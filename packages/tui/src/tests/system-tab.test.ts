@@ -257,6 +257,8 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       reviewer: { model: 'claude-opus-4-8', effort: 'low' },
       // sparring joined the roster 2026-10-22 (user-ruled "Yes, as stated"); also last
       sparring: { model: 'claude-opus-4-8', effort: 'low' },
+      // implementor-hard joined 2026-10-23 (decision hard-implementor-is-its-own-agent-sterling-implementor-hard); also last
+      'implementor-hard': { model: 'claude-opus-4-8', effort: 'low' },
     },
     catalog: freshCatalog(),
     ...over,
@@ -395,7 +397,9 @@ test('AC1: every registered agent in the snapshot appears in exactly one row (th
   const snap = baseSnapshot();
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
   for (const agent of snap.agents.filter((agent) => ROSTER_AGENTS.includes(agent.name))) {
-    const hits = view.rows.filter((r) => new RegExp(agent.name).test(rowText(r)));
+    // a whole agent name: 'implementor' must not count the implementor-hard row, which names
+    // a different agent (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+    const hits = view.rows.filter((r) => new RegExp(`(?<![\\w-])${agent.name}(?![\\w-])`).test(rowText(r)));
     assert.equal(hits.length, 1, `agent ${agent.name} is listed in exactly one row`);
   }
 });

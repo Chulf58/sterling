@@ -7,7 +7,7 @@ description: Capture and read Sterling's durable decision records through the kn
 
 Decisions that live only in chat, a commit message, or one person's memory rot. Sterling keeps them instead as `decision` (or `anti_pattern` / `research_finding`) records in the knowledge store, retrieved through the `knowledge_*` MCP tools.
 
-**Only the conductor authors a record, and it creates one directly.** `researcher`, `scout`, and `implementor` hold no store-write grant. If any of them surfaces a decision worth recording, it comes back as a **capture candidate** in its report, and the conductor writes the record itself, never by dispatching another agent to do it. `librarian`'s grant (`agent-templates/librarian.md`) is update-shaped knowledge writes (`knowledge_update`/`append`/`edit`/`array_remove`) plus board and queue writes — all applying conductor-drafted content verbatim; it never creates a record and never authors one.
+**Only the conductor authors a record, and it creates one directly.** `researcher`, `scout`, `implementor`, and `implementor-hard` hold no store-write grant. If any of them surfaces a decision worth recording, it comes back as a **capture candidate** in its report, and the conductor writes the record itself, never by dispatching another agent to do it. `librarian`'s grant (`agent-templates/librarian.md`) is update-shaped knowledge writes (`knowledge_update`/`append`/`edit`/`array_remove`) plus board and queue writes — all applying conductor-drafted content verbatim; it never creates a record and never authors one.
 
 ## When to activate
 

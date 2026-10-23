@@ -250,15 +250,21 @@ export const configSchema = z.object({
   // key.
   models: z
     .object({
-      // The hard_task, and the reviewer's and sparring's opencode_model below, are the
-      // models the conductor named on those dispatches before the OpenCode dispatch
-      // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
-      // They are whole-entry defaults only, never hidden field defaults: an entry that
-      // exists without them means "none" (clearing opencode_model in the System tab runs
-      // the role on its Claude model). Live entries written before them get them once,
-      // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
-      // "Write it into each config").
-      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } }),
+      // The reviewer's and sparring's opencode_model below are the models the conductor
+      // named on those dispatches before the OpenCode dispatch model resolver (decision
+      // subagent-model-choice-on-opencode-conductor-states-dispatch). They are whole-entry
+      // defaults only, never hidden field defaults: an entry that exists without them means
+      // "none" (clearing opencode_model in the System tab runs the role on its Claude
+      // model). Live entries written before them get them once, visibly, from
+      // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
+      // config").
+      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
+      // implementor-hard is the sterling/implementor-hard agent (decision
+      // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
+      // lane, with its own Overpass tier and System tab row. It replaces
+      // models.implementor.hard_task, whose default it keeps (Opus 5.5, at the
+      // implementor's effort); moveImplementorHardTask below moves a live hard_task here.
+      'implementor-hard': agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
       researcher: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
       scout: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
       classifiers: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
@@ -644,21 +650,31 @@ export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 // plugin sends on each request of that role's lane. Effort is an exact override, not a
 // minimum: 'high' also replaces an xhigh the gateway would have picked. Both are off by
 // default. Plan and the maintenance worker are not roles here and keep laneModel.
-export const OVERPASS_ROLES = ['implementor', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring'] as const;
+export const OVERPASS_ROLES = ['implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring'] as const;
 export type OverpassRole = (typeof OVERPASS_ROLES)[number];
 export const OVERPASS_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type OverpassEffort = (typeof OVERPASS_EFFORTS)[number];
 export const OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 export const DEFAULT_OVERPASS_TIER = 'agentic-high';
+// The Overpass tiers the user listed (user-stated 2026-10-23), in that order: the System
+// tab's tier picker offers these. They are not a closed set: OVERPASS_TIER_RE still accepts
+// any agentic-* name, and the picker adds a role's current tier when it is not listed.
+export const OVERPASS_TIERS = ['agentic-low', 'agentic-high', 'agentic-conductor', 'agentic-auto', 'agentic-premium', 'agentic-premium-max'] as const;
 // Per-role default tiers (user-ruled 2026-10-22 through the question form, "Yes, as
-// stated"): the implementor role defaults to agentic-premium (Sonnet 5.5, Opus 5.5 and
+// stated"): the implementor role defaulted to agentic-premium (Sonnet 5.5, Opus 5.5 and
 // Sol 6.1, each at high, xhigh or max) and the sparring role (the sterling/sparring agent)
 // to agentic-premium-max (Fable 5.1 and Astra 6, each at high, xhigh or
 // max). Every other role, the reviewer included, stays on DEFAULT_OVERPASS_TIER. An
 // explicit roles.<role>.tier still wins, and any name matching OVERPASS_TIER_RE is
 // accepted, so no list of tier names needs to grow when the gateway adds one.
+// implementor-hard (the sterling/implementor-hard agent, decision
+// hard-implementor-is-its-own-agent-sterling-implementor-hard) took over agentic-premium,
+// and the implementor moved to agentic-auto (user-ruled 2026-10-23, verbatim: "The new
+// implementer-hard should run the angentic-premium tier, and the regular implementer should
+// run angentic-auto").
 export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
-  implementor: 'agentic-premium',
+  implementor: 'agentic-auto',
+  'implementor-hard': 'agentic-premium',
   researcher: DEFAULT_OVERPASS_TIER,
   scout: DEFAULT_OVERPASS_TIER,
   reviewer: DEFAULT_OVERPASS_TIER,
@@ -824,6 +840,10 @@ const MODEL_DEFAULT_FIELDS: ReadonlyArray<readonly [string, 'opencode_model' | '
   ['reviewer', 'opencode_model'],
   ['sparring', 'opencode_model'],
 ];
+// The implementor's hard_task this migration adds, frozen as it shipped: the schema
+// default no longer carries it (models.implementor-hard replaced it), and
+// moveImplementorHardTask, which runs after this one, moves it into that key.
+const ADDED_IMPLEMENTOR_HARD_TASK = { model: 'claude-opus-5-5' };
 
 export interface ModelDefaultAdd {
   role: string;
@@ -849,7 +869,8 @@ export function addModelDefaults(raw: unknown): ModelDefaultsMigration {
   if (applied !== undefined && !(Array.isArray(applied) && applied.every((x) => typeof x === 'string'))) return none;
   if ((applied ?? []).includes(MODEL_DEFAULTS_MIGRATION_ID)) return none;
   if (raw.models !== undefined && !isPlainObject(raw.models)) return none;
-  const defaults = configSchema.shape.models.parse({}) as Record<string, Record<string, unknown>>;
+  const schemaDefaults = configSchema.shape.models.parse({}) as Record<string, Record<string, unknown>>;
+  const defaults: Record<string, Record<string, unknown>> = { ...schemaDefaults, implementor: { ...schemaDefaults.implementor, hard_task: ADDED_IMPLEMENTOR_HARD_TASK } };
   const models: Record<string, unknown> = { ...(raw.models ?? {}) };
   const added: ModelDefaultAdd[] = [];
   for (const [role, field] of MODEL_DEFAULT_FIELDS) {
@@ -864,6 +885,84 @@ export function addModelDefaults(raw: unknown): ModelDefaultsMigration {
   }
   const config = { ...raw, ...(added.length ? { models } : {}), applied_config_migrations: [...(applied ?? []), MODEL_DEFAULTS_MIGRATION_ID] };
   return { config, changed: true, added };
+}
+
+// ── models.implementor.hard_task → models.implementor-hard: the one-time move ──
+// Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: the hard
+// implementor lane is its own agent, so its pin moves out of the implementor entry
+// into the new key (anti_pattern wiring-a-formerly-inert-config-field-to-authoritative-
+// without-migrating-the-live-config-values: the live value moves, it is never left
+// behind to be ignored). It runs after addModelDefaults, once per file (its id goes into
+// applied_config_migrations), and each change is reported:
+//   - hard_task set, no implementor-hard entry: the entry is built from it. Its effort is
+//     hard_task.effort, else the implementor's effort (what a hard dispatch was sent
+//     with). A <provider>/<model> hard_task becomes the entry's opencode_model, with the
+//     schema default's Claude model; any other value lands in `model`, where the
+//     schema refuses it loud and the caller leaves the file untouched.
+//   - hard_task set and an implementor-hard entry already there: the entry wins and
+//     the hard_task is dropped, its value reported.
+//   - no hard_task on an existing implementor entry (the user cleared it, meaning "no
+//     separate hard lane"; addModelDefaults has already added it otherwise): the
+//     implementor's own model, effort and opencode_model are copied, so a hard lane
+//     keeps running where it ran.
+// Other roles keep their hard_task.
+export const IMPLEMENTOR_HARD_MIGRATION_ID = 'implementor-hard-2026-10-23';
+
+export interface ImplementorHardMove {
+  /** moved: hard_task became the entry; dropped: an entry existed, hard_task was removed; copied: no hard_task, the implementor's pin was copied. */
+  kind: 'moved' | 'dropped' | 'copied';
+  /** The implementor's hard_task that was removed (absent for 'copied'). */
+  hard_task?: unknown;
+  /** The models.implementor-hard entry the file now holds. */
+  entry: unknown;
+}
+
+export interface ImplementorHardMigration {
+  config: unknown;
+  /** True when the file must be rewritten: something moved, or the migration id was recorded. */
+  changed: boolean;
+  move: ImplementorHardMove | null;
+}
+
+/** Move models.implementor.hard_task into models.implementor-hard (see above). Pure;
+ *  anything that is not a plain object with an absent-or-object `models`, or a file that
+ *  already records the migration, comes back unchanged. */
+export function moveImplementorHardTask(raw: unknown): ImplementorHardMigration {
+  const none = { config: raw, changed: false, move: null };
+  if (!isPlainObject(raw)) return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== undefined && !(Array.isArray(applied) && applied.every((x) => typeof x === 'string'))) return none;
+  if ((applied ?? []).includes(IMPLEMENTOR_HARD_MIGRATION_ID)) return none;
+  if (raw.models !== undefined && !isPlainObject(raw.models)) return none;
+  const record = (models: Record<string, unknown> | null, move: ImplementorHardMove | null): ImplementorHardMigration => ({
+    config: { ...raw, ...(models ? { models } : {}), applied_config_migrations: [...(applied ?? []), IMPLEMENTOR_HARD_MIGRATION_ID] },
+    changed: true,
+    move,
+  });
+  const models: Record<string, unknown> = { ...(raw.models ?? {}) };
+  const implementor = models.implementor;
+  if (!isPlainObject(implementor)) return record(null, null);
+  const hasHard = Object.prototype.hasOwnProperty.call(implementor, 'hard_task');
+  const existing = models['implementor-hard'];
+  if (!hasHard) {
+    if (existing !== undefined) return record(null, null);
+    const entry: Record<string, unknown> = { model: implementor.model, effort: implementor.effort };
+    if (implementor.opencode_model !== undefined) entry.opencode_model = implementor.opencode_model;
+    models['implementor-hard'] = entry;
+    return record(models, { kind: 'copied', entry });
+  }
+  const { hard_task, ...rest } = implementor;
+  models.implementor = rest;
+  if (existing !== undefined) return record(models, { kind: 'dropped', hard_task, entry: existing });
+  const pin = isPlainObject(hard_task) ? hard_task : {};
+  const effort = pin.effort ?? implementor.effort;
+  const fallbackModel = (configSchema.shape.models.parse({}) as Record<string, Record<string, unknown>>)['implementor-hard'].model;
+  const entry: Record<string, unknown> =
+    typeof pin.model === 'string' && OPENCODE_MODEL_REF_RE.test(pin.model)
+      ? { model: fallbackModel, effort, opencode_model: pin.model }
+      : { model: pin.model, effort };
+  models['implementor-hard'] = entry;
+  return record(models, { kind: 'moved', hard_task, entry });
 }
 
 // ── Retired models keys: the on-disk migration ──────────────────────────────

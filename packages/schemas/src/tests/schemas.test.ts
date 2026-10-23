@@ -784,6 +784,8 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
   // straight identity.
   assert.deepEqual(map, {
     implementor: 'implementor',
+    // the seventh role (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+    'implementor-hard': 'implementor-hard',
     researcher: 'researcher',
     scout: 'scout',
     librarian: 'librarian',

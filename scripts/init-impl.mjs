@@ -232,8 +232,14 @@ if (existsSync(configPath)) {
   }
   if (configMigration.status === 'refused') fail(`init REFUSED: ${configMigration.lines[0]}. Nothing was written.`, 2);
   // The managed mutation below serializes this raw document, so it must already be the
-  // migrated one or it would write the retired keys back.
-  if (configMigration.status === 'ready') rawRecorded = configMigration.config;
+  // migrated one or it would write the retired keys back. The parsed copy follows it: the
+  // agents render from `recorded`, and the migration can change model values (the
+  // implementor-hard move), so a pre-migration parse would pin the wrong model (Sol review).
+  // prepareConfigMigration has already validated the migrated document.
+  if (configMigration.status === 'ready') {
+    rawRecorded = configMigration.config;
+    recorded = parseConfig(rawRecorded);
+  }
 }
 if (!recorded) {
   const noConfigAt = `no recorded config found at '${target}' (.sterling/config.json absent) — these declarations are required only on a first init; if this target is wrong, pass the intended --target`;

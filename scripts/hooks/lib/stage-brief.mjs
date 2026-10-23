@@ -69,10 +69,10 @@ export const RETURN_CONTRACT =
   'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
   'relevant files/tests, and unresolved risks.';
 
-// Implementor dispatches (the roster's one writing role) get the live TDD posture
+// Implementor and implementor-hard dispatches (the roster's writing roles) get the live TDD posture
 // (decision foreign_752caf98) and the active plan line; a researcher, scout or
 // reviewer judges against the store and the brief, not the plan's ordering.
-const CHROME_AGENT_TYPES = new Set(['implementor']);
+const CHROME_AGENT_TYPES = new Set(['implementor', 'implementor-hard']);
 const PLAN_TITLE_MAX = 120;
 const PLAN_PATH_MAX = 320;
 

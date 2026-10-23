@@ -80,7 +80,7 @@ import { CONDUCTOR_AGENT, CONDUCTOR_ROLE } from './conductor-identity.mjs';
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export { CONDUCTOR_AGENT };
-export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian'];
+export const ROSTER = ['conductor', 'implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian'];
 export { STERLING_NPM_PACKAGE, parseJsonc };
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 // The shell denies an earlier Sterling wrote into shell, bash and "*" blocks. They are no longer

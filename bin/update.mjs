@@ -5778,6 +5778,7 @@ var init_records = __esm({
     });
     AGENT_MODEL_KEY = {
       implementor: "implementor",
+      "implementor-hard": "implementor-hard",
       researcher: "researcher",
       scout: "scout",
       librarian: "librarian",
@@ -6200,7 +6201,8 @@ function addModelDefaults(raw) {
     return none;
   if (raw.models !== void 0 && !isPlainObject(raw.models))
     return none;
-  const defaults = configSchema.shape.models.parse({});
+  const schemaDefaults = configSchema.shape.models.parse({});
+  const defaults = { ...schemaDefaults, implementor: { ...schemaDefaults.implementor, hard_task: ADDED_IMPLEMENTOR_HARD_TASK } };
   const models = { ...raw.models ?? {} };
   const added = [];
   for (const [role, field] of MODEL_DEFAULT_FIELDS) {
@@ -6215,6 +6217,48 @@ function addModelDefaults(raw) {
   }
   const config = { ...raw, ...added.length ? { models } : {}, applied_config_migrations: [...applied ?? [], MODEL_DEFAULTS_MIGRATION_ID] };
   return { config, changed: true, added };
+}
+function moveImplementorHardTask(raw) {
+  const none = { config: raw, changed: false, move: null };
+  if (!isPlainObject(raw))
+    return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
+    return none;
+  if ((applied ?? []).includes(IMPLEMENTOR_HARD_MIGRATION_ID))
+    return none;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return none;
+  const record = (models2, move) => ({
+    config: { ...raw, ...models2 ? { models: models2 } : {}, applied_config_migrations: [...applied ?? [], IMPLEMENTOR_HARD_MIGRATION_ID] },
+    changed: true,
+    move
+  });
+  const models = { ...raw.models ?? {} };
+  const implementor = models.implementor;
+  if (!isPlainObject(implementor))
+    return record(null, null);
+  const hasHard = Object.prototype.hasOwnProperty.call(implementor, "hard_task");
+  const existing = models["implementor-hard"];
+  if (!hasHard) {
+    if (existing !== void 0)
+      return record(null, null);
+    const entry2 = { model: implementor.model, effort: implementor.effort };
+    if (implementor.opencode_model !== void 0)
+      entry2.opencode_model = implementor.opencode_model;
+    models["implementor-hard"] = entry2;
+    return record(models, { kind: "copied", entry: entry2 });
+  }
+  const { hard_task, ...rest } = implementor;
+  models.implementor = rest;
+  if (existing !== void 0)
+    return record(models, { kind: "dropped", hard_task, entry: existing });
+  const pin = isPlainObject(hard_task) ? hard_task : {};
+  const effort = pin.effort ?? implementor.effort;
+  const fallbackModel = configSchema.shape.models.parse({})["implementor-hard"].model;
+  const entry = typeof pin.model === "string" && OPENCODE_MODEL_REF_RE.test(pin.model) ? { model: fallbackModel, effort, opencode_model: pin.model } : { model: pin.model, effort };
+  models["implementor-hard"] = entry;
+  return record(models, { kind: "moved", hard_task, entry });
 }
 function migrateRetiredModelKeys(raw) {
   const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
@@ -6273,7 +6317,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6451,15 +6495,21 @@ var init_config = __esm({
       // longer needs an indirection layer between an agent's name and its config
       // key.
       models: external_exports.object({
-        // The hard_task, and the reviewer's and sparring's opencode_model below, are the
-        // models the conductor named on those dispatches before the OpenCode dispatch
-        // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
-        // They are whole-entry defaults only, never hidden field defaults: an entry that
-        // exists without them means "none" (clearing opencode_model in the System tab runs
-        // the role on its Claude model). Live entries written before them get them once,
-        // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
-        // "Write it into each config").
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
+        // The reviewer's and sparring's opencode_model below are the models the conductor
+        // named on those dispatches before the OpenCode dispatch model resolver (decision
+        // subagent-model-choice-on-opencode-conductor-states-dispatch). They are whole-entry
+        // defaults only, never hidden field defaults: an entry that exists without them means
+        // "none" (clearing opencode_model in the System tab runs the role on its Claude
+        // model). Live entries written before them get them once, visibly, from
+        // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
+        // config").
+        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        // implementor-hard is the sterling/implementor-hard agent (decision
+        // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
+        // lane, with its own Overpass tier and System tab row. It replaces
+        // models.implementor.hard_task, whose default it keeps (Opus 5.5, at the
+        // implementor's effort); moveImplementorHardTask below moves a live hard_task here.
+        "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
         classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -6795,12 +6845,14 @@ var init_config = __esm({
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-    OVERPASS_ROLES = ["implementor", "researcher", "scout", "reviewer", "librarian", "sparring"];
+    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring"];
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
     DEFAULT_OVERPASS_TIER = "agentic-high";
+    OVERPASS_TIERS = ["agentic-low", "agentic-high", "agentic-conductor", "agentic-auto", "agentic-premium", "agentic-premium-max"];
     DEFAULT_OVERPASS_ROLE_TIERS = {
-      implementor: "agentic-premium",
+      implementor: "agentic-auto",
+      "implementor-hard": "agentic-premium",
       researcher: DEFAULT_OVERPASS_TIER,
       scout: DEFAULT_OVERPASS_TIER,
       reviewer: DEFAULT_OVERPASS_TIER,
@@ -6823,6 +6875,8 @@ var init_config = __esm({
       ["reviewer", "opencode_model"],
       ["sparring", "opencode_model"]
     ];
+    ADDED_IMPLEMENTOR_HARD_TASK = { model: "claude-opus-5-5" };
+    IMPLEMENTOR_HARD_MIGRATION_ID = "implementor-hard-2026-10-23";
     CONFIG_KEY_RENAMES = {
       "models.coder": "models.implementor",
       "models.explorer": "models.scout"
@@ -7061,6 +7115,7 @@ __export(dist_exports, {
   HANDOFFS_DIR_REL: () => HANDOFFS_DIR_REL,
   HANDOFF_MILESTONE_MAX: () => HANDOFF_MILESTONE_MAX,
   HEADLINE_CLIP: () => HEADLINE_CLIP,
+  IMPLEMENTOR_HARD_MIGRATION_ID: () => IMPLEMENTOR_HARD_MIGRATION_ID,
   KNOWLEDGE_WRITES_COMPACT_LINES: () => KNOWLEDGE_WRITES_COMPACT_LINES,
   KNOWLEDGE_WRITES_DIR_REL: () => KNOWLEDGE_WRITES_DIR_REL,
   KNOWLEDGE_WRITES_KEEP_IDS: () => KNOWLEDGE_WRITES_KEEP_IDS,
@@ -7080,6 +7135,7 @@ __export(dist_exports, {
   OVERPASS_EFFORTS: () => OVERPASS_EFFORTS,
   OVERPASS_PROVIDER_RE: () => OVERPASS_PROVIDER_RE,
   OVERPASS_ROLES: () => OVERPASS_ROLES,
+  OVERPASS_TIERS: () => OVERPASS_TIERS,
   OVERPASS_TIER_RE: () => OVERPASS_TIER_RE,
   PROJECT_IDENTITY_REL: () => PROJECT_IDENTITY_REL,
   PROJECT_MODES: () => PROJECT_MODES,
@@ -7154,6 +7210,7 @@ __export(dist_exports, {
   migrateRetiredModelKeys: () => migrateRetiredModelKeys,
   modelsCatalogSchema: () => modelsCatalogSchema,
   moveFenceSchema: () => moveFenceSchema,
+  moveImplementorHardTask: () => moveImplementorHardTask,
   needsReasonAllowed: () => needsReasonAllowed,
   needsReasonRequired: () => needsReasonRequired,
   noCaptureLaneSchema: () => noCaptureLaneSchema,

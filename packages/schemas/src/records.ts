@@ -1023,6 +1023,7 @@ export const briefSchema = base
 // an indirection layer.
 export const AGENT_MODEL_KEY = {
   implementor: 'implementor',
+  'implementor-hard': 'implementor-hard',
   researcher: 'researcher',
   scout: 'scout',
   librarian: 'librarian',

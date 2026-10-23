@@ -49,7 +49,8 @@ const CFG = { config: { models: MODELS }, models: MODELS };
 // added 2026-10-22, user-ruled "Yes, as stated"), plus plan: the
 // OpenCode-only Plan agent (registry hosts ["opencode"], GitHub #76), a primary
 // agent the user Tabs to, so it is in MAIN_SESSION_AGENTS like the conductor.
-const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'conductor', 'plan'];
+// implementor-hard joined on 2026-10-23 (decision hard-implementor-is-its-own-agent-sterling-implementor-hard).
+const ROSTER = ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'conductor', 'plan'];
 // What Claude Code installs to .claude/agents/: every agent but the OpenCode-only plan.
 const CLAUDE_ROSTER = ROSTER.filter((n) => n !== 'plan');
 
@@ -289,6 +290,24 @@ test('reviewer: registered, read-only by tool grant (no Edit/Write/NotebookEdit,
   }
 });
 
+// Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: implementor-hard is the
+// implementor's contract as its own agent, so Overpass can give it its own tier. The two
+// templates must not drift: the frontmatter differs only in name and description, and the
+// body only in the one paragraph that says it is the hard-task implementor.
+test('implementor-hard: registered, the implementor\'s grant and required inputs, and the implementor\'s body word for word plus one paragraph', () => {
+  const registry = loadRegistry(join(TPL, 'registry.json'));
+  assert.ok(registry.agents.some((a) => a.name === 'implementor-hard' && a.file === 'implementor-hard.md'), 'implementor-hard is registered against implementor-hard.md');
+  const base = readFileSync(join(TPL, 'implementor.md'), 'utf8');
+  const hard = readFileSync(join(TPL, 'implementor-hard.md'), 'utf8');
+  assert.match(fmOf(hard), /^name: implementor-hard$/m);
+  const strip = (fm) => fm.replace(/^name: .*$/m, '').replace(/^description: .*$/m, '');
+  assert.equal(strip(fmOf(hard)), strip(fmOf(base)), 'same model/effort tokens, disallowedTools and required_inputs');
+  const bodyOf = (text) => text.replace(/^---[\s\S]*?\n---/, '');
+  const extra = '\nYou are the hard-task implementor: you are dispatched instead of the implementor when a change is hard (a mechanism, a schema or a change at many sites), so that you can run on a stronger model. Everything below is the implementor\'s contract, unchanged.\n';
+  assert.equal(bodyOf(hard).split(extra).length, 2, 'the hard-task paragraph is there exactly once');
+  assert.equal(bodyOf(hard).replace(extra, ''), bodyOf(base), 'the rest of the body is the implementor\'s, word for word');
+});
+
 // User ruling 2026-10-22 ("Yes, as stated"): sparring has its own agent, so Overpass
 // can route it to its own tier. It holds the reviewer's exact read-only grant, and
 // its body is a sparring brief, not the review rubric.
@@ -350,8 +369,11 @@ test('tool-grant linter: inherit-all (disallowedTools, no tools:) passes; a temp
 test('tool-grant linter: inherit-all is allowed only for INHERIT_ALL_AGENTS — any other template with disallowedTools and no tools: fails', () => {
   const registeredTools = readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'));
   const body = `---\nname: probe\ndisallowedTools: mcp__sterling__board_add, mcp__plugin_sterling_sterling__board_add\nrequired_inputs:\n  - x\n---\n\nbody\n`;
-  assert.deepEqual(INHERIT_ALL_AGENTS, ['implementor.md']);
+  // implementor-hard is the implementor's contract as its own agent, so it inherits too
+  // (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+  assert.deepEqual(INHERIT_ALL_AGENTS, ['implementor.md', 'implementor-hard.md']);
   assert.deepEqual(lintToolGrants(body, 'implementor.md', registeredTools), []);
+  assert.deepEqual(lintToolGrants(body, 'implementor-hard.md', registeredTools), []);
   for (const label of ['scout.md', 'researcher.md', 'librarian.md', 'probe.md']) {
     assert.deepEqual(lintToolGrants(body, label, registeredTools).map((v) => v.kind), ['inherit_all_not_allowed'], `${label} may not inherit every tool`);
   }
