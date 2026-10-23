@@ -53,6 +53,26 @@ import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subj
 const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
 const CODEX_TOOL = /^codex[._]/;
 const PENDING_CAP = 200;
+// How long a dispatch waits for OpenCode's model list before the variant guard gives up
+// (checkVariant then marks the variant "not checked"), so a list that never settles
+// cannot stall a dispatch; the same race-with-timer shape as context.mjs sendSynthetic.
+export const MODEL_LIST_TIMEOUT_MS = 2000;
+
+/** listModels() raced against `ms`: { list } or { error }; never throws, never waits longer than `ms`. */
+async function boundedModelList(listModels, ms) {
+  let timer;
+  try {
+    const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    });
+    return await Promise.race([call, late]);
+  } catch (e) {
+    return { error: e };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Which H20 surface a tool call is on, or null. */
 export function axisSurface(tool) {
@@ -118,7 +138,7 @@ function reportOverpass(root, message) {
  * delivers to the session that makes the call, so it reaches a blind lane only
  * when that lane dispatches (decision blind-lane-sterling-delivery-off-brief-line, point 6).
  */
-export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels }) {
+export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels, modelListTimeoutMs = MODEL_LIST_TIMEOUT_MS }) {
   if (!deliveryPolicy) throw new Error('createAxisHandlers needs the deliveryPolicy tracker');
   const pending = new Map();
 
@@ -171,14 +191,8 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         }
         // A resolved model whose variant OpenCode does not list runs without it (checkVariant).
         if (pin.resolved) {
-          let list = null;
-          let listError = null;
-          try {
-            list = await listModels?.();
-          } catch (e) {
-            listError = e;
-          }
-          const checked = checkVariant(pin.model, list, listError);
+          const { list, error } = await boundedModelList(listModels, modelListTimeoutMs);
+          const checked = checkVariant(pin.model, list, error);
           pin = { ...pin, model: checked.model, line: checked.note ? `${pin.line} ${checked.note}` : pin.line };
         }
         if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;

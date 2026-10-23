@@ -21329,6 +21329,21 @@ var namedText = (e) => `${e?.constructor?.name ?? e?.name ?? "Error"}: ${errorTe
 var CODEX_OPENERS = /* @__PURE__ */ new Set(["codex_codex", "codex.codex"]);
 var CODEX_TOOL = /^codex[._]/;
 var PENDING_CAP2 = 200;
+var MODEL_LIST_TIMEOUT_MS = 2e3;
+async function boundedModelList(listModels, ms) {
+  let timer;
+  try {
+    const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
+    const late2 = new Promise((resolve17) => {
+      timer = setTimeout(() => resolve17({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    });
+    return await Promise.race([call, late2]);
+  } catch (e) {
+    return { error: e };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 function axisSurface(tool) {
   if (tool === "subagent") return "dispatch";
   if (tool === "question") return "question";
@@ -21370,7 +21385,7 @@ function reportOverpass(root, message) {
 `);
   }
 }
-function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels }) {
+function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels, modelListTimeoutMs = MODEL_LIST_TIMEOUT_MS }) {
   if (!deliveryPolicy) throw new Error("createAxisHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
   async function onBefore(input) {
@@ -21408,14 +21423,8 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
           throw e;
         }
         if (pin.resolved) {
-          let list = null;
-          let listError = null;
-          try {
-            list = await listModels?.();
-          } catch (e) {
-            listError = e;
-          }
-          const checked = checkVariant(pin.model, list, listError);
+          const { list, error } = await boundedModelList(listModels, modelListTimeoutMs);
+          const checked = checkVariant(pin.model, list, error);
           pin = { ...pin, model: checked.model, line: checked.note ? `${pin.line} ${checked.note}` : pin.line };
         }
         if (pin.model && input.input && typeof input.input === "object") input.input.model = pin.model;

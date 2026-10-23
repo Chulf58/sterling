@@ -306,3 +306,28 @@ test('seam: the plugin checks a resolved variant against ctx.model.list and drop
     p.cleanup();
   }
 });
+
+test('seam: a model list that never settles cannot stall the dispatch; the variant is kept and marked not checked (Sol review, MEDIUM)', async () => {
+  const p = makeProject({});
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env: {} });
+  const ctx = stubCtx(p.dir);
+  ctx.model.list = () => new Promise(() => {});
+  const cleanup = await plugin.setup(ctx);
+  try {
+    const input = { tool: 'subagent', id: 'c_hang', sessionID: 'ses_root', input: { agent: 'sterling/reviewer', description: 'd', prompt: 'p' } };
+    const started = Date.now();
+    await ctx.hooks.tool['execute.before'](input);
+    const waited = Date.now() - started;
+    assert.ok(waited < 5000, `the dispatch went ahead after ${waited} ms`);
+    assert.equal(input.input.model, SOL);
+    const after = { ...input, status: 'completed', result: { content: [{ type: 'text', text: 'done' }], metadata: {} } };
+    await ctx.hooks.tool['execute.after'](after);
+    assert.match(after.result.content.map((x) => x.text).join('\n'), /variant high not checked: OpenCode's model list could not be read: the model list timed out after 2000 ms/);
+    // A refusal still refuses at once, whatever the model list does.
+    const bad = { tool: 'subagent', id: 'c_bad', sessionID: 'ses_root', input: { agent: 'sterling/reviewer', description: 'd', prompt: brief('hrad') } };
+    await assert.rejects(ctx.hooks.tool['execute.before'](bad), /MODEL-INTENT line but its value "hrad"/);
+  } finally {
+    await cleanup?.();
+    p.cleanup();
+  }
+});
