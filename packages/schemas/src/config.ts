@@ -44,12 +44,27 @@ export const CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])
 // opencode-only-model-override-per-role-for-openai-picks): `model` stays the
 // Claude model Claude Code runs, and the OpenCode agent pins opencode_model
 // when it is set, anthropic/<model> otherwise.
+const opencodeModelRef = z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra');
 const agentModelEntry = z.object({
   model: z.string().regex(CLAUDE_MODEL_ID_RE, 'model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines'),
   effort: effortLevel,
   hard_task: modelPin.optional(),
-  opencode_model: z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra').optional(),
+  opencode_model: opencodeModelRef.optional(),
 }).strict();
+
+// Per-role field defaults for the OpenCode dispatch model resolver (decision
+// subagent-model-choice-on-opencode-conductor-states-dispatch,
+// packages/opencode-plugin/src/dispatch-model.mjs): they reproduce the models the
+// conductor named on each call before the resolver existed: Sol 6.1 reviews, Astra 6
+// spars, Opus 5.5 takes a hard implementor lane. They sit on the FIELD, not only on the
+// role's whole-entry default, so a live config whose entry predates them (written from
+// templates/default-config.json, with model and effort only) gets them too and is not
+// silently moved to anthropic/<model> (anti-pattern 94f16632). A value written in the
+// config wins; to run a role on its Claude model on OpenCode, set opencode_model to
+// anthropic/<model>.
+const reviewerEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default('openai/gpt-6.1-sol') });
+const sparringEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default('openai/gpt-6-astra') });
+const implementorEntry = agentModelEntry.extend({ hard_task: modelPin.default({ model: 'claude-opus-5-5' }) });
 
 // One pin per vendor, shared by sparring_partner.models and review.models.
 const vendorPins = z
@@ -250,7 +265,7 @@ export const configSchema = z.object({
   // key.
   models: z
     .object({
-      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
+      implementor: implementorEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
       researcher: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
       scout: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
       classifiers: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
@@ -261,12 +276,12 @@ export const configSchema = z.object({
       // reviewer judges a diff (decision
       // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
       // dispatch pins its model explicitly; this is the install-time default.
-      reviewer: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
+      reviewer: reviewerEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
       // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
       // read-only grant as the reviewer, so the same install-time default. Every
       // dispatch pins its model (Astra, else a Fable model); under Overpass its
       // role tier decides.
-      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
+      sparring: sparringEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
     })
     // Any installed agent's name is a key (decision
     // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):

@@ -4974,7 +4974,7 @@ var init_project = __esm({
 });
 
 // packages/schemas/dist/config.js
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, opencodeModelRef, agentModelEntry, reviewerEntry, sparringEntry, implementorEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -4987,12 +4987,16 @@ var init_config = __esm({
     }).strict();
     OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
     CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    opencodeModelRef = external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra");
     agentModelEntry = external_exports.object({
       model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
       effort: effortLevel,
       hard_task: modelPin.optional(),
-      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
+      opencode_model: opencodeModelRef.optional()
     }).strict();
+    reviewerEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default("openai/gpt-6.1-sol") });
+    sparringEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default("openai/gpt-6-astra") });
+    implementorEntry = agentModelEntry.extend({ hard_task: modelPin.default({ model: "claude-opus-5-5" }) });
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
       anthropic: modelPin.optional()
@@ -5151,7 +5155,7 @@ var init_config = __esm({
       // longer needs an indirection layer between an agent's name and its config
       // key.
       models: external_exports.object({
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        implementor: implementorEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
         classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -5162,12 +5166,12 @@ var init_config = __esm({
         // reviewer judges a diff (decision
         // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
         // dispatch pins its model explicitly; this is the install-time default.
-        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+        reviewer: reviewerEntry.default({ model: "claude-opus-5-5", effort: "high" }),
         // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
         // read-only grant as the reviewer, so the same install-time default. Every
         // dispatch pins its model (Astra, else a Fable model); under Overpass its
         // role tier decides.
-        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+        sparring: sparringEntry.default({ model: "claude-opus-5-5", effort: "high" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):

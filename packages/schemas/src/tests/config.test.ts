@@ -519,7 +519,13 @@ type PinCfg = {
 const pins = (raw: unknown) => parseConfig(raw) as unknown as PinCfg;
 
 test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-trips, and a junk pin is refused loud', () => {
-  assert.equal(pins({}).models.implementor.hard_task, undefined, 'no hard_task is invented for the shipped defaults');
+  // Changed with the OpenCode dispatch model resolver (decision
+  // subagent-model-choice-on-opencode-conductor-states-dispatch): the implementor's hard
+  // lane defaults to Opus 5.5, the model the conductor named on a hard dispatch before; it
+  // is a field default, so an entry written without it gets it too. No other role gets one.
+  assert.deepEqual(pins({}).models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'the implementor hard lane defaults to Opus 5.5');
+  assert.deepEqual(pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'an entry written without hard_task gets the default');
+  assert.equal(pins({}).models.researcher.hard_task, undefined, 'no hard_task is invented for the other roles');
   const withHard = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } });
   assert.deepEqual(withHard.models.implementor.hard_task, { model: 'claude-opus-5-5', effort: 'high' });
   const noEffort = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } } } });

@@ -96,8 +96,14 @@ test('the OpenCode conductor names no Claude-only mechanism and carries the Open
 // Claude Code route only. The model-string form is the one measured; only the Sol dispatch was run live.
 test('the OpenCode conductor routes Sol, Astra and Terra through native subagent dispatches; the Claude conductor keeps the codex MCP route', () => {
   const opencode = fullRender('conductor');
-  for (const native of ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'do not modify the worktree', 'user-ruled 2026-10-05']) {
+  // Changed with the dispatch model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch):
+  // the OpenCode conductor states dispatch intent and the plugin picks the model from config.models, so the
+  // openai model ids left the OpenCode text and the intent lines took their place.
+  for (const native of ['sterling/reviewer', 'MODEL-INTENT: review-of=openai', 'MODEL-INTENT: hard', 'MODEL-INTENT: fallback=<reason>', 'sterling/implementor', 'do not modify the worktree', 'user-ruled 2026-10-05']) {
     assert.ok(opencode.includes(native), `OpenCode conductor lacks ${JSON.stringify(native)}`);
+  }
+  for (const id of ['openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'openai/gpt-5.6-terra']) {
+    assert.ok(!opencode.includes(id), `OpenCode conductor still names the model id ${JSON.stringify(id)}`);
   }
   for (const codexRoute of ['dispatched through the `codex` MCP tool', 'as on Claude Code', 'through the `codex` MCP tool, never a shelled `codex exec`', 'through the `review-brief` skill', 'sandbox: read-only']) {
     assert.ok(!opencode.includes(codexRoute), `OpenCode conductor still carries ${JSON.stringify(codexRoute)}`);
@@ -149,7 +155,8 @@ test('the OpenCode conductor carries the progress rule; the Claude conductor doe
 // and the review runs on Opus, with no retry on another Sol id.
 test('Sol is gpt-6.1-sol on the OpenCode conductor and gpt-5.6-sol on the Claude conductor, which falls back loudly to Opus', () => {
   const opencode = fullRender('conductor');
-  assert.ok(opencode.includes('openai/gpt-6.1-sol#high'), 'OpenCode conductor pins the new Sol id');
+  // Changed with the dispatch model resolver: the Sol id is config's (models.reviewer.opencode_model), not a call pin in the text.
+  assert.ok(!opencode.includes('openai/gpt-6.1-sol#high'), 'OpenCode conductor no longer pins a Sol model on the call');
   assert.ok(opencode.includes('**Sol** (`gpt-6.1-sol`)'), 'the OpenCode pairing paragraph names the new Sol id');
   assert.ok(!opencode.includes('openai/gpt-5.6-sol'), 'OpenCode conductor no longer dispatches the old Sol id');
   assert.ok(opencode.includes('Claude Code\'s `codex` MCP route stays on `gpt-5.6-sol`, because the Codex MCP route is frozen at client 0.153.4, which cannot reach `gpt-6.1-sol`; a refusal there is reported and the review runs on Opus'), 'the OpenCode conductor says why the Claude Code route stays on gpt-5.6-sol');

@@ -14,6 +14,9 @@
 // mutated model reaches execution, and an unavailable one fails as a tool error).
 // A brief with an `OVERPASS-BYPASS: <reason>` line keeps the model the call names
 // (decision overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re).
+// While Overpass is not effective, a call that names no model gets one from
+// config.models through the brief's MODEL-INTENT line (dispatch-model.mjs; decision
+// subagent-model-choice-on-opencode-conductor-states-dispatch).
 // H20 never denies on either host: Claude Code's deny-once rung was removed by
 // decision sterling-claude-code-scale-down-boundary (h20-mechanism-axis.mjs:435-441),
 // so the question surface is a post-answer audit here too.
@@ -42,6 +45,7 @@ import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
 import { dispatchOverpass, dispatchPin, overpassRefusal, overpassUnknownLine } from './overpass.mjs';
+import { dispatchModel } from './dispatch-model.mjs';
 import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
@@ -156,9 +160,11 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
       } else {
         // An OVERPASS-BYPASS brief line keeps the call's model; one that cannot be honoured
         // (no model on the call, no reason) throws and refuses the dispatch the same way.
+        // While Overpass is not effective, the model comes from config.models through the
+        // dispatch intent instead (dispatch-model.mjs); a bad MODEL-INTENT line refuses the same way.
         let pin;
         try {
-          pin = dispatchPin(read.res, args);
+          pin = read.res.effective ? dispatchPin(read.res, args) : dispatchModel(read.config, args);
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
