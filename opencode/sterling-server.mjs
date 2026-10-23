@@ -4246,6 +4246,69 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/retired-terms.js
+function retiredTermRegex(term) {
+  const t = term.trim();
+  const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+  const lead = WORD_CHAR.test(t[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
+  const trail = WORD_CHAR.test(t[t.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
+  return new RegExp(`${lead}${body}${trail}`, "giu");
+}
+function protectedSpans(text) {
+  const spans = [];
+  for (const re of [/"[^"]*"/g, /\u201c[^\u201d]*\u201d/g, /^[ \t]*>.*$/gm]) {
+    for (const m of text.matchAll(re))
+      spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
+  return spans;
+}
+function findTermOccurrences(text, term) {
+  if (!text || !term.trim())
+    return [];
+  const spans = protectedSpans(text);
+  const out = [];
+  for (const m of text.matchAll(retiredTermRegex(term))) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    out.push({ start, end, protected: spans.some(([s2, e]) => start >= s2 && end <= e) });
+  }
+  return out;
+}
+function collectRetiredTerms(decisions) {
+  const out = [];
+  for (const d of decisions) {
+    if (!d || d.type !== "decision" || d.status !== void 0 && d.status !== "active")
+      continue;
+    if (!Array.isArray(d.retired_terms))
+      continue;
+    for (const entry of d.retired_terms) {
+      const parsed = retiredTermSchema.safeParse(entry);
+      if (!parsed.success)
+        continue;
+      out.push({ ...parsed.data, decision_id: String(d.id), ...typeof d.slug === "string" ? { decision_slug: d.slug } : {} });
+    }
+  }
+  return out;
+}
+function retiredTermsInText(text, terms) {
+  return terms.filter((t) => findTermOccurrences(text, t.term).some((o) => !o.protected));
+}
+function retiredTermWarning(t) {
+  return `retired term '${t.term}': renamed to '${t.replacement}' by decision ${t.decision_slug ?? t.decision_id} (knowledge_get ${t.decision_id}); use '${t.replacement}' unless you are quoting.`;
+}
+var retiredTermSchema, WORD_CHAR;
+var init_retired_terms = __esm({
+  "packages/schemas/dist/retired-terms.js"() {
+    "use strict";
+    init_zod();
+    retiredTermSchema = external_exports.object({
+      term: external_exports.string().trim().min(1),
+      replacement: external_exports.string().trim().min(1)
+    }).strict();
+    WORD_CHAR = /[\p{L}\p{N}_]/u;
+  }
+});
+
 // packages/schemas/dist/source-extensions.js
 function sourceExtensionOf(path) {
   const base2 = String(path).split("/").pop() ?? "";
@@ -4369,6 +4432,7 @@ var init_records = __esm({
     init_zod();
     init_envelope();
     init_paths();
+    init_retired_terms();
     verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
     base = external_exports.object(envelopeFields);
     decisionSchema = base.extend({
@@ -4400,7 +4464,13 @@ var init_records = __esm({
       // one-off instruction was once captured as standing policy and rewrote
       // the governing file three times; absent means unstated, and existing
       // records round-trip unchanged.
-      authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
+      authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional(),
+      // GitHub #188 (decision retiring-a-renamed-term-a-retired-terms-field-on-
+      // the-rename): a decision that rules a rename names the old term and its
+      // replacement. Preflight and H19/H20 delivery warn on the old term, a
+      // retired_term_use maintenance item is queued per record still using it,
+      // and record hygiene lists those records. The matcher is retired-terms.ts.
+      retired_terms: external_exports.array(retiredTermSchema).min(1).optional()
     }).superRefine(refineSupersession);
     notApplicableExemptionSchema = external_exports.object({
       not_applicable: external_exports.object({
@@ -4755,7 +4825,15 @@ var init_records = __esm({
       // (file_keys): a repeat restore of the same path refreshes the open item
       // rather than minting a second one — the obligation is "this path keeps
       // getting reverted", not "an event happened".
-      "restore_performed"
+      "restore_performed",
+      // A record still uses a term a rename decision retired (GitHub #188,
+      // decision retiring-a-renamed-term-a-retired-terms-field-on-the-rename).
+      // Minted per record (feature_link = the record) when a decision's
+      // retired_terms are created or changed, and at MCP server start for
+      // renames recorded in a mounted domain. The worker may replace the term
+      // outside quotes in decision titles and statements and article text;
+      // anything else is handed back.
+      "retired_term_use"
     ];
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
@@ -5157,7 +5235,7 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
-    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
     workerPolicyItemSchema = external_exports.object({
       id: external_exports.string().uuid(),
       lane: external_exports.enum(WORKER_POLICY_LANES),
@@ -6080,6 +6158,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_retired_terms();
     init_source_extensions();
     init_envelope();
     init_records();
@@ -13678,6 +13757,18 @@ function recordAdvisoryFire(root, hook, sessionId) {
 // scripts/hooks/lib/axis-compose.mjs
 init_dist2();
 
+// scripts/hooks/lib/retired-terms.mjs
+init_dist();
+var DECISION_SCAN_CAP = 1e6;
+function retiredTermNotice(store, text) {
+  if (!text) return "";
+  const decisions = store.query({ types: ["decision"], cap: DECISION_SCAN_CAP }).filter((d) => Array.isArray(d.retired_terms));
+  if (!decisions.length) return "";
+  const used = retiredTermsInText(text, collectRetiredTerms(decisions));
+  if (!used.length) return "";
+  return ["STERLING RETIRED TERMS \u2014 this text uses a term a rename decision retired (advisory):", ...used.map((t) => `  - ${retiredTermWarning(t)}`)].join("\n");
+}
+
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
 import { join as join13 } from "node:path";
@@ -14803,8 +14894,19 @@ function citedInBrief(record, text) {
   if (id8.length === 8 && new RegExp(`(?<![0-9a-f])${esc(id8)}(?![0-9a-f])`, "i").test(text)) return true;
   return !!record.slug && new RegExp(`(?<![a-z0-9-])${esc(record.slug)}(?![a-z0-9-])`, "i").test(text);
 }
-function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }) {
-  if (!Object.hasOwn(HOST_TEXT, host)) throw new Error(`composeMechanismAxis: unknown host '${host}'`);
+function composeMechanismAxis(store, opts) {
+  if (!Object.hasOwn(HOST_TEXT, opts.host)) throw new Error(`composeMechanismAxis: unknown host '${opts.host}'`);
+  const retiredLine = retiredTermNotice(store, opts.outgoing);
+  const composed = composeSubjectAxis(store, opts, retiredLine);
+  if (composed || !retiredLine) return composed;
+  const parts = [
+    ...opts.pinLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: opts.pinLine }] : [],
+    { kind: "ordinary", pinned: true, contentClass: "chrome", text: retiredLine },
+    ...opts.overlap ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: opts.overlap }] : []
+  ];
+  return { assembled: assembleDelivery(parts, resolveTotalCap(opts.root)), guard: opts.guardFor() };
+}
+function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion = surface === "question";
   const isConsult = surface === "consult";
   const isDispatch = surface === "dispatch";
@@ -14991,6 +15093,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
     // unattributed block. Pinned chrome is placed first; a hazard that then
     // no longer fits falls to its pointer (the existing held-back behaviour).
     { kind: "ordinary", pinned: true, contentClass: "chrome", text: header },
+    ...retiredLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: retiredLine }] : [],
     // A prior ANSWER outranks everything on a question-shaped prompt — it is
     // the direct "don't re-derive" signal; on a change-shaped prompt hazards
     // still lead (stop the mistake), answers ride with the article pointers.
@@ -21533,7 +21636,7 @@ var OPENCODE_ALLOWED_TOOLS = [
 
 // scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_RUN_BUDGET_USD = 5;
-var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
 var RUN_BATCH_MAX = 12;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;

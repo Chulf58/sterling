@@ -4118,6 +4118,118 @@ function normalizeLocation(location) {
   return repoPathOfLocation(location) ?? location;
 }
 
+// packages/schemas/dist/retired-terms.js
+var retiredTermSchema = external_exports.object({
+  term: external_exports.string().trim().min(1),
+  replacement: external_exports.string().trim().min(1)
+}).strict();
+var WORD_CHAR = /[\p{L}\p{N}_]/u;
+function retiredTermRegex(term) {
+  const t = term.trim();
+  const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+  const lead = WORD_CHAR.test(t[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
+  const trail = WORD_CHAR.test(t[t.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
+  return new RegExp(`${lead}${body}${trail}`, "giu");
+}
+function protectedSpans(text) {
+  const spans = [];
+  for (const re of [/"[^"]*"/g, /\u201c[^\u201d]*\u201d/g, /^[ \t]*>.*$/gm]) {
+    for (const m of text.matchAll(re))
+      spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
+  return spans;
+}
+function findTermOccurrences(text, term) {
+  if (!text || !term.trim())
+    return [];
+  const spans = protectedSpans(text);
+  const out = [];
+  for (const m of text.matchAll(retiredTermRegex(term))) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    out.push({ start, end, protected: spans.some(([s2, e]) => start >= s2 && end <= e) });
+  }
+  return out;
+}
+var RETIRED_TERM_SKIPPED_FIELDS = /* @__PURE__ */ new Set([
+  "history",
+  "retired_terms",
+  "id",
+  "type",
+  "slug",
+  "status",
+  "scope",
+  "author",
+  "version",
+  "created_at",
+  "updated_at",
+  "superseded_by",
+  "links",
+  "file_keys",
+  "file_baselines",
+  "aliases",
+  "stack_tags",
+  "source_date",
+  "capture_date",
+  "location"
+]);
+var NESTED_SKIPPED_KEYS = /* @__PURE__ */ new Set(["path", "id", "ac_id", "target_id"]);
+function retiredTermScanFields(record) {
+  const out = [];
+  const walk = (value, path) => {
+    if (typeof value === "string")
+      out.push([path, value]);
+    else if (Array.isArray(value))
+      value.forEach((v, i) => walk(v, `${path}[${i}]`));
+    else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value))
+        if (!NESTED_SKIPPED_KEYS.has(k))
+          walk(v, `${path}.${k}`);
+    }
+  };
+  for (const [k, v] of Object.entries(record))
+    if (!RETIRED_TERM_SKIPPED_FIELDS.has(k))
+      walk(v, k);
+  return out;
+}
+function collectRetiredTerms(decisions) {
+  const out = [];
+  for (const d of decisions) {
+    if (!d || d.type !== "decision" || d.status !== void 0 && d.status !== "active")
+      continue;
+    if (!Array.isArray(d.retired_terms))
+      continue;
+    for (const entry of d.retired_terms) {
+      const parsed = retiredTermSchema.safeParse(entry);
+      if (!parsed.success)
+        continue;
+      out.push({ ...parsed.data, decision_id: String(d.id), ...typeof d.slug === "string" ? { decision_slug: d.slug } : {} });
+    }
+  }
+  return out;
+}
+function retiredTermUses(record, terms) {
+  if (record.status !== void 0 && record.status !== "active")
+    return [];
+  const fields = retiredTermScanFields(record);
+  const out = [];
+  for (const t of terms) {
+    if (t.decision_id === record.id)
+      continue;
+    const hitFields = [];
+    let kept = 0;
+    for (const [path, text] of fields) {
+      const occ = findTermOccurrences(text, t.term);
+      kept += occ.filter((o) => o.protected).length;
+      if (occ.some((o) => !o.protected))
+        hitFields.push(path);
+    }
+    if (hitFields.length)
+      out.push({ term: t.term, replacement: t.replacement, decision_id: t.decision_id, ...t.decision_slug ? { decision_slug: t.decision_slug } : {}, fields: hitFields, protected: kept });
+  }
+  return out;
+}
+
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
@@ -4197,7 +4309,13 @@ var decisionSchema = base.extend({
   // one-off instruction was once captured as standing policy and rewrote
   // the governing file three times; absent means unstated, and existing
   // records round-trip unchanged.
-  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
+  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional(),
+  // GitHub #188 (decision retiring-a-renamed-term-a-retired-terms-field-on-
+  // the-rename): a decision that rules a rename names the old term and its
+  // replacement. Preflight and H19/H20 delivery warn on the old term, a
+  // retired_term_use maintenance item is queued per record still using it,
+  // and record hygiene lists those records. The matcher is retired-terms.ts.
+  retired_terms: external_exports.array(retiredTermSchema).min(1).optional()
 }).superRefine(refineSupersession);
 var notApplicableExemptionSchema = external_exports.object({
   not_applicable: external_exports.object({
@@ -4552,7 +4670,15 @@ var SYSTEM_REASONS = [
   // (file_keys): a repeat restore of the same path refreshes the open item
   // rather than minting a second one — the obligation is "this path keeps
   // getting reverted", not "an event happened".
-  "restore_performed"
+  "restore_performed",
+  // A record still uses a term a rename decision retired (GitHub #188,
+  // decision retiring-a-renamed-term-a-retired-terms-field-on-the-rename).
+  // Minted per record (feature_link = the record) when a decision's
+  // retired_terms are created or changed, and at MCP server start for
+  // renames recorded in a mounted domain. The worker may replace the term
+  // outside quotes in decision titles and statements and article text;
+  // anything else is handed back.
+  "retired_term_use"
 ];
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
@@ -4974,7 +5100,7 @@ var knowledgeWriteSchema = external_exports.object({
   type: external_exports.string().min(1),
   at: external_exports.string().min(1)
 }).strict();
-var WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
 var workerPolicyItemSchema = external_exports.object({
   id: external_exports.string().uuid(),
   lane: external_exports.enum(WORKER_POLICY_LANES),
@@ -11962,8 +12088,12 @@ var label = (rec) => rec.slug || rec.title || rec.question || rec.id;
 function auditRecords(records, { headFiles }) {
   const findings = [];
   const add = (rec, kind, detail) => findings.push({ kind, type: rec.type, ids: [rec.id], detail: `${rec.type} ${label(rec)} (${rec.id.slice(0, 8)}): ${detail}` });
+  const retiredTerms = collectRetiredTerms(records);
   const groups = /* @__PURE__ */ new Map();
   for (const rec of records) {
+    for (const use of retiredTerms.length ? retiredTermUses(rec, retiredTerms) : []) {
+      add(rec, "retired_term_use", `still uses retired term '${use.term}' (now '${use.replacement}', decision ${use.decision_slug ?? use.decision_id.slice(0, 8)}) in ${use.fields.join(", ")}`);
+    }
     const claims = pathClaims(rec);
     if (carriesPaths(rec) && claims.length === 0) add(rec, "no_file_paths", "carries no file paths");
     for (const c of claims) {

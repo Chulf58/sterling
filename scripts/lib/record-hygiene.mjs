@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recordCentralTerms, MODELS_CATALOG_LOCATION } from '@sterling/store';
+import { collectRetiredTerms, retiredTermUses } from '@sterling/schemas';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -68,8 +69,15 @@ export function auditRecords(records, { headFiles }) {
   const add = (rec, kind, detail) =>
     findings.push({ kind, type: rec.type, ids: [rec.id], detail: `${rec.type} ${label(rec)} (${rec.id.slice(0, 8)}): ${detail}` });
 
+  // Retired terms (GitHub #188): the active rename decisions among these
+  // records, matched by the one schemas matcher (quotes, blockquotes, history
+  // and the rename decision itself skipped).
+  const retiredTerms = collectRetiredTerms(records);
   const groups = new Map();
   for (const rec of records) {
+    for (const use of retiredTerms.length ? retiredTermUses(rec, retiredTerms) : []) {
+      add(rec, 'retired_term_use', `still uses retired term '${use.term}' (now '${use.replacement}', decision ${use.decision_slug ?? use.decision_id.slice(0, 8)}) in ${use.fields.join(', ')}`);
+    }
     const claims = pathClaims(rec);
     if (carriesPaths(rec) && claims.length === 0) add(rec, 'no_file_paths', 'carries no file paths');
     for (const c of claims) {

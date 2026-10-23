@@ -8,6 +8,10 @@
 //   dead_test_path        a live_test_ref naming a test path absent at HEAD
 //   shared_central_terms  records whose central-term sets are identical
 //   filler_central_terms  filler words among a record's central terms
+//   retired_term_use      a record still using a term a project-held rename
+//                         decision retired (GitHub #188; renames held in a
+//                         mounted domain are not read here, the project
+//                         store is the only one this arm opens)
 // Central terms are recordCentralTerms from packages/store/src/axis.ts.
 //
 //   node scripts/check-record-hygiene.mjs [root] [--all]

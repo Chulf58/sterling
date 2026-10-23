@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_RANK_TERMS, allocateShares } from '@sterling/store';
 import { loadConfig } from './common.mjs';
+import { retiredTermNotice } from './retired-terms.mjs';
 import { ownsHere } from './working-tree.mjs';
 import {
   extractAxisTerms,
@@ -247,8 +248,23 @@ function citedInBrief(record, text) {
  *   overlap     the dispatch-overlap block, appended pinned
  *   host        'claude' | 'opencode' (HOST_TEXT)
  */
-export function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }) {
-  if (!Object.hasOwn(HOST_TEXT, host)) throw new Error(`composeMechanismAxis: unknown host '${host}'`);
+export function composeMechanismAxis(store, opts) {
+  if (!Object.hasOwn(HOST_TEXT, opts.host)) throw new Error(`composeMechanismAxis: unknown host '${opts.host}'`);
+  // RETIRED TERMS (GitHub #188): independent of the subject match, so it is
+  // read first and rides as pinned chrome — on the subject payload when there
+  // is one, alone (with the model pin) when the subject stages stay silent.
+  const retiredLine = retiredTermNotice(store, opts.outgoing);
+  const composed = composeSubjectAxis(store, opts, retiredLine);
+  if (composed || !retiredLine) return composed;
+  const parts = [
+    ...(opts.pinLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: opts.pinLine }] : []),
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: retiredLine },
+    ...(opts.overlap ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: opts.overlap }] : []),
+  ];
+  return { assembled: assembleDelivery(parts, resolveTotalCap(opts.root)), guard: opts.guardFor() };
+}
+
+function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion = surface === 'question';
   const isConsult = surface === 'consult';
   const isDispatch = surface === 'dispatch';
@@ -653,6 +669,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
     // unattributed block. Pinned chrome is placed first; a hazard that then
     // no longer fits falls to its pointer (the existing held-back behaviour).
     { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: header },
+    ...(retiredLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: retiredLine }] : []),
     // A prior ANSWER outranks everything on a question-shaped prompt — it is
     // the direct "don't re-derive" signal; on a change-shaped prompt hazards
     // still lead (stop the mistake), answers ride with the article pointers.

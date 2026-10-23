@@ -1,5 +1,20 @@
 export { normalizeRepoPath, repoPath, toRepoRelative, matchesGlob, samePath, isAbsolutePathAnyHost, sameLocationAnyHost, isUnderLocationAnyHost, classifyLocation, repoPathOfLocation, normalizeLocation, isCollapsedUrlLocation } from './paths.js';
 export type { LocationKind } from './paths.js';
+export {
+  retiredTermSchema,
+  retiredTermRegex,
+  protectedSpans,
+  findTermOccurrences,
+  replaceRetiredTerms,
+  retiredTermScanFields,
+  collectRetiredTerms,
+  retiredTermUses,
+  retiredTermsInText,
+  retiredTermWarning,
+  RETIRED_TERM_SKIPPED_FIELDS,
+  RETIRED_TERM_REWRITE_FIELDS,
+} from './retired-terms.js';
+export type { RetiredTermEntry, RetiredTerm, TermOccurrence, RetiredTermUse } from './retired-terms.js';
 export { SOURCE_EXTENSIONS, sourceExtensionOf, isSourcePath } from './source-extensions.js';
 export {
   LINK_RELS,
