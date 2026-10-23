@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, resolveOverpass, DEFAULT_OVERPASS_ROLE_TIERS, OVERPASS_TIERS, OVERPASS_TIER_RE, judgeProjectMode, ProjectModeError } from '../index.js';
+import { parseConfig, resolveOverpass, DEFAULT_OVERPASS_ROLE_TIERS, OVERPASS_ROLES, OVERPASS_TIERS, OVERPASS_TIER_RE, judgeProjectMode, ProjectModeError } from '../index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const shippedRaw = (): Record<string, unknown> => JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
@@ -53,6 +53,7 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
       reviewer: { model: 'overpass/agentic-high' },
       librarian: { model: 'overpass/agentic-high' },
       sparring: { model: 'overpass/agentic-premium-max' },
+      preflight: { model: 'overpass/agentic-high' },
     },
   });
 });
@@ -165,6 +166,7 @@ test('overpass roles: unset gives the per-role default tier and no effort (imple
     reviewer: { model: 'overpass/agentic-high' },
     librarian: { model: 'overpass/agentic-high' },
     sparring: { model: 'overpass/agentic-premium-max' },
+    preflight: { model: 'overpass/agentic-high' },
   };
   for (const cfg of [on(), on({ roles: {} }), on({ roles: { reviewer: {} } }), on({ roles: { implementor: {} } }), on({ roles: { sparring: {} } })]) {
     const r = resolveOverpass(cfg, { host: 'opencode' });
@@ -188,6 +190,16 @@ test('overpass roles: a tier and an effort apply to that role only, under the co
   assert.deepEqual(r.roles.scout, { model: 'overpass-agentic/agentic-high', effort: 'low' });
   assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-auto' });
   assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan and the worker keep the default lane model');
+});
+
+// Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: preflight is its own
+// Overpass role, on agentic-high by default, and takes its own tier and effort.
+test('overpass roles: preflight is a role that defaults to agentic-high and takes its own tier and effort', () => {
+  assert.ok((OVERPASS_ROLES as readonly string[]).includes('preflight'));
+  assert.equal(DEFAULT_OVERPASS_ROLE_TIERS.preflight, 'agentic-high');
+  const r = resolveOverpass(on({ roles: { preflight: { tier: 'agentic-low', effort: 'low' } } }), { host: 'opencode' });
+  assert.deepEqual(r.roles.preflight, { model: 'overpass/agentic-low', effort: 'low' });
+  assert.deepEqual(r.roles.scout, { model: 'overpass/agentic-high' }, 'the scout keeps its own tier');
 });
 
 // Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: implementor-hard is its

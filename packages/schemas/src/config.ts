@@ -281,6 +281,10 @@ export const configSchema = z.object({
       // dispatch pins its model (Astra, else a Fable model); under Overpass its
       // role tier decides.
       sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }),
+      // preflight is the sterling/preflight agent (decision
+      // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
+      // lookup, so a cheap model at low effort like the scout.
+      preflight: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
     })
     // Any installed agent's name is a key (decision
     // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
@@ -650,7 +654,7 @@ export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 // plugin sends on each request of that role's lane. Effort is an exact override, not a
 // minimum: 'high' also replaces an xhigh the gateway would have picked. Both are off by
 // default. Plan and the maintenance worker are not roles here and keep laneModel.
-export const OVERPASS_ROLES = ['implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring'] as const;
+export const OVERPASS_ROLES = ['implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring', 'preflight'] as const;
 export type OverpassRole = (typeof OVERPASS_ROLES)[number];
 export const OVERPASS_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type OverpassEffort = (typeof OVERPASS_EFFORTS)[number];
@@ -680,6 +684,7 @@ export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
   reviewer: DEFAULT_OVERPASS_TIER,
   librarian: DEFAULT_OVERPASS_TIER,
   sparring: 'agentic-premium-max',
+  preflight: DEFAULT_OVERPASS_TIER,
 };
 
 export interface OverpassRoleRoute {

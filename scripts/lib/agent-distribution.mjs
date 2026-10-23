@@ -337,7 +337,9 @@ export function setInstalledModelEffort(installedContent, { model, effort, plugi
 // not. The permission keys and values are the ones OpenCode documents
 // (opencode.ai/docs/agents, fetched 2026-09-24); anything else is refused, never
 // passed through.
-export const OPENCODE_PERMISSION_KEYS = ['edit', 'bash', 'webfetch', 'task'];
+// webfetch and websearch are separate permission actions in OpenCode V2 (opencode.ai/v2/docs/permissions,
+// opencode.ai/v2/docs/tools), so a role with no web grant denies both.
+export const OPENCODE_PERMISSION_KEYS = ['edit', 'bash', 'webfetch', 'websearch', 'task'];
 export const OPENCODE_PERMISSION_VALUES = ['allow', 'ask', 'deny'];
 
 // One permission map, for the portable block and the Sterling-full one alike: each

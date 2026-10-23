@@ -121,7 +121,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   assert.match(fm[0], /^description: Sterling's planning agent for OpenCode\. Plans only, never implements\./);
   // one line longer since implementor-hard joined the roster: the Plan agent denies it as it
   // denies the implementor (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-  assert.deepEqual(fm.slice(1, 25), [
+  assert.deepEqual(fm.slice(1, 26), [
     'mode: primary',
     'permission:',
     '  edit:',
@@ -131,6 +131,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
     '    "*": deny',
     '    "sterling/scout": allow',
     '    "sterling/researcher": allow',
+    '    "sterling/preflight": allow',
     '    "sterling/reviewer": allow',
     '    "sterling/sparring": allow',
     '    "sterling/implementor": deny',

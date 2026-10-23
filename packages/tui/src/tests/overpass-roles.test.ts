@@ -98,6 +98,25 @@ test('Overpass on: each role row reads its tier with (Overpass), the saved model
   assert.equal(saved.kind, 'meta', 'the saved line is the dimmed kind');
 });
 
+// Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: preflight is an installed
+// agent and an Overpass role, so it gets a System tab row with its own tier (agentic-high by default).
+test('Overpass on: an installed preflight agent gets its own row on agentic-high; off, it reads its saved model', () => {
+  const withPreflight = (over: Partial<AgentRosterSnapshot> = {}) => {
+    const base = snapshot(over);
+    return {
+      ...base,
+      agents: [...base.agents, { name: 'preflight', installedModel: 'claude-sonnet-5-5', installedEffort: 'low' }],
+      configModels: { ...base.configModels, preflight: { model: 'claude-sonnet-5-5', effort: 'low' } },
+    } as AgentRosterSnapshot;
+  };
+  const onRows = rowTexts(withPreflight({ overpass: on() }));
+  const at = onRows.indexOf('  Preflight: agentic-high (Overpass)');
+  assert.ok(at >= 0, onRows.join('\n'));
+  assert.deepEqual(onRows.slice(at, at + 3), ['  Preflight: agentic-high (Overpass)', '    saved: claude-sonnet-5-5 low', '    preflight']);
+  const offRows = rowTexts(withPreflight());
+  assert.ok(offRows.includes('  Preflight: claude-sonnet-5-5 low'), offRows.join('\n'));
+});
+
 test('Overpass on: a configured tier and effort show on the row', () => {
   const rows = rowTexts(snapshot({ overpass: on({ implementor: { tier: 'agentic-premium-max', effort: 'high' }, scout: { tier: 'agentic-lite' } }) }));
   assert.equal(rows[0], '› Implementor: agentic-premium-max (Overpass) high');

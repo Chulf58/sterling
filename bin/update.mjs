@@ -5783,7 +5783,8 @@ var init_records = __esm({
       scout: "scout",
       librarian: "librarian",
       reviewer: "reviewer",
-      sparring: "sparring"
+      sparring: "sparring",
+      preflight: "preflight"
     };
     REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
     s = (v) => typeof v === "string" ? v : "";
@@ -6525,7 +6526,11 @@ var init_config = __esm({
         // read-only grant as the reviewer, so the same install-time default. Every
         // dispatch pins its model (Astra, else a Fable model); under Overpass its
         // role tier decides.
-        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+        // preflight is the sterling/preflight agent (decision
+        // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
+        // lookup, so a cheap model at low effort like the scout.
+        preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -6845,7 +6850,7 @@ var init_config = __esm({
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring"];
+    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight"];
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
     DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -6857,7 +6862,8 @@ var init_config = __esm({
       scout: DEFAULT_OVERPASS_TIER,
       reviewer: DEFAULT_OVERPASS_TIER,
       librarian: DEFAULT_OVERPASS_TIER,
-      sparring: "agentic-premium-max"
+      sparring: "agentic-premium-max",
+      preflight: DEFAULT_OVERPASS_TIER
     };
     RETIRED_MODEL_KEYS = [
       "coder",

@@ -760,3 +760,13 @@ test('moveImplementorHardTask: moves the hard_task, records its id once, and lea
   assert.equal(moveImplementorHardTask({ models: 'x' }).changed, false);
   parseConfig(m.config);
 });
+
+// Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: preflight is a read-only
+// store lookup, so its default is Sonnet 5.5 at low effort like the scout, in the schema and in
+// the shipped template alike.
+test('models.preflight: Sonnet 5.5 at low effort by default, in the schema and in templates/default-config.json', () => {
+  const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.deepEqual(shippedRaw.models.preflight, { model: 'claude-sonnet-5-5', effort: 'low' });
+  assert.deepEqual(parseConfig({}).models.preflight, { model: 'claude-sonnet-5-5', effort: 'low' });
+  assert.deepEqual(parseConfig({ models: { preflight: { model: 'claude-opus-5-5', effort: 'high' } } }).models.preflight, { model: 'claude-opus-5-5', effort: 'high' }, 'an explicit entry wins');
+});
