@@ -27231,7 +27231,7 @@ ${notice}`;
           if (subRoot && !abort.signal.aborted) {
             try {
               logLine(subRoot, `event subscription ended: ${errText2(e)}`);
-              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText2(e)}); settlement stops until OpenCode restarts.`);
+              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText2(e)}); settlement stops until the plugin reloads: run /reload in the TUI or \`opencode reload\` in a shell.`);
             } catch (reportError) {
               process.stderr.write(`[sterling] event subscription ended (${errText2(e)}) and could not be reported (${errText2(reportError)})
 `);

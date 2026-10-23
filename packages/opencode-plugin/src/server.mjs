@@ -494,7 +494,7 @@ export function createSterlingServer(deps = {}) {
           if (subRoot && !abort.signal.aborted) {
             try {
               logLine(subRoot, `event subscription ended: ${errText(e)}`);
-              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText(e)}); settlement stops until OpenCode restarts.`);
+              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText(e)}); settlement stops until the plugin reloads: run /reload in the TUI or \`opencode reload\` in a shell.`);
             } catch (reportError) {
               process.stderr.write(`[sterling] event subscription ended (${errText(e)}) and could not be reported (${errText(reportError)})\n`);
             }
