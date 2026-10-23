@@ -328,15 +328,16 @@ export function renderRotationRestore(note, { cwd, source, host = 'claude', plan
   const caution = cautions.length ? ` CAUTION: ${cautions.join('; ')}.` : '';
   if (host === 'opencode') {
     // OpenCode: the user started a new session (/new) in a running OpenCode,
-    // and a new session does not reload plugin or MCP-server code; only a
-    // relaunch of OpenCode does.
+    // and a new session does not reload plugin or MCP-server code; only
+    // `opencode reload` does (every TUI is a client of one shared server, so
+    // relaunching a TUI does not restart it; measured 2026-10-23, OpenCode 2.1.2).
     return (
       `\n\nROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` +
       caution +
       body +
       (note.reason === 'code-reload'
-        ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. exit and relaunch OpenCode, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: exit and relaunch OpenCode now.`
-        : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED OpenCode before this new session — a new session alone never reloads code, so relaunch now if that didn't happen yet.`)
+        ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. run \`opencode reload\`, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).`
+        : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`opencode reload\` before this new session — a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`)
     );
   }
   // SOURCE-AWARE CLOSING PARAGRAPH: the `clear` wording below is UNCHANGED
