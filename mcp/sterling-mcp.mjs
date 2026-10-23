@@ -17160,53 +17160,66 @@ function retiredTermRegex(term) {
 }
 function protectedSpans(text) {
   const spans = [];
-  const bounds = [];
-  let from = 0;
-  for (const sep2 of text.matchAll(/\n[ \t]*\n/g)) {
-    bounds.push([from, sep2.index ?? 0]);
-    from = (sep2.index ?? 0) + sep2[0].length;
-  }
-  bounds.push([from, text.length]);
-  for (const [ps, pe] of bounds) {
-    const para = text.slice(ps, pe);
-    const straight = [...para.matchAll(/"/g)].map((m) => ps + (m.index ?? 0));
-    for (let i = 0; i < straight.length; i += 2)
-      spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : pe]);
-    for (let i = para.indexOf("\u201C"); i !== -1; ) {
-      const close = para.indexOf("\u201D", i + 1);
-      if (close === -1) {
-        spans.push([ps + i, pe]);
-        break;
-      }
-      spans.push([ps + i, ps + close + 1]);
-      i = para.indexOf("\u201C", close + 1);
+  const paragraphEnd = (at) => {
+    const sep2 = /\n[ \t]*\n/g;
+    sep2.lastIndex = at;
+    const m = sep2.exec(text);
+    return m ? m.index : text.length;
+  };
+  const straight = [...text.matchAll(/"/g)].map((m) => m.index ?? 0);
+  for (let i = 0; i < straight.length; i += 2)
+    spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : paragraphEnd(straight[i])]);
+  for (let i = text.indexOf("\u201C"); i !== -1; ) {
+    const close = text.indexOf("\u201D", i + 1);
+    if (close === -1) {
+      spans.push([i, paragraphEnd(i)]);
+      i = text.indexOf("\u201C", i + 1);
+    } else {
+      spans.push([i, close + 1]);
+      i = text.indexOf("\u201C", close + 1);
     }
-    const bq = /^[ \t]*>/m.exec(para);
-    if (bq)
-      spans.push([ps + bq.index, pe]);
+  }
+  for (const m of text.matchAll(/^[ \t]*>/gm)) {
+    const at = m.index ?? 0;
+    spans.push([at, paragraphEnd(at)]);
   }
   return spans;
 }
-function findTermOccurrences(text, term) {
+function findTermOccurrences(text, term, replacement) {
   if (!text || !term.trim())
     return [];
   const spans = protectedSpans(text);
+  const canonical2 = [];
+  if (replacement?.trim()) {
+    const fold = (t) => t.normalize("NFC").trim().split(/\s+/).join(" ").toLowerCase();
+    const caseOnly = fold(term) === fold(replacement);
+    const re = retiredTermRegex(replacement);
+    const exact = caseOnly ? new RegExp(re.source, "gu") : re;
+    for (const m of text.matchAll(exact))
+      canonical2.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
   const out = [];
   for (const m of text.matchAll(retiredTermRegex(term))) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    out.push({ start, end, protected: spans.some(([s2, e]) => start < e && s2 < end) });
+    out.push({
+      start,
+      end,
+      protected: spans.some(([s2, e]) => start < e && s2 < end),
+      resolved: canonical2.some(([s2, e]) => start >= s2 && end <= e)
+    });
   }
   return out;
 }
+var owed = (o) => !o.protected && !o.resolved;
 function replaceRetiredTerms(text, terms) {
   let out = text;
   let replaced = 0;
   let kept = 0;
   for (const { term, replacement } of terms) {
-    const occ = findTermOccurrences(out, term);
-    kept += occ.filter((o) => o.protected).length;
-    const hits = occ.filter((o) => !o.protected);
+    const occ = findTermOccurrences(out, term, replacement);
+    kept += occ.filter((o) => o.protected && !o.resolved).length;
+    const hits = occ.filter(owed);
     replaced += hits.length;
     for (const o of [...hits].reverse())
       out = out.slice(0, o.start) + replacement + out.slice(o.end);
@@ -17285,9 +17298,9 @@ function retiredTermUses(record2, terms) {
     const hitFields = [];
     let kept = 0;
     for (const [path, text] of fields) {
-      const occ = findTermOccurrences(text, t.term);
-      kept += occ.filter((o) => o.protected).length;
-      if (occ.some((o) => !o.protected))
+      const occ = findTermOccurrences(text, t.term, t.replacement);
+      kept += occ.filter((o) => o.protected && !o.resolved).length;
+      if (occ.some(owed))
         hitFields.push(path);
     }
     if (hitFields.length)
@@ -17296,7 +17309,7 @@ function retiredTermUses(record2, terms) {
   return out;
 }
 function retiredTermsInText(text, terms) {
-  return terms.filter((t) => findTermOccurrences(text, t.term).some((o) => !o.protected));
+  return terms.filter((t) => findTermOccurrences(text, t.term, t.replacement).some(owed));
 }
 function retiredTermWarning(t) {
   return `retired term '${t.term}': renamed to '${t.replacement}' by decision ${t.decision_slug ?? t.decision_id} (knowledge_get ${t.decision_id}); use '${t.replacement}' unless you are quoting.`;

@@ -89,3 +89,41 @@ test('boundaries work on code points and treat combining marks as part of the wo
   assert.deepEqual(hits('une \u00e9curie ici', 'e\u0301curie'), [['\u00e9curie', false]]);
   assert.deepEqual(hits('e\u0301curies', '\u00e9curie'), [], 'a plural is still a different word');
 });
+
+test('a balanced quote that spans paragraphs is protected whole (straight and curly)', () => {
+  const straight = 'Intro North Barn.\n\n"North Barn first\n\nNorth Barn second" and North Barn after.';
+  assert.deepEqual(hits(straight, 'North Barn').map(([, p]) => p), [false, true, true, false]);
+  const curly = 'Intro North Barn.\n\n\u201cNorth Barn first\n\nNorth Barn second\u201d and North Barn after.';
+  assert.deepEqual(hits(curly, 'North Barn').map(([, p]) => p), [false, true, true, false]);
+  const r = replaceRetiredTerms(straight, [{ term: 'North Barn', replacement: 'Hay Barn' }]);
+  assert.equal(r.text, 'Intro Hay Barn.\n\n"North Barn first\n\nNorth Barn second" and Hay Barn after.');
+  // A second, unclosed curly opener later on still protects only to the end of its own paragraph.
+  const mixed = '\u201cclosed North Barn\u201d\n\n\u201cunclosed North Barn\n\nPlain North Barn.';
+  assert.deepEqual(hits(mixed, 'North Barn').map(([, p]) => p), [true, true, false]);
+});
+
+test('replacement contains the term (Barn -> North Barn): the new name is resolved, never a use or a rewrite', () => {
+  const rename = [{ term: 'Barn', replacement: 'North Barn' }];
+  assert.deepEqual(findTermOccurrences('North Barn holds hay; the Barn is red.', 'Barn', 'North Barn').map((o) => o.resolved), [true, false]);
+  const r = replaceRetiredTerms('North Barn holds hay; the Barn is red.', rename);
+  assert.equal(r.text, 'North Barn holds hay; the North Barn is red.');
+  assert.equal(r.replaced, 1);
+  assert.equal(replaceRetiredTerms(r.text, rename).replaced, 0, 'idempotent: the rewritten text owes nothing');
+  const terms = collectRetiredTerms([{ id: 'd', type: 'decision', status: 'active', retired_terms: rename }]);
+  assert.deepEqual(retiredTermUses({ id: 'a', type: 'decision', status: 'active', statement: 'North Barn holds hay.' }, terms), []);
+  assert.deepEqual(retiredTermsInText('north barn holds hay', terms), [], 'resolution is case-insensitive like the term');
+});
+
+test('term contains the replacement (North Barn -> Barn): the shorter new name is not mistaken for the old one', () => {
+  const rename = [{ term: 'North Barn', replacement: 'Barn' }];
+  const r = replaceRetiredTerms('Feed in North Barn; the Barn is red.', rename);
+  assert.equal(r.text, 'Feed in Barn; the Barn is red.');
+  assert.equal(replaceRetiredTerms(r.text, rename).replaced, 0);
+});
+
+test('a case-only rename still finds the old spelling', () => {
+  const rename = [{ term: 'north barn', replacement: 'North Barn' }];
+  const r = replaceRetiredTerms('the north barn and the North Barn', rename);
+  assert.equal(r.text, 'the North Barn and the North Barn');
+  assert.equal(r.replaced, 1);
+});

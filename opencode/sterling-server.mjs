@@ -4261,42 +4261,54 @@ function retiredTermRegex(term) {
 }
 function protectedSpans(text) {
   const spans = [];
-  const bounds = [];
-  let from = 0;
-  for (const sep4 of text.matchAll(/\n[ \t]*\n/g)) {
-    bounds.push([from, sep4.index ?? 0]);
-    from = (sep4.index ?? 0) + sep4[0].length;
-  }
-  bounds.push([from, text.length]);
-  for (const [ps, pe] of bounds) {
-    const para = text.slice(ps, pe);
-    const straight = [...para.matchAll(/"/g)].map((m) => ps + (m.index ?? 0));
-    for (let i = 0; i < straight.length; i += 2)
-      spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : pe]);
-    for (let i = para.indexOf("\u201C"); i !== -1; ) {
-      const close = para.indexOf("\u201D", i + 1);
-      if (close === -1) {
-        spans.push([ps + i, pe]);
-        break;
-      }
-      spans.push([ps + i, ps + close + 1]);
-      i = para.indexOf("\u201C", close + 1);
+  const paragraphEnd = (at) => {
+    const sep4 = /\n[ \t]*\n/g;
+    sep4.lastIndex = at;
+    const m = sep4.exec(text);
+    return m ? m.index : text.length;
+  };
+  const straight = [...text.matchAll(/"/g)].map((m) => m.index ?? 0);
+  for (let i = 0; i < straight.length; i += 2)
+    spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : paragraphEnd(straight[i])]);
+  for (let i = text.indexOf("\u201C"); i !== -1; ) {
+    const close = text.indexOf("\u201D", i + 1);
+    if (close === -1) {
+      spans.push([i, paragraphEnd(i)]);
+      i = text.indexOf("\u201C", i + 1);
+    } else {
+      spans.push([i, close + 1]);
+      i = text.indexOf("\u201C", close + 1);
     }
-    const bq = /^[ \t]*>/m.exec(para);
-    if (bq)
-      spans.push([ps + bq.index, pe]);
+  }
+  for (const m of text.matchAll(/^[ \t]*>/gm)) {
+    const at = m.index ?? 0;
+    spans.push([at, paragraphEnd(at)]);
   }
   return spans;
 }
-function findTermOccurrences(text, term) {
+function findTermOccurrences(text, term, replacement) {
   if (!text || !term.trim())
     return [];
   const spans = protectedSpans(text);
+  const canonical2 = [];
+  if (replacement?.trim()) {
+    const fold = (t) => t.normalize("NFC").trim().split(/\s+/).join(" ").toLowerCase();
+    const caseOnly = fold(term) === fold(replacement);
+    const re = retiredTermRegex(replacement);
+    const exact = caseOnly ? new RegExp(re.source, "gu") : re;
+    for (const m of text.matchAll(exact))
+      canonical2.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
   const out = [];
   for (const m of text.matchAll(retiredTermRegex(term))) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    out.push({ start, end, protected: spans.some(([s2, e]) => start < e && s2 < end) });
+    out.push({
+      start,
+      end,
+      protected: spans.some(([s2, e]) => start < e && s2 < end),
+      resolved: canonical2.some(([s2, e]) => start >= s2 && end <= e)
+    });
   }
   return out;
 }
@@ -4317,12 +4329,12 @@ function collectRetiredTerms(decisions) {
   return out;
 }
 function retiredTermsInText(text, terms) {
-  return terms.filter((t) => findTermOccurrences(text, t.term).some((o) => !o.protected));
+  return terms.filter((t) => findTermOccurrences(text, t.term, t.replacement).some(owed));
 }
 function retiredTermWarning(t) {
   return `retired term '${t.term}': renamed to '${t.replacement}' by decision ${t.decision_slug ?? t.decision_id} (knowledge_get ${t.decision_id}); use '${t.replacement}' unless you are quoting.`;
 }
-var retiredTermSchema, WORD_CLASS, WORD_CHAR;
+var retiredTermSchema, WORD_CLASS, WORD_CHAR, owed;
 var init_retired_terms = __esm({
   "packages/schemas/dist/retired-terms.js"() {
     "use strict";
@@ -4333,6 +4345,7 @@ var init_retired_terms = __esm({
     }).strict();
     WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
     WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
+    owed = (o) => !o.protected && !o.resolved;
   }
 });
 
@@ -25701,37 +25714,37 @@ function weighDuties(store, records, config, root, at, git) {
     }
   }
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
-  const owed = [];
+  const owed2 = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
   const changed = git.candidates.filter((c) => existsSync29(join48(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
     const ats = touched.map((c) => c.at).filter(isValidAt).sort();
-    owed.push({ duty: "capture", since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
+    owed2.push({ duty: "capture", since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
   }
   const demand = articleDemand(store, root, config, changed.map((c) => c.path), base2, degraded);
-  if (demand) owed.push({ duty: "article", paths: demand.unowned, newly: demand.newly, foreign: demand.foreign });
+  if (demand) owed2.push({ duty: "article", paths: demand.unowned, newly: demand.newly, foreign: demand.foreign });
   const weighed = new Set(state.weighed);
   const fresh = events.filter((e) => WEIGHED_KINDS.has(e.kind) && !weighed.has(eventKey(e)));
   const sessionAts = fresh.map((e) => e.at).filter(isValidAt).sort();
   const earliestSessionAt = sessionAts[0] ?? at;
   const families = conceptFamiliesFrom(fresh);
-  for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed.push({ duty: "concept", family, since: families.get(family), window_start: earliestSessionAt });
+  for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed2.push({ duty: "concept", family, since: families.get(family), window_start: earliestSessionAt });
   const researchAgents = new Set(config.session_events.research_agents);
   const isResearchAgent = (d) => researchAgents.has(d) || researchAgents.has(agentRole(String(d ?? "")));
   const research = fresh.filter((e) => (e.kind === "research_tool" || e.kind === "agent_dispatch" && isResearchAgent(e.detail)) && !dischargedByCutoff(e.at, cutoffs.research));
   if (research.length) {
     const ats = research.map((e) => e.at).filter(isValidAt).sort();
     const since = ats[0] ?? at;
-    if (!researchCapturedSince(records, since)) owed.push({ duty: "research", since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
+    if (!researchCapturedSince(records, since)) owed2.push({ duty: "research", since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
   }
-  if (owed.length) notices.push(`Sterling settlement: the last turn left ${owed.length} duty(ies) unpaid (OpenCode has no stop block, so this is the reminder; still unpaid at the next settlement, each is queued as a maintenance item):
-${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
+  if (owed2.length) notices.push(`Sterling settlement: the last turn left ${owed2.length} duty(ies) unpaid (OpenCode has no stop block, so this is the reminder; still unpaid at the next settlement, each is queued as a maintenance item):
+${owed2.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join48(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join48(root, DUTIES_REL), { owed: owed2, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {

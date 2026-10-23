@@ -20,12 +20,12 @@ const RENAME = { term: 'North Barn', replacement: 'Hay Barn' };
 const mkDecision = (tools: SterlingTools, fields: Loose) =>
   (tools.knowledgeCreate('decision', { alternatives_rejected: [], rationale: 'r', ...fields } as never) as unknown as { record: { id: string; version: number } }).record;
 
-async function workerHarness(targetFields: Loose) {
+async function workerHarness(targetFields: Loose, rename: { term: string; replacement: string } = RENAME) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-retired-worker-'));
   const policyPath = join(dir, 'eligible.json');
   const { server, store, tools } = createSterlingServer(join(dir, 'sterling.db'), { workerPolicy: { path: policyPath, token: TOKEN } });
   const target = mkDecision(tools, targetFields);
-  mkDecision(tools, { title: 'Rename North Barn to Hay Barn', statement: 'North Barn is now Hay Barn.', retired_terms: [RENAME] });
+  mkDecision(tools, { title: 'Rename decision', statement: `${rename.term} is now ${rename.replacement}.`, retired_terms: [rename] });
   const item = (tools.maintenanceQuery({ system_reason: 'retired_term_use', cap: 10 }) as unknown as { id: string; feature_link: string }[]).find((i) => i.feature_link === target.id)!;
   writeFileSync(policyPath, JSON.stringify({ policy_version: 1, token: TOKEN, run_id: 'run-1', policy_items: [{ id: item.id, lane: 'retired_term_use', target_id: target.id, file_keys: [] }] }));
   const client = new Client({ name: 'retired-worker-test', version: '0.0.1' });
@@ -99,6 +99,57 @@ for (const alias of ['body', 'fields'] as const) {
     }
   });
 }
+
+for (const alias of ['body', 'fields'] as const) {
+  test(`worker mode (${alias} alias): a balanced quote spanning paragraphs stays protected, so rewriting inside it is refused`, async () => {
+    const h = await workerHarness({ title: 'Quoted across paragraphs', statement: 'Plain North Barn.\n\n"North Barn first\n\nNorth Barn second"' });
+    try {
+      const write = (statement: string) => h.call('knowledge_update', { id: h.target.id, [alias]: { statement }, expected_version: h.target.version, resolves: [h.item.id] });
+      const bad = await write('Plain Hay Barn.\n\n"North Barn first\n\nHay Barn second"');
+      assert.equal(bad.isError, true, bad.text);
+      assert.match(bad.text, /not the stored value with the retired term/);
+      assert.ok(itemOpen(h.tools, h.item.id), 'the refused write closed nothing');
+      const good = await write('Plain Hay Barn.\n\n"North Barn first\n\nNorth Barn second"');
+      assert.equal(good.isError, false, good.text);
+      assert.equal(itemOpen(h.tools, h.item.id), false);
+    } finally {
+      await h.cleanup();
+    }
+  });
+}
+
+test('worker mode: a replacement that contains the term (Barn -> North Barn) closes the item; the new name is not an open use', async () => {
+  const h = await workerHarness({ title: 'Hay storage', statement: 'North Barn holds hay; the Barn is red.' }, { term: 'Barn', replacement: 'North Barn' });
+  try {
+    const r = await h.call('knowledge_update', { id: h.target.id, body: { statement: 'North Barn holds hay; the North Barn is red.' }, expected_version: h.target.version, resolves: [h.item.id] });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(itemOpen(h.tools, h.item.id), false);
+    assert.equal((h.tools.knowledgeGet(h.target.id) as unknown as { statement: string }).statement, 'North Barn holds hay; the North Barn is red.');
+    const doubled = await h.call('knowledge_update', { id: h.target.id, body: { statement: 'North North Barn holds hay; the North Barn is red.' }, expected_version: h.target.version + 1 });
+    assert.equal(doubled.isError, true, 'rewriting the new name again is refused: the target no longer owes anything');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('worker mode: a term that contains the replacement (North Barn -> Barn) closes the item; a partial update is still refused', async () => {
+  const h = await workerHarness({ title: 'Feed in North Barn', statement: 'Feed in North Barn; the Barn is red.' }, { term: 'North Barn', replacement: 'Barn' });
+  try {
+    const partial = await h.call('knowledge_update', { id: h.target.id, body: { title: 'Feed in Barn' }, expected_version: h.target.version, resolves: [h.item.id] });
+    assert.equal(partial.isError, true, partial.text);
+    assert.match(partial.text, /still uses 'North Barn' in statement/);
+    const r = await h.call('knowledge_update', {
+      id: h.target.id,
+      body: { title: 'Feed in Barn', statement: 'Feed in Barn; the Barn is red.' },
+      expected_version: h.target.version,
+      resolves: [h.item.id],
+    });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(itemOpen(h.tools, h.item.id), false);
+  } finally {
+    await h.cleanup();
+  }
+});
 
 test('a failure in the advisory scan after the write committed: the write result stands, with one explicit warning', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-retired-fault-'));

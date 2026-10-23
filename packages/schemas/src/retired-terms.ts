@@ -41,6 +41,8 @@ export interface TermOccurrence {
   start: number;
   end: number;
   protected: boolean;
+  /** Inside an occurrence of the replacement: already the new name. */
+  resolved: boolean;
 }
 
 // \p{M}: a combining mark continues the word it follows.
@@ -65,72 +67,101 @@ export function retiredTermRegex(term: string): RegExp {
 }
 
 /**
- * [start, end) ranges of protected text, worked out one paragraph at a time
- * (a paragraph ends at a blank line), so a stray mark never protects past it:
- * - straight double quotes pair up in order; an opening quote with no closing
- *   one protects to the end of its paragraph, because an unclosed quote is
- *   ambiguous about where the quoted words stop and the safe answer for a
- *   rewrite is to leave them alone and hand the record back;
- * - curly quotes run from an opening mark to the next closing mark, or to the
- *   end of the paragraph when none follows;
+ * [start, end) ranges of protected text:
+ * - straight double quotes pair up in order over the WHOLE text, and a curly
+ *   opening mark runs to the next closing mark anywhere after it, so a
+ *   balanced quotation that spans paragraphs is protected whole;
+ * - only an opening quote with no closing partner is bounded: it protects to
+ *   the end of its paragraph (a paragraph ends at a blank line). An unclosed
+ *   quote is ambiguous about where the quoted words stop, and the safe answer
+ *   for a rewrite is to leave them alone and hand the record back, but it must
+ *   not silence the rest of the record;
  * - a blockquote line (leading '>') protects from its line start to the end of
  *   its paragraph, since a markdown blockquote carries on over the unmarked
  *   lines that follow it.
+ * Pairing over the whole text can mis-pair after a stray quote; that only
+ * ever protects MORE text, never less.
  */
 export function protectedSpans(text: string): [number, number][] {
   const spans: [number, number][] = [];
-  const bounds: [number, number][] = [];
-  let from = 0;
-  for (const sep of text.matchAll(/\n[ \t]*\n/g)) {
-    bounds.push([from, sep.index ?? 0]);
-    from = (sep.index ?? 0) + sep[0].length;
-  }
-  bounds.push([from, text.length]);
-  for (const [ps, pe] of bounds) {
-    const para = text.slice(ps, pe);
-    const straight = [...para.matchAll(/"/g)].map((m) => ps + (m.index ?? 0));
-    for (let i = 0; i < straight.length; i += 2) spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : pe]);
-    for (let i = para.indexOf('\u201c'); i !== -1; ) {
-      const close = para.indexOf('\u201d', i + 1);
-      if (close === -1) {
-        spans.push([ps + i, pe]);
-        break;
-      }
-      spans.push([ps + i, ps + close + 1]);
-      i = para.indexOf('\u201c', close + 1);
+  const paragraphEnd = (at: number): number => {
+    const sep = /\n[ \t]*\n/g;
+    sep.lastIndex = at;
+    const m = sep.exec(text);
+    return m ? m.index : text.length;
+  };
+  const straight = [...text.matchAll(/"/g)].map((m) => m.index ?? 0);
+  for (let i = 0; i < straight.length; i += 2) spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : paragraphEnd(straight[i])]);
+  for (let i = text.indexOf('\u201c'); i !== -1; ) {
+    const close = text.indexOf('\u201d', i + 1);
+    if (close === -1) {
+      spans.push([i, paragraphEnd(i)]);
+      i = text.indexOf('\u201c', i + 1);
+    } else {
+      spans.push([i, close + 1]);
+      i = text.indexOf('\u201c', close + 1);
     }
-    const bq = /^[ \t]*>/m.exec(para);
-    if (bq) spans.push([ps + bq.index, pe]);
+  }
+  for (const m of text.matchAll(/^[ \t]*>/gm)) {
+    const at = m.index ?? 0;
+    spans.push([at, paragraphEnd(at)]);
   }
   return spans;
 }
 
-/** Every whole-word occurrence of `term` in `text`, each marked protected or not. */
-export function findTermOccurrences(text: string, term: string): TermOccurrence[] {
+/**
+ * Every whole-word occurrence of `term` in `text`, each marked protected (it
+ * overlaps a quote or blockquote) and resolved (it lies inside a whole-word
+ * occurrence of `replacement`, so it IS the new name: with the rename
+ * 'Barn' -> 'North Barn', the 'Barn' in 'North Barn' is not an old mention).
+ * The replacement is found case-insensitively like the term, except when the
+ * rename only changes case ('north barn' -> 'North Barn'): then only the
+ * replacement's exact spelling counts as resolved. Only an occurrence that is
+ * neither protected nor resolved is a use, is rewritten, and blocks the close
+ * of a retired_term_use item.
+ */
+export function findTermOccurrences(text: string, term: string, replacement?: string): TermOccurrence[] {
   if (!text || !term.trim()) return [];
   const spans = protectedSpans(text);
+  const canonical: [number, number][] = [];
+  if (replacement?.trim()) {
+    const fold = (t: string) => t.normalize('NFC').trim().split(/\s+/).join(' ').toLowerCase();
+    const caseOnly = fold(term) === fold(replacement);
+    const re = retiredTermRegex(replacement);
+    const exact = caseOnly ? new RegExp(re.source, 'gu') : re;
+    for (const m of text.matchAll(exact)) canonical.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
   const out: TermOccurrence[] = [];
   for (const m of text.matchAll(retiredTermRegex(term))) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    out.push({ start, end, protected: spans.some(([s, e]) => start < e && s < end) });
+    out.push({
+      start,
+      end,
+      protected: spans.some(([s, e]) => start < e && s < end),
+      resolved: canonical.some(([s, e]) => start >= s && end <= e),
+    });
   }
   return out;
 }
 
+/** An occurrence that still owes a rewrite: neither quoted nor already the new name. */
+const owed = (o: TermOccurrence): boolean => !o.protected && !o.resolved;
+
 /**
  * `text` with every unprotected occurrence of each term replaced by its
  * replacement. `replaced` counts the rewrites, `protected` the occurrences
- * left alone because they sit in a quote or a blockquote line.
+ * left alone because they sit in a quote or a blockquote line. An occurrence
+ * that already lies inside the replacement is neither (findTermOccurrences).
  */
 export function replaceRetiredTerms(text: string, terms: readonly RetiredTermEntry[]): { text: string; replaced: number; protected: number } {
   let out = text;
   let replaced = 0;
   let kept = 0;
   for (const { term, replacement } of terms) {
-    const occ = findTermOccurrences(out, term);
-    kept += occ.filter((o) => o.protected).length;
-    const hits = occ.filter((o) => !o.protected);
+    const occ = findTermOccurrences(out, term, replacement);
+    kept += occ.filter((o) => o.protected && !o.resolved).length;
+    const hits = occ.filter(owed);
     replaced += hits.length;
     for (const o of [...hits].reverse()) out = out.slice(0, o.start) + replacement + out.slice(o.end);
   }
@@ -231,9 +262,9 @@ export function retiredTermUses(record: Record<string, unknown>, terms: readonly
     const hitFields: string[] = [];
     let kept = 0;
     for (const [path, text] of fields) {
-      const occ = findTermOccurrences(text, t.term);
-      kept += occ.filter((o) => o.protected).length;
-      if (occ.some((o) => !o.protected)) hitFields.push(path);
+      const occ = findTermOccurrences(text, t.term, t.replacement);
+      kept += occ.filter((o) => o.protected && !o.resolved).length;
+      if (occ.some(owed)) hitFields.push(path);
     }
     if (hitFields.length) out.push({ term: t.term, replacement: t.replacement, decision_id: t.decision_id, ...(t.decision_slug ? { decision_slug: t.decision_slug } : {}), fields: hitFields, protected: kept });
   }
@@ -242,7 +273,7 @@ export function retiredTermUses(record: Record<string, unknown>, terms: readonly
 
 /** The retired terms a free text (a brief, a question, a record being written) uses outside protected spans. */
 export function retiredTermsInText(text: string, terms: readonly RetiredTerm[]): RetiredTerm[] {
-  return terms.filter((t) => findTermOccurrences(text, t.term).some((o) => !o.protected));
+  return terms.filter((t) => findTermOccurrences(text, t.term, t.replacement).some(owed));
 }
 
 /** One advisory line per retired term found in a text. */
