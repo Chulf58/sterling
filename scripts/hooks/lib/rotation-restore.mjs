@@ -336,8 +336,8 @@ export function renderRotationRestore(note, { cwd, source, host = 'claude', plan
       caution +
       body +
       (note.reason === 'code-reload'
-        ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. run \`opencode reload\`, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).`
-        : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`opencode reload\` before this new session — a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`)
+        ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. run \`/reload\` in the TUI or \`opencode reload\` in any shell, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`/reload\` or \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).`
+        : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`/reload\` or \`opencode reload\` before this new session — a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`)
     );
   }
   // SOURCE-AWARE CLOSING PARAGRAPH: the `clear` wording below is UNCHANGED

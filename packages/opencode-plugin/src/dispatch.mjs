@@ -191,7 +191,7 @@ export async function sweepStaleDispatches(root) {
     return lines.join('\n\n');
   } catch (e) {
     if (e?.code !== 'register_lock_held') throw e;
-    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; run \`opencode reload\` to retry the sweep.`;
   }
 }
 

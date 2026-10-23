@@ -887,7 +887,7 @@ function runAllStores() {
     `${TOOL}: --all-stores is an ADVISORY sweep, same posture every single --db run has always had — CLOSE EVERY SESSION ` +
       `(Claude Code CLI, MCP server, TUI) holding any of these stores open before continuing. No live-writer detection is ` +
       `attempted (no PID/lock surface exists to check it); a store migrated while a session holds it open leaves that ` +
-      `session refusing writes until it exits and relaunches.`
+      `session refusing writes until it is relaunched (Claude Code) or reloaded (OpenCode: \`opencode reload\`).`
   );
 
   const { candidates, unreadable } = enumerateStores();
