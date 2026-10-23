@@ -644,10 +644,12 @@ export function createSterlingServer(
     'knowledge_update',
     {
       description:
-        "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+        "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` (or its alias `fields`, the name knowledge_create uses; pass exactly one) is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string().describe(ID_LADDER),
-        body: passthrough,
+        // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
+        body: z.object({}).passthrough().optional().describe('the partial patch; exactly one of body or fields'),
+        fields: z.object({}).passthrough().optional().describe('alias of body, the name knowledge_create uses; exactly one of body or fields'),
         resolves: z
           .array(z.string())
           .optional()
@@ -661,8 +663,16 @@ export function createSterlingServer(
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
-    ({ id, body, resolves, expected_version, projection }) =>
-      json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves, expected_version), projection))
+    ({ id, body, fields, resolves, expected_version, projection }) => {
+      if (body !== undefined && fields !== undefined) {
+        throw new Error("knowledge_update takes the payload as body or fields, not both: you passed both. Send one of them; nothing was written.");
+      }
+      const payload = body ?? fields;
+      if (payload === undefined) {
+        throw new Error('knowledge_update takes the payload as body (or fields): neither was passed. Nothing was written.');
+      }
+      return json(tools.writeProjected(tools.knowledgeUpdateResult(id, payload, resolves, expected_version), projection));
+    }
   );
 
   server.registerTool(

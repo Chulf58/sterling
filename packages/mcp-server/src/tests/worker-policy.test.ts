@@ -198,6 +198,8 @@ test('reconcile_needed: a factual field on the batch target is allowed and stamp
 
     const before = h.version(h.ids.recon);
     await h.refused('knowledge_update', { id: h.ids.recon, body: { title: 'renamed' }, expected_version: before }, 'field_not_allowed', h.ids.reconItem);
+    // the `fields` alias of body is judged by the same field allowlist, never a way around it
+    await h.refused('knowledge_update', { id: h.ids.recon, fields: { title: 'renamed' }, expected_version: before }, 'field_not_allowed', h.ids.reconItem);
     await h.refused('knowledge_edit', { id: h.ids.recon, field: 'slug', find: 'recon', replace: 'other' }, 'field_not_allowed', h.ids.reconItem);
     await h.refused('knowledge_update', { id: h.ids.decision, body: { statement: 'x' }, expected_version: 1 }, 'target_not_in_batch');
     await h.refused('knowledge_update', { id: 'recon-article', body: { what_it_does: 'x.' }, expected_version: before }, 'target_not_in_batch');
