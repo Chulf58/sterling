@@ -480,6 +480,27 @@ test('fan-out: an auto-memory kept/wrong_type notice is relayed verbatim once, e
   }
 });
 
+// The retired-models-key drops (board c45a4507) are receipts the user cannot get back from the
+// file, so the fan-out relays them: verbatim, with the warning mark, once, and never as a change.
+test('fan-out: config migration lines are relayed once with the warning mark and are not counted as agent changes', async () => {
+  const cwd = scratchCwd();
+  try {
+    const drop = 'config migration: models.coder dropped (ignored since the roster rename to models.implementor); value was {"model":"claude-opus-5","effort":"high"}; set models.implementor in the System tab if you want it';
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: `up_to_date: scout\n${drop}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 0);
+    assert.equal(report.projects[0].changed, 0, 'a dropped key is not a changed agent');
+    assert.equal(report.projects[0].config_migration, 1);
+    const log = lines.join('\n');
+    assert.equal(log.split(drop).length - 1, 1, `relayed verbatim exactly once:\n${log}`);
+    assert.ok(log.includes(`⚠ ${drop}`), log);
+    assert.doesNotMatch(log, /Dome: .*config migration/, 'the project line still reads as no agent changes');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 // THE BOOTSTRAP DEFECT, found by running the real CLI against a fresh clone:
 // the workspace packages are gitignored, so on a first update NOTHING is built —
 // and the CLI needs @sterling/store to read the project registry. Reading it at

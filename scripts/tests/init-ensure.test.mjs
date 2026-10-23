@@ -969,8 +969,10 @@ test('individually regenerable: deleted artifacts are recreated by a flagless re
 // Decision gap-hunt-2026-09-28-rulings item (12): keys the schema no longer
 // defines are silently ignored, so a conductor can write to a dead key with no
 // warning (measured: Dome Farmer's models.coder). A re-run NAMES each by path,
-// with the known rename, and never deletes one.
-test('a re-run lists the config keys Sterling no longer reads, nested ones by path with their renames, and deletes none', () => {
+// with the known rename, and never deletes one. The retired models keys are the
+// exception (board c45a4507, drop only): init removes those after its preflights pass
+// and reports each value; nothing is carried to a successor.
+test('a re-run lists the config keys Sterling no longer reads and deletes none, but drops the retired models keys and reports their values', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -979,15 +981,44 @@ test('a re-run lists the config keys Sterling no longer reads, nested ones by pa
     assert.doesNotMatch(fresh.stdout, /no longer reads/, 'control: a config init wrote itself carries no dead key');
     const cfgPath = join(dir, '.sterling', 'config.json');
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    const scoutBefore = cfg.models.scout;
     cfg.caps = { inner_loop_n: 3 };
-    cfg.models.coder = { model: 'claude-sonnet-5-5', effort: 'medium' };
-    cfg.models.explorer = { model: 'claude-sonnet-5-5', effort: 'low' };
+    delete cfg.models.implementor;
+    cfg.models.coder = { model: 'claude-opus-5', effort: 'medium' };
+    cfg.models.explorer = { model: 'claude-haiku-5-5', effort: 'low' };
+    cfg.models.reviewers = { model: 'claude-opus-5', effort: 'high' };
     writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-    const before = readFileSync(cfgPath, 'utf8');
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /note: \.sterling\/config\.json carries 3 key\(s\) Sterling no longer reads: models\.coder \(renamed to models\.implementor\), models\.explorer \(renamed to models\.scout\), caps — /);
-    assert.equal(readFileSync(cfgPath, 'utf8'), before, 'disclosure only: no key is deleted and the file is not rewritten');
+    assert.match(rerun.stdout, /note: config migration: models\.coder dropped \(ignored since the roster rename to models\.implementor\); value was \{"model":"claude-opus-5","effort":"medium"\}/);
+    assert.match(rerun.stdout, /note: config migration: models\.explorer dropped \(ignored since the roster rename to models\.scout\); value was \{"model":"claude-haiku-5-5","effort":"low"\}/);
+    assert.match(rerun.stdout, /note: config migration: models\.reviewers dropped \(a retired key/);
+    assert.match(rerun.stdout, /note: \.sterling\/config\.json carries 1 key\(s\) Sterling no longer reads: caps — /, 'a non-models dead key is still disclosure only');
+    const after = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    for (const k of ['coder', 'explorer', 'reviewers', 'implementor']) assert.ok(!(k in after.models), `models.${k} is absent: dropped, never carried`);
+    assert.deepEqual(after.models.scout, scoutBefore, 'a live key is untouched');
+    assert.deepEqual(after.caps, { inner_loop_n: 3 }, 'caps is reported, never deleted');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('a re-run that init refuses later leaves a config with retired models keys byte-identical (the drop is committed only after every preflight)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const cfgPath = join(dir, '.sterling', 'config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    cfg.models.coder = { model: 'claude-opus-5', effort: 'medium' };
+    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    const before = readFileSync(cfgPath, 'utf8');
+    const refused = init(dir, ['--domain-description', 'not-a-declared-domain=whatever']);
+    assert.equal(refused.code, 2, refused.stdout + refused.stderr);
+    assert.match(refused.stdout + refused.stderr, /which is not a declared domain/);
+    assert.equal(readFileSync(cfgPath, 'utf8'), before, 'byte-identical after the refusal');
+    assert.doesNotMatch(refused.stdout, /config migration/, 'no receipt is printed for a write that did not happen');
+    assert.equal(init(dir).code, 0);
+    assert.ok(!('coder' in JSON.parse(readFileSync(cfgPath, 'utf8')).models), 'the next clean run drops it');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

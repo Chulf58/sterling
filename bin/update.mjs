@@ -5989,6 +5989,22 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
+function migrateRetiredModelKeys(raw) {
+  const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
+  if (!isPlainObject(raw) || !isPlainObject(raw.models))
+    return none([]);
+  const models = raw.models;
+  const retired = RETIRED_MODEL_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(models, k));
+  const untouched = Object.keys(models).filter((k) => !RETIRED_MODEL_KEYS.includes(k));
+  if (retired.length === 0)
+    return none(untouched);
+  const dropped = retired.map((key) => {
+    const renamed = CONFIG_KEY_RENAMES[`models.${key}`]?.replace(/^models\./, "");
+    return renamed === void 0 ? { key, value: models[key] } : { key, value: models[key], renamed_to: renamed };
+  });
+  const next = Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k)));
+  return { config: { ...raw, models: next }, changed: true, dropped, untouched };
+}
 function unwrapSchema(schema) {
   let s2 = schema;
   for (; ; ) {
@@ -6879,6 +6895,7 @@ __export(dist_exports, {
   knownFieldsFor: () => knownFieldsFor,
   linkSchema: () => linkSchema,
   matchesGlob: () => matchesGlob,
+  migrateRetiredModelKeys: () => migrateRetiredModelKeys,
   modelsCatalogSchema: () => modelsCatalogSchema,
   moveFenceSchema: () => moveFenceSchema,
   needsReasonAllowed: () => needsReasonAllowed,
@@ -15869,8 +15886,9 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
       const statuses = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
       const autoMemoryNotices = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^auto-memory off: (kept|wrong_type)\b/.test(l));
+      const configMigrationLines = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
       const changedAgents = statuses.filter((l) => !l.startsWith("up_to_date") && !l.startsWith("locally_modified_up_to_date") && !l.startsWith("config_drift: "));
-      Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length });
+      Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length, config_migration: configMigrationLines.length });
       if (r.status === 2) {
         log(`  \u2717 ${p.name}: agent sync REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:
 ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
@@ -15885,6 +15903,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         log(`  \u2022 ${p.name}: ${changedAgents.length ? changedAgents.join(", ") : driftedAgents.length ? "no agent changes" : "up to date"}`);
         for (const line of driftedAgents) log(`      \u26A0 ${line}`);
         for (const line of autoMemoryNotices) log(`      \u26A0 ${line}`);
+        for (const line of configMigrationLines) log(`      \u26A0 ${line}`);
       }
       if (handoffUnmaintained.length) log(`      \u26A0 ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       if (!withHandoff) {
