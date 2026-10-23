@@ -6108,7 +6108,7 @@ function resolveOverpassRoles(raw, provider) {
   const block = raw ?? {};
   for (const key of Object.keys(block)) {
     if (!OVERPASS_ROLES.includes(key)) {
-      throw new Error(`config.overpass.roles has the unknown role ${JSON.stringify(key)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+      throw new OverpassUnknownRoleError(key);
     }
   }
   const out = {};
@@ -6318,7 +6318,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6868,6 +6868,14 @@ var init_config = __esm({
       preflight: DEFAULT_OVERPASS_TIER,
       "maintenance-worker": DEFAULT_OVERPASS_TIER
     };
+    OverpassUnknownRoleError = class extends Error {
+      role;
+      constructor(role) {
+        super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+        this.name = "OverpassUnknownRoleError";
+        this.role = role;
+      }
+    };
     RETIRED_MODEL_KEYS = [
       "coder",
       "coder_hard",
@@ -7150,6 +7158,7 @@ __export(dist_exports, {
   OVERPASS_ROLES: () => OVERPASS_ROLES,
   OVERPASS_TIERS: () => OVERPASS_TIERS,
   OVERPASS_TIER_RE: () => OVERPASS_TIER_RE,
+  OverpassUnknownRoleError: () => OverpassUnknownRoleError,
   PROJECT_IDENTITY_REL: () => PROJECT_IDENTITY_REL,
   PROJECT_MODES: () => PROJECT_MODES,
   ProjectIdentityError: () => ProjectIdentityError,
@@ -7342,7 +7351,7 @@ var init_shares = __esm({
 
 // packages/store/dist/move-lock.js
 import { hostname } from "node:os";
-import { createHash as createHash3, randomUUID } from "node:crypto";
+import { createHash as createHash4, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync as mkdirSync3, readFileSync as readFileSync9, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname3 } from "node:path";
 function pidIsAlive(pid) {
@@ -7417,7 +7426,7 @@ function takeOverStale(path, staleRaw, me, probe) {
   let key = staleRaw;
   const dead = [];
   for (let depth = 0; depth < 16; depth++) {
-    const ticket = `${path}.takeover-${createHash3("sha256").update(key).digest("hex").slice(0, 32)}`;
+    const ticket = `${path}.takeover-${createHash4("sha256").update(key).digest("hex").slice(0, 32)}`;
     if (createWithContent(ticket, JSON.stringify(me))) {
       try {
         if (readOwner(path)?.raw === staleRaw)
@@ -14499,29 +14508,35 @@ import { join as join2 } from "node:path";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { createHash as createHash2 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
+var JSONC_SOURCE = String.raw`
 function parseJsonc(text) {
-  let out = "";
+  let out = '';
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === '"') {
       let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
       out += text.slice(i, j + 1);
       i = j;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      if (end === -1) throw new Error("unterminated /* comment");
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
       i = end + 1;
-    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
     } else out += c;
   }
   return JSON.parse(out);
 }
+`;
+var parseJsonc = new Function(`${JSONC_SOURCE}
+return parseJsonc;`)();
 
 // scripts/lib/sterling-roots.mjs
 var STERLING_GIT_SPEC = "github:Chulf58/sterling#semver:>=0.18.0";
@@ -14677,19 +14692,75 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-var STERLING_NPM_PACKAGE = "@chulf58/sterling";
-var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-var isNpmSpec = (s2) => s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`);
-var namesSterling = (s2) => typeof s2 === "string" && (isNpmSpec(s2) || STERLING_GIT_REPO.test(s2.split("#")[0]));
+var SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
 function sterlingPluginSpecs(plugins) {
   if (!Array.isArray(plugins)) return [];
   const out = [];
   for (const entry of plugins) {
-    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
-    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
   }
   return out;
 }
+`;
+var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
+return sterlingPluginSpecs;`)();
+var OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+var loaded = new Function(
+  "createHash",
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
+return { openCodeCacheKey, openCodeLoadedSterling };`
+)(createHash2, existsSync, readFileSync, readdirSync, join, homedir);
+var openCodeCacheKey = loaded.openCodeCacheKey;
+var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function copyKindOf(root, env, home) {
   if (!root) return null;
   const cache = installRoots(env, home).find((r) => r.host === "opencode")?.dir;
@@ -15254,7 +15325,7 @@ function withNestedIgnore(text) {
 }
 
 // scripts/lib/launchers.mjs
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { appendFileSync as appendFileSync3, chmodSync, existsSync as existsSync6, readFileSync as readFileSync8, statSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { basename, delimiter, join as join12, resolve as resolve6 } from "node:path";
@@ -15263,7 +15334,31 @@ import { basename, delimiter, join as join12, resolve as resolve6 } from "node:p
 import { readFileSync as readFileSync6 } from "node:fs";
 import { join as join10 } from "node:path";
 var fwd4 = (p) => p.replace(/\\/g, "/");
-var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd4(pluginRoot2)}"`, `TUI_BUNDLE="${fwd4(pluginRoot2)}/tui/sterling-tui.mjs"`].join("\n");
+var OPENCODE_PANE_MARKER = "# OpenCode pane: the dashboard of the Sterling copy the OpenCode plugin loads";
+var OPENCODE_PANE_PATHS = [
+  OPENCODE_PANE_MARKER,
+  "# (the newest install of the Sterling spec in OpenCode's global config), resolved when the pane opens",
+  "opencode_tui_bundle() {",
+  `  "$NODE_BIN" --input-type=module <<'STERLING_OPENCODE_RESOLVER'`,
+  "import { createHash } from 'node:crypto';",
+  RESOLVER_IMPORTS,
+  RESOLVER_SOURCE.trim(),
+  JSONC_SOURCE.trim(),
+  SPECS_SOURCE.trim(),
+  OPENCODE_LOADED_SOURCE.trim(),
+  "const keep = 'so the OpenCode pane runs the launcher\\'s own dashboard, which may be another Sterling version than the plugin';",
+  "const loaded = openCodeLoadedSterling();",
+  "if (loaded.error) console.error('sterling-launch: could not read ' + loaded.configPath + ' (' + loaded.error + '), so which Sterling OpenCode loads is unknown, ' + keep);",
+  "else if (loaded.copies.length) {",
+  "  const [first] = loaded.copies;",
+  "  if (new Set(loaded.copies.map((c) => c.root)).size > 1) console.error('sterling-launch: ' + loaded.configPath + ' lists Sterling ' + loaded.copies.length + ' times (' + loaded.copies.map((c) => c.spec).join(', ') + '); the OpenCode pane follows the first, ' + first.spec);",
+  "  if (first.root === null) console.error('sterling-launch: OpenCode has not installed ' + first.spec + ' yet (nothing in ' + first.dir + '), ' + keep);",
+  "  else process.stdout.write(join(first.root, 'tui', 'sterling-tui.mjs'));",
+  "}",
+  "STERLING_OPENCODE_RESOLVER",
+  "}"
+].join("\n");
+var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd4(pluginRoot2)}"`, `TUI_BUNDLE="${fwd4(pluginRoot2)}/tui/sterling-tui.mjs"`, OPENCODE_PANE_PATHS].join("\n");
 var INSTALLED_PATHS = [
   "# installed copy: nothing below names a versioned install directory; the newest",
   "# installed Sterling (Claude Code or OpenCode) is resolved when this runs",
@@ -15277,7 +15372,8 @@ var INSTALLED_PATHS = [
   "if (found) process.stdout.write(join(found.root, 'tui', 'sterling-tui.mjs'));",
   "else console.error('sterling-launch: ' + sterlingNotFoundMessage('claude-code'));",
   "STERLING_RESOLVER",
-  ')"'
+  ')"',
+  OPENCODE_PANE_PATHS
 ].join("\n");
 function renderTmuxLauncher(pluginRoot2, { session, legacySession = session, splitPercent, installed = isInstalledCopy(pluginRoot2) }) {
   return readFileSync6(join10(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{LEGACY_SESSION}}", () => legacySession).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent));
@@ -15315,8 +15411,16 @@ var PLACEHOLDER_VALUES = {
   PROJECT_DIR_POSIX: (v) => /^[^'\n]+$/.test(v),
   MCP_ARGS: (v) => v === "" || /^ --mcp-config "[^"\n]+\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config$/.test(v),
   MCP_MODE_NOTE: (v) => /^rem MODE: (?:host-native|dual-context) [^\n]*$/.test(v),
-  PLUGIN_PATHS: (v, { installedBlocks }) => /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"$/.test(v) || installedBlocks.has(v)
+  PLUGIN_PATHS: (v, { installedBlocks }) => installedBlocks.has(v) || authoringPaths(v, installedBlocks)
 };
+function authoringPaths(v, installedBlocks) {
+  const m = /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"(?:\n([\s\S]*))?$/.exec(v);
+  if (!m) return false;
+  if (m[1] === void 0) return true;
+  return m[1].startsWith(`${OPENCODE_PANE_MARKER}
+`) && [...installedBlocks].some((b) => b.endsWith(`
+${m[1]}`));
+}
 function matchTemplateRender(text, templateText, { installedBlocks = /* @__PURE__ */ new Set([INSTALLED_PATHS]) } = {}) {
   const parts = lf(templateText).split(/\{\{([A-Z_]+)\}\}/);
   const literals = parts.filter((_, i) => i % 2 === 0);
@@ -15653,7 +15757,7 @@ var wslCdPath = (target2) => {
   return /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath2(posix) : posix;
 };
 var legacySessionName = (target2) => `sterling-${basename(target2).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project"}`;
-var sessionName = (target2) => `${legacySessionName(target2)}-${createHash2("sha256").update(fwd5(resolve6(target2))).digest("hex").slice(0, 4)}`;
+var sessionName = (target2) => `${legacySessionName(target2)}-${createHash3("sha256").update(fwd5(resolve6(target2))).digest("hex").slice(0, 4)}`;
 function renderOpener(pluginRoot2, target2, host, opener) {
   const template = readFileSync8(join12(pluginRoot2, "templates", OPENER_TEMPLATES[host]), "utf8");
   const body = lf2(template).replaceAll("{{APP}}", () => opener.app).replaceAll("{{MODE}}", () => opener.mode).replaceAll("{{WIN_PROJECT_DIR}}", () => wslCdPath(target2));

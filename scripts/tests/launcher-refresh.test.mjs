@@ -23,7 +23,7 @@ import {
   launcherHistorySnapshot,
   replayFailureLine,
 } from '../lib/launcher-history.mjs';
-import { INSTALLED_PATHS } from '../lib/launcher-tmux.mjs';
+import { INSTALLED_PATHS, OPENCODE_PANE_MARKER, renderTmuxLauncher } from '../lib/launcher-tmux.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const made = new Set();
@@ -78,6 +78,31 @@ test('matchTemplateRender: {{PLUGIN_PATHS}} accepts the authoring pair and known
   const inserted = [...lines.slice(0, 3), 'export SNEAKY=1', ...lines.slice(3)].join('\n');
   assert.equal(matchTemplateRender(`top\n${inserted}\nbottom\n`, tpl), null, 'an installed block with an inserted line');
   assert.equal(matchTemplateRender('top\nPLUGIN_DIR="/c"\nexport X=1\nTUI_BUNDLE="/c"\nbottom\n', tpl), null);
+});
+
+// GitHub #202: both shapes now end {{PLUGIN_PATHS}} with the OpenCode pane block, so a
+// launcher rendered today must still read as generated once its template is an older one.
+test('matchTemplateRender: {{PLUGIN_PATHS}} accepts today\'s authoring render (the pair plus the OpenCode pane block); a pair plus anything else is a hand edit', () => {
+  const tpl = 'top\n{{PLUGIN_PATHS}}\nbottom\n';
+  const pane = INSTALLED_PATHS.slice(INSTALLED_PATHS.indexOf(`\n${OPENCODE_PANE_MARKER}\n`) + 1);
+  assert.ok(pane.startsWith(OPENCODE_PANE_MARKER) && pane.includes('openCodeLoadedSterling()'), 'today\'s installed block ends with the OpenCode pane block');
+  const authoring = renderTmuxLauncher(REPO, { session: 's', splitPercent: 1, installed: false }).split('\n# --- generated paths (machine-detected by init) ---\n')[1].split('\nSPLIT_RATIO=')[0];
+  assert.ok(authoring.startsWith(`PLUGIN_DIR="${REPO}"\nTUI_BUNDLE="${REPO}/tui/sterling-tui.mjs"\n${OPENCODE_PANE_MARKER}\n`), 'the authoring render is the pair plus the pane block');
+  assert.ok(matchTemplateRender(`top\n${authoring}\nbottom\n`, tpl), 'today\'s authoring block');
+  assert.ok(matchTemplateRender(`top\nPLUGIN_DIR="/c"\nTUI_BUNDLE="/c/tui/sterling-tui.mjs"\n${pane}\nbottom\n`, tpl), 'any clone path with the pane block');
+  assert.equal(matchTemplateRender(`top\nPLUGIN_DIR="/c"\nTUI_BUNDLE="/c/tui/sterling-tui.mjs"\n${pane.replace('const loaded = openCodeLoadedSterling();', 'const loaded = newestInstalledSterling();')}\nbottom\n`, tpl), null, 'an edited pane block');
+  assert.equal(matchTemplateRender(`top\nPLUGIN_DIR="/c"\nTUI_BUNDLE="/c/tui/sterling-tui.mjs"\n')"\nbottom\n`, tpl), null, 'a tail of an installed block that is not the pane block');
+});
+
+test('#202: a launcher rendered for the authoring clone by the template before the OpenCode pane (CH.Core\'s) is an older generated version', () => {
+  const history = historicalLauncherTemplates({ repoRoot: REPO });
+  const before = gitShow('807a6b5d', 'templates/launcher-tmux.sh')
+    .replaceAll('{{SESSION}}', 'sterling-chulf-d3ca')
+    .replaceAll('{{LEGACY_SESSION}}', 'sterling-chulf')
+    .replaceAll('{{PLUGIN_PATHS}}', 'PLUGIN_DIR="/home/demo/sterling"\nTUI_BUNDLE="/home/demo/sterling/tui/sterling-tui.mjs"')
+    .replaceAll('{{CLAUDE_PLUGIN_FLAG}}', ' --plugin-dir "$PLUGIN_DIR"')
+    .replaceAll('{{SPLIT_RATIO}}', '35');
+  assert.ok(olderGeneratedLauncher(before, 'launcher-tmux.sh', history), 'init and update rewrite it with the OpenCode pane');
 });
 
 test('every placeholder in every committed version of the launcher templates has a validator', () => {

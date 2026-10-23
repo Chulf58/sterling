@@ -20,6 +20,8 @@ import {
   RESOLVER_SOURCE,
   RESOLVER_IMPORTS,
   STERLING_GIT_SPEC,
+  openCodeCacheKey,
+  openCodeLoadedSterling,
 } from '../lib/sterling-roots.mjs';
 
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
@@ -323,5 +325,83 @@ test('RESOLVER_SOURCE inlined into a standalone module resolves exactly as the l
     assert.deepEqual(JSON.parse(r.stdout), newestInstalledSterling({}, home));
   } finally {
     rm(home, dir);
+  }
+});
+
+// Sol review of GitHub #202 (CRITICAL): the copy OpenCode loads is the newest install
+// GENERATION (numeric timestamp directory) of the spec its global config lists, mirroring
+// OpenCode v2.1.2 packages/util/src/npm.ts key()/current(); not the highest version in the cache.
+const ocConfig = (home, plugins) => touch(join(home, '.config', 'opencode', 'opencode.json'), JSON.stringify({ plugins }));
+const gitCopy = (home, ts, version, key = 'git-sterling-8c334bb56af9') => {
+  const root = join(npmCache(home), key, ts, 'node_modules', '@chulf58', 'sterling');
+  touch(join(root, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version }));
+  return root;
+};
+
+test('openCodeCacheKey reproduces OpenCode\'s cache key: the shipped Git spec is git-sterling-8c334bb56af9 (the directory measured on this machine); a bare registry name is @latest', () => {
+  assert.equal(openCodeCacheKey(STERLING_GIT_SPEC, 'git'), 'git-sterling-8c334bb56af9');
+  assert.match(openCodeCacheKey('git+https://github.com/Chulf58/sterling.git#v1', 'git'), /^git-sterling-[0-9a-f]{12}$/);
+  assert.equal(openCodeCacheKey('@chulf58/sterling', 'npm'), '@chulf58/sterling@latest');
+  assert.equal(openCodeCacheKey('@chulf58/sterling@^0.19', 'npm'), '@chulf58/sterling@^0.19');
+});
+
+// Sol re-check (MEDIUM): OpenCode keys a registry spec by npm-package-arg's rawSpec, which
+// turns an empty suffix into '*' and keeps everything else as typed (probed with
+// npm-package-arg 13.0.2 and 4.28.0); an alias or Git spec after '@' is keyed as the spec.
+test('openCodeCacheKey mirrors npm-package-arg for registry specs: "@chulf58/sterling@" is @*, whitespace and other suffixes stay as typed', () => {
+  for (const [spec, key] of [
+    ['@chulf58/sterling@', '@chulf58/sterling@*'],
+    ['@chulf58/sterling@*', '@chulf58/sterling@*'],
+    ['@chulf58/sterling@latest', '@chulf58/sterling@latest'],
+    ['@chulf58/sterling@ ^0.19 ', '@chulf58/sterling@ ^0.19 '],
+    ['@chulf58/sterling@>=0.18.0 <1', '@chulf58/sterling@>=0.18.0 <1'],
+    ['@chulf58/sterling@v0.19.1', '@chulf58/sterling@v0.19.1'],
+    ['@chulf58/sterling@npm:foo@1', '@chulf58/sterling@npm:foo@1'],
+  ]) assert.equal(openCodeCacheKey(spec, 'npm'), key, spec);
+  const home = tmp('sterling-roots-oc-');
+  try {
+    const root = opencodeCopy(home, '1792750000000', '0.19.113', ['@chulf58', 'sterling@*']);
+    ocConfig(home, ['@chulf58/sterling@']);
+    assert.equal(openCodeLoadedSterling({}, home).copies[0].root, root, 'the installed copy is found, not reported missing');
+  } finally {
+    rm(home);
+  }
+});
+
+test('openCodeLoadedSterling, one spec: the newest generation wins when it holds the OLDER version (a rollback); a staging directory is never it', () => {
+  const home = tmp('sterling-roots-oc-');
+  try {
+    ocConfig(home, [STERLING_GIT_SPEC]);
+    gitCopy(home, '1792747812087', '0.19.116');
+    const rolledBack = gitCopy(home, '1792750000000', '0.19.113');
+    touch(join(npmCache(home), 'git-sterling-8c334bb56af9', '.staging-1792760000000-abc', 'node_modules', '@chulf58', 'sterling', 'package.json'), JSON.stringify({ version: '0.19.120' }));
+    const loaded = openCodeLoadedSterling({}, home);
+    assert.equal(loaded.copies.length, 1);
+    assert.equal(loaded.copies[0].root, rolledBack);
+    assert.equal(loaded.copies[0].version, '0.19.113');
+    assert.notEqual(newestInstalledSterling({}, home).version, '0.19.113', 'CONTROL: the highest-version rule picks another copy');
+  } finally {
+    rm(home);
+  }
+});
+
+test('openCodeLoadedSterling, across specs: the configured spec\'s copy wins over a newer version under a spec the config no longer lists; no config is no copies; a broken config is an error', () => {
+  const home = tmp('sterling-roots-oc-');
+  try {
+    assert.deepEqual(openCodeLoadedSterling({}, home).copies, [], 'no opencode.json');
+    const configured = gitCopy(home, '1792750000000', '0.19.113');
+    opencodeCopy(home, '1792760000000', '0.19.116');
+    ocConfig(home, ['@nemlig/overpass-gateway@1.14.3', [STERLING_GIT_SPEC, {}]]);
+    const loaded = openCodeLoadedSterling({}, home);
+    assert.deepEqual(loaded.copies.map((c) => [c.spec, c.root, c.version]), [[STERLING_GIT_SPEC, configured, '0.19.113']]);
+    ocConfig(home, ['@chulf58/sterling', STERLING_GIT_SPEC]);
+    assert.deepEqual(openCodeLoadedSterling({}, home).copies.map((c) => c.version), ['0.19.116', '0.19.113'], 'each listed spec, in list order');
+    ocConfig(home, ['git+https://github.com/Chulf58/sterling.git#v1']);
+    const missing = openCodeLoadedSterling({}, home).copies[0];
+    assert.equal(missing.root, null, 'a listed spec with nothing installed has no root');
+    touch(join(home, '.config', 'opencode', 'opencode.json'), '{ "plugins": [ ');
+    assert.ok(openCodeLoadedSterling({}, home).error, 'an unparseable config is an error, never no copies');
+  } finally {
+    rm(home);
   }
 });

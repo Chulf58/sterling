@@ -5664,6 +5664,14 @@ var DEFAULT_OVERPASS_ROLE_TIERS = {
   preflight: DEFAULT_OVERPASS_TIER,
   "maintenance-worker": DEFAULT_OVERPASS_TIER
 };
+var OverpassUnknownRoleError = class extends Error {
+  role;
+  constructor(role) {
+    super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+    this.name = "OverpassUnknownRoleError";
+    this.role = role;
+  }
+};
 function resolveOverpassRoles(raw, provider) {
   if (raw !== void 0 && !isPlainObject(raw)) {
     throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
@@ -5671,7 +5679,7 @@ function resolveOverpassRoles(raw, provider) {
   const block = raw ?? {};
   for (const key of Object.keys(block)) {
     if (!OVERPASS_ROLES.includes(key)) {
-      throw new Error(`config.overpass.roles has the unknown role ${JSON.stringify(key)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+      throw new OverpassUnknownRoleError(key);
     }
   }
   const out = {};
@@ -15777,6 +15785,37 @@ var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
 import { existsSync as existsSync8, readFileSync as readFileSync11, readdirSync as readdirSync3, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join15, resolve as resolve7, sep as sep2 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
+
+// scripts/lib/jsonc.mjs
+var JSONC_SOURCE = String.raw`
+function parseJsonc(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
+      i = end + 1;
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+`;
+var parseJsonc = new Function(`${JSONC_SOURCE}
+return parseJsonc;`)();
+
+// scripts/lib/sterling-roots.mjs
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -15929,6 +15968,75 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+var SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
+  }
+  return out;
+}
+`;
+var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
+return sterlingPluginSpecs;`)();
+var OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+var loaded = new Function(
+  "createHash",
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
+return { openCodeCacheKey, openCodeLoadedSterling };`
+)(createHash3, existsSync8, readFileSync11, readdirSync3, join15, homedir6);
+var openCodeCacheKey = loaded.openCodeCacheKey;
+var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 
 // scripts/lib/opencode-agents.mjs
 var OPENCODE_RENDERER = "opencode/1";
@@ -19499,7 +19607,7 @@ var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync8, rmSync as rmSync6, rmdirSync, renameSync as renameSync5, existsSync as existsSync13, lstatSync as lstatSync7, readdirSync as readdirSync5, realpathSync as realpathSync6, chmodSync as chmodSync2 } from "node:fs";
 import { join as join21, resolve as resolve10, dirname as dirname10, isAbsolute as isAbsolute3 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { randomBytes, createHash as createHash3 } from "node:crypto";
+import { randomBytes, createHash as createHash4 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -19680,7 +19788,7 @@ function liveFileName(key) {
   return `${LIVE_PREFIX}${key}.json`;
 }
 function agentIdHash(agentId) {
-  return createHash3("sha256").update(String(agentId), "utf8").digest("base64url");
+  return createHash4("sha256").update(String(agentId), "utf8").digest("base64url");
 }
 function recordAgentIds(record) {
   return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
@@ -19719,7 +19827,7 @@ function warnStateFile(file, text) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash4("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 function isNonEmptyString(v) {
   return typeof v === "string" && v !== "";
@@ -19749,7 +19857,7 @@ function validateRecordShape(r) {
   if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
   if (typeof r.prompt === "string") {
     const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash3("sha256").update(r.prompt, "utf8").digest("hex");
+    const sha = createHash4("sha256").update(r.prompt, "utf8").digest("hex");
     if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
   } else if (r.prompt !== null) {
     return { ok: false, reason: "prompt-type" };

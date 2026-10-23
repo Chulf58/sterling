@@ -38,6 +38,19 @@ command -v tmux >/dev/null || { echo "sterling-launch: 'tmux' not installed" >&2
 [ -n "$TUI_BUNDLE" ] && [ -f "$TUI_BUNDLE" ] || { echo "sterling-launch: TUI bundle missing: ${TUI_BUNDLE:-no installed Sterling found}" >&2; exit 1; }
 [ -f "$STORE" ]      || { echo "sterling-launch: store missing: $STORE (run from a project root)" >&2; exit 1; }
 
+# An OpenCode session's pane runs the dashboard of the Sterling copy the OpenCode plugin
+# loads (opencode_tui_bundle, above), not TUI_BUNDLE: a dashboard from another copy can
+# write config that plugin refuses (GitHub #202). With no Sterling in OpenCode's plugin
+# list, init installed its own OpenCode server shim, which loads TUI_BUNDLE's copy, so it
+# stays; opencode_tui_bundle says on stderr when it keeps TUI_BUNDLE for any other reason.
+use_opencode_tui() {
+  local bundle
+  bundle="$(opencode_tui_bundle)"
+  [ -n "$bundle" ] || return 0
+  [ -f "$bundle" ] || { echo "sterling-launch: OpenCode TUI bundle missing: $bundle" >&2; exit 1; }
+  TUI_BUNDLE="$bundle"
+}
+
 # '=' asks tmux for an exact name: without it sterling-x would match sterling-x-claude.
 # set-option and split-window take a pane target, so they need the trailing ':'.
 running() { tmux has-session -t "=$1" 2>/dev/null; }
@@ -140,6 +153,7 @@ case "$MODE" in
     ;;
   opencode)
     [ -n "$OPENCODE_BIN" ] || { echo "sterling-launch: 'opencode' not found on PATH or in ~/.opencode/bin (set OPENCODE_BIN)" >&2; exit 1; }
+    use_opencode_tui
     # A fresh tmux session means the last one ended (crash, service restart): reopen the root
     # session the user last prompted here, recorded by the Sterling plugin
     # (packages/opencode-plugin/src/conductor-session.mjs), instead of a blank one beside a
@@ -168,7 +182,7 @@ case "$MODE" in
     [ -n "$S" ] || { echo "sterling-launch: no session of this project is running ($SESSION-claude, $SESSION-opencode) - start one with: ./sterling-launch.sh claude" >&2; exit 1; }
     tmux set-option -t "=$S:" mouse on
     # this script names the OpenCode session, so that one gets the OpenCode TUI and any other the Claude one
-    if [ "$S" = "$SESSION-opencode" ]; then add_tui_pane "$S" opencode; else add_tui_pane "$S" claude; fi
+    if [ "$S" = "$SESSION-opencode" ]; then use_opencode_tui; add_tui_pane "$S" opencode; else add_tui_pane "$S" claude; fi
     ;;
   *)
     echo "sterling-launch: unknown mode '$MODE' (use claude, opencode or tui)" >&2

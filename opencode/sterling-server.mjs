@@ -5391,7 +5391,7 @@ function resolveOverpassRoles(raw, provider) {
   const block = raw ?? {};
   for (const key of Object.keys(block)) {
     if (!OVERPASS_ROLES.includes(key)) {
-      throw new Error(`config.overpass.roles has the unknown role ${JSON.stringify(key)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+      throw new OverpassUnknownRoleError(key);
     }
   }
   const out = {};
@@ -5474,7 +5474,7 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6019,6 +6019,14 @@ var init_config = __esm({
       sparring: "agentic-premium-max",
       preflight: DEFAULT_OVERPASS_TIER,
       "maintenance-worker": DEFAULT_OVERPASS_TIER
+    };
+    OverpassUnknownRoleError = class extends Error {
+      role;
+      constructor(role) {
+        super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+        this.name = "OverpassUnknownRoleError";
+        this.role = role;
+      }
     };
     RETIRED_MODEL_KEYS = [
       "coder",
@@ -12891,9 +12899,9 @@ var init_checks = __esm({
 });
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypto";
 function sha256(text) {
-  return createHash4("sha256").update(normalize(text), "utf8").digest("hex");
+  return createHash5("sha256").update(normalize(text), "utf8").digest("hex");
 }
 var normalize, RESTART_INSTRUCTION;
 var init_agent_distribution = __esm({
@@ -17268,7 +17276,7 @@ import { existsSync as existsSync14, mkdirSync as mkdirSync11, readFileSync as r
 import { dirname as dirname10, join as join23 } from "node:path";
 
 // scripts/lib/opencode-install.mjs
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { existsSync as existsSync13, mkdirSync as mkdirSync10, readFileSync as readFileSync14, readdirSync as readdirSync5, realpathSync as realpathSync8, rmSync as rmSync6, statSync as statSync5, unlinkSync as unlinkSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute3, join as join22, resolve as resolve11 } from "node:path";
@@ -19779,29 +19787,35 @@ import { join as join18 } from "node:path";
 import { existsSync as existsSync9, readFileSync as readFileSync11, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join17, resolve as resolve7, sep } from "node:path";
+import { createHash as createHash4 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
+var JSONC_SOURCE = String.raw`
 function parseJsonc(text) {
-  let out = "";
+  let out = '';
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === '"') {
       let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
       out += text.slice(i, j + 1);
       i = j;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      if (end === -1) throw new Error("unterminated /* comment");
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
       i = end + 1;
-    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
     } else out += c;
   }
   return JSON.parse(out);
 }
+`;
+var parseJsonc = new Function(`${JSONC_SOURCE}
+return parseJsonc;`)();
 
 // scripts/lib/sterling-roots.mjs
 var STERLING_GIT_SPEC = "github:Chulf58/sterling#semver:>=0.18.0";
@@ -19957,19 +19971,75 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-var STERLING_NPM_PACKAGE = "@chulf58/sterling";
-var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-var isNpmSpec = (s2) => s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`);
-var namesSterling = (s2) => typeof s2 === "string" && (isNpmSpec(s2) || STERLING_GIT_REPO.test(s2.split("#")[0]));
+var SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
 function sterlingPluginSpecs(plugins) {
   if (!Array.isArray(plugins)) return [];
   const out = [];
   for (const entry of plugins) {
-    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
-    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
   }
   return out;
 }
+`;
+var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
+return sterlingPluginSpecs;`)();
+var OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+var loaded = new Function(
+  "createHash",
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
+return { openCodeCacheKey, openCodeLoadedSterling };`
+)(createHash4, existsSync9, readFileSync11, readdirSync3, join17, homedir5);
+var openCodeCacheKey = loaded.openCodeCacheKey;
+var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function copyKindOf(root, env, home) {
   if (!root) return null;
   const cache = installRoots(env, home).find((r) => r.host === "opencode")?.dir;
@@ -20378,7 +20448,7 @@ var TUI_MATERIALIZED_FILES = ["package.json", "sterling-tui.bundle.tsx"];
 var TUI_MATERIALIZED_KEEP = 2;
 var MATERIALIZED_MARKER = ".sterling-materialized.json";
 var SEMVER_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-var bytesHash = (b) => createHash5("sha256").update(b).digest("hex");
+var bytesHash = (b) => createHash6("sha256").update(b).digest("hex");
 function materializedTuiRoot({ home = homedir7() } = {}) {
   return join22(home, ".sterling", "opencode", "tui");
 }
@@ -20817,8 +20887,21 @@ function createLaneDispatches() {
     }
   };
 }
-function overpassRefusal(error) {
-  return `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}). While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs. Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+function pluginVersion(moduleUrl = import.meta.url) {
+  try {
+    const v = readCopyVersion(sterlingRootFrom(moduleUrl), "opencode");
+    return v.version ?? `unknown (${v.reason})`;
+  } catch (e) {
+    return `unknown (${e?.message ?? e})`;
+  }
+}
+function overpassRefusal(error, { version } = {}) {
+  const head = `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}).`;
+  const tail = "While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs.";
+  if (error instanceof OverpassUnknownRoleError) {
+    return `${head} This Sterling plugin is version ${version ?? pluginVersion()} and does not know the role ${JSON.stringify(error.role)}; a newer Sterling most likely wrote it. Run \`opencode plugin update\`, then /reload, so the plugin knows that role. ${tail} Or remove that role from overpass.roles, or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+  }
+  return `${head} ${tail} Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
 }
 function desiredOverlay(res) {
   const out = {};
@@ -21890,7 +21973,7 @@ import { existsSync as existsSync20 } from "node:fs";
 import { delimiter, join as join30 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash7, randomUUID as randomUUID8 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync6, existsSync as existsSync19, mkdirSync as mkdirSync15, openSync as openSync6, readFileSync as readFileSync19, renameSync as renameSync7, rmSync as rmSync10, rmdirSync as rmdirSync2, statSync as statSync6, writeFileSync as writeFileSync9, appendFileSync as appendFileSync3 } from "node:fs";
 import { dirname as dirname14, isAbsolute as isAbsolute5, join as join29, resolve as resolve13, sep as sep3 } from "node:path";
@@ -22629,6 +22712,30 @@ init_dist();
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
 
 // scripts/lib/launcher-tmux.mjs
+var OPENCODE_PANE_MARKER = "# OpenCode pane: the dashboard of the Sterling copy the OpenCode plugin loads";
+var OPENCODE_PANE_PATHS = [
+  OPENCODE_PANE_MARKER,
+  "# (the newest install of the Sterling spec in OpenCode's global config), resolved when the pane opens",
+  "opencode_tui_bundle() {",
+  `  "$NODE_BIN" --input-type=module <<'STERLING_OPENCODE_RESOLVER'`,
+  "import { createHash } from 'node:crypto';",
+  RESOLVER_IMPORTS,
+  RESOLVER_SOURCE.trim(),
+  JSONC_SOURCE.trim(),
+  SPECS_SOURCE.trim(),
+  OPENCODE_LOADED_SOURCE.trim(),
+  "const keep = 'so the OpenCode pane runs the launcher\\'s own dashboard, which may be another Sterling version than the plugin';",
+  "const loaded = openCodeLoadedSterling();",
+  "if (loaded.error) console.error('sterling-launch: could not read ' + loaded.configPath + ' (' + loaded.error + '), so which Sterling OpenCode loads is unknown, ' + keep);",
+  "else if (loaded.copies.length) {",
+  "  const [first] = loaded.copies;",
+  "  if (new Set(loaded.copies.map((c) => c.root)).size > 1) console.error('sterling-launch: ' + loaded.configPath + ' lists Sterling ' + loaded.copies.length + ' times (' + loaded.copies.map((c) => c.spec).join(', ') + '); the OpenCode pane follows the first, ' + first.spec);",
+  "  if (first.root === null) console.error('sterling-launch: OpenCode has not installed ' + first.spec + ' yet (nothing in ' + first.dir + '), ' + keep);",
+  "  else process.stdout.write(join(first.root, 'tui', 'sterling-tui.mjs'));",
+  "}",
+  "STERLING_OPENCODE_RESOLVER",
+  "}"
+].join("\n");
 var INSTALLED_PATHS = [
   "# installed copy: nothing below names a versioned install directory; the newest",
   "# installed Sterling (Claude Code or OpenCode) is resolved when this runs",
@@ -22642,7 +22749,8 @@ var INSTALLED_PATHS = [
   "if (found) process.stdout.write(join(found.root, 'tui', 'sterling-tui.mjs'));",
   "else console.error('sterling-launch: ' + sterlingNotFoundMessage('claude-code'));",
   "STERLING_RESOLVER",
-  ')"'
+  ')"',
+  OPENCODE_PANE_PATHS
 ].join("\n");
 
 // scripts/lib/launcher-history.mjs
@@ -23684,7 +23792,7 @@ function maintenanceLines(state, config, root) {
 init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
-import { createHash as createHash7, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync8, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync18, openSync as openSync8, readSync as readSync4, renameSync as renameSync9, unlinkSync as unlinkSync5, writeFileSync as writeFileSync13 } from "node:fs";
 import { join as join37 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
@@ -23756,7 +23864,7 @@ function readStoreFileBounded(path, maxBytes) {
   return { text: read.bytes.toString("utf8") };
 }
 function sha256Of(data) {
-  return createHash7("sha256").update(data).digest("hex");
+  return createHash8("sha256").update(data).digest("hex");
 }
 function invalidReason(l) {
   if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
@@ -25641,13 +25749,13 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
-import { createHash as createHash8, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash9, randomUUID as randomUUID12 } from "node:crypto";
 import { readFileSync as readFileSync29, writeFileSync as writeFileSync15, mkdirSync as mkdirSync21, rmSync as rmSync14, statSync as statSync10, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { join as join47, dirname as dirname18 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash8("sha256").update(readFileSync29(join47(root, rel))).digest("hex");
+    return createHash9("sha256").update(readFileSync29(join47(root, rel))).digest("hex");
   } catch {
     return void 0;
   }

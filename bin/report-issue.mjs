@@ -34,6 +34,37 @@ import { join as join3 } from "node:path";
 import { existsSync as existsSync2, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join as join2, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+
+// scripts/lib/jsonc.mjs
+var JSONC_SOURCE = String.raw`
+function parseJsonc(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
+      i = end + 1;
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+`;
+var parseJsonc = new Function(`${JSONC_SOURCE}
+return parseJsonc;`)();
+
+// scripts/lib/sterling-roots.mjs
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -186,6 +217,75 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+var SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
+  }
+  return out;
+}
+`;
+var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
+return sterlingPluginSpecs;`)();
+var OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+var loaded = new Function(
+  "createHash",
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
+return { openCodeCacheKey, openCodeLoadedSterling };`
+)(createHash, existsSync2, readFileSync, readdirSync, join2, homedir);
+var openCodeCacheKey = loaded.openCodeCacheKey;
+var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function canonical(p) {
   try {
     return realpathSync(p);
@@ -340,7 +440,7 @@ function resolveStoreWritePath(root, ...segments) {
 }
 
 // scripts/lib/issue-report.mjs
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 var STERLING_ISSUE_HOST = "github.com";
 var STERLING_ISSUE_REPO = "Chulf58/sterling";
 var SEVERITIES = ["BLOCKED", "WORKAROUND", "FRICTION"];
@@ -476,7 +576,7 @@ function normalizeTitle(title) {
   return String(title).toLowerCase().replace(UUID_RE, "#").replace(/<project-path>|<id>/g, "#").replace(new RegExp(`[^${DELIMS}]*[\\\\/][^${DELIMS}]*`, "g"), "#").replace(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{6,}\b/g, "#").replace(/\d+/g, "#").replace(/#+/g, "#").replace(/\s+/g, " ").trim();
 }
 function fingerprint(component, title) {
-  return createHash("sha1").update(`${String(component).trim().toLowerCase()}|${normalizeTitle(title)}`).digest("hex").slice(0, 12);
+  return createHash2("sha1").update(`${String(component).trim().toLowerCase()}|${normalizeTitle(title)}`).digest("hex").slice(0, 12);
 }
 var fingerprintLine = (fp) => `Fingerprint: sterling-fp-${fp}`;
 var labelsLine = (labels) => `Labels: ${labels.join(", ")}`;
