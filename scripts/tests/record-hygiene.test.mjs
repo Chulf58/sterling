@@ -238,3 +238,39 @@ test('arm: outside a git repo it reports it could not run and still exits 0', ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('retired terms: a rename held by a mounted domain is listed against project records, read-only; an unreadable domain is named', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { SterlingStore } = await import('@sterling/store');
+  const { readDomainRetiredDecisions } = await import('../lib/record-hygiene.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'hygiene-domain-'));
+  try {
+    const domainDb = join(dir, 'farm.db');
+    const domain = new SterlingStore(domainDb);
+    domain.create({
+      id: randomUUID(), type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'domain:farm', stack_tags: [],
+      title: 'Rename Old Shed', statement: 'Old Shed is now Tool Shed.', alternatives_rejected: [], rationale: 'r', retired_terms: [{ term: 'Old Shed', replacement: 'Tool Shed' }],
+    });
+    domain.close();
+    const before = new DatabaseSync(domainDb, { readOnly: true }).prepare('SELECT COUNT(*) AS n FROM records').get().n;
+    const garbage = join(dir, 'garbage.db');
+    (await import('node:fs')).writeFileSync(garbage, 'not a database');
+    const { decisions, unread } = readDomainRetiredDecisions([
+      { name: 'farm', dbPath: domainDb },
+      { name: 'never-created', dbPath: join(dir, 'absent.db') },
+      { name: 'broken', dbPath: garbage },
+    ]);
+    assert.equal(decisions.length, 1);
+    assert.deepEqual(unread.map((u) => u.name), ['broken'], 'a never-created domain holds nothing and is not reported; an unreadable one is');
+    const own = decision({ title: 'Tools live in the Old Shed', statement: 's', file_keys: ['src/a.mjs'] });
+    const { findings } = auditRecords([own], { headFiles: new Set(['src/a.mjs']), domainDecisions: decisions });
+    const listed = findings.filter((f) => f.kind === 'retired_term_use');
+    assert.equal(listed.length, 1);
+    assert.match(listed[0].detail, /retired term 'Old Shed' \(now 'Tool Shed'/);
+    const after = new DatabaseSync(domainDb, { readOnly: true }).prepare('SELECT COUNT(*) AS n FROM records').get().n;
+    assert.equal(after, before, 'the domain store was only read');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

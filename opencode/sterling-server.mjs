@@ -4246,6 +4246,109 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/retired-terms.js
+function retiredTermRegex(term) {
+  const trimmed = term.trim();
+  const variants = [.../* @__PURE__ */ new Set([trimmed.normalize("NFC"), trimmed.normalize("NFD")])];
+  const alternatives = variants.map((t) => {
+    const points = Array.from(t);
+    const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+    const lead = WORD_CHAR.test(points[0] ?? "") ? `(?<![${WORD_CLASS}])` : "";
+    const trail = WORD_CHAR.test(points[points.length - 1] ?? "") ? `(?![${WORD_CLASS}])` : "";
+    return `${lead}${body}${trail}`;
+  });
+  return new RegExp(`(?:${alternatives.join("|")})`, "giu");
+}
+function protectedSpans(text) {
+  const spans = [];
+  const paragraphEnd = (at) => {
+    const sep4 = /\n[ \t]*\n/g;
+    sep4.lastIndex = at;
+    const m = sep4.exec(text);
+    return m ? m.index : text.length;
+  };
+  const straight = [...text.matchAll(/"/g)].map((m) => m.index ?? 0);
+  for (let i = 0; i < straight.length; i += 2)
+    spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : paragraphEnd(straight[i])]);
+  for (let i = text.indexOf("\u201C"); i !== -1; ) {
+    const close = text.indexOf("\u201D", i + 1);
+    if (close === -1) {
+      spans.push([i, paragraphEnd(i)]);
+      i = text.indexOf("\u201C", i + 1);
+    } else {
+      spans.push([i, close + 1]);
+      i = text.indexOf("\u201C", close + 1);
+    }
+  }
+  for (const m of text.matchAll(/^[ \t]*>/gm)) {
+    const at = m.index ?? 0;
+    spans.push([at, paragraphEnd(at)]);
+  }
+  return spans;
+}
+function findTermOccurrences(text, term, replacement) {
+  if (!text || !term.trim())
+    return [];
+  const spans = protectedSpans(text);
+  const canonical2 = [];
+  if (replacement?.trim()) {
+    const fold = (t) => t.normalize("NFC").trim().split(/\s+/).join(" ").toLowerCase();
+    const caseOnly = fold(term) === fold(replacement);
+    const re = retiredTermRegex(replacement);
+    const exact = caseOnly ? new RegExp(re.source, "gu") : re;
+    for (const m of text.matchAll(exact))
+      canonical2.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
+  const out = [];
+  for (const m of text.matchAll(retiredTermRegex(term))) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    out.push({
+      start,
+      end,
+      protected: spans.some(([s2, e]) => start < e && s2 < end),
+      resolved: canonical2.some(([s2, e]) => start >= s2 && end <= e)
+    });
+  }
+  return out;
+}
+function collectRetiredTerms(decisions) {
+  const out = [];
+  for (const d of decisions) {
+    if (!d || d.type !== "decision" || d.status !== void 0 && d.status !== "active")
+      continue;
+    if (!Array.isArray(d.retired_terms))
+      continue;
+    for (const entry of d.retired_terms) {
+      const parsed = retiredTermSchema.safeParse(entry);
+      if (!parsed.success)
+        continue;
+      out.push({ ...parsed.data, decision_id: String(d.id), ...typeof d.slug === "string" ? { decision_slug: d.slug } : {} });
+    }
+  }
+  return out;
+}
+function retiredTermsInText(text, terms) {
+  return terms.filter((t) => findTermOccurrences(text, t.term, t.replacement).some(owed));
+}
+function retiredTermWarning(t) {
+  return `retired term '${t.term}': renamed to '${t.replacement}' by decision ${t.decision_slug ?? t.decision_id} (knowledge_get ${t.decision_id}); use '${t.replacement}' unless you are quoting.`;
+}
+var retiredTermSchema, WORD_CLASS, WORD_CHAR, owed;
+var init_retired_terms = __esm({
+  "packages/schemas/dist/retired-terms.js"() {
+    "use strict";
+    init_zod();
+    retiredTermSchema = external_exports.object({
+      term: external_exports.string().trim().min(1),
+      replacement: external_exports.string().trim().min(1)
+    }).strict();
+    WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+    WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
+    owed = (o) => !o.protected && !o.resolved;
+  }
+});
+
 // packages/schemas/dist/source-extensions.js
 function sourceExtensionOf(path) {
   const base2 = String(path).split("/").pop() ?? "";
@@ -4369,6 +4472,7 @@ var init_records = __esm({
     init_zod();
     init_envelope();
     init_paths();
+    init_retired_terms();
     verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
     base = external_exports.object(envelopeFields);
     decisionSchema = base.extend({
@@ -4400,7 +4504,13 @@ var init_records = __esm({
       // one-off instruction was once captured as standing policy and rewrote
       // the governing file three times; absent means unstated, and existing
       // records round-trip unchanged.
-      authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
+      authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional(),
+      // GitHub #188 (decision retiring-a-renamed-term-a-retired-terms-field-on-
+      // the-rename): a decision that rules a rename names the old term and its
+      // replacement. Preflight and H19/H20 delivery warn on the old term, a
+      // retired_term_use maintenance item is queued per record still using it,
+      // and record hygiene lists those records. The matcher is retired-terms.ts.
+      retired_terms: external_exports.array(retiredTermSchema).min(1).optional()
     }).superRefine(refineSupersession);
     notApplicableExemptionSchema = external_exports.object({
       not_applicable: external_exports.object({
@@ -4755,7 +4865,15 @@ var init_records = __esm({
       // (file_keys): a repeat restore of the same path refreshes the open item
       // rather than minting a second one — the obligation is "this path keeps
       // getting reverted", not "an event happened".
-      "restore_performed"
+      "restore_performed",
+      // A record still uses a term a rename decision retired (GitHub #188,
+      // decision retiring-a-renamed-term-a-retired-terms-field-on-the-rename).
+      // Minted per record (feature_link = the record) when a decision's
+      // retired_terms are created or changed, and at MCP server start for
+      // renames recorded in a mounted domain. The worker may replace the term
+      // outside quotes in decision titles and statements and article text;
+      // anything else is handed back.
+      "retired_term_use"
     ];
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
@@ -5157,7 +5275,7 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
-    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
     workerPolicyItemSchema = external_exports.object({
       id: external_exports.string().uuid(),
       lane: external_exports.enum(WORKER_POLICY_LANES),
@@ -5952,7 +6070,7 @@ var init_broker = __esm({
   "packages/schemas/dist/broker.js"() {
     "use strict";
     init_zod();
-    BROKER_PROTOCOL = 2;
+    BROKER_PROTOCOL = 3;
     BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
     BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
     BROKER_DISCOVERY_MAX_ENTRIES = 32;
@@ -5984,7 +6102,7 @@ var init_broker = __esm({
         "remove",
         "recordCheckSkipped"
       ],
-      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
+      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription", "retiredTermDecisions"]
     };
     BROKER_MAX_ARGS = 6;
     brokerIdentitySchema = external_exports.object({
@@ -6092,6 +6210,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_retired_terms();
     init_source_extensions();
     init_envelope();
     init_records();
@@ -7782,6 +7901,13 @@ var init_mounted = __esm({
         const perStore = this.fanValues((s2) => s2.query({ ...opts, cap }));
         const shares = allocateShares(perStore.map((r) => r.length), cap);
         return perStore.flatMap((records, i) => records.slice(0, shares[i]));
+      }
+      /** Cross-mount retiredTermDecisions (GitHub #188): the active rename decisions of the
+       *  project store and every readable mounted domain, project first. A rename held in a
+       *  domain covers every project mounting it (decision
+       *  retiring-a-renamed-term-a-retired-terms-field-on-the-rename), so the fan is the read. */
+      retiredTermDecisions() {
+        return this.fanValues((s2) => s2.retiredTermDecisions()).flat();
       }
       /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
        *  query(), summed project-first across every mounted store (countBySource is
@@ -11386,6 +11512,31 @@ var init_dist2 = __esm({
         return this.db.prepare("SELECT id, type, status FROM records").all();
       }
       /**
+       * The active decisions that carry retired_terms (GitHub #188, decision
+       * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+       * minimal shape collectRetiredTerms reads. This is the one read every write
+       * warning, preflight, delivery hook, worker check and hygiene listing makes,
+       * so it never decodes or hydrates a record body that holds none: a plain
+       * substring test on the body column drops those rows inside the database,
+       * and the JSON extraction runs only on the survivors. With no rename
+       * recorded it costs one indexed type scan and returns [].
+       */
+      retiredTermDecisions() {
+        return this.readTx(() => {
+          const d = this.db.dialect;
+          const rows = this.db.prepare(`SELECT id, ${d.jsonText("body", "slug")} AS slug, ${d.jsonText("body", "retired_terms")} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText("body", "retired_terms")} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`).all();
+          return rows.map((r) => ({
+            id: r.id,
+            type: "decision",
+            status: "active",
+            ...r.slug ? { slug: r.slug } : {},
+            retired_terms: JSON.parse(r.retired_terms)
+          }));
+        });
+      }
+      /**
        * Every non-superseded feature_article carrying this EXACT slug, newest first.
        * A deterministic identity lookup, deliberately NOT a search (decision
        * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
@@ -13690,6 +13841,21 @@ function recordAdvisoryFire(root, hook, sessionId) {
 // scripts/hooks/lib/axis-compose.mjs
 init_dist2();
 
+// scripts/hooks/lib/retired-terms.mjs
+init_dist();
+function retiredTermNotice(store, text) {
+  if (!text) return "";
+  try {
+    const terms = collectRetiredTerms(store.retiredTermDecisions());
+    if (!terms.length) return "";
+    const used = retiredTermsInText(text, terms);
+    if (!used.length) return "";
+    return ["STERLING RETIRED TERMS \u2014 this text uses a term a rename decision retired (advisory):", ...used.map((t) => `  - ${retiredTermWarning(t)}`)].join("\n");
+  } catch (e) {
+    return `STERLING RETIRED TERMS \u2014 the retired-term check FAILED (${e && e.message || e}); this text was NOT checked against renamed terms.`;
+  }
+}
+
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
 import { join as join13 } from "node:path";
@@ -14815,8 +14981,19 @@ function citedInBrief(record, text) {
   if (id8.length === 8 && new RegExp(`(?<![0-9a-f])${esc(id8)}(?![0-9a-f])`, "i").test(text)) return true;
   return !!record.slug && new RegExp(`(?<![a-z0-9-])${esc(record.slug)}(?![a-z0-9-])`, "i").test(text);
 }
-function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }) {
-  if (!Object.hasOwn(HOST_TEXT, host)) throw new Error(`composeMechanismAxis: unknown host '${host}'`);
+function composeMechanismAxis(store, opts) {
+  if (!Object.hasOwn(HOST_TEXT, opts.host)) throw new Error(`composeMechanismAxis: unknown host '${opts.host}'`);
+  const retiredLine = retiredTermNotice(store, opts.outgoing);
+  const composed = composeSubjectAxis(store, opts, retiredLine);
+  if (composed || !retiredLine) return composed;
+  const parts = [
+    ...opts.pinLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: opts.pinLine }] : [],
+    { kind: "ordinary", pinned: true, contentClass: "chrome", text: retiredLine },
+    ...opts.overlap ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: opts.overlap }] : []
+  ];
+  return { assembled: assembleDelivery(parts, resolveTotalCap(opts.root)), guard: opts.guardFor() };
+}
+function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion = surface === "question";
   const isConsult = surface === "consult";
   const isDispatch = surface === "dispatch";
@@ -15003,6 +15180,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
     // unattributed block. Pinned chrome is placed first; a hazard that then
     // no longer fits falls to its pointer (the existing held-back behaviour).
     { kind: "ordinary", pinned: true, contentClass: "chrome", text: header },
+    ...retiredLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: retiredLine }] : [],
     // A prior ANSWER outranks everything on a question-shaped prompt — it is
     // the direct "don't re-derive" signal; on a change-shaped prompt hazards
     // still lead (stop the mistake), answers ride with the article pointers.
@@ -21198,6 +21376,10 @@ function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
     articlesBySlug(slug) {
       return project.articlesBySlug(slug);
     },
+    /** The active rename decisions of the project and every readable domain (GitHub #188), project first. */
+    retiredTermDecisions() {
+      return [...project.retiredTermDecisions(), ...eachDomain((s2) => s2.retiredTermDecisions()).flatMap(([, r]) => r)];
+    },
     close() {
       let first;
       for (const s2 of [project, ...domains.map((d) => d.store)]) {
@@ -21266,6 +21448,9 @@ function routedSubjectFan(stores) {
     },
     articlesBySlug(slug) {
       return project.articlesBySlug(slug);
+    },
+    retiredTermDecisions() {
+      return stores.retiredTermDecisions();
     },
     close() {
       stores.close();
@@ -21701,7 +21886,7 @@ var OPENCODE_ALLOWED_TOOLS = [
 
 // scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_RUN_BUDGET_USD = 5;
-var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
 var RUN_BATCH_MAX = 12;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
@@ -25697,37 +25882,37 @@ function weighDuties(store, records, config, root, at, git) {
     }
   }
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
-  const owed = [];
+  const owed2 = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
   const changed = git.candidates.filter((c) => existsSync29(join48(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
     const ats = touched.map((c) => c.at).filter(isValidAt).sort();
-    owed.push({ duty: "capture", since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
+    owed2.push({ duty: "capture", since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
   }
   const demand = articleDemand(store, root, config, changed.map((c) => c.path), base2, degraded);
-  if (demand) owed.push({ duty: "article", paths: demand.unowned, newly: demand.newly, foreign: demand.foreign });
+  if (demand) owed2.push({ duty: "article", paths: demand.unowned, newly: demand.newly, foreign: demand.foreign });
   const weighed = new Set(state.weighed);
   const fresh = events.filter((e) => WEIGHED_KINDS.has(e.kind) && !weighed.has(eventKey(e)));
   const sessionAts = fresh.map((e) => e.at).filter(isValidAt).sort();
   const earliestSessionAt = sessionAts[0] ?? at;
   const families = conceptFamiliesFrom(fresh);
-  for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed.push({ duty: "concept", family, since: families.get(family), window_start: earliestSessionAt });
+  for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed2.push({ duty: "concept", family, since: families.get(family), window_start: earliestSessionAt });
   const researchAgents = new Set(config.session_events.research_agents);
   const isResearchAgent = (d) => researchAgents.has(d) || researchAgents.has(agentRole(String(d ?? "")));
   const research = fresh.filter((e) => (e.kind === "research_tool" || e.kind === "agent_dispatch" && isResearchAgent(e.detail)) && !dischargedByCutoff(e.at, cutoffs.research));
   if (research.length) {
     const ats = research.map((e) => e.at).filter(isValidAt).sort();
     const since = ats[0] ?? at;
-    if (!researchCapturedSince(records, since)) owed.push({ duty: "research", since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
+    if (!researchCapturedSince(records, since)) owed2.push({ duty: "research", since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
   }
-  if (owed.length) notices.push(`Sterling settlement: the last turn left ${owed.length} duty(ies) unpaid (OpenCode has no stop block, so this is the reminder; still unpaid at the next settlement, each is queued as a maintenance item):
-${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
+  if (owed2.length) notices.push(`Sterling settlement: the last turn left ${owed2.length} duty(ies) unpaid (OpenCode has no stop block, so this is the reminder; still unpaid at the next settlement, each is queued as a maintenance item):
+${owed2.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join48(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join48(root, DUTIES_REL), { owed: owed2, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {

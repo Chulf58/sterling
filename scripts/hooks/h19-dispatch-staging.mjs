@@ -38,6 +38,7 @@
 import { readStdin, allow, warnNonBlocking, exitAfterWrite } from './lib/common.mjs';
 import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
+import { retiredTermNotice } from './lib/retired-terms.mjs';
 // Path extraction, the path and subject channels, the delivery assembler, the plan
 // and TDD lines and the return contract all live in lib/stage-brief.mjs — one
 // mechanism, imported never reimplemented (decision foreign_f5638a84). Prompt
@@ -147,6 +148,10 @@ async function main(input) {
     if (applyDeliveryPolicy(readDeliveryPolicy(input.cwd, policyKey()))) return finish('');
 
     const prompts = typeof resolution.prompt === 'string' ? [resolution.prompt] : [];
+    // RETIRED TERMS (GitHub #188): a brief using a term a rename decision
+    // retired gets the advisory line, staged or not. A blind lane (above)
+    // never reaches here, since the line cites a decision.
+    const retiredLine = retiredTermNotice(store, prompts.join('\n'));
     // PATH + SUBJECT STAGING is the shared lib's (scripts/hooks/lib/stage-brief.mjs,
     // also called by the OpenCode context hook); only the brief's source differs.
     // The chrome (plan line, TDD posture, unattributable-start line, return
@@ -163,6 +168,7 @@ async function main(input) {
       hazardMode: hazardLaneMode(input, input.cwd),
       leadingChrome: activePlanLine ? [activePlanLine] : [],
       trailingChrome: [
+        ...(retiredLine ? [retiredLine] : []),
         ...(tddPostureLine ? [tddPostureLine] : []),
         ...(unattributableLine ? [unattributableLine] : []),
         ...(!EXEMPT_AGENT_TYPES.has(input.agent_type) ? [RETURN_CONTRACT] : []),
@@ -171,7 +177,7 @@ async function main(input) {
     // A domain or config.json the fan could not read is one loud stderr line; the
     // project store's staging above is unaffected.
     warnFanDegraded(store, 'H19');
-    if (!staged) return finish('');
+    if (!staged) return finish(retiredLine);
     const out = staged.text;
 
     // Side effect first, guard second (the ordering rule mirrored from

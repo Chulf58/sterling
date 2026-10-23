@@ -154,6 +154,10 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
     articlesBySlug(slug) {
       return project.articlesBySlug(slug);
     },
+    /** The active rename decisions of the project and every readable domain (GitHub #188), project first. */
+    retiredTermDecisions() {
+      return [...project.retiredTermDecisions(), ...eachDomain((s) => s.retiredTermDecisions()).flatMap(([, r]) => r)];
+    },
     close() {
       let first;
       for (const s of [project, ...domains.map((d) => d.store)]) {
@@ -237,6 +241,9 @@ export function routedSubjectFan(stores) {
     },
     articlesBySlug(slug) {
       return project.articlesBySlug(slug);
+    },
+    retiredTermDecisions() {
+      return stores.retiredTermDecisions();
     },
     close() {
       stores.close();

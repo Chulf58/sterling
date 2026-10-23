@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { envelopeFields, refineSupersession } from './envelope.js';
 import { normalizeLocation, normalizeRepoPath, repoPath, repoPathOfLocation } from './paths.js';
+import { retiredTermSchema } from './retired-terms.js';
 
 // Durable record schemas — MVP-spine set (spec §16.1 item 2): decision,
 // feature_article, todo, brief. Remaining §3.2 types arrive at full-build
@@ -44,6 +45,12 @@ export const decisionSchema = base
     // the governing file three times; absent means unstated, and existing
     // records round-trip unchanged.
     authority: z.enum(['standing', 'session_scoped', 'one_off']).optional(),
+    // GitHub #188 (decision retiring-a-renamed-term-a-retired-terms-field-on-
+    // the-rename): a decision that rules a rename names the old term and its
+    // replacement. Preflight and H19/H20 delivery warn on the old term, a
+    // retired_term_use maintenance item is queued per record still using it,
+    // and record hygiene lists those records. The matcher is retired-terms.ts.
+    retired_terms: z.array(retiredTermSchema).min(1).optional(),
   })
   .superRefine(refineSupersession);
 
@@ -606,6 +613,14 @@ export const SYSTEM_REASONS = [
   // rather than minting a second one — the obligation is "this path keeps
   // getting reverted", not "an event happened".
   'restore_performed',
+  // A record still uses a term a rename decision retired (GitHub #188,
+  // decision retiring-a-renamed-term-a-retired-terms-field-on-the-rename).
+  // Minted per record (feature_link = the record) when a decision's
+  // retired_terms are created or changed, and at MCP server start for
+  // renames recorded in a mounted domain. The worker may replace the term
+  // outside quotes in decision titles and statements and article text;
+  // anything else is handed back.
+  'retired_term_use',
 ] as const;
 
 // §11 queue drain verbs: draining means the fulfilling artifact was written,
@@ -634,6 +649,8 @@ export const DRAIN_VERBS = {
   // The deed is closing the loop with the conductor on why the path keeps
   // getting reverted — a stamp attesting it up front, or the change dropped.
   restore_performed: 'resolved',
+  // The deed is rewriting the record to use the replacement term.
+  retired_term_use: 'renamed',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
 // The todo cross-field rules, read by the superRefine below and by

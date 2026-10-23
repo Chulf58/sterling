@@ -4135,6 +4135,14 @@ function normalizeLocation(location) {
   return repoPathOfLocation(location) ?? location;
 }
 
+// packages/schemas/dist/retired-terms.js
+var retiredTermSchema = external_exports.object({
+  term: external_exports.string().trim().min(1),
+  replacement: external_exports.string().trim().min(1)
+}).strict();
+var WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+var WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
+
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
@@ -4214,7 +4222,13 @@ var decisionSchema = base.extend({
   // one-off instruction was once captured as standing policy and rewrote
   // the governing file three times; absent means unstated, and existing
   // records round-trip unchanged.
-  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
+  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional(),
+  // GitHub #188 (decision retiring-a-renamed-term-a-retired-terms-field-on-
+  // the-rename): a decision that rules a rename names the old term and its
+  // replacement. Preflight and H19/H20 delivery warn on the old term, a
+  // retired_term_use maintenance item is queued per record still using it,
+  // and record hygiene lists those records. The matcher is retired-terms.ts.
+  retired_terms: external_exports.array(retiredTermSchema).min(1).optional()
 }).superRefine(refineSupersession);
 var notApplicableExemptionSchema = external_exports.object({
   not_applicable: external_exports.object({
@@ -4569,7 +4583,15 @@ var SYSTEM_REASONS = [
   // (file_keys): a repeat restore of the same path refreshes the open item
   // rather than minting a second one — the obligation is "this path keeps
   // getting reverted", not "an event happened".
-  "restore_performed"
+  "restore_performed",
+  // A record still uses a term a rename decision retired (GitHub #188,
+  // decision retiring-a-renamed-term-a-retired-terms-field-on-the-rename).
+  // Minted per record (feature_link = the record) when a decision's
+  // retired_terms are created or changed, and at MCP server start for
+  // renames recorded in a mounted domain. The worker may replace the term
+  // outside quotes in decision titles and statements and article text;
+  // anything else is handed back.
+  "retired_term_use"
 ];
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
@@ -4991,7 +5013,7 @@ var knowledgeWriteSchema = external_exports.object({
   type: external_exports.string().min(1),
   at: external_exports.string().min(1)
 }).strict();
-var WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
 var workerPolicyItemSchema = external_exports.object({
   id: external_exports.string().uuid(),
   lane: external_exports.enum(WORKER_POLICY_LANES),
@@ -8429,6 +8451,31 @@ var SterlingStore = class _SterlingStore {
    */
   recordIdIndex() {
     return this.db.prepare("SELECT id, type, status FROM records").all();
+  }
+  /**
+   * The active decisions that carry retired_terms (GitHub #188, decision
+   * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+   * minimal shape collectRetiredTerms reads. This is the one read every write
+   * warning, preflight, delivery hook, worker check and hygiene listing makes,
+   * so it never decodes or hydrates a record body that holds none: a plain
+   * substring test on the body column drops those rows inside the database,
+   * and the JSON extraction runs only on the survivors. With no rename
+   * recorded it costs one indexed type scan and returns [].
+   */
+  retiredTermDecisions() {
+    return this.readTx(() => {
+      const d = this.db.dialect;
+      const rows2 = this.db.prepare(`SELECT id, ${d.jsonText("body", "slug")} AS slug, ${d.jsonText("body", "retired_terms")} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText("body", "retired_terms")} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`).all();
+      return rows2.map((r) => ({
+        id: r.id,
+        type: "decision",
+        status: "active",
+        ...r.slug ? { slug: r.slug } : {},
+        retired_terms: JSON.parse(r.retired_terms)
+      }));
+    });
   }
   /**
    * Every non-superseded feature_article carrying this EXACT slug, newest first.

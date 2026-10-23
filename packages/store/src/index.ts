@@ -883,6 +883,15 @@ export interface RecordWriteOptions {
   prunedReceipt?: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[];
 }
 
+/** SterlingStore.retiredTermDecisions' row: what collectRetiredTerms reads, entries unvalidated. */
+export interface RetiredTermDecision {
+  id: string;
+  type: 'decision';
+  status: 'active';
+  slug?: string;
+  retired_terms: unknown[];
+}
+
 export interface QueryOptions {
   types?: string[];
   stack_tags?: string[];
@@ -942,6 +951,10 @@ export type ToolStore = Pick<
   // — this is that second consumer). Deterministic, so the refusal can never be
   // a ranking artefact.
   | 'articlesBySlug'
+  // The narrow read of active rename decisions' retired_terms (GitHub #188):
+  // every write, preflight and delivery asks it, so it skips the full decision
+  // scan and hydration (see SterlingStore.retiredTermDecisions).
+  | 'retiredTermDecisions'
   // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
   // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
   | 'recordsBySlug'
@@ -3237,6 +3250,36 @@ export class SterlingStore {
       type: string;
       status: string;
     }[];
+  }
+
+  /**
+   * The active decisions that carry retired_terms (GitHub #188, decision
+   * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+   * minimal shape collectRetiredTerms reads. This is the one read every write
+   * warning, preflight, delivery hook, worker check and hygiene listing makes,
+   * so it never decodes or hydrates a record body that holds none: a plain
+   * substring test on the body column drops those rows inside the database,
+   * and the JSON extraction runs only on the survivors. With no rename
+   * recorded it costs one indexed type scan and returns [].
+   */
+  retiredTermDecisions(): RetiredTermDecision[] {
+    return this.readTx(() => {
+      const d = this.db.dialect;
+      const rows = this.db
+        .prepare(
+          `SELECT id, ${d.jsonText('body', 'slug')} AS slug, ${d.jsonText('body', 'retired_terms')} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText('body', 'retired_terms')} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`
+        )
+        .all() as { id: string; slug: string | null; retired_terms: string }[];
+      return rows.map((r) => ({
+        id: r.id,
+        type: 'decision' as const,
+        status: 'active' as const,
+        ...(r.slug ? { slug: r.slug } : {}),
+        retired_terms: JSON.parse(r.retired_terms) as unknown[],
+      }));
+    });
   }
 
   /**
