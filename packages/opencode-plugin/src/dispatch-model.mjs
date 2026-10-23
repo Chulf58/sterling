@@ -140,6 +140,12 @@ export function dispatchModel(config, args) {
   const intent = parseIntent(args?.prompt);
   const role = agentRole(args?.agent);
   const named = typeof args?.model === 'string' && args.model ? args.model : null;
+  // A call that resumes a subagent session (`sessionID` on 2.1.2's subagent tool, the old task_id)
+  // keeps that session's own model: a model on the call would beat it and switch a warm session
+  // (an Opus lane resumed as Sonnet). Only an explicit intent line resolves a model for a resume.
+  if (typeof args?.sessionID === 'string' && args.sessionID && intent.kind === 'normal') {
+    return { model: null, line: named ? null : 'MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied).' };
+  }
   const res = resolveDispatchModel(role, intent, config);
   if (res === null) {
     return intent.kind === 'normal'
@@ -165,10 +171,23 @@ export function dispatchModel(config, args) {
 const variantIds = (entry) => (Array.isArray(entry?.variants) ? entry.variants.map((v) => (typeof v === 'string' ? v : v?.id)).filter((v) => typeof v === 'string') : null);
 
 /**
+ * The models in a `ctx.model.list()` result. OpenCode 2.1.2's plugin context returns the
+ * HTTP shape, `{ location, data: [Model.Info] }` (the binary's `model.list` wraps the
+ * registry's array as `{ location, data }`; GET /api/model documents the same body), not
+ * a bare array, so reading it as an array failed every dispatch's variant check and the
+ * pressure watch's window lookup with no error to report. A bare array is accepted too;
+ * anything else comes back unchanged for the caller to refuse as "not a list".
+ */
+export function modelListItems(result) {
+  if (Array.isArray(result?.data)) return result.data;
+  return result;
+}
+
+/**
  * The variant guard (user-ruled 2026-10-23, "Send for all, verify live"): a resolved
  * `provider/model#variant` whose model OpenCode lists without that variant runs without
  * it, and the note says so, rather than the dispatch failing. `list` is OpenCode's model
- * list (ctx.model.list(): items { providerID, id or modelID, variants: [{ id }] }).
+ * list (modelListItems of ctx.model.list(): items { providerID, id or modelID, variants: [{ id }] }).
  * Returns { model, note }: `note` is null when the variant is listed. A model that is not
  * in the list, or a list that could not be read (`listError`), keeps the variant, and the
  * note says it was not checked: OpenCode refuses an unavailable model loudly on its own.

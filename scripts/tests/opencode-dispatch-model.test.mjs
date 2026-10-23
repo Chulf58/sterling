@@ -283,7 +283,8 @@ test('seam: the plugin checks a resolved variant against ctx.model.list and drop
   const p = makeProject({});
   const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env: {} });
   const ctx = stubCtx(p.dir);
-  ctx.model.list = async () => LIST;
+  // The real 2.1.2 shape: ctx.model.list() resolves to { location, data: [Model.Info] }, not an array.
+  ctx.model.list = async () => ({ location: { directory: p.dir }, data: LIST });
   const cleanup = await plugin.setup(ctx);
   try {
     const run = async (args, id) => {
@@ -330,4 +331,57 @@ test('seam: a model list that never settles cannot stall the dispatch; the varia
     await cleanup?.();
     p.cleanup();
   }
+});
+
+test('model list shape: modelListItems unwraps { location, data } and accepts a bare array; anything else is left for the guard to refuse', () => {
+  assert.deepEqual(dm.modelListItems({ location: {}, data: LIST }), LIST);
+  assert.deepEqual(dm.modelListItems(LIST), LIST);
+  assert.equal(dm.modelListItems(undefined), undefined);
+  assert.deepEqual(dm.modelListItems({ location: {} }), { location: {} });
+  assert.match(dm.checkVariant(SOL, dm.modelListItems({ location: {} })).note, /could not be read/);
+  assert.deepEqual(dm.checkVariant(SOL, dm.modelListItems({ location: {}, data: LIST })), { model: SOL, note: null });
+});
+
+test('seam: a bare-array ctx.model.list still works', async () => {
+  const p = makeProject({});
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env: {} });
+  const ctx = stubCtx(p.dir);
+  ctx.model.list = async () => LIST;
+  const cleanup = await plugin.setup(ctx);
+  try {
+    const input = { tool: 'subagent', id: 'c_arr', sessionID: 'ses_root', input: { agent: 'sterling/librarian', description: 'd', prompt: 'p' } };
+    await ctx.hooks.tool['execute.before'](input);
+    assert.equal(input.input.model, 'anthropic/claude-haiku-5-5', 'the unlisted variant is dropped');
+  } finally {
+    await cleanup?.();
+    p.cleanup();
+  }
+});
+
+// ── resuming a subagent session (board 25acfbe4) ─────────────────────────────
+
+test('resume: a call with a sessionID and no intent line keeps the session\'s own model; a named model or an intent line still applies', () => {
+  const plain = dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.' });
+  assert.deepEqual(plain, { model: null, line: 'MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied).' });
+  assert.deepEqual(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.', model: OPUS }), { model: null, line: null }, 'a model the call names is the caller\'s pin');
+  assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: brief('hard') }).model, OPUS, 'an intent line resolves as usual');
+  assert.equal(dm.dispatchModel({}, { agent: 'sterling/reviewer', sessionID: 'ses_warm', prompt: brief('fallback=x') }).model, OPUS);
+  assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: '', prompt: 'x' }).model, SONNET, 'an empty sessionID is a new dispatch');
+  assert.throws(() => dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: brief('hrad') }), /MODEL-INTENT/, 'a malformed line still refuses on a resume');
+});
+
+test('seam: resuming leaves the model unset (hobby and work); an intent line sets it; Overpass on is unchanged', async () => {
+  for (const config of [{}, { mode: 'work' }]) {
+    await withPlugin(config, async ({ dispatch }) => {
+      const resumed = await dispatch({ sessionID: 'ses_warm' });
+      assert.equal(Object.hasOwn(resumed.args, 'model'), false, JSON.stringify(config));
+      assert.match(resumed.result, /MODEL: resumed session keeps its own model/);
+      assert.equal((await dispatch({ sessionID: 'ses_warm', prompt: brief('hard') })).args.model, OPUS);
+    });
+  }
+  await withPlugin({ mode: 'work', overpass: { enabled: true } }, async ({ dispatch }) => {
+    const resumed = await dispatch({ sessionID: 'ses_warm' });
+    assert.equal(resumed.args.model, 'overpass/agentic-premium', 'Overpass still sets the tier on a resume');
+    assert.doesNotMatch(resumed.result, /resumed session/);
+  });
 });
