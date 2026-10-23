@@ -61,6 +61,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CORE_SCHEMA, load } from 'js-yaml';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { writeFileAtomic, writeFileAtomicIfChanged } from './atomic-write.mjs';
 export { writeFileAtomic };
@@ -920,49 +921,56 @@ const agentMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : n
 
 /**
  * Whether a Markdown agent's frontmatter disables it: true, false, or null when that is
- * not known. A strict reader, not YAML: it accepts a top-level `disabled` (V2) or
- * `disable` (V1) key, bare or quoted, whose value is a YAML 1.2 core boolean (true, True,
- * TRUE, false, False, FALSE) with an optional trailing comment. Any other mention of either
- * name it cannot place (a flow mapping, a nested or repeated key, a quoted or other value,
- * frontmatter with no closing ---) gives null, so a caller refuses rather than guesses.
- * Text inside another key's value (a block scalar, or a plain or quoted scalar wrapped onto
- * more-indented lines) is not a key and is skipped. A leading UTF-8 BOM is ignored.
+ * not known. The fences follow gray-matter, which OpenCode reads agent files with: the file
+ * must start with `---` (a file that does not has no frontmatter), the rest of that line
+ * may be blank (trailing whitespace), `yaml` or `json`, and the closing fence is the first
+ * `\n---`. The body is parsed with js-yaml's core schema (YAML 1.2), so comments, anchors,
+ * quoting and wrapped scalars are the parser's job, or with JSON.parse for `---json`. A
+ * top-level `disabled` (V2) or `disable` (V1) key whose value is a boolean (true, True, TRUE,
+ * false, False, FALSE) gives that boolean; no such key gives false. Anything Sterling cannot
+ * place gives null, so a caller refuses rather than guesses: any other opening line that
+ * starts with `---` (`----`, `---toml`, `---yml`), no closing fence, frontmatter that does
+ * not parse (a repeated key included), is not a mapping, both keys at once, a non-boolean
+ * value (yes, "true", 1), or a `<<` merge key (whether OpenCode honours it is unproven). A
+ * nested `disabled` is not the agent's own key and is ignored. A leading UTF-8 BOM and CRLF
+ * line ends are handled.
  */
 export function markdownDisabled(text) {
-  // A leading UTF-8 BOM is not part of the frontmatter fence.
+  // A leading UTF-8 BOM is not part of the frontmatter fence; normalize makes CRLF into LF.
   const doc = normalize(text).replace(/^\uFEFF/, '');
-  const token = /\bdisabled?\b/;
-  if (!doc.startsWith('---\n')) return false;
-  const m = doc.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
-  if (!m) return token.test(doc) ? null : false;
-  let found = null;
-  let seen = 0;
-  // inBlock: the lines after a top-level key whose value is a block scalar (| or >) or a
-  // plain or quoted scalar, where a more-indented line is that value's text, not a key.
-  let inBlock = false;
-  for (const line of m[1].split('\n')) {
-    if (inBlock && (/^\s/.test(line) || line === '')) continue;
-    inBlock = false;
-    if (line.trim() === '' || /^\s*#/.test(line)) continue;
-    const key = line.match(/^(?:"([^"]*)"|'([^']*)'|([A-Za-z_][\w-]*))\s*:(?:\s+(.*))?$/);
-    if (!key) {
-      if (token.test(line)) return null;
-      continue;
-    }
-    const name = key[1] ?? key[2] ?? key[3];
-    const value = (key[4] ?? '').replace(/\s+#.*$/, '').trim();
-    if (name !== 'disabled' && name !== 'disable') {
-      // An empty value opens a nested mapping or list, whose keys are not placed here.
-      if (value !== '') inBlock = true;
-      continue;
-    }
-    seen++;
-    if (/^(?:true|True|TRUE)$/.test(value)) found = true;
-    else if (/^(?:false|False|FALSE)$/.test(value)) found = false;
-    else return null;
+  // OpenCode reads the frontmatter with gray-matter, whose opening fence is any text that
+  // starts with `---` (the rest of that line names the engine) and whose closing fence is the
+  // first `\n---`. Text that does not start with `---` has no frontmatter.
+  if (!doc.startsWith('---')) return false;
+  // `----` is no fence to gray-matter either, but it is a fence-like line Sterling will not guess at.
+  if (doc.charAt(3) === '-') return null;
+  const eol = doc.indexOf('\n');
+  const engine = doc.slice(3, eol === -1 ? doc.length : eol).trim();
+  // An engine other than yaml and json (toml, js, yml...) is one Sterling does not parse.
+  if (engine !== '' && engine !== 'yaml' && engine !== 'json') return null;
+  const rest = eol === -1 ? '' : doc.slice(eol);
+  const close = rest.indexOf('\n---');
+  // gray-matter would read to the end of the file; Sterling will not guess where the keys stop.
+  if (close === -1) return null;
+  const matter = rest.slice(0, close);
+  // Blank or comment-only frontmatter has no keys (gray-matter says the same; js-yaml calls it an empty document).
+  if (matter.split('\n').every((line) => /^\s*(?:#.*)?$/.test(line))) return false;
+  let data;
+  try {
+    // The core schema: true/false only (yes, on and y stay strings, so they refuse), and no
+    // merge-key resolution, so a `<<` stays a visible key. A repeated key throws.
+    data = engine === 'json' ? JSON.parse(matter) : load(matter, { schema: CORE_SCHEMA });
+  } catch {
+    return null;
   }
-  if (seen > 1) return null;
-  return found === true;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  // Whether OpenCode honours `<<: *alias` is unproven, so a merge key is unknown, never enabled.
+  if (Object.hasOwn(data, '<<')) return null;
+  const present = ['disabled', 'disable'].filter((k) => Object.hasOwn(data, k));
+  if (present.length === 0) return false;
+  if (present.length > 1) return null;
+  const value = data[present[0]];
+  return typeof value === 'boolean' ? value : null;
 }
 
 /**

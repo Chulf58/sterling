@@ -450,8 +450,14 @@ const agentFileWith = (dir, frontmatter) => {
 for (const [form, fm, expected] of [
   ['a quoted key', 'description: d\n"disabled": true', /would not see sterling\/implementor/],
   ['a capitalised boolean', 'description: d\ndisabled: True', /would not see sterling\/implementor/],
-  ['a flow mapping', '{disabled: true, mode: subagent}', /could not check .*sets disable or disabled in a form Sterling cannot read/],
+  ['a flow mapping', '{disabled: true, mode: subagent}', /would not see sterling\/implementor/],
   ['an unparseable value', 'description: d\ndisabled: yes', /could not check .*sets disable or disabled in a form Sterling cannot read/],
+  // Board 321641b0 (Sol re-check of c653a064): values the line reader took for scalars.
+  ['a disable key after a mapping opened by a comment-only value', 'description: d\noptions: # note\n  temperature: 0\ndisabled: true', /would not see sterling\/implementor/],
+  ['a disable key after an anchor-only mapping', 'description: d\nbase: &a\n  mode: subagent\ndisabled: true', /would not see sterling\/implementor/],
+  ['a disabled key merged in by an anchored alias', 'description: d\nbase: &a\n  disabled: true\n<<: *a', /could not check .*sets disable or disabled in a form Sterling cannot read/],
+  ['frontmatter that does not parse', 'description: d\n  disabled: true\nmode: [subagent', /could not check .*sets disable or disabled in a form Sterling cannot read/],
+  ['a repeated key', 'description: d\ndisabled: false\ndisabled: true', /could not check .*sets disable or disabled in a form Sterling cannot read/],
 ]) {
   test(`frontmatter disable as ${form} refuses the move`, async () => {
     const t = makeTree();
@@ -477,6 +483,25 @@ test('a plain Markdown agent whose text only mentions "disabled" outside a key i
     t.cleanup();
   }
 });
+
+// A nested `disabled` (under a mapping opened by a comment-only or anchor-only value) is that
+// mapping's own key, not the agent's, which a real parse tells apart from a top-level one.
+for (const [label, fm] of [
+  ['a comment-only mapping value', 'description: d\noptions: # note\n  disabled: true'],
+  ['an anchor-only mapping value', 'description: d\noptions: &a\n  disabled: true'],
+]) {
+  test(`a nested disabled under ${label} is not the agent's own key: the move is allowed`, async () => {
+    const t = makeTree();
+    agentFileWith(t.worktree, fm);
+    const s = await setup(t, own(t));
+    try {
+      await move1(s, t);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
 
 // Sol review of bb73d581: a wrapped scalar's continuation lines are its text, not keys,
 // and a leading UTF-8 BOM does not hide the frontmatter.
@@ -513,6 +538,68 @@ test('a BOM-prefixed disabled agent is read as disabled: the move is refused', a
     t.cleanup();
   }
 });
+
+// Sol review of the js-yaml reader: OpenCode reads the file with gray-matter, whose opening
+// fence is any text starting with `---` (the rest of the line names the engine), so a fence
+// with trailing whitespace, `---yaml` or `---json` is frontmatter, not text. Each form is run
+// through the same session_move guard as the plain fence above.
+const REFUSED = /would not see sterling\/implementor/;
+const UNREADABLE = /could not check .*sets disable or disabled in a form Sterling cannot read/;
+for (const [label, text, outcome] of [
+  ['a fence with trailing spaces', '---   \ndescription: d\ndisabled: true\n---\nbody\n', REFUSED],
+  ['a fence with a trailing tab', '---\t\ndescription: d\ndisabled: true\n---\nbody\n', REFUSED],
+  ['a ---yaml fence', '---yaml\ndescription: d\ndisabled: true\n---\nbody\n', REFUSED],
+  ['a ---json fence', '---json\n{"description": "d", "disabled": true}\n---\nbody\n', REFUSED],
+  ['a ---json fence with the V1 disable key', '---json\n{"disable": true}\n---\nbody\n', REFUSED],
+  ['CRLF line ends', '---\r\ndescription: d\r\ndisabled: true\r\n---\r\nbody\r\n', REFUSED],
+  ['CRLF line ends and a trailing-space fence', '---  \r\ndescription: d\r\ndisabled: true\r\n---\r\nbody\r\n', REFUSED],
+  ['a BOM, a ---yaml fence and CRLF', '\uFEFF---yaml\r\ndescription: d\r\ndisabled: true\r\n---\r\nbody\r\n', REFUSED],
+  ['a ---json fence with a non-boolean disabled', '---json\n{"disabled": "true"}\n---\nbody\n', UNREADABLE],
+  ['a ---json fence that is not JSON', '---json\ndisabled: true\n---\nbody\n', UNREADABLE],
+  ['a ---json fence holding an array', '---json\n[true]\n---\nbody\n', UNREADABLE],
+  ['a ---toml fence', '---toml\ndisabled = true\n---\nbody\n', UNREADABLE],
+  ['a ---yml fence', '---yml\ndisabled: true\n---\nbody\n', UNREADABLE],
+  ['an opening line with text after the dashes', '--- # note\ndisabled: true\n---\nbody\n', UNREADABLE],
+  ['a ---- opening line', '----\ndisabled: true\n----\nbody\n', UNREADABLE],
+  ['an opening fence with no closing fence', '---\ndescription: d\ndisabled: true\nbody\n', UNREADABLE],
+  ['a ---yaml fence with no closing fence', '---yaml\ndescription: d\nmode: subagent\n', UNREADABLE],
+  ['a lone fence', '---', UNREADABLE],
+]) {
+  test(`frontmatter with ${label} is handled like gray-matter: the move is refused`, async () => {
+    const t = makeTree();
+    agentFileRaw(t.worktree, text);
+    const s = await setup(t, own(t));
+    try {
+      await assert.rejects(move1(s, t), outcome);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
+
+for (const [label, text] of [
+  ['a fence with trailing spaces', '---   \ndescription: d\nmode: subagent\n---\nbody\n'],
+  ['a ---yaml fence', '---yaml\ndescription: d\nmode: subagent\n---\nbody\n'],
+  ['a ---json fence', '---json\n{"description": "d", "disabled": false}\n---\nbody\n'],
+  ['a ---json fence with other keys', '---json\n{"description": "d", "mode": "subagent"}\n---\nbody\n'],
+  ['CRLF line ends', '---\r\ndescription: d\r\nmode: subagent\r\n---\r\nbody\r\n'],
+  ['an empty ---json fence', '---json\n---\nbody\n'],
+  ['no frontmatter at all', 'just a body that says disabled: true\n'],
+  ['a body that begins after a blank line', '\n---\ndisabled: true\n---\nbody\n'],
+]) {
+  test(`frontmatter with ${label} that does not disable the agent is allowed`, async () => {
+    const t = makeTree();
+    agentFileRaw(t.worktree, text);
+    const s = await setup(t, own(t));
+    try {
+      await move1(s, t);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
 
 test('moveTarget expands ~ and resolves a relative path against the base', () => {
   assert.equal(move.moveTarget('~/wt', '/a/b', '/home/u'), '/home/u/wt');
