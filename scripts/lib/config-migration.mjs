@@ -1,9 +1,12 @@
-// Drop retired config.models keys from a project's .sterling/config.json, for
-// sync-agents and init (board c45a4507). DROP ONLY, never a carry (user-ruled
+// Drop retired config.models keys from a project's .sterling/config.json, and add the
+// model defaults a live config lacks, for sync-agents and init (board c45a4507). DROP ONLY, never a carry (user-ruled
 // 2026-10-23): the keys have been ignored since the roster rename, so removing
 // one changes no rendered model; each removed value is reported so the user can
-// set the successor by hand. The rewrite is migrateRetiredModelKeys in
-// packages/schemas; this wraps it in two steps so a caller can defer the write:
+// set the successor by hand. The add step (addModelDefaults in packages/schemas,
+// user-ruled 2026-10-23, "Write it into each config") writes, once per file, the
+// opencode_model of reviewer and sparring and the implementor's hard_task where they are
+// absent, never overwriting a value, and reports each add. The rewrites are
+// migrateRetiredModelKeys and addModelDefaults in packages/schemas; this wraps them in two steps so a caller can defer the write:
 //   prepareConfigMigration  reads, parses and plans; writes nothing.
 //   commitConfigMigration   replaces the file only if its bytes are still the ones
 //                           the plan was made from (the compare-and-swap config_set
@@ -12,10 +15,10 @@
 //                           file's mode. A concurrent change is refused, never lost.
 // A config that does not parse is never touched, and a migrated config that would
 // not parse is never written. The output stays the raw document minus the retired
-// keys: parseConfig is a gate only, never serialized (it would materialize defaults).
+// keys plus the added defaults: parseConfig is a gate only, never serialized (it would materialize defaults).
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { migrateRetiredModelKeys, parseConfig } from '@sterling/schemas';
+import { MODEL_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, parseConfig } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -33,12 +36,21 @@ export function describeMigration(dropped) {
   );
 }
 
+/** One report line per added default (addModelDefaults). */
+export function describeAdded(added) {
+  return added.map((a) =>
+    a.field === 'entry'
+      ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role} added as the shipped default ${show(a.value)}, so the System tab shows the model each OpenCode dispatch of this role runs on; change it there`
+      : `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role}.${a.field} added as ${show(a.value)} (the model the conductor named on these dispatches before); change it in the System tab, or clear it to run the role on its Claude model${a.field === 'hard_task' ? ' (cleared: no separate hard lane)' : ''}`
+  );
+}
+
 class ConcurrentChange extends Error {}
 
 const oneLine = (err) => err.message.replace(/\s+/g, ' ');
 
 /** Plan the migration of `<projectDir>/.sterling/config.json` and write nothing.
- *  status: absent (no file), unchanged (no retired key), ready (a plan to commit) or
+ *  status: absent (no file), unchanged (no retired key, defaults already applied), ready (a plan to commit) or
  *  refused (the file stays as it is; `lines[0]` says why). */
 export function prepareConfigMigration(projectDir) {
   const configPath = join(projectDir, '.sterling', 'config.json');
@@ -54,7 +66,8 @@ export function prepareConfigMigration(projectDir) {
     return refuse(`does not parse or validate (${oneLine(err)})`);
   }
   const m = migrateRetiredModelKeys(raw);
-  if (!m.changed) return { status: 'unchanged', lines: [] };
+  const d = addModelDefaults(m.config);
+  if (!m.changed && !d.changed) return { status: 'unchanged', lines: [] };
   // A linked .sterling would send the rewrite to a config outside the project.
   try {
     containedPath(projectDir, '.sterling', 'dir');
@@ -65,7 +78,7 @@ export function prepareConfigMigration(projectDir) {
   const stat = lstatSync(configPath);
   if (stat.isSymbolicLink()) return refuse('is a symlink, which the rewrite would replace');
   try {
-    parseConfig(m.config);
+    parseConfig(d.config);
   } catch (err) {
     return refuse(`would not validate after the migration (${oneLine(err)})`);
   }
@@ -76,10 +89,15 @@ export function prepareConfigMigration(projectDir) {
     shown,
     originalBytes,
     mode: stat.mode & 0o777,
-    next: JSON.stringify(m.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
-    config: m.config,
+    next: JSON.stringify(d.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
+    config: d.config,
     dropped: m.dropped,
-    lines: describeMigration(m.dropped),
+    added: d.added,
+    lines: [
+      ...describeMigration(m.dropped),
+      ...describeAdded(d.added),
+      ...(d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : []),
+    ],
   };
 }
 

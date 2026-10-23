@@ -146,8 +146,11 @@ test('dispatch pin: off, or on in hobby mode, leaves the call alone', async () =
       const named = await s.dispatch({ model: 'anthropic/claude-sonnet-5' });
       assert.equal(named.args.model, 'anthropic/claude-sonnet-5', JSON.stringify(config));
       assert.doesNotMatch(named.result, /OVERPASS/);
+      // Changed with the dispatch model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch):
+      // Overpass still leaves the call alone, but a call that names no model now gets its role's config.models model.
       const unnamed = await s.dispatch({}, 'call_2');
-      assert.equal(Object.hasOwn(unnamed.args, 'model'), false, JSON.stringify(config));
+      assert.equal(unnamed.args.model, 'anthropic/claude-sonnet-5-5#high', JSON.stringify(config));
+      assert.doesNotMatch(unnamed.result, /OVERPASS/);
     } finally {
       await s.cleanup();
       p.cleanup();
@@ -294,8 +297,10 @@ test('bypass: the marker means nothing while Overpass is off, so even a malforme
       const named = await s.dispatch({ model: SOL, prompt: BYPASS_BRIEF('x') });
       assert.equal(named.args.model, SOL, JSON.stringify(config));
       assert.doesNotMatch(named.result, /OVERPASS/);
+      // Changed with the dispatch model resolver: an unnamed call off Overpass gets its role's config.models model;
+      // the malformed marker still refuses nothing.
       const empty = await s.dispatch({ prompt: BYPASS_BRIEF('') }, 'call_2');
-      assert.equal(Object.hasOwn(empty.args, 'model'), false, JSON.stringify(config));
+      assert.equal(empty.args.model, 'anthropic/claude-sonnet-5-5#high', JSON.stringify(config));
     } finally {
       await s.cleanup();
       p.cleanup();
