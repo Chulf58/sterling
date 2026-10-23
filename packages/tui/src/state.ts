@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_TIERS, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -255,6 +255,11 @@ export interface AgentRosterSnapshot {
   /** config.overpass as the System tab reads it (the controller fills it from the
    *  raw config; absent → the schema defaults, off). */
   overpass?: OverpassView;
+  /** maintenance_worker.opencode_model as the Maintenance worker row shows it (the
+   *  controller fills it from the raw config): opencodeModel is null when unset, and
+   *  `invalid` carries the JSON text of a value that is not a usable string, and `unreadable`
+   *  the reason when the config cannot be read or is not an object. Absent → unset. */
+  maintenanceWorker?: { opencodeModel: string | null; invalid?: string; unreadable?: string };
 }
 
 /** The Overpass settings the three System-tab rows show. A boolean field is
@@ -385,15 +390,15 @@ export function driftOf(installed: string, config: string): boolean {
 /** System tab, LOW-3 (second Opus re-check round, feat/gap-hunt-round-1
  *  22e20f9): the ONLY config.models keys the System tab may render/edit —
  *  every governed agent key from AGENT_MODEL_KEY (the classless four-agent
- *  roster, the former ruling 'agent-roster-is-classless-four-agents' (not in the current store) plus
- *  'classifiers', the schema's one legitimate config-only key
- *  (packages/schemas/src/config.ts's `models` object — the only 5 keys it
- *  actually defines). A relic/legacy key such as 'coder_hard' — no agent has
+ *  roster, the former ruling 'agent-roster-is-classless-four-agents' (not in the current store)).
+ *  There is no config-only key any more: 'classifiers' belonged to the retired
+ *  Haiku noise-gate and was removed (user-ruled 2026-10-23, "Remove it"). A
+ *  relic/legacy key such as 'coder_hard' or 'classifiers' — no agent has
  *  EVER read it, and update/init now flag it as unread — is filtered out
  *  here rather than trusted from whatever `configModels` the caller hands
  *  in: a defensive floor, not just a fixture cleanup, since an old
  *  project's config.json can carry a stray key forever. */
-const SYSTEM_TAB_MODEL_KEYS = new Set<string>([...Object.values(AGENT_MODEL_KEY), 'classifiers']);
+const SYSTEM_TAB_MODEL_KEYS = new Set<string>(Object.values(AGENT_MODEL_KEY));
 
 /** §7.2 effort rule as data: no System-tab key ever offers xhigh or max. The
  *  one-time exception (coder_hard) was itself a config-only key no agent
@@ -413,6 +418,24 @@ type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' };
 function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string } | undefined): ModelOption[] {
   const opts: ModelOption[] = entries.map((entry) => ({ kind: 'entry', entry }));
   if (config?.opencode_model) opts.push({ kind: 'clear' });
+  return opts;
+}
+
+/** The System tab's roster keys: the config.models keys it may show, then the
+ *  maintenance worker. The worker is no config.models key (its model is
+ *  maintenance_worker.opencode_model and its Overpass tier is a role of its own), so it
+ *  is appended here and every cursor index below the roster counts it. */
+function systemKeys(snap: AgentRosterSnapshot): string[] {
+  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k)), MAINTENANCE_WORKER_ROLE];
+}
+
+/** The worker row's model picker (Overpass off): every catalog entry as the OpenCode
+ *  <vendor>/<id> reference the worker runs through, then, when one is set, an option
+ *  that clears it. */
+type WorkerModelOption = { kind: 'entry'; ref: string; label: string } | { kind: 'clear' };
+function workerModelOptions(entries: CatalogEntry[], current: string | null | undefined): WorkerModelOption[] {
+  const opts: WorkerModelOption[] = entries.map((e) => ({ kind: 'entry', ref: `${e.vendor ?? 'anthropic'}/${e.id}`, label: e.label }));
+  if (current) opts.push({ kind: 'clear' });
   return opts;
 }
 
@@ -663,7 +686,15 @@ export interface BoardEditEffect {
   version: number;
   measuredAtHead?: string;
 }
+/** System tab, Maintenance worker row with Overpass off (board c97ddc97): sets (`to`) or
+ *  clears (`to` absent) config.maintenance_worker.opencode_model and writes nothing else. */
+export interface WorkerModelEffect {
+  type: 'worker_model';
+  from?: string;
+  to?: string;
+}
 export type Effect =
+  | WorkerModelEffect
   | SelectEffect
   | QuitEffect
   | ModelSwapEffect
@@ -968,24 +999,72 @@ export const clipEllipsis = (s: string, width: number): string =>
  * KEY (SYSTEM_TAB_MODEL_KEYS — LOW-3, second Opus re-check round: a relic
  * key like 'coder_hard' is filtered out here regardless of what the caller's
  * snapshot carries), in insertion order, id 'sys:<key>'. Governed agents
- * (AGENT_MODEL_KEY) list under their key; the INSTALLED frontmatter value
- * renders (the copy that governs dispatch), and a key whose installed value
+ * (AGENT_MODEL_KEY) render the INSTALLED frontmatter value
+ * (the copy that governs dispatch), and a key whose installed value
  * disagrees with config is flagged drift with a visible marker (AC4; the P5
- * backstop for a partial projection). classifiers, the one config-only key,
- * renders its config value with no governed agent. When ui.selector is open
+ * backstop for a partial projection). The Maintenance worker row follows the
+ * config.models rows (systemKeys). When ui.selector is open
  * on a key, that row also renders the inline picker options (catalog
  * entries at the model stage; effort options at the effort stage). Every
  * line is clipped to `width` so the 33-col floor holds.
  */
 export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
   const snap = snapshot ?? EMPTY_ROSTER;
-  const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
+  const keys = systemKeys(snap);
   const selector = ui.selector;
   const clip = (s: string): string => clipEllipsis(s, width);
   const overpassView = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
   const overpassEffective = overpassOffered(snap) && overpassView.effective;
+  // The tier and effort pickers, shared by every Overpass role row, the worker's included.
+  const overpassPickerLines = (key: string): SystemLine[] => {
+    const out: SystemLine[] = [];
+    if (!selector || selector.key !== key) return out;
+    if (selector.stage === 'tier' && isOverpassRole(key)) {
+      overpassTierOptions(overpassView, key).forEach((tier, oi) => {
+        const m = oi === selector.highlight ? '› ' : '  ';
+        out.push({ text: clip(`  ${m}tier ${tier}`), kind: 'option', selected: oi === selector.highlight });
+      });
+    } else if (selector.stage === 'role_effort') {
+      OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
+        const m = oi === selector.highlight ? '› ' : '  ';
+        out.push({ text: clip(`  ${m}effort ${eff}`), kind: 'option', selected: oi === selector.highlight });
+      });
+    }
+    return out;
+  };
 
   const rows: SystemRow[] = keys.map((key, i) => {
+    if (key === MAINTENANCE_WORKER_ROLE) {
+      // The Maintenance worker row (board c97ddc97): its model is
+      // maintenance_worker.opencode_model, not a config.models entry.
+      const worker = snap.maintenanceWorker ?? { opencodeModel: null };
+      const marker = i === ui.cursor ? '› ' : '  ';
+      const saved = worker.invalid !== undefined ? `invalid ${worker.invalid}` : worker.opencodeModel;
+      const lines: SystemLine[] = [];
+      if (overpassEffective) {
+        const route = overpassRoute(overpassView, MAINTENANCE_WORKER_ROLE);
+        lines.push({ text: clip(`${marker}Maintenance worker: ${route.tier} (Overpass)${route.effort ? ` ${route.effort}` : ''}`), kind: 'title', selected: i === ui.cursor });
+        if (worker.unreadable !== undefined) lines.push({ text: clip(`    maintenance_worker unreadable: ${worker.unreadable}`), kind: 'meta' });
+        else if (saved) lines.push({ text: clip(`    saved OpenCode: ${saved}`), kind: 'meta' });
+      } else if (worker.unreadable !== undefined) {
+        // an unreadable config is not "not set": say what is wrong and claim nothing about the model
+        lines.push({ text: clip(`${marker}Maintenance worker: config unreadable: ${worker.unreadable}`), kind: 'title', selected: i === ui.cursor });
+      } else {
+        lines.push({ text: clip(`${marker}Maintenance worker: ${saved ?? 'not set: worker will not start'}`), kind: 'title', selected: i === ui.cursor });
+        lines.push({ text: clip(`    claude CLI, when on PATH: ${MAINTENANCE_WORKER_CLAUDE_MODEL} ${MAINTENANCE_WORKER_CLAUDE_EFFORT}`), kind: 'meta' });
+      }
+      if (selector && selector.key === key) {
+        if (selector.stage === 'model') {
+          workerModelOptions(snap.catalog.entries, worker.opencodeModel).forEach((o, oi) => {
+            const m = oi === selector.highlight ? '› ' : '  ';
+            lines.push({ text: clip(`  ${m}${o.kind === 'clear' ? 'OpenCode: clear the model' : `${o.ref} ${o.label}`}`), kind: 'option', selected: oi === selector.highlight });
+          });
+        } else {
+          lines.push(...overpassPickerLines(key));
+        }
+      }
+      return { id: `sys:${key}`, key, drift: false, agents: [], lines };
+    }
     const config = snap.configModels[key];
     const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
     const agentNames = governed.map((a) => a.name);
@@ -1016,21 +1095,20 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
           { text: clip(`    saved: ${config.model} ${config.effort}${drift ? '  drift' : ''}`), kind: 'meta' },
         ]
       : [{ text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected }];
-    for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
-    // While Overpass is effective the saved override is kept but not applied
-    if (config.opencode_model) lines.push({ text: clip(`    OpenCode: ${config.opencode_model}${overpassEffective ? ' (inactive: Overpass)' : ''}`), kind: 'body' });
+    // The agent-name line is dropped when it only repeats the header (AGENT_MODEL_KEY is an
+    // identity map now); a name that differs from the key stays listed (board 4e7a6bfc).
+    if (!agentNames.every((name) => name === key)) for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
+    // While Overpass is effective the saved override is kept but not applied: it is shown
+    // dimmed like the saved model, and plain 'OpenCode:' while it governs the role.
+    if (config.opencode_model) {
+      lines.push(overpassEffective
+        ? { text: clip(`    saved OpenCode: ${config.opencode_model}`), kind: 'meta' }
+        : { text: clip(`    OpenCode: ${config.opencode_model}`), kind: 'body' });
+    }
 
     if (selector && selector.key === key) {
-      if (selector.stage === 'tier' && isOverpassRole(key)) {
-        overpassTierOptions(overpassView, key).forEach((tier, oi) => {
-          const m = oi === selector.highlight ? '› ' : '  ';
-          lines.push({ text: clip(`  ${m}tier ${tier}`), kind: 'option', selected: oi === selector.highlight });
-        });
-      } else if (selector.stage === 'role_effort') {
-        OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
-          const m = oi === selector.highlight ? '› ' : '  ';
-          lines.push({ text: clip(`  ${m}effort ${eff}`), kind: 'option', selected: oi === selector.highlight });
-        });
+      if (selector.stage === 'tier' || selector.stage === 'role_effort') {
+        lines.push(...overpassPickerLines(key));
       } else if (selector.stage === 'model') {
         // a non-anthropic entry is offered as the OpenCode override only, and
         // says so; a set override adds a last option that clears it
@@ -2027,6 +2105,7 @@ function reduceNodes(
   const pickerOptions = (sel: NonNullable<UiState['selector']>): number =>
     sel.stage === 'tier' ? overpassTierOptions(roster!.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key as OverpassRole).length
     : sel.stage === 'role_effort' ? OVERPASS_EFFORT_OPTIONS.length
+    : sel.stage === 'model' && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster!.catalog.entries, roster!.maintenanceWorker?.opencodeModel).length
     : sel.stage === 'model' ? modelOptions(roster!.catalog.entries, roster!.configModels[sel.key]).length
     : effortOptions(sel.key).length;
 
@@ -2213,7 +2292,7 @@ function reduceNodes(
         // filters `keys` — a relic key never occupies a cursor slot here either,
         // so the two stay in lockstep (a stray key in roster.configModels would
         // otherwise misalign every row/toggle index below it).
-        const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
+        const sysKeys = systemKeys(roster);
         // + 3: the sparring-partner toggle row (index sysKeys.length) and its
         // model row (sysKeys.length + 1), appended after the config.models
         // roster (board a0714d0b) — then the tdd toggle row (sysKeys.length + 2),
@@ -2382,11 +2461,28 @@ function reduceNodes(
               effects.push({ type: 'overpass_role', role: roleKey, tier: sel.tier, ...(effort === 'default' ? {} : { effort }) });
               return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
             }
+            if (sel && sel.stage === 'model' && sel.key === MAINTENANCE_WORKER_ROLE) {
+              // the worker's model commits at once: the picked <vendor>/<id>, or its removal
+              const current = roster.maintenanceWorker?.opencodeModel ?? undefined;
+              const option = workerModelOptions(roster.catalog.entries, current)[sel.highlight];
+              if (!option) return { ui: { ...ui, selector: undefined }, effects };
+              const to = option.kind === 'clear' ? undefined : option.ref;
+              if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
+                return { ui: { ...ui, selector: undefined, notice: `Maintenance worker model refused: '${to}' is not a <provider>/<model> id` }, effects };
+              }
+              effects.push({ type: 'worker_model', from: current, to });
+              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+            }
+            if (!sel && key === MAINTENANCE_WORKER_ROLE && roster.maintenanceWorker?.unreadable !== undefined) {
+              return { ui: { ...ui, cursor, notice: `Maintenance worker model not editable: config unreadable: ${roster.maintenanceWorker.unreadable}` }, effects };
+            }
             if (!sel) {
               // do NOT open a picker on an empty/invalid catalog (audit finding
               // 24/43): the selector would show zero rows and every commit would
-              // be silently refused — surface a notice instead.
-              if (roster.catalog.entries.length === 0) {
+              // be silently refused — surface a notice instead. The worker may
+              // still clear a model it has, so only its entry-less, model-less
+              // picker is empty.
+              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : roster.catalog.entries.length === 0) {
                 return { ui: { ...ui, cursor, notice: 'model catalog empty or invalid — nothing to pick; refresh the catalog first' }, effects };
               }
               // open the MODEL picker on the key under the cursor (highlight 0)

@@ -5200,7 +5200,6 @@ var init_config = __esm({
         "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-        classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
         // librarian is mechanical clerking — cheap model, low effort (P8). The
         // roster is classless (decision agent-roster-is-classless-four-agents), and
         // the debugger role it rejected has no key here.

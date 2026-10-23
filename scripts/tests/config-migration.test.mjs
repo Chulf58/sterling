@@ -429,3 +429,24 @@ test('implementor-hard move: a hard_task model that is neither a Claude id nor <
     cleanup(dir);
   }
 });
+
+// Board 07ee17a9 (user-ruled 2026-10-23, "Remove it"): models.classifiers belonged to the retired Haiku
+// noise-gate and nothing reads it, so a live config's key migrates out as a retired key, reported with
+// its value in its own words (not the roster-rename wording).
+test('a live models.classifiers key is dropped as a retired key, with its value and an accurate reason, and the rest of models is kept', () => {
+  const dir = project(JSON.stringify({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' }, classifiers: { model: 'claude-haiku-5-5', effort: 'low' } } }));
+  try {
+    const plan = prepareConfigMigration(dir);
+    assert.equal(plan.status, 'ready');
+    assert.deepEqual(plan.dropped, [{ key: 'classifiers', value: { model: 'claude-haiku-5-5', effort: 'low' } }]);
+    const line = plan.lines.find((l) => l.includes('models.classifiers'));
+    assert.match(line, /models\.classifiers dropped \(a retired key: it belonged to the retired Haiku noise-gate and nothing read it\); value was \{"model":"claude-haiku-5-5","effort":"low"\}/);
+    assert.doesNotMatch(line, /roster rename/);
+    assert.equal(commitConfigMigration(plan).status, 'migrated');
+    const after = JSON.parse(read(dir));
+    assert.ok(!('classifiers' in after.models), 'the key is gone from the file');
+    assert.ok('implementor' in after.models, 'the other keys stay');
+  } finally {
+    cleanup(dir);
+  }
+});

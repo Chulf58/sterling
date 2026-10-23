@@ -82,7 +82,7 @@ test('mode row: a separate single-entry modeRows array; rows/sparringRows/tddRow
   assert.strictEqual(typeof buildSystemTab, 'function');
   const snap = snapshot({ mode: 'hobby' });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  assert.equal(view.rows.length, Object.keys(snap.configModels).length);
+  assert.equal(view.rows.length, Object.keys(snap.configModels).length + 1);
   assert.equal(view.sparringRows?.length, 2);
   assert.equal(view.tddRows?.length, 1);
   assert.equal(view.modeRows?.length, 1);
@@ -109,7 +109,7 @@ test('mode row: DOWN from the tdd row lands on it; DOWN again moves to the hando
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby' });
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 2 }), key('DOWN'), undefined, undefined, snap);
     assert.equal(down.ui.cursor, n + 3);
     const next = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
@@ -134,7 +134,7 @@ test('mode row: ENTER and SPACE emit mode_toggle with the NEW mode (hobby→work
     ];
     for (const [mode, k, next] of cases) {
       const snap = snapshot(mode === undefined ? {} : { mode });
-      const n = Object.keys(snap.configModels).length;
+      const n = Object.keys(snap.configModels).length + 1;
       const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key(k), undefined, undefined, snap);
       const effect = r.effects.find((e) => e.type === 'mode_toggle');
       assert.ok(effect, `${k} on the mode row emits mode_toggle (from ${mode})`);

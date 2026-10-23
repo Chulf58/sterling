@@ -44369,7 +44369,6 @@ var configSchema = external_exports.object({
     "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
@@ -44706,7 +44705,10 @@ var configSchema = external_exports.object({
 });
 var DEFAULT_OVERPASS_PROVIDER = "overpass";
 var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight"];
+var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+var MAINTENANCE_WORKER_ROLE = "maintenance-worker";
+var MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
+var MAINTENANCE_WORKER_CLAUDE_EFFORT = "medium";
 var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -44719,7 +44721,8 @@ var DEFAULT_OVERPASS_ROLE_TIERS = {
   reviewer: DEFAULT_OVERPASS_TIER,
   librarian: DEFAULT_OVERPASS_TIER,
   sparring: "agentic-premium-max",
-  preflight: DEFAULT_OVERPASS_TIER
+  preflight: DEFAULT_OVERPASS_TIER,
+  "maintenance-worker": DEFAULT_OVERPASS_TIER
 };
 function resolveOverpassRoles(raw, provider) {
   if (raw !== void 0 && !isPlainObject(raw)) {
@@ -44791,7 +44794,8 @@ var RETIRED_MODEL_KEYS = [
   "test_writer",
   "reviewers",
   "implementation_architect",
-  "debugger"
+  "debugger",
+  "classifiers"
 ];
 var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function normalizeRawConfig(raw) {
@@ -51721,7 +51725,7 @@ var EMPTY_ROSTER = {
 function driftOf(installed, config) {
   return installed !== config;
 }
-var SYSTEM_TAB_MODEL_KEYS = /* @__PURE__ */ new Set([...Object.values(AGENT_MODEL_KEY), "classifiers"]);
+var SYSTEM_TAB_MODEL_KEYS = new Set(Object.values(AGENT_MODEL_KEY));
 function effortOptions(key) {
   return ["low", "medium", "high"];
 }
@@ -51729,6 +51733,15 @@ var MODEL_VALUE_RE = /^claude-/;
 function modelOptions(entries, config) {
   const opts = entries.map((entry) => ({ kind: "entry", entry }));
   if (config?.opencode_model)
+    opts.push({ kind: "clear" });
+  return opts;
+}
+function systemKeys(snap) {
+  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k)), MAINTENANCE_WORKER_ROLE];
+}
+function workerModelOptions(entries, current) {
+  const opts = entries.map((e) => ({ kind: "entry", ref: `${e.vendor ?? "anthropic"}/${e.id}`, label: e.label }));
+  if (current)
     opts.push({ kind: "clear" });
   return opts;
 }
@@ -51877,12 +51890,59 @@ function wrapText(text, width) {
 var clipEllipsis = (s2, width) => Number.isFinite(width) && s2.length > width ? `${s2.slice(0, Math.max(1, width) - 1)}\u2026` : s2;
 function buildSystemTab(snapshot, ui, width = Infinity) {
   const snap = snapshot ?? EMPTY_ROSTER;
-  const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
+  const keys = systemKeys(snap);
   const selector = ui.selector;
   const clip2 = (s2) => clipEllipsis(s2, width);
   const overpassView = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
   const overpassEffective = overpassOffered(snap) && overpassView.effective;
+  const overpassPickerLines = (key) => {
+    const out = [];
+    if (!selector || selector.key !== key)
+      return out;
+    if (selector.stage === "tier" && isOverpassRole(key)) {
+      overpassTierOptions(overpassView, key).forEach((tier, oi) => {
+        const m = oi === selector.highlight ? "\u203A " : "  ";
+        out.push({ text: clip2(`  ${m}tier ${tier}`), kind: "option", selected: oi === selector.highlight });
+      });
+    } else if (selector.stage === "role_effort") {
+      OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
+        const m = oi === selector.highlight ? "\u203A " : "  ";
+        out.push({ text: clip2(`  ${m}effort ${eff}`), kind: "option", selected: oi === selector.highlight });
+      });
+    }
+    return out;
+  };
   const rows = keys.map((key, i) => {
+    if (key === MAINTENANCE_WORKER_ROLE) {
+      const worker = snap.maintenanceWorker ?? { opencodeModel: null };
+      const marker2 = i === ui.cursor ? "\u203A " : "  ";
+      const saved = worker.invalid !== void 0 ? `invalid ${worker.invalid}` : worker.opencodeModel;
+      const lines2 = [];
+      if (overpassEffective) {
+        const route2 = overpassRoute(overpassView, MAINTENANCE_WORKER_ROLE);
+        lines2.push({ text: clip2(`${marker2}Maintenance worker: ${route2.tier} (Overpass)${route2.effort ? ` ${route2.effort}` : ""}`), kind: "title", selected: i === ui.cursor });
+        if (worker.unreadable !== void 0)
+          lines2.push({ text: clip2(`    maintenance_worker unreadable: ${worker.unreadable}`), kind: "meta" });
+        else if (saved)
+          lines2.push({ text: clip2(`    saved OpenCode: ${saved}`), kind: "meta" });
+      } else if (worker.unreadable !== void 0) {
+        lines2.push({ text: clip2(`${marker2}Maintenance worker: config unreadable: ${worker.unreadable}`), kind: "title", selected: i === ui.cursor });
+      } else {
+        lines2.push({ text: clip2(`${marker2}Maintenance worker: ${saved ?? "not set: worker will not start"}`), kind: "title", selected: i === ui.cursor });
+        lines2.push({ text: clip2(`    claude CLI, when on PATH: ${MAINTENANCE_WORKER_CLAUDE_MODEL} ${MAINTENANCE_WORKER_CLAUDE_EFFORT}`), kind: "meta" });
+      }
+      if (selector && selector.key === key) {
+        if (selector.stage === "model") {
+          workerModelOptions(snap.catalog.entries, worker.opencodeModel).forEach((o, oi) => {
+            const m = oi === selector.highlight ? "\u203A " : "  ";
+            lines2.push({ text: clip2(`  ${m}${o.kind === "clear" ? "OpenCode: clear the model" : `${o.ref} ${o.label}`}`), kind: "option", selected: oi === selector.highlight });
+          });
+        } else {
+          lines2.push(...overpassPickerLines(key));
+        }
+      }
+      return { id: `sys:${key}`, key, drift: false, agents: [], lines: lines2 };
+    }
     const config = snap.configModels[key];
     const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
     const agentNames = governed.map((a) => a.name);
@@ -51900,21 +51960,15 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
       // installed-frontmatter drift check stays a separate marker
       { text: clip2(`    saved: ${config.model} ${config.effort}${drift ? "  drift" : ""}`), kind: "meta" }
     ] : [{ text: clip2(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }];
-    for (const name of agentNames)
-      lines.push({ text: clip2(`    ${name}`), kind: "body" });
-    if (config.opencode_model)
-      lines.push({ text: clip2(`    OpenCode: ${config.opencode_model}${overpassEffective ? " (inactive: Overpass)" : ""}`), kind: "body" });
+    if (!agentNames.every((name) => name === key))
+      for (const name of agentNames)
+        lines.push({ text: clip2(`    ${name}`), kind: "body" });
+    if (config.opencode_model) {
+      lines.push(overpassEffective ? { text: clip2(`    saved OpenCode: ${config.opencode_model}`), kind: "meta" } : { text: clip2(`    OpenCode: ${config.opencode_model}`), kind: "body" });
+    }
     if (selector && selector.key === key) {
-      if (selector.stage === "tier" && isOverpassRole(key)) {
-        overpassTierOptions(overpassView, key).forEach((tier, oi) => {
-          const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip2(`  ${m}tier ${tier}`), kind: "option", selected: oi === selector.highlight });
-        });
-      } else if (selector.stage === "role_effort") {
-        OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
-          const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip2(`  ${m}effort ${eff}`), kind: "option", selected: oi === selector.highlight });
-        });
+      if (selector.stage === "tier" || selector.stage === "role_effort") {
+        lines.push(...overpassPickerLines(key));
       } else if (selector.stage === "model") {
         modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
@@ -52567,7 +52621,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
-  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
+  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
   const revealPicker = (next) => {
     const sel = next.selector;
     if (!sel || !roster || !Number.isFinite(maxBodyLines))
@@ -52696,7 +52750,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
         return { ui, effects };
       }
       if (ui.tab === SYSTEM_TAB && roster) {
-        const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
+        const sysKeys = systemKeys(roster);
         const overpassOn = roster !== void 0 && overpassOffered(roster);
         const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 + (overpassOn ? 3 : 0) - 1)));
         const sel = ui.selector;
@@ -52824,8 +52878,23 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
               effects.push({ type: "overpass_role", role: roleKey, tier: sel.tier, ...effort2 === "default" ? {} : { effort: effort2 } });
               return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
             }
+            if (sel && sel.stage === "model" && sel.key === MAINTENANCE_WORKER_ROLE) {
+              const current = roster.maintenanceWorker?.opencodeModel ?? void 0;
+              const option = workerModelOptions(roster.catalog.entries, current)[sel.highlight];
+              if (!option)
+                return { ui: { ...ui, selector: void 0 }, effects };
+              const to = option.kind === "clear" ? void 0 : option.ref;
+              if (to !== void 0 && !OPENCODE_MODEL_REF_RE.test(to)) {
+                return { ui: { ...ui, selector: void 0, notice: `Maintenance worker model refused: '${to}' is not a <provider>/<model> id` }, effects };
+              }
+              effects.push({ type: "worker_model", from: current, to });
+              return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+            }
+            if (!sel && key === MAINTENANCE_WORKER_ROLE && roster.maintenanceWorker?.unreadable !== void 0) {
+              return { ui: { ...ui, cursor, notice: `Maintenance worker model not editable: config unreadable: ${roster.maintenanceWorker.unreadable}` }, effects };
+            }
             if (!sel) {
-              if (roster.catalog.entries.length === 0) {
+              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : roster.catalog.entries.length === 0) {
                 return { ui: { ...ui, cursor, notice: "model catalog empty or invalid \u2014 nothing to pick; refresh the catalog first" }, effects };
               }
               return { ui: revealPicker({ ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }), effects };
@@ -55785,7 +55854,42 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+  }
+  function readMaintenanceWorker() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+    } catch (err) {
+      return { opencodeModel: null, unreadable: `${err.message.split("\n")[0]}` };
+    }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+      return { opencodeModel: null, unreadable: `config.json holds ${JSON.stringify(raw)}, not an object` };
+    const block = raw.maintenance_worker;
+    if (block === void 0)
+      return { opencodeModel: null };
+    if (block === null || typeof block !== "object" || Array.isArray(block))
+      return { opencodeModel: null, unreadable: `maintenance_worker is ${JSON.stringify(block)}, not an object` };
+    const value = block.opencode_model;
+    if (value === void 0 || value === null)
+      return { opencodeModel: null };
+    if (typeof value !== "string" || value.trim() === "")
+      return { opencodeModel: null, invalid: JSON.stringify(value) };
+    return { opencodeModel: value };
+  }
+  function applyWorkerModel(e) {
+    try {
+      if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
+        throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      writeConfigKey(configPath2, "maintenance_worker", (old, raw) => {
+        if (overpassEffectiveIn(raw))
+          throw new Error("Overpass is on, so the worker runs on its tier and the saved model is not applied; turn Overpass off to edit it. Nothing was written");
+        const { opencode_model: _previous, ...rest } = old !== null && typeof old === "object" && !Array.isArray(old) ? old : {};
+        return e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
+      }, options.configWriteFs);
+    } catch (err) {
+      ui = { ...ui, notice: `Maintenance worker model not changed \u2014 ${err.message}` };
+    }
   }
   function applySparringModel(e) {
     try {
@@ -55964,6 +56068,9 @@ function openDashboard(storePath2, options = {}) {
       await applySwap(e);
     for (const e of overrides)
       applyOpenCodeModel(e);
+    const workerModels = effects.filter((e) => e.type === "worker_model");
+    for (const e of workerModels)
+      applyWorkerModel(e);
     const refused = overpassRefusedEdit;
     const sparringModels = effects.filter((e) => e.type === "sparring_model");
     for (const e of sparringModels)
@@ -56049,7 +56156,7 @@ function openDashboard(storePath2, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session (Claude Code) or run opencode reload (OpenCode) to reload the MCP server.");
     }
-    if (refused || swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length)
+    if (refused || swaps.length || overrides.length || workerModels.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length)
       roster = loadRoster();
     for (const e of effects) {
       if (e.type === "select")

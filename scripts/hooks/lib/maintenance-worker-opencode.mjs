@@ -118,9 +118,11 @@ export function buildOpencodeConfig({ mcpConfig, model = null }) {
 /** `opencode run` argv. --standalone runs a private server (no background
  *  service, no port); --auto approves what is not explicitly denied, so the
  *  run never waits on a prompt nobody will answer; --agent picks the worker
- *  agent, so the user's default agent's rules never apply. */
-export function buildOpencodeArgs({ prompt, model = null }) {
-  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : []), prompt];
+ *  agent, so the user's default agent's rules never apply. --variant is the
+ *  provider's reasoning effort for the model, set only for the Overpass role's
+ *  effort (config.overpass.roles.maintenance-worker.effort). */
+export function buildOpencodeArgs({ prompt, model = null, variant = null }) {
+  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : []), ...(variant ? ['--variant', variant] : []), prompt];
 }
 
 /** The child's environment additions. PWD picks the session directory

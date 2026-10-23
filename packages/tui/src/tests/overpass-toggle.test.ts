@@ -80,7 +80,7 @@ test('overpass rows: three rows, ids in order, shown in work mode on OpenCode; t
   const snap = snapshot();
   const v = buildSystemTab(snap, st({ tab: SYS_TAB }), 80);
   assert.deepEqual(v.overpassRows.map((r) => r.id), ['sys:overpass', 'sys:overpass_provider', 'sys:overpass_bypass']);
-  assert.equal(v.rows.length, Object.keys(snap.configModels).length);
+  assert.equal(v.rows.length, Object.keys(snap.configModels).length + 1);
   assert.equal(v.autoMergeRows.length, 1);
   assert.equal(v.storageRows.length, 1);
 });
@@ -110,7 +110,7 @@ test('overpass rows: existing cursor positions do not move — the clamp still e
   const { store, cleanup } = storeFixture();
   try {
     for (const snap of [snapshot({ mode: 'hobby' }), snapshot({ host: undefined })]) {
-      const n = Object.keys(snap.configModels).length;
+      const n = Object.keys(snap.configModels).length + 1;
       const clamped = reduce(store, st({ tab: SYS_TAB, cursor: n + 5 }), key('DOWN'), undefined, undefined, snap);
       assert.equal(clamped.ui.cursor, n + 5);
       const end = reduce(store, st({ tab: SYS_TAB, cursor: 0 }), key('END'), undefined, undefined, snap);
@@ -128,7 +128,7 @@ test('overpass rows: shown last — DOWN from auto-merge reaches them in order a
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot();
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     let ui = st({ tab: SYS_TAB, cursor: n + 5 });
     for (const expected of [n + 6, n + 7, n + 8, n + 8]) {
       ui = reduce(store, ui, key('DOWN'), undefined, undefined, snap).ui;
@@ -181,7 +181,7 @@ test('overpass toggle: ENTER and SPACE emit overpass_toggle with the NEW value; 
     ];
     for (const [v, k, next] of cases) {
       const snap = snapshot(v === undefined ? {} : { overpass: v });
-      const n = Object.keys(snap.configModels).length;
+      const n = Object.keys(snap.configModels).length + 1;
       const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 6 }), key(k), undefined, undefined, snap);
       assert.deepEqual(r.effects.map((e: Effect) => e.type), ['overpass_toggle'], `${k}: exactly one overpass_toggle`);
       assert.equal((r.effects[0] as { enabled: boolean }).enabled, next);
@@ -203,7 +203,7 @@ test('conductor bypass: ENTER and SPACE emit overpass_bypass_toggle with the NEW
     ];
     for (const [v, k, next] of cases) {
       const snap = snapshot(v === undefined ? {} : { overpass: v });
-      const n = Object.keys(snap.configModels).length;
+      const n = Object.keys(snap.configModels).length + 1;
       const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 8 }), key(k), undefined, undefined, snap);
       assert.deepEqual(r.effects.map((e: Effect) => e.type), ['overpass_bypass_toggle']);
       assert.equal((r.effects[0] as { enabled: boolean }).enabled, next);
@@ -217,7 +217,7 @@ test('overpass provider: ENTER opens the edit prefilled with the current id; typ
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ overpass: view({ provider: 'overpass' }) });
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     let r = reduce(store, st({ tab: SYS_TAB, cursor: n + 7 }), key('ENTER'), undefined, undefined, snap);
     assert.equal(r.ui.overpassProviderEdit, 'overpass');
     assert.deepEqual(r.effects, []);
@@ -240,7 +240,7 @@ test('overpass provider: an invalid id is refused with a visible notice, nothing
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot();
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     for (const bad of ['', '   ', 'a/b', 'a#b', 'has space', 'ü']) {
       const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 7, overpassProviderEdit: bad }), key('ENTER'), undefined, undefined, snap);
       assert.deepEqual(r.effects, [], `'${bad}' emits nothing`);
@@ -257,7 +257,7 @@ test('overpass provider: ESCAPE cancels the edit; an invalid saved id opens an e
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ overpass: view({ provider: 'a/b' }) });
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     const opened = reduce(store, st({ tab: SYS_TAB, cursor: n + 7 }), key('ENTER'), undefined, undefined, snap);
     assert.equal(opened.ui.overpassProviderEdit, '', 'an invalid saved id is not prefilled');
     const esc = reduce(store, { ...opened.ui, overpassProviderEdit: 'x/y', notice: 'n' }, key('ESCAPE'), undefined, undefined, snap);
@@ -274,7 +274,7 @@ test('overpass rows: when the mode leaves work the cursor clamps back to the aut
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby' });
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 8 }), key('ENTER'), undefined, undefined, snap);
     assert.deepEqual(r.effects.map((e: Effect) => e.type), ['auto_merge_toggle']);
     assert.equal(r.ui.cursor, n + 5);
@@ -296,8 +296,14 @@ const withOverride = (over: Partial<AgentRosterSnapshot>): AgentRosterSnapshot =
     ...over,
   });
 
-test('override labels: a saved OpenCode override reads (inactive: Overpass) only while Overpass is effective', () => {
-  assert.match(roleText(withOverride({ overpass: view({ enabled: true, effective: true }) })), /OpenCode: openai\/gpt-6-terra \(inactive: Overpass\)/);
+// Changed 2026-10-23 (board 4e7a6bfc, user-ruled "As proposed"): while Overpass is effective the saved
+// override is the dimmed line 'saved OpenCode: <model>' (kind meta, like 'saved:'), not
+// 'OpenCode: <model> (inactive: Overpass)'.
+test('override labels: a saved OpenCode override reads as a dimmed saved OpenCode line only while Overpass is effective', () => {
+  const effective = buildSystemTab(withOverride({ overpass: view({ enabled: true, effective: true }) }), st({ tab: SYS_TAB }), 200).rows[0].lines;
+  assert.deepEqual(effective.map((l) => l.text), ['› Implementor: agentic-auto (Overpass)', '    saved: claude-opus-5-5 medium', '    saved OpenCode: openai/gpt-6-terra']);
+  assert.deepEqual(effective.slice(1).map((l) => l.kind), ['meta', 'meta'], 'both saved lines are dimmed');
+  assert.doesNotMatch(effective.map((l) => l.text).join('\n'), /inactive/);
   for (const snap of [
     withOverride({}),
     withOverride({ overpass: view({ enabled: true, effective: false }) }),

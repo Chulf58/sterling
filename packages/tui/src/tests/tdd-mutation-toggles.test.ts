@@ -166,7 +166,6 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       researcher: { model: 'claude-opus-4-8', effort: 'low' },
       scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
-      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
     catalog: freshCatalog(),
     codexWired: true,
@@ -224,7 +223,7 @@ test('toggles 1: buildSystemTab exposes tddRows as a separate single-entry array
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported (frozen phase-4 oracle)');
   const snap = baseSnapshot();
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  assert.equal(view.rows.length, Object.keys(snap.configModels).length, 'rows stays one entry per config.models key — untouched by this slice');
+  assert.equal(view.rows.length, Object.keys(snap.configModels).length + 1, 'rows stays one entry per config.models key plus the Maintenance worker row — untouched by this slice');
   assert.equal(view.sparringRows?.length, 2, 'sparringRows stays exactly [toggle, model] — untouched by this slice');
   assert.ok(Array.isArray(view.tddRows), 'tddRows is exported as a separate array on the view');
   assert.equal(view.tddRows!.length, 1, 'tddRows carries exactly one row — the toggle row');
@@ -252,7 +251,7 @@ test('toggles 3: UP/DOWN traverse past sparringRows onto the tdd row, and clamp 
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    const numKeys = Object.keys(snap.configModels).length;
+    const numKeys = Object.keys(snap.configModels).length + 1;
     // numKeys = sparring toggle row, numKeys+1 = sparring model row (both frozen
     // by sparring-partner.test.ts) — this slice's row continues from there.
 
@@ -292,7 +291,7 @@ test('toggles 4: ENTER on the tdd row emits tdd_toggle with the FLIPPED value; n
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ tdd: { enabled: true } });
-    const numKeys = Object.keys(snap.configModels).length;
+    const numKeys = Object.keys(snap.configModels).length + 1;
     const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 2 }), key('ENTER'), undefined, undefined, snap);
     const toggle = findTddToggle(r.effects);
     assert.ok(toggle, 'ENTER on the tdd row emits a tdd_toggle effect');
@@ -307,7 +306,7 @@ test('toggles 4: SPACE on the tdd row emits tdd_toggle with the flipped value (f
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ tdd: { enabled: false } });
-    const numKeys = Object.keys(snap.configModels).length;
+    const numKeys = Object.keys(snap.configModels).length + 1;
     const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 2 }), key('SPACE'), undefined, undefined, snap);
     const toggle = findTddToggle(r.effects);
     assert.ok(toggle, 'SPACE on the tdd row emits a tdd_toggle effect');
@@ -362,7 +361,7 @@ test('toggles 6: buildDashboardState honors ui.scroll on the System tab — the 
   try {
     assert.strictEqual(typeof stateMod.buildDashboardState, 'function', 'buildDashboardState must be exported');
     const snap = baseSnapshot();
-    const numKeys = Object.keys(snap.configModels).length;
+    const numKeys = Object.keys(snap.configModels).length + 1;
     const maxBodyLines = 2; // total SYS_TAB rows (numKeys config rows + 2 sparring + 1 tdd) exceed this
     const vp = { maxBodyLines, width: 80 };
 
@@ -444,7 +443,7 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     assert.strictEqual(typeof stateMod.buildDashboardState, 'function', 'buildDashboardState must be exported');
     assert.strictEqual(typeof stateMod.screenLineToRow, 'function', 'screenLineToRow must be exported');
 
-    const numKeys = Object.keys(baseSnapshot().configModels).length;
+    const numKeys = Object.keys(baseSnapshot().configModels).length + 1;
     // Every non-banner row on the tab, so bannerRowCount below can subtract them: config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) + 1 PR auto-merge (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean) + 1 read-only storage row (board 6ca1a3c5), which is drawn but takes no cursor stop.
     const totalSelectableRows = numKeys + 7;
     const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport

@@ -5474,7 +5474,7 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5668,7 +5668,6 @@ var init_config = __esm({
         "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-        classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
         // librarian is mechanical clerking — cheap model, low effort (P8). The
         // roster is classless (decision agent-roster-is-classless-four-agents), and
         // the debugger role it rejected has no key here.
@@ -6005,7 +6004,8 @@ var init_config = __esm({
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight"];
+    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+    MAINTENANCE_WORKER_ROLE = "maintenance-worker";
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
     DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -6017,7 +6017,8 @@ var init_config = __esm({
       reviewer: DEFAULT_OVERPASS_TIER,
       librarian: DEFAULT_OVERPASS_TIER,
       sparring: "agentic-premium-max",
-      preflight: DEFAULT_OVERPASS_TIER
+      preflight: DEFAULT_OVERPASS_TIER,
+      "maintenance-worker": DEFAULT_OVERPASS_TIER
     };
     RETIRED_MODEL_KEYS = [
       "coder",
@@ -6026,7 +6027,8 @@ var init_config = __esm({
       "test_writer",
       "reviewers",
       "implementation_architect",
-      "debugger"
+      "debugger",
+      "classifiers"
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   }
@@ -22296,7 +22298,7 @@ function launchWorker(opts) {
     let logFd;
     try {
       writeFileSync9(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true } : {} } : { host };
+      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : {} } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
       const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));
@@ -22411,15 +22413,20 @@ function createWorkerLaunch({
   return function launchWorkerFor(root, at) {
     const config = loadConfig(root);
     let tierModel = null;
+    let tierEffort;
     try {
       const overpass = resolveOverpass(config, { host: "opencode" });
-      if (overpass.effective) tierModel = overpass.laneModel;
+      if (overpass.effective) {
+        const route = overpass.roles[MAINTENANCE_WORKER_ROLE];
+        tierModel = route.model;
+        tierEffort = route.effort;
+      }
     } catch (e) {
       skipOnce(root, at, `maintenance worker skipped: ${errText2(e)}`, `Sterling: the maintenance worker did not run. ${errText2(e)}. Fix .sterling/config.json; until then the queue drains by hand with /sterling:drain.`);
       return;
     }
     const ocBin = claudeOnPath() && !tierModel ? null : findOpencode();
-    const runnerHost = ocBin ? { host: "opencode", opencodeBin: ocBin, ...tierModel ? { workerModel: tierModel } : {} } : {};
+    const runnerHost = ocBin ? { host: "opencode", opencodeBin: ocBin, ...tierModel ? { workerModel: tierModel, ...tierEffort ? { workerEffort: tierEffort } : {} } : {} } : {};
     if (!ocBin && tierModel) {
       skipOnce(root, at, "maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through", OVERPASS_NO_RUNNER_TEXT);
       return;
@@ -23283,10 +23290,11 @@ function projectModeLine({ config, configUnreadable, noOrigin = false }) {
   }
   return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
 }
+var routeLabel = ({ model, effort }) => effort ? `${model} at effort ${effort}` : model;
 function overpassRoleRoutes(roles) {
   const groups = /* @__PURE__ */ new Map();
-  for (const [role, { model, effort }] of Object.entries(roles)) {
-    const label = effort ? `${model} at effort ${effort}` : model;
+  for (const [role, route] of Object.entries(roles)) {
+    const label = routeLabel(route);
     groups.set(label, [...groups.get(label) ?? [], role]);
   }
   return [...groups].map(([label, names]) => `${label} (${names.join(", ")})`).join(", ");
@@ -23303,7 +23311,8 @@ function overpassLine({ config, configUnreadable, host }) {
   }
   if (res.effective) {
     const conductor = res.conductorRouted ? `the conductor runs on ${res.conductorModel}` : "the conductor is bypassed (config.overpass.conductor_bypass) and keeps its direct model pin";
-    return `Overpass: ON (provider '${res.provider}', config.overpass \u2014 TUI System tab) \u2014 ${conductor}; subagent roles run on ${overpassRoleRoutes(res.roles)}; other agents, the Plan agent and the maintenance worker run on ${res.laneModel}. The direct model pins in agent files, briefs and models.<role>.opencode_model do not apply while it is on.`;
+    const { [MAINTENANCE_WORKER_ROLE]: worker, ...subagentRoles } = res.roles;
+    return `Overpass: ON (provider '${res.provider}', config.overpass \u2014 TUI System tab) \u2014 ${conductor}; subagent roles run on ${overpassRoleRoutes(subagentRoles)}; the maintenance worker runs on ${routeLabel(worker)}; other agents and the Plan agent run on ${res.laneModel}. The direct model pins in agent files, briefs and models.<role>.opencode_model do not apply while it is on.`;
   }
   if (res.configured) return `Overpass: CONFIGURED BUT NOT IN EFFECT \u2014 ${res.reason}; every lane uses its direct model pin.`;
   if (host === "opencode" && config?.mode === "work") return "Overpass: OFF (config.overpass.enabled \u2014 TUI System tab) \u2014 every lane uses its direct model pin.";

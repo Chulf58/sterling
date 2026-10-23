@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, resolveOverpass, DEFAULT_OVERPASS_ROLE_TIERS, OVERPASS_ROLES, OVERPASS_TIERS, OVERPASS_TIER_RE, judgeProjectMode, ProjectModeError } from '../index.js';
+import { parseConfig, resolveOverpass, migrateRetiredModelKeys, unreadConfigKeys, MAINTENANCE_WORKER_ROLE, DEFAULT_OVERPASS_ROLE_TIERS, OVERPASS_ROLES, OVERPASS_TIERS, OVERPASS_TIER_RE, judgeProjectMode, ProjectModeError } from '../index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const shippedRaw = (): Record<string, unknown> => JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
@@ -54,6 +54,8 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
       librarian: { model: 'overpass/agentic-high' },
       sparring: { model: 'overpass/agentic-premium-max' },
       preflight: { model: 'overpass/agentic-high' },
+      // the maintenance worker's own role (board c97ddc97), not a subagent
+      'maintenance-worker': { model: 'overpass/agentic-high' },
     },
   });
 });
@@ -167,10 +169,11 @@ test('overpass roles: unset gives the per-role default tier and no effort (imple
     librarian: { model: 'overpass/agentic-high' },
     sparring: { model: 'overpass/agentic-premium-max' },
     preflight: { model: 'overpass/agentic-high' },
+    'maintenance-worker': { model: 'overpass/agentic-high' },
   };
   for (const cfg of [on(), on({ roles: {} }), on({ roles: { reviewer: {} } }), on({ roles: { implementor: {} } }), on({ roles: { sparring: {} } })]) {
     const r = resolveOverpass(cfg, { host: 'opencode' });
-    assert.equal(r.laneModel, 'overpass/agentic-high', 'Plan and the worker stay on agentic-high');
+    assert.equal(r.laneModel, 'overpass/agentic-high', 'Plan stays on agentic-high');
     assert.deepEqual(r.roles, expected, JSON.stringify(cfg));
   }
 });
@@ -189,7 +192,7 @@ test('overpass roles: a tier and an effort apply to that role only, under the co
   assert.deepEqual(r.roles.reviewer, { model: 'overpass-agentic/agentic-max', effort: 'xhigh' });
   assert.deepEqual(r.roles.scout, { model: 'overpass-agentic/agentic-high', effort: 'low' });
   assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-auto' });
-  assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan and the worker keep the default lane model');
+  assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan keeps the default lane model');
 });
 
 // Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: preflight is its own
@@ -251,4 +254,26 @@ test('OVERPASS_TIERS: the six listed tiers in order, each a valid tier name, cov
   assert.deepEqual([...OVERPASS_TIERS], ['agentic-low', 'agentic-high', 'agentic-conductor', 'agentic-auto', 'agentic-premium', 'agentic-premium-max']);
   for (const tier of OVERPASS_TIERS) assert.match(tier, OVERPASS_TIER_RE);
   for (const tier of Object.values(DEFAULT_OVERPASS_ROLE_TIERS)) assert.ok((OVERPASS_TIERS as readonly string[]).includes(tier), tier);
+});
+
+// Board c97ddc97 (user-ruled 2026-10-23, "Row + its own Overpass tier"): the background maintenance
+// worker is an Overpass role of its own, default agentic-high, that no installed agent carries.
+test('overpass roles: maintenance-worker is a role that defaults to agentic-high and takes its own tier and effort', () => {
+  assert.ok((OVERPASS_ROLES as readonly string[]).includes(MAINTENANCE_WORKER_ROLE));
+  assert.equal(DEFAULT_OVERPASS_ROLE_TIERS[MAINTENANCE_WORKER_ROLE], 'agentic-high');
+  const set = resolveOverpass(on({ roles: { 'maintenance-worker': { tier: 'agentic-premium', effort: 'xhigh' } } }), { host: 'opencode' });
+  assert.deepEqual(set.roles['maintenance-worker'], { model: 'overpass/agentic-premium', effort: 'xhigh' });
+  assert.deepEqual(set.roles.reviewer, { model: 'overpass/agentic-high' }, 'no other role moves');
+});
+
+test('config: models.classifiers is a retired key — dropped by parse, reported by the migration, never defaulted', () => {
+  const raw = { models: { classifiers: { model: 'claude-haiku-5-5', effort: 'low' }, implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } };
+  const parsed = parseConfig(raw);
+  assert.ok(!('classifiers' in parsed.models), 'a live classifiers entry is dropped before the parse');
+  assert.ok(!('classifiers' in parseConfig({}).models), 'the schema carries no classifiers default');
+  const m = migrateRetiredModelKeys(raw);
+  assert.equal(m.changed, true);
+  assert.deepEqual(m.dropped, [{ key: 'classifiers', value: { model: 'claude-haiku-5-5', effort: 'low' } }]);
+  assert.deepEqual(Object.keys((m.config as { models: object }).models), ['implementor']);
+  assert.deepEqual(unreadConfigKeys(raw), [{ path: 'models.classifiers' }]);
 });

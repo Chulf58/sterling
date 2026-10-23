@@ -67,7 +67,7 @@ test('Storage row: an unreadable config reads UNKNOWN, never the SQLite default'
 
 test('Storage row is read-only: never selected, no cursor index, no effect, hidden under a model picker', () => {
   const snap = snapshot({ storage: 'postgres' });
-  const keys = Object.keys(snap.configModels).length;
+  const keys = Object.keys(snap.configModels).length + 1;
   // The cursor clamp still ends at the handoff row (keys + 4); the storage row adds no stop.
   const down = reduce({} as SterlingStore, st({ tab: 4, cursor: keys + 4 }), { type: 'key', key: 'DOWN' } as never, undefined, undefined, snap);
   assert.equal(down.ui.cursor, keys + 4);
