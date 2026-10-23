@@ -5379,7 +5379,7 @@ var configSchema = external_exports.object({
   // including an unknown role or field under the optional `roles` map
   // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
-  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: true }),
   // The one-time config migrations already applied to this file (addModelDefaults),
   // so a value a migration added and the user later cleared is never added again.
   // Written by sync and init only.

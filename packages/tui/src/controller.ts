@@ -487,8 +487,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       return { enabled: false, provider: null, conductorBypass: false, effective, invalid: JSON.stringify(block) };
     }
     const fields = (block ?? {}) as { enabled?: unknown; provider?: unknown; conductor_bypass?: unknown };
-    const flag = (v: unknown): boolean | string => (v === undefined ? false : typeof v === 'boolean' ? v : JSON.stringify(v));
-    const base = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective, ...(roles ? { roles } : {}) };
+    const flag = (v: unknown, whenAbsent = false): boolean | string => (v === undefined ? whenAbsent : typeof v === 'boolean' ? v : JSON.stringify(v));
+    const base = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass, true), effective, ...(roles ? { roles } : {}) };
     if (fields.provider !== undefined && typeof fields.provider !== 'string') return { ...base, provider: null, providerInvalid: JSON.stringify(fields.provider) };
     return { ...base, provider: fields.provider ?? 'overpass' };
   }

@@ -85,19 +85,19 @@ test('Overpass on: each role row reads its tier with (Overpass), the saved model
     '› Implementor: agentic-auto (Overpass)',
     '    saved: claude-opus-5-5 medium',
     '    saved OpenCode: openai/gpt-6-terra',
-    '  Scout: agentic-high (Overpass)',
+    '  Scout: agentic-auto (Overpass)',
     '    saved: claude-sonnet-5 low',
     '  Sparring: agentic-premium-max (Overpass)',
     '    saved: claude-fable-5-1 high',
-    '  Maintenance worker: agentic-high (Overpass)',
+    '  Maintenance worker: agentic-auto (Overpass)',
   ]);
   const saved = buildSystemTab(snapshot({ overpass: on() }), st(), 120).rows[0].lines[1];
   assert.equal(saved.kind, 'meta', 'the saved line is the dimmed kind');
 });
 
 // Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: preflight is an installed
-// agent and an Overpass role, so it gets a System tab row with its own tier (agentic-high by default).
-test('Overpass on: an installed preflight agent gets its own row on agentic-high; off, it reads its saved model', () => {
+// agent and an Overpass role, so it gets a System tab row with its own tier (agentic-auto by default, agentic-high until 2026-10-23).
+test('Overpass on: an installed preflight agent gets its own row on agentic-auto; off, it reads its saved model', () => {
   const withPreflight = (over: Partial<AgentRosterSnapshot> = {}) => {
     const base = snapshot(over);
     return {
@@ -107,9 +107,9 @@ test('Overpass on: an installed preflight agent gets its own row on agentic-high
     } as AgentRosterSnapshot;
   };
   const onRows = rowTexts(withPreflight({ overpass: on() }));
-  const at = onRows.indexOf('  Preflight: agentic-high (Overpass)');
+  const at = onRows.indexOf('  Preflight: agentic-auto (Overpass)');
   assert.ok(at >= 0, onRows.join('\n'));
-  assert.deepEqual(onRows.slice(at, at + 2), ['  Preflight: agentic-high (Overpass)', '    saved: claude-sonnet-5-5 low']);
+  assert.deepEqual(onRows.slice(at, at + 2), ['  Preflight: agentic-auto (Overpass)', '    saved: claude-sonnet-5-5 low']);
   const offRows = rowTexts(withPreflight());
   assert.ok(offRows.includes('  Preflight: claude-sonnet-5-5 low'), offRows.join('\n'));
 });
@@ -226,7 +226,7 @@ test('Maintenance worker row: ENTER opens its tier picker with Overpass on and i
   try {
     const workerCursor = Object.keys(snapshot().configModels).length;
     const on1 = reduce(store, st({ cursor: workerCursor }), key('ENTER'), undefined, undefined, snapshot({ overpass: on() }));
-    assert.deepEqual(on1.ui.selector, { key: 'maintenance-worker', stage: 'tier', highlight: 1 }, 'agentic-high is the second listed tier');
+    assert.deepEqual(on1.ui.selector, { key: 'maintenance-worker', stage: 'tier', highlight: 3 }, 'agentic-auto is the fourth listed tier');
     const off1 = reduce(store, st({ cursor: workerCursor }), key('ENTER'), undefined, undefined, snapshot());
     assert.deepEqual(off1.ui.selector, { key: 'maintenance-worker', stage: 'model', highlight: 0 });
   } finally {
@@ -429,7 +429,7 @@ test('implementor-hard row: model and effort with Overpass off, its own tier wit
     '    saved: claude-sonnet-5-5 high',
     '  Implementor-hard: agentic-premium-max (Overpass) xhigh',
     '    saved: claude-opus-5-5 high',
-    '  Maintenance worker: agentic-high (Overpass)',
+    '  Maintenance worker: agentic-auto (Overpass)',
   ]);
   assert.equal(rowTexts(hardSnap({ overpass: on() }))[2], '  Implementor-hard: agentic-premium (Overpass)', 'its default tier is agentic-premium');
   assert.equal(rowTexts(hardSnap({ overpass: on() }))[0], '› Implementor: agentic-auto (Overpass)', 'the implementor default is agentic-auto');

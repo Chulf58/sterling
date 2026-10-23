@@ -111,6 +111,8 @@ function readPrLoopEntry(root, prNumber2) {
   const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
   return state.pr_number === prNumber2 ? { state, file: prLoopPath(root), rel: PR_LOOP_REL } : null;
 }
+var MAX_LOOPS_NAMED = 5;
+var MAX_LOOP_ERROR_CHARS = 200;
 function listPrLoopFilesForDiagnostic(root) {
   const files = [];
   const dir = join2(root, PR_LOOPS_DIR_REL);
@@ -139,8 +141,12 @@ function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */
   if (!entry) {
     const others = listPrLoopFilesForDiagnostic(root);
     if (!others.length) throw new Error(`no PR review loop is armed here (${PR_LOOPS_DIR_REL}/ and ${PR_LOOP_REL} are absent) \u2014 nothing to settle`);
-    const armed2 = others.map((o) => o.state ? `PR #${o.state.pr_number} (${o.state.pr_url}, ${unstick(o)})` : `${o.file} (unreadable: ${o.error})`).join("; ");
-    throw new Error(`no PR review loop is armed for ${prRef}; the armed loops are for ${armed2} \u2014 nothing settled`);
+    const live = others.filter((o) => !o.state || o.state.status === "owed");
+    const settledNote = others.length > live.length ? `${others.length - live.length} settled loop${others.length - live.length === 1 ? "" : "s"} ignored` : "";
+    if (!live.length) throw new Error(`no PR review loop is armed for ${prRef} (${settledNote}); rerun /sterling:merge on the branch to arm it \u2014 nothing settled`);
+    const armed2 = live.slice(0, MAX_LOOPS_NAMED).map((o) => o.state ? `PR #${o.state.pr_number} (${o.state.pr_url}, ${unstick(o)})` : `${o.file} (unreadable: ${o.error.slice(0, MAX_LOOP_ERROR_CHARS)})`).join("; ");
+    const more = live.length > MAX_LOOPS_NAMED ? `; +${live.length - MAX_LOOPS_NAMED} more` : "";
+    throw new Error(`no PR review loop is armed for ${prRef}; the armed loops are for ${armed2}${more}${settledNote ? ` (${settledNote})` : ""} \u2014 nothing settled`);
   }
   const s = entry.state;
   const armed = parsePrUrl(s.pr_url);

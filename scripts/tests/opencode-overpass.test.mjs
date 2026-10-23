@@ -25,7 +25,9 @@ before(async () => {
   opState = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'operating-state.mjs')).href);
 });
 
-const ON = { mode: 'work', overpass: { enabled: true } };
+// The conductor is routed here: conductor_bypass is false explicitly, because it defaults to true since
+// 2026-10-23 (user-ruled, 'Defaults + reset + bypass ON'). The default itself is pinned in the session-line and mismatch-notice tests.
+const ON = { mode: 'work', overpass: { enabled: true, conductor_bypass: false } };
 const OC_REL = '.opencode/opencode.json';
 
 /** A Sterling project with `config`, an empty store and, when given, a .opencode/opencode.json value or raw text. */
@@ -738,13 +740,16 @@ test('session line: ON, bypass, not in effect, off, invalid and unknown', () => 
   // agentic-premium and sparring on agentic-premium-max.
   // Changed again 2026-10-23 (user-ruled, "the regular implementer should run angentic-auto"):
   // the implementor defaults to agentic-auto and implementor-hard to agentic-premium.
-  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto \(implementor\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high \(researcher, scout, reviewer, librarian, preflight\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-high; other agents and the Plan agent run on overpass\/agentic-high\./);
+  // Changed again 2026-10-23 (user-ruled, 'Defaults + reset + bypass ON'): scout, librarian, preflight and the
+  // maintenance worker default to agentic-auto, and the conductor is bypassed unless conductor_bypass is false.
+  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto \(implementor, scout, librarian, preflight\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high \(researcher, reviewer\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-auto; other agents and the Plan agent run on overpass\/agentic-high\./);
   // An explicit override: a role tier moves that role to its own group, an effort adds "at effort" to the group.
   // implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) keeps its own default
   // tier when the implementor's is overridden, so it is a group of its own here.
   const overridden = line({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' }, implementor: { tier: 'agentic-high' } } } });
-  assert.match(overridden, /subagent roles run on overpass\/agentic-high \(implementor, researcher, librarian, preflight\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-high; other agents and the Plan agent run on overpass\/agentic-high\./);
+  assert.match(overridden, /subagent roles run on overpass\/agentic-high \(implementor, researcher\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-auto at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-auto \(librarian, preflight\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-auto; other agents and the Plan agent run on overpass\/agentic-high\./);
   assert.doesNotMatch(overridden, /agentic-premium \((?:[^)]*, )?implementor[,)]/, 'the implementor override replaces its default');
+  assert.match(line({ mode: 'work', overpass: { enabled: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin/, 'an absent conductor_bypass reads as true');
   assert.match(line({ mode: 'work', overpass: { enabled: true, conductor_bypass: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin; .* run on overpass-agentic\/agentic-high/);
   assert.match(line({ mode: 'hobby', overpass: { enabled: true } }), /^Overpass: CONFIGURED BUT NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/);
   assert.match(line({ overpass: { enabled: true } }), /NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/, 'absent mode is hobby');
@@ -800,7 +805,7 @@ test('mismatch notice: a conductor or Plan session on another model is told ever
 });
 
 test('mismatch notice: silent when the conductor is bypassed or Overpass is off', async () => {
-  for (const config of [{ mode: 'work', overpass: { enabled: true, conductor_bypass: true } }, { mode: 'work' }, { mode: 'hobby', overpass: { enabled: true } }]) {
+  for (const config of [{ mode: 'work', overpass: { enabled: true, conductor_bypass: true } }, { mode: 'work', overpass: { enabled: true } }, { mode: 'work' }, { mode: 'hobby', overpass: { enabled: true } }]) {
     const p = makeProject(config, { agent: {} });
     const s = await setup(p.dir);
     try {

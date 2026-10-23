@@ -5807,7 +5807,7 @@ var init_config = __esm({
       // including an unknown role or field under the optional `roles` map
       // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
       // (config.test.ts pins that they agree).
-      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: true }),
       // The one-time config migrations already applied to this file (addModelDefaults),
       // so a value a migration added and the user later cleared is never added again.
       // Written by sync and init only.
@@ -9701,8 +9701,8 @@ function systemTodoKey(t) {
 function systemTodoTextsEquivalent(reason, a, b) {
   if (reason !== "state_review")
     return a === b;
-  const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
-  return strip(a) === strip(b);
+  const strip2 = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+  return strip2(a) === strip2(b);
 }
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
@@ -15646,11 +15646,13 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
+    // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
       const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
       if (existsSync(pkg)) consider(pkg, host);
       if (depth === 0) return;
-      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
     };
     walk(dir, 4);
   }
@@ -16017,12 +16019,24 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
 POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
 }
+var RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
+var OVERPASS_RESET_LINE = /^config migration: overpass\./;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var strip = (l) => l.replace(/^config migration: /, "");
+function splitMigrated(migrated) {
+  return {
+    retired: migrated.filter((l) => RETIRED_KEY_LINE.test(l)),
+    overpass: migrated.filter((l) => OVERPASS_RESET_LINE.test(l)),
+    other: migrated.filter((l) => !RETIRED_KEY_LINE.test(l) && !OVERPASS_RESET_LINE.test(l))
+  };
+}
 function migratedWarning(migrated) {
-  if (!migrated.length) return "";
-  return `.sterling/config.json lost ${migrated.length} retired models key${migrated.length === 1 ? "" : "s"} (ignored before, so no model changed). `;
+  const { retired, overpass, other } = splitMigrated(migrated);
+  return (retired.length ? `.sterling/config.json lost ${plural(retired.length, "retired models key")} (ignored before, so no model changed). ` : "") + (overpass.length ? `.sterling/config.json had its Overpass settings reset to the defaults (tier overrides removed, conductor bypass on), which changes model routing. ` : "") + (other.length ? `.sterling/config.json had ${plural(other.length, "other config migration step")} applied (model defaults or the implementor-hard move), which can change model pins. ` : "");
 }
 function migratedContext(migrated) {
-  return migrated.length ? ` sync-agents removed ${migrated.length} retired models key${migrated.length === 1 ? "" : "s"} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${migrated.map((l) => l.replace(/^config migration: /, "")).join("; ")}.` : "";
+  const { retired, overpass, other } = splitMigrated(migrated);
+  return (retired.length ? ` sync-agents removed ${plural(retired.length, "retired models key")} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join("; ")}.` : "") + (overpass.length ? ` sync-agents reset the Overpass settings in .sterling/config.json, which changes model routing (config.overpass.roles overrides are gone and the conductor bypass is on); tell the user, because the old values are no longer in the file: ${overpass.map(strip).join("; ")}.` : "") + (other.length ? ` sync-agents applied ${plural(other.length, "other config migration step")} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join("; ")}.` : "");
 }
 function cloneAgentSyncApplies(root, project) {
   return Boolean(root) && !isInstalledCopy(root) && existsSync15(join28(project, ".sterling", "config.json"));
@@ -16579,7 +16593,7 @@ import { join as join32 } from "node:path";
 var isWorkerLane = (r) => WORKER_LANES.includes(r);
 var REASONS_SHOWN = 3;
 var REASON_CLIP = 120;
-var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var plural2 = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var inLane = (n, r) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`;
 function readMaintenanceState(store2, cwd) {
   const reconcile2 = { count: 0, lanes: [], handedOff: 0, handoffs: [], oldest: null, unjudged: 0, oldestUnjudged: null, writes: null };
@@ -16705,9 +16719,9 @@ function lastRunClause(last, nowMs) {
   if (last.ok === false) return "";
   const age = ageText(last.at, nowMs);
   const parts = [age === "unknown" ? "time unknown" : `${age} ago`];
-  if (Number.isFinite(last.verdicts)) parts.push(plural(last.verdicts, "verdict"));
+  if (Number.isFinite(last.verdicts)) parts.push(plural2(last.verdicts, "verdict"));
   if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok + (Number.isFinite(last.resolves_closed) ? last.resolves_closed : 0)} closed`);
-  if (Number.isFinite(last.writes_ok) && last.writes_ok > 0) parts.push(plural(last.writes_ok, "factual edit"));
+  if (Number.isFinite(last.writes_ok) && last.writes_ok > 0) parts.push(plural2(last.writes_ok, "factual edit"));
   return `. Last run: ${parts.join(", ")}`;
 }
 function workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowMs, env }) {
@@ -16736,7 +16750,7 @@ function workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowM
     if (reconcile2.unjudged < BATCH_MIN_ITEMS && waitedMs < BATCH_MAX_WAIT_MS) {
       return `worker batching: starts at ${BATCH_MIN_ITEMS} unjudged or after ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m (${reconcile2.unjudged} now, oldest ${waited})${lastRunClause(last, nowMs)}`;
     }
-    return `worker launches at your next Stop or git commit to judge ${plural(reconcile2.unjudged, "item")} (oldest unjudged ${waited})${lastRunClause(last, nowMs)}`;
+    return `worker launches at your next Stop or git commit to judge ${plural2(reconcile2.unjudged, "item")} (oldest unjudged ${waited})${lastRunClause(last, nowMs)}`;
   } catch (e) {
     return `worker state unknown (${stateUnknownReason(e)})`;
   }

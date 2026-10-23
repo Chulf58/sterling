@@ -5637,7 +5637,7 @@ var configSchema = external_exports.object({
   // including an unknown role or field under the optional `roles` map
   // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
-  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: true }),
   // The one-time config migrations already applied to this file (addModelDefaults),
   // so a value a migration added and the user later cleared is never added again.
   // Written by sync and init only.
@@ -5657,12 +5657,12 @@ var DEFAULT_OVERPASS_ROLE_TIERS = {
   implementor: "agentic-auto",
   "implementor-hard": "agentic-premium",
   researcher: DEFAULT_OVERPASS_TIER,
-  scout: DEFAULT_OVERPASS_TIER,
+  scout: "agentic-auto",
   reviewer: DEFAULT_OVERPASS_TIER,
-  librarian: DEFAULT_OVERPASS_TIER,
+  librarian: "agentic-auto",
   sparring: "agentic-premium-max",
-  preflight: DEFAULT_OVERPASS_TIER,
-  "maintenance-worker": DEFAULT_OVERPASS_TIER
+  preflight: "agentic-auto",
+  "maintenance-worker": "agentic-auto"
 };
 var OverpassUnknownRoleError = class extends Error {
   role;
@@ -5716,7 +5716,7 @@ function resolveOverpass(config, opts) {
   if (typeof enabled !== "boolean") {
     throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
   }
-  const bypass = block.conductor_bypass === void 0 ? false : block.conductor_bypass;
+  const bypass = block.conductor_bypass === void 0 ? true : block.conductor_bypass;
   if (typeof bypass !== "boolean") {
     throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
   }
@@ -12551,7 +12551,7 @@ var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 function isOpenCodeOnlyEntry(entry) {
   return entry.vendor !== void 0 && entry.vendor !== "anthropic";
 }
-var DEFAULT_OVERPASS_VIEW = { enabled: false, provider: "overpass", conductorBypass: false, effective: false };
+var DEFAULT_OVERPASS_VIEW = { enabled: false, provider: "overpass", conductorBypass: true, effective: false };
 var isOverpassRole = (key) => OVERPASS_ROLES.includes(key);
 function overpassRoute(view, role) {
   return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
@@ -15909,11 +15909,13 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
+    // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
       const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
       if (existsSync(pkg)) consider(pkg, host);
       if (depth === 0) return;
-      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
     };
     walk(dir, 4);
   }
@@ -16658,8 +16660,8 @@ function openDashboard(storePath, options = {}) {
       return { enabled: false, provider: null, conductorBypass: false, effective, invalid: JSON.stringify(block) };
     }
     const fields = block ?? {};
-    const flag = (v) => v === void 0 ? false : typeof v === "boolean" ? v : JSON.stringify(v);
-    const base2 = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective, ...roles ? { roles } : {} };
+    const flag = (v, whenAbsent = false) => v === void 0 ? whenAbsent : typeof v === "boolean" ? v : JSON.stringify(v);
+    const base2 = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass, true), effective, ...roles ? { roles } : {} };
     if (fields.provider !== void 0 && typeof fields.provider !== "string")
       return { ...base2, provider: null, providerInvalid: JSON.stringify(fields.provider) };
     return { ...base2, provider: fields.provider ?? "overpass" };

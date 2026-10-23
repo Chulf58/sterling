@@ -393,6 +393,54 @@ test('cloneAgentSync: dropped retired models keys are named in the banner and th
   assert.ok(r.context.includes('value was {"model":"claude-opus-5","effort":"high"}'), r.context);
 });
 
+// The Overpass defaults reset (decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max)
+// changes routing, so the banner and context must not call it a dropped retired key or say no model changed.
+const RESET_LINES = [
+  'config migration: overpass.roles removed (value was {"scout":{"tier":"agentic-low"}}); every role now runs on its default tier',
+  'config migration: overpass.conductor_bypass set to true (was false); the conductor keeps its direct model pin',
+];
+const HARD_MOVE_LINE = 'config migration: models.implementor.hard_task {"model":"claude-opus-5-5"} moved to models.implementor-hard as {"model":"claude-opus-5-5","effort":"high"}, the sterling/implementor-hard agent\'s model; change it in the System tab';
+
+test('postUpdateSync: the Overpass reset is described as a routing change, never as dropped retired keys or "no model changed"', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `up_to_date: implementor\n${RESET_LINES.join('\n')}\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'synced', r.context);
+  assert.match(r.warning, /\.sterling\/config\.json had its Overpass settings reset to the defaults \(tier overrides removed, conductor bypass on\), which changes model routing\./, r.warning);
+  assert.doesNotMatch(r.warning, /retired models key|no model changed/, r.warning);
+  assert.doesNotMatch(r.context, /retired models key|no model changed/, r.context);
+  assert.match(r.context, /sync-agents reset the Overpass settings in \.sterling\/config\.json, which changes model routing/);
+  for (const l of RESET_LINES) assert.ok(r.context.includes(l.replace(/^config migration: /, '')), l);
+});
+
+test('postUpdateSync: a retired-key drop next to the Overpass reset keeps its own text, and the reset gets its own', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `up_to_date: implementor\n${DROP_LINE}\n${HARD_MOVE_LINE}\n${RESET_LINES.join('\n')}\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.match(r.warning, /\.sterling\/config\.json lost 1 retired models key \(ignored before, so no model changed\)\. /, 'the retired-key clause counts only the drop');
+  assert.match(r.warning, /Overpass settings reset to the defaults/);
+  assert.match(r.warning, /had 1 other config migration step applied \(model defaults or the implementor-hard move\), which can change model pins\./, 'the hard_task move is not a retired key');
+  assert.ok(r.context.includes('sync-agents removed 1 retired models key from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: models.coder dropped'), r.context);
+  assert.ok(!r.context.includes('(they were already ignored, so no model changed); tell the user, because the values are no longer in the file: models.coder dropped (ignored since the roster rename to models.implementor); value was {"model":"claude-opus-5","effort":"high"}; set models.implementor in the System tab if you want it; overpass'), 'the reset is not folded into the retired-key sentence');
+});
+
+test('cloneAgentSync: the Overpass reset is described as a routing change', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  const project = makeProject({ marker: null, store: false });
+  const out = `up_to_date: implementor\n${RESET_LINES.join('\n')}\n`;
+  const { runStep } = recordingSteps({ 'sync-agents.mjs': { status: 0, error: null, out, tail: out } });
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+  assert.equal(r.outcome, 'synced', r.context);
+  assert.match(r.warning, /Overpass settings reset to the defaults/, r.warning);
+  assert.doesNotMatch(r.warning, /retired models key|no model changed/, r.warning);
+});
+
 // A failure after the drop must still carry the receipts: the values are gone from the file and the
 // refusal's last-eight-lines `tail` does not hold them.
 const DROP_OUT = `up_to_date: implementor\n${DROP_LINE}\n`;
