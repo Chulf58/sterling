@@ -5989,6 +5989,33 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
+function addModelDefaults(raw) {
+  const none = { config: raw, changed: false, added: [] };
+  if (!isPlainObject(raw))
+    return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
+    return none;
+  if ((applied ?? []).includes(MODEL_DEFAULTS_MIGRATION_ID))
+    return none;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return none;
+  const defaults = configSchema.shape.models.parse({});
+  const models = { ...raw.models ?? {} };
+  const added = [];
+  for (const [role, field] of MODEL_DEFAULT_FIELDS) {
+    const entry = models[role];
+    if (entry === void 0) {
+      models[role] = defaults[role];
+      added.push({ role, field: "entry", value: defaults[role] });
+    } else if (isPlainObject(entry) && !Object.prototype.hasOwnProperty.call(entry, field)) {
+      models[role] = { ...entry, [field]: defaults[role][field] };
+      added.push({ role, field, value: defaults[role][field] });
+    }
+  }
+  const config = { ...raw, ...added.length ? { models } : {}, applied_config_migrations: [...applied ?? [], MODEL_DEFAULTS_MIGRATION_ID] };
+  return { config, changed: true, added };
+}
 function migrateRetiredModelKeys(raw) {
   const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
   if (!isPlainObject(raw) || !isPlainObject(raw.models))
@@ -6046,7 +6073,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6224,7 +6251,15 @@ var init_config = __esm({
       // longer needs an indirection layer between an agent's name and its config
       // key.
       models: external_exports.object({
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        // The hard_task, and the reviewer's and sparring's opencode_model below, are the
+        // models the conductor named on those dispatches before the OpenCode dispatch
+        // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
+        // They are whole-entry defaults only, never hidden field defaults: an entry that
+        // exists without them means "none" (clearing opencode_model in the System tab runs
+        // the role on its Claude model). Live entries written before them get them once,
+        // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
+        // "Write it into each config").
+        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
         classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -6235,12 +6270,12 @@ var init_config = __esm({
         // reviewer judges a diff (decision
         // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
         // dispatch pins its model explicitly; this is the install-time default.
-        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6.1-sol" }),
         // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
         // read-only grant as the reviewer, so the same install-time default. Every
         // dispatch pins its model (Astra, else a Fable model); under Overpass its
         // role tier decides.
-        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -6552,7 +6587,11 @@ var init_config = __esm({
       // including an unknown role or field under the optional `roles` map
       // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
       // (config.test.ts pins that they agree).
-      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+      // The one-time config migrations already applied to this file (addModelDefaults),
+      // so a value a migration added and the user later cleared is never added again.
+      // Written by sync and init only.
+      applied_config_migrations: external_exports.array(external_exports.string()).optional()
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
@@ -6578,6 +6617,12 @@ var init_config = __esm({
       "debugger"
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+    MODEL_DEFAULTS_MIGRATION_ID = "model-defaults-2026-10-23";
+    MODEL_DEFAULT_FIELDS = [
+      ["implementor", "hard_task"],
+      ["reviewer", "opencode_model"],
+      ["sparring", "opencode_model"]
+    ];
     CONFIG_KEY_RENAMES = {
       "models.coder": "models.implementor",
       "models.explorer": "models.scout"
@@ -6825,6 +6870,7 @@ __export(dist_exports, {
   KNOWLEDGE_WRITES_TEMP_FILE: () => KNOWLEDGE_WRITES_TEMP_FILE,
   LIFECYCLE_VALUES: () => LIFECYCLE_VALUES,
   LINK_RELS: () => LINK_RELS,
+  MODEL_DEFAULTS_MIGRATION_ID: () => MODEL_DEFAULTS_MIGRATION_ID,
   NAME_CLIP: () => NAME_CLIP,
   NOT_APPLICABLE_EXEMPT_KINDS: () => NOT_APPLICABLE_EXEMPT_KINDS,
   NO_CAPTURE_LANES: () => NO_CAPTURE_LANES,
@@ -6853,6 +6899,7 @@ __export(dist_exports, {
   WORKER_POLICY_LANES: () => WORKER_POLICY_LANES,
   WRITE_REFUSED_LINK_RELS: () => WRITE_REFUSED_LINK_RELS,
   addFieldCondition: () => addFieldCondition,
+  addModelDefaults: () => addModelDefaults,
   antiPatternSchema: () => antiPatternSchema,
   attestationSchema: () => attestationSchema,
   boardDisplayLabel: () => boardDisplayLabel,

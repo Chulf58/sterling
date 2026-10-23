@@ -20,7 +20,11 @@ function project(text) {
 }
 const cfgPath = (dir) => join(dir, '.sterling', 'config.json');
 const read = (dir) => readFileSync(cfgPath(dir), 'utf8');
+// The fixtures below are about the retired keys, so they record the model-defaults add as
+// already applied (added with that step, user-ruled 2026-10-23); its own tests are at the end.
+const DEFAULTS_DONE = { applied_config_migrations: ['model-defaults-2026-10-23'] };
 const retiredConfig = () => ({
+  ...DEFAULTS_DONE,
   mode: 'hobby',
   models: {
     coder: { model: 'claude-opus-5', effort: 'high' },
@@ -41,7 +45,7 @@ test('drops every retired key with its value in the report and carries nothing; 
       'config migration: models.explorer dropped (ignored since the roster rename to models.scout); value was {"model":"claude-haiku-5-5","effort":"low"}; set models.scout in the System tab if you want it',
       'config migration: models.reviewers dropped (a retired key, ignored since the roster rename); value was {"model":"claude-opus-5","effort":"high"}; set models.<role> in the System tab for the role you want it on',
     ]);
-    assert.deepEqual(JSON.parse(read(dir)), { mode: 'hobby', models: { scout: { model: 'claude-sonnet-5-5', effort: 'medium' } } }, 'no implementor key appears: nothing is carried');
+    assert.deepEqual(JSON.parse(read(dir)), { ...DEFAULTS_DONE, mode: 'hobby', models: { scout: { model: 'claude-sonnet-5-5', effort: 'medium' } } }, 'no implementor key appears: nothing is carried');
     assert.ok(read(dir).endsWith('\n'), 'the trailing newline is kept');
     assert.deepEqual(readdirSync(join(dir, '.sterling')), ['config.json']);
   } finally {
@@ -155,7 +159,7 @@ test('a symlinked config with retired keys is refused (the rename would replace 
     const r = prepareConfigMigration(dir);
     assert.equal(r.status, 'refused');
     assert.match(r.lines[0], /is a symlink/);
-    writeFileSync(target, JSON.stringify({ mode: 'hobby' }));
+    writeFileSync(target, JSON.stringify({ ...DEFAULTS_DONE, mode: 'hobby' }));
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
   } finally {
     cleanup(dir);
@@ -175,7 +179,7 @@ test('a symlinked .sterling directory is refused and the config it points at is 
     assert.match(r.lines[0], /\.sterling that is not a plain directory/);
     assert.equal(migrateProjectConfig(dir).status, 'refused');
     assert.equal(readFileSync(join(real, 'config.json'), 'utf8'), original);
-    writeFileSync(join(real, 'config.json'), JSON.stringify({ mode: 'hobby' }));
+    writeFileSync(join(real, 'config.json'), JSON.stringify({ ...DEFAULTS_DONE, mode: 'hobby' }));
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
   } finally {
     cleanup(dir);
@@ -248,6 +252,75 @@ test('sync-agents stops with exit 2 before rendering or setupOpenCode when the m
     assert.equal(read(dir), text, 'the file is untouched');
   } finally {
     chmodSync(join(dir, '.sterling'), 0o700);
+    cleanup(dir);
+  }
+});
+
+// ── the model-defaults add (user-ruled 2026-10-23, "Write it into each config") ──
+
+test('model defaults: absent opencode_model and hard_task are added and reported; a present value is never overwritten', () => {
+  const dir = project(JSON.stringify({
+    mode: 'hobby',
+    models: {
+      implementor: { model: 'claude-sonnet-5-5', effort: 'high' },
+      reviewer: { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' },
+      researcher: { model: 'claude-sonnet-5-5', effort: 'medium' },
+    },
+  }, null, 2) + '\n');
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    const after = JSON.parse(read(dir));
+    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } });
+    assert.deepEqual(after.models.reviewer, { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' }, 'a value the user set stays');
+    assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }, 'a role with no entry gets the shipped default entry');
+    assert.deepEqual(after.models.researcher, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'other roles are not touched');
+    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23']);
+    assert.equal(r.lines.length, 2);
+    assert.match(r.lines[0], /^config migration: models\.implementor\.hard_task added as \{"model":"claude-opus-5-5"\}/);
+    assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra"\}/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('model defaults: run once; a value cleared afterwards stays cleared at the next sync', () => {
+  const dir = project(JSON.stringify({ mode: 'hobby', models: { reviewer: { model: 'claude-opus-5-5', effort: 'high' } } }));
+  try {
+    const first = migrateProjectConfig(dir);
+    assert.match(first.lines.join('\n'), /models\.reviewer\.opencode_model added as "openai\/gpt-6\.1-sol"/);
+    const cfg = JSON.parse(read(dir));
+    delete cfg.models.reviewer.opencode_model; // the System tab's clear: "use the Claude model"
+    writeFileSync(cfgPath(dir), JSON.stringify(cfg));
+    const second = prepareConfigMigration(dir);
+    assert.equal(second.status, 'unchanged');
+    assert.deepEqual(second.lines, []);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('model defaults: a config that already has them records the step once, says so, and is unchanged after', () => {
+  const dir = project(JSON.stringify({ mode: 'hobby', models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } },
+    reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
+    sparring: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' },
+  } }));
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    assert.deepEqual(r.lines, ['config migration: model defaults already set; recorded model-defaults-2026-10-23 in applied_config_migrations so they are never added again']);
+    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('model defaults: the shipped default-config.json already carries them, so a fresh config needs no add', () => {
+  const dir = project(readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
+  try {
+    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
+  } finally {
     cleanup(dir);
   }
 });

@@ -14,6 +14,9 @@
 // mutated model reaches execution, and an unavailable one fails as a tool error).
 // A brief with an `OVERPASS-BYPASS: <reason>` line keeps the model the call names
 // (decision overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re).
+// While Overpass is not effective, a call that names no model gets one from
+// config.models through the brief's MODEL-INTENT line (dispatch-model.mjs; decision
+// subagent-model-choice-on-opencode-conductor-states-dispatch).
 // H20 never denies on either host: Claude Code's deny-once rung was removed by
 // decision sterling-claude-code-scale-down-boundary (h20-mechanism-axis.mjs:435-441),
 // so the question surface is a post-answer audit here too.
@@ -42,6 +45,7 @@ import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
 import { dispatchOverpass, dispatchPin, overpassRefusal, overpassUnknownLine } from './overpass.mjs';
+import { checkVariant, dispatchModel } from './dispatch-model.mjs';
 import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
@@ -49,6 +53,26 @@ import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subj
 const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
 const CODEX_TOOL = /^codex[._]/;
 const PENDING_CAP = 200;
+// How long a dispatch waits for OpenCode's model list before the variant guard gives up
+// (checkVariant then marks the variant "not checked"), so a list that never settles
+// cannot stall a dispatch; the same race-with-timer shape as context.mjs sendSynthetic.
+export const MODEL_LIST_TIMEOUT_MS = 2000;
+
+/** listModels() raced against `ms`: { list } or { error }; never throws, never waits longer than `ms`. */
+async function boundedModelList(listModels, ms) {
+  let timer;
+  try {
+    const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    });
+    return await Promise.race([call, late]);
+  } catch (e) {
+    return { error: e };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Which H20 surface a tool call is on, or null. */
 export function axisSurface(tool) {
@@ -114,7 +138,7 @@ function reportOverpass(root, message) {
  * delivers to the session that makes the call, so it reaches a blind lane only
  * when that lane dispatches (decision blind-lane-sterling-delivery-off-brief-line, point 6).
  */
-export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels, modelListTimeoutMs = MODEL_LIST_TIMEOUT_MS }) {
   if (!deliveryPolicy) throw new Error('createAxisHandlers needs the deliveryPolicy tracker');
   const pending = new Map();
 
@@ -156,12 +180,20 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
       } else {
         // An OVERPASS-BYPASS brief line keeps the call's model; one that cannot be honoured
         // (no model on the call, no reason) throws and refuses the dispatch the same way.
+        // While Overpass is not effective, the model comes from config.models through the
+        // dispatch intent instead (dispatch-model.mjs); a bad MODEL-INTENT line refuses the same way.
         let pin;
         try {
-          pin = dispatchPin(read.res, args);
+          pin = read.res.effective ? dispatchPin(read.res, args) : dispatchModel(read.config, args);
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
+        }
+        // A resolved model whose variant OpenCode does not list runs without it (checkVariant).
+        if (pin.resolved) {
+          const { list, error } = await boundedModelList(listModels, modelListTimeoutMs);
+          const checked = checkVariant(pin.model, list, error);
+          pin = { ...pin, model: checked.model, line: checked.note ? `${pin.line} ${checked.note}` : pin.line };
         }
         if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
         pinLine = pin.line;

@@ -61,7 +61,8 @@ export function dispatchOverpass(root) {
     return { res: null, unreadable: e };
   }
   if (!isObject(config)) return { res: null, unreadable: new Error('it is not a JSON object') };
-  return { res: resolveOverpass(config, { host: 'opencode' }), unreadable: null };
+  // `config` is the raw object read, for the model resolver that runs while Overpass is not effective (dispatch-model.mjs).
+  return { res: resolveOverpass(config, { host: 'opencode' }), unreadable: null, config };
 }
 
 /** The loud line a dispatch carries when .sterling/config.json could not be read (`error` from dispatchOverpass). */
@@ -78,14 +79,14 @@ const BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
- * The OVERPASS-BYPASS marker in a brief: null when no unfenced line carries one, else
- * { reason }. The reason is the first marker's, trimmed; it is empty when ANY unfenced
- * marker line has no reason, so a valid first marker cannot hide an empty second one.
+ * The text after the marker on every unfenced brief line that `lineRe` matches (its first
+ * group, trimmed), in order. A line inside a fenced code block is quoted text and never
+ * counts. Shared by the OVERPASS-BYPASS and MODEL-INTENT markers (dispatch-model.mjs).
  */
-export function bypassMarker(prompt) {
-  if (typeof prompt !== 'string') return null;
+export function unfencedMarkers(prompt, lineRe) {
+  if (typeof prompt !== 'string') return [];
   let fence = null;
-  const reasons = [];
+  const found = [];
   for (const line of prompt.split(/\r?\n/)) {
     if (fence) {
       const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
@@ -97,9 +98,19 @@ export function bypassMarker(prompt) {
       fence = open[1];
       continue;
     }
-    const m = BYPASS_LINE.exec(line);
-    if (m) reasons.push(m[1].trim());
+    const m = lineRe.exec(line);
+    if (m) found.push(m[1].trim());
   }
+  return found;
+}
+
+/**
+ * The OVERPASS-BYPASS marker in a brief: null when no unfenced line carries one, else
+ * { reason }. The reason is the first marker's, trimmed; it is empty when ANY unfenced
+ * marker line has no reason, so a valid first marker cannot hide an empty second one.
+ */
+export function bypassMarker(prompt) {
+  const reasons = unfencedMarkers(prompt, BYPASS_LINE);
   if (!reasons.length) return null;
   return { reason: reasons.every(Boolean) ? reasons[0] : '' };
 }
