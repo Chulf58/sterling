@@ -120,7 +120,7 @@ for (const r of report) {
     // nothing written. Names model/effort and/or the tools difference.
     console.log(
       `config_drift: ${r.name} — ${describeConfigDrift(r)}; ` +
-        `NOT rewritten by sync — realize it with ${r.fix}, then restart the session`
+        `NOT rewritten by sync — realize it with ${r.fix}, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`)`
     );
   } else {
     console.log(`${r.status}: ${r.name}`);

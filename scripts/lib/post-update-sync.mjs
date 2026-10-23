@@ -46,7 +46,7 @@ const HOST_TEXT = {
   opencode: {
     label: 'OpenCode plugin',
     restartShort: 'agents synced — RELOAD to load them (run `opencode reload`; a /new is NOT enough)',
-    restartLong: 'RELOAD REQUIRED — agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`) before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.',
+    restartLong: 'RELOAD REQUIRED — agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `/reload` in the TUI, or `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`), before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.',
     retry: 'retries the next time OpenCode starts',
     rerun: 're-runs at every OpenCode start',
   },

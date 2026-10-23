@@ -99,7 +99,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
-      schema = found === SUPPORTED_SCHEMA_VERSION ? `store schema v${found} (current)` : `store schema v${found}, this Sterling expects v${SUPPORTED_SCHEMA_VERSION}: run migrate-stores, then restart OpenCode`;
+      schema = found === SUPPORTED_SCHEMA_VERSION ? `store schema v${found} (current)` : `store schema v${found}, this Sterling expects v${SUPPORTED_SCHEMA_VERSION}: run migrate-stores, then run \`opencode reload\``;
     } catch (e) {
       schema = `store schema probe failed (${errText(e)})`;
     }
@@ -385,7 +385,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           line = await sweepStale(root);
         } catch (e) {
           // A failed sweep costs its own line, not the rest of the context.
-          line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+          line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; run \`opencode reload\` to retry the sweep.`;
         }
         if (line) {
           holdLine(`${root}\0sweep`, line);

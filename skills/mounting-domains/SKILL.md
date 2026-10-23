@@ -52,7 +52,7 @@ Never hand-edit `stack_tags` when the CLI can make the change: a hand edit skips
 
 ## 6. Load the mount and confirm it
 
-The Sterling MCP server mounts domains once, when it starts (verified in `packages/mcp-server/src/server.ts`: the mounted set is built at boot from the config). So the new domain is not readable or writable in the running session. Tell the user to restart the session.
+The Sterling MCP server mounts domains once, when it starts (verified in `packages/mcp-server/src/server.ts`: the mounted set is built at boot from the config). So the new domain is not readable or writable in the running session. Tell the user to restart the session (Claude Code: exit and relaunch; OpenCode: run `/reload` in the TUI or `opencode reload`).
 
 Then:
 - Check the "Stack tags" and "Domain stores" lines in the project's `AGENTS.md`. `domains.mjs --apply` and a re-run of `/sterling:init` rewrite them when they still have the shape init writes; a line edited by hand is kept and reported with a warning, so update that one yourself.
@@ -102,7 +102,7 @@ After it runs:
 - [ ] The user chose the list through the question form.
 - [ ] Each new store has a description in the user's words that names what belongs and what does not.
 - [ ] The apply output was read and shows the new `stack_tags`.
-- [ ] The user was told to restart the session, and `AGENTS.md` matches the new tags.
+- [ ] The user was told to restart the session (OpenCode: `opencode reload`), and `AGENTS.md` matches the new tags.
 - [ ] The map was re-run and shows this project under each added domain.
 - [ ] Each sibling step was named to the user with the project and its path, and the one-machine, one-user limit was stated.
 - [ ] Nothing was removed and no record was moved by hand (a rename went through `bin/domain-doctor.mjs rename`, and the user saw the dry-run plan first).

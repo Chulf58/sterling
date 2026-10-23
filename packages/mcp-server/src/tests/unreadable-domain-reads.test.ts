@@ -220,7 +220,7 @@ test('knowledge_create into a dropped domain refuses, naming the domain, the err
   try {
     assert.throws(
       () => h.tools.knowledgeCreate('decision', decision('A new decision for the old domain store', { scope: 'domain:old' })),
-      /domain 'old' cannot be written: this session cannot read it \(no such table: record_relations.*\)\. Nothing was written\. Repair the store, then restart the session\./s
+      /domain 'old' cannot be written: this session cannot read it \(no such table: record_relations.*\)\. Nothing was written\. Repair the store, then restart the session \(Claude Code: exit and relaunch; OpenCode: run `opencode reload`\)\./s
     );
   } finally {
     h.cleanup();
