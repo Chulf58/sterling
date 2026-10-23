@@ -493,6 +493,30 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     return { ...base, provider: fields.provider ?? 'overpass' };
   }
 
+  /** Set by refuseOverpassModelEdit; applyEffects clears it before the model writers run. */
+  let overpassRefusedEdit = false;
+
+  /** Whether Overpass is effective in `raw`, the parsed bytes a model edit is built from
+   *  (false when the resolver refuses the config, as readOverpass reads it). */
+  function overpassEffectiveIn(raw: unknown): boolean {
+    try {
+      return resolveOverpass(raw, { host: options.host ?? 'terminal' }).effective;
+    } catch {
+      return false;
+    }
+  }
+
+  /** True, with the refusal notice set and the refusal recorded for applyEffects, when
+   *  `key` is an Overpass role and Overpass is effective in `raw`: its saved model and
+   *  OpenCode override are not editable then. */
+  function refuseOverpassModelEdit(key: string, raw: unknown): boolean {
+    const roleKeys: readonly string[] = OVERPASS_ROLES;
+    if (!roleKeys.includes(key) || !overpassEffectiveIn(raw)) return false;
+    overpassRefusedEdit = true;
+    ui = { ...ui, notice: 'Overpass is on — the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written.' };
+    return true;
+  }
+
   /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
    *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
    *  a deduped refresh when the catalog is stale (decision foreign_98064d77). */
@@ -579,6 +603,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // every agent file below is touched only after it succeeded.
       const original = readFileSync(configPath);
       const raw = JSON.parse(original.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
+      if (refuseOverpassModelEdit(e.key, raw)) return;
       raw.models = raw.models ?? {};
       const prev = raw.models[e.key] ?? {};
       raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
@@ -667,6 +692,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
       configBefore = readFileSync(configPath);
       const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
+      if (refuseOverpassModelEdit(e.key, raw)) return;
       raw.models = raw.models ?? {};
       // a key the file does not carry yet takes its current (default) Claude values
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
@@ -752,25 +778,20 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       return false;
     });
     const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
-    // Overpass is judged from the config on disk right now, not from the roster the
-    // picker opened on: Overpass may have been switched on since (config_set, another
-    // session). While it is effective an Overpass role's saved model and OpenCode
+    // Overpass is judged from the config on disk when the write is built, not from the
+    // roster the picker opened on: Overpass may have been switched on since (config_set,
+    // another session). While it is effective an Overpass role's saved model and OpenCode
     // override are not editable (decision
     // system-tab-agent-catalog-with-overpass-on-each-row-shows-the), so those effects
     // are refused and the roster is refreshed to show the tier rows.
-    const overpassRoleKeys: readonly string[] = OVERPASS_ROLES;
-    const modelEdit = (e: Effect): e is ModelSwapEffect | OpenCodeModelEffect => (e.type === 'model_swap' || e.type === 'opencode_model') && overpassRoleKeys.includes(e.key);
-    let refused = false;
-    let swaps = effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
-    let overrides = effects.filter((e): e is OpenCodeModelEffect => e.type === 'opencode_model');
-    if (effects.some(modelEdit) && readOverpass().effective) {
-      swaps = swaps.filter((e) => !modelEdit(e));
-      overrides = overrides.filter((e) => !modelEdit(e));
-      refused = true;
-      notice('Overpass is on — the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written.');
-    }
+    const swaps = effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
+    const overrides = effects.filter((e): e is OpenCodeModelEffect => e.type === 'opencode_model');
+    // each writer resolves Overpass from the very bytes it builds its write from and
+    // replaceConfigFile compares them again at the rename, so no change can slip between
+    overpassRefusedEdit = false;
     for (const e of swaps) await applySwap(e);
     for (const e of overrides) applyOpenCodeModel(e);
+    const refused = overpassRefusedEdit;
     const sparringModels = effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
     for (const e of sparringModels) applySparringModel(e);
     // sparring/tdd/mode/handoff toggle writes (board a0714d0b, decision foreign_752caf98):

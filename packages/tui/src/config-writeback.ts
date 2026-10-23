@@ -25,10 +25,11 @@
 // failure on the shared UI notice sink. The caller (main.ts) composes the
 // single H17-latch reminder itself once all appliers in the batch have run
 // — board 09f05fca half 2, review fix.
-import { randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { OVERPASS_PROVIDER_RE, resolveOverpass } from '@sterling/schemas';
+// Static, so esbuild inlines it into the bundles (as controller.ts does for the other scripts/lib modules).
+import { writeFileAtomic } from '../../../scripts/lib/atomic-write.mjs';
 import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, OverpassBypassEffect, OverpassProviderEffect, OverpassRoleEffect, OverpassToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
@@ -82,31 +83,26 @@ export function replaceConfigFile(target: string, next: string, expected: Buffer
   const linkStat = lstatSync(target);
   if (linkStat.isSymbolicLink()) throw new Error('config.json is a symlink — refusing to write through a link, which the write would replace with a plain file. Nothing was written.');
   const mode = linkStat.mode & 0o777;
-  const tmp = `${target}.tmp-${randomUUID()}`;
-  let renamed = false;
-  try {
-    if (seams.writeFile) seams.writeFile(tmp, next, mode);
-    else writeFileSync(tmp, next, { mode });
-    chmodSync(tmp, mode);
-    seams.beforeRename?.();
-    let now: Buffer | undefined;
-    try {
-      now = readFileSync(target);
-    } catch {
-      now = undefined;
-    }
-    if (now === undefined || !now.equals(expected)) throw new ConfigChangedError();
-    renameSync(tmp, target);
-    renamed = true;
-  } finally {
-    if (!renamed) {
+  // the shared temp-file lifecycle (write, rename, remove the temp file on failure) is
+  // writeFileAtomic's; the mode and the byte compare ride on its two seams
+  writeFileAtomic(target, next, {
+    writeFile: (tmp: string, content: string) => {
+      if (seams.writeFile) seams.writeFile(tmp, content, mode);
+      else writeFileSync(tmp, content, { mode });
+      chmodSync(tmp, mode);
+    },
+    rename: (tmp: string, path: string) => {
+      seams.beforeRename?.();
+      let now: Buffer | undefined;
       try {
-        unlinkSync(tmp);
+        now = readFileSync(path);
       } catch {
-        // the temp file may never have been created; the original is untouched either way
+        now = undefined;
       }
-    }
-  }
+      if (now === undefined || !now.equals(expected)) throw new ConfigChangedError();
+      renameSync(tmp, path);
+    },
+  });
 }
 
 /** Read config.json, replace the top-level `key` with `update(old, raw)`, and write it
