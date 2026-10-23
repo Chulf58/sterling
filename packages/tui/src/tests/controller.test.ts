@@ -253,6 +253,32 @@ test('controller: an OpenCode re-render failure is folded into the notice; the s
   }
 });
 
+test('controller: a model swap refused because config.json changed on disk writes no agent file and records no decision', async () => {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
+  const claudeAgent = join(f.dir, '.claude', 'agents', 'implementor.md');
+  mkdirSync(join(f.dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(claudeAgent, '---\nname: implementor\nmodel: claude-a\neffort: high\n---\nbody\n');
+  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
+  mkdirSync(ocDir, { recursive: true });
+  writeFileSync(join(ocDir, 'implementor.md'), 'portable\n');
+  const concurrent = JSON.stringify({ models: { implementor: { model: 'claude-a', effort: 'high' } }, overpass: { enabled: false } }, null, 2) + '\n';
+  const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => writeFileSync(f.configPath, concurrent) } });
+  try {
+    await ctl.applyEffects([
+      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
+    ]);
+    assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change is not lost");
+    assert.match(readFileSync(claudeAgent, 'utf8'), /^model: claude-a$/m, 'the Claude agent file was not re-stamped');
+    assert.equal(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), 'portable\n', 'the OpenCode agent file was not re-rendered');
+    assert.equal(ctl.store.query({ types: ['decision'], cap: 10 }).length, 0, 'no swap decision was recorded');
+    assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), []);
+    assert.match(ctl.ui().notice ?? '', /^model swap for 'implementor' not changed — config\.json changed on disk while this write was in flight/);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('controller: a model swap in a project without OpenCode agents writes no .opencode files', async () => {
   const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
   const ctl = openDashboard(f.storePath);
@@ -475,25 +501,80 @@ for (const path of ['set', 'clear'] as const) {
     }
   });
 
-  test(`controller: an override ${path} whose config.json write stops part-way keeps the original config bytes and restores the agent files`, async () => {
+  // The config.json write comes first and the agent files only after it succeeded, so a
+  // config write that stops part-way (a full disk) leaves config.json AND every agent file
+  // as they were: the agents were never touched.
+  test(`controller: an override ${path} whose config.json write stops part-way keeps the original config bytes and never writes the agent files`, async () => {
     const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    // every config.json write (the commit and its restore) stops after a few bytes, as a full disk would
-    const configWriteFs = { writeFile: (p: string, c: string) => { writeFileSync(p, c.slice(0, 7)); throw new Error('ENOSPC: no space left'); } };
+    let failing = false;
+    const configWriteFs = { writeFile: (p: string, c: string) => { if (!failing) return writeFileSync(p, c); writeFileSync(p, c.slice(0, 7)); throw new Error('ENOSPC: no space left'); } };
     const ctl = openDashboard(f.storePath, { configWriteFs });
     try {
       await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
+      failing = true;
       const before = snapshotFiles(f);
       const decisions = decisionCount(ctl);
       await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.deepEqual(snapshotFiles(f), before, 'config.json keeps its original bytes; both written agent files were restored');
+      assert.deepEqual(snapshotFiles(f), before, 'config.json keeps its original bytes and no agent file was written');
       assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), [], 'no config temp file is left behind');
       assert.deepEqual(readdirSync(f.ocDir).filter((n) => !n.endsWith('.md')), [], 'no agent temp file is left behind');
       assert.equal(decisionCount(ctl), decisions);
-      const notice = ctl.ui().notice ?? '';
-      assert.match(notice, /writing config\.json failed \(ENOSPC[^)]*\) and the rollback failed — config\.json not restored: ENOSPC/);
-      assert.doesNotMatch(notice, /OpenCode agents not restored/, 'the agent restore ran and succeeded');
+      assert.match(ctl.ui().notice ?? '', /not changed — writing config\.json failed: ENOSPC/);
     } finally {
       ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`controller: an override ${path} refused because config.json changed on disk keeps the other writer's file, re-renders no agent and records no decision`, async () => {
+    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
+    let concurrent: string | undefined;
+    const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => { if (concurrent !== undefined) writeFileSync(f.configPath, concurrent); } } });
+    try {
+      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
+      const agentsBefore = snapshotFiles(f);
+      delete (agentsBefore as Record<string, string>).config;
+      const decisions = decisionCount(ctl);
+      // another session changes config.json between this change's read and its rename
+      concurrent = JSON.stringify({ ...JSON.parse(readFileSync(f.configPath, 'utf8')), overpass: { enabled: false } }, null, 2) + '\n';
+      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
+      assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change is not lost");
+      const agentsAfter = snapshotFiles(f);
+      delete (agentsAfter as Record<string, string>).config;
+      assert.deepEqual(agentsAfter, agentsBefore, 'no OpenCode agent file was re-rendered');
+      assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), [], 'no config temp file is left behind');
+      assert.equal(decisionCount(ctl), decisions);
+      assert.match(ctl.ui().notice ?? '', /not changed — config\.json changed on disk while this write was in flight/);
+    } finally {
+      ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`controller: an override ${path} whose agent write fails after the config write puts config.json back, and says so when it cannot because the file changed`, async () => {
+    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
+    let writes = 0;
+    let concurrent: string | undefined;
+    const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => { writes++; if (concurrent !== undefined && writes === 2) writeFileSync(f.configPath, concurrent); } } });
+    try {
+      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
+      chmodSync(f.ocDir, 0o555);
+      const before = snapshotFiles(f);
+      // the agent write fails after config.json was replaced: the config write is undone
+      writes = 0;
+      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
+      assert.equal(writes, 2, 'one config write, one restore');
+      assert.deepEqual(snapshotFiles(f), before, 'config.json is back to its original bytes');
+      assert.match(ctl.ui().notice ?? '', /not changed — writing the OpenCode agents failed/);
+      // the same failure while another session changed config.json: the restore is refused
+      writes = 0;
+      concurrent = JSON.stringify({ ...JSON.parse(before.config), overpass: { enabled: false } }, null, 2) + '\n';
+      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
+      assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change stands");
+      assert.match(ctl.ui().notice ?? '', /writing the OpenCode agents failed \(.*\) and config\.json was not restored: config\.json changed on disk/);
+    } finally {
+      ctl.close();
+      chmodSync(f.ocDir, 0o755);
       rmSync(f.dir, { recursive: true, force: true });
     }
   });
