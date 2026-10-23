@@ -17,6 +17,7 @@ import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSy
 import { join } from 'node:path';
 import { migrateRetiredModelKeys, parseConfig } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { containedPath, ContainmentError } from './contained-fs.mjs';
 
 /** Prefix of every report line; sync-agents prints them and update/post-update relay them by it. */
 export const CONFIG_MIGRATION_LINE_PREFIX = 'config migration: ';
@@ -54,6 +55,13 @@ export function prepareConfigMigration(projectDir) {
   }
   const m = migrateRetiredModelKeys(raw);
   if (!m.changed) return { status: 'unchanged', lines: [] };
+  // A linked .sterling would send the rewrite to a config outside the project.
+  try {
+    containedPath(projectDir, '.sterling', 'dir');
+  } catch (err) {
+    if (err instanceof ContainmentError) return refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`);
+    throw err;
+  }
   const stat = lstatSync(configPath);
   if (stat.isSymbolicLink()) return refuse('is a symlink, which the rewrite would replace');
   try {

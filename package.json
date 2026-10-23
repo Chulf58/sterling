@@ -1,7 +1,7 @@
 {
   "name": "@chulf58/sterling",
   "type": "module",
-  "version": "0.19.105",
+  "version": "0.19.106",
   "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
   "publishConfig": {
     "access": "public"
@@ -47,6 +47,7 @@
   "devDependencies": {
     "@types/node": "^25.9.2",
     "esbuild": "^0.28.0",
+    "js-yaml": "^5.5.0",
     "typescript": "^6.0.3"
   },
   "allowScripts": {
