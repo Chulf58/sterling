@@ -39074,7 +39074,7 @@ import { performance } from "node:perf_hooks";
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, existsSync as existsSync12 } from "node:fs";
 import { basename as basename4, dirname as dirname9, join as join20 } from "node:path";
-import { randomUUID as randomUUID8 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -52956,11 +52956,37 @@ function runEffects(store, effects, now = () => (/* @__PURE__ */ new Date()).toI
 }
 
 // packages/tui/dist/config-writeback.js
+import { chmodSync, lstatSync as lstatSync3, readFileSync as readFileSync7, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join10 } from "node:path";
+
+// scripts/lib/atomic-write.mjs
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { chmodSync, lstatSync as lstatSync3, readFileSync as readFileSync6, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join9 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync6, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { basename as basename2, dirname as dirname6, join as join9 } from "node:path";
+function atomicTempPath(path) {
+  return join9(dirname6(path), `.${basename2(path)}.tmp-${process.pid}-${randomUUID4().slice(0, 8)}`);
+}
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID4()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync2, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync3(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFileAtomicIfChanged(path, content, fs) {
+  if (existsSync4(path) && readFileSync6(path, "utf8") === content) return false;
+  replaceVia(atomicTempPath(path), path, content, fs);
+  return true;
+}
+
+// packages/tui/dist/config-writeback.js
 function configPath(explicit) {
-  return explicit ?? join9(process.cwd(), ".sterling", "config.json");
+  return explicit ?? join10(process.cwd(), ".sterling", "config.json");
 }
 var MOVE_STORE = '`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite`';
 var StorageTransitionRequiredError = class extends Error {
@@ -52980,38 +53006,32 @@ function replaceConfigFile(target, next, expected, seams = {}) {
   if (linkStat.isSymbolicLink())
     throw new Error("config.json is a symlink \u2014 refusing to write through a link, which the write would replace with a plain file. Nothing was written.");
   const mode = linkStat.mode & 511;
-  const tmp = `${target}.tmp-${randomUUID4()}`;
-  let renamed = false;
-  try {
-    if (seams.writeFile)
-      seams.writeFile(tmp, next, mode);
-    else
-      writeFileSync2(tmp, next, { mode });
-    chmodSync(tmp, mode);
-    seams.beforeRename?.();
-    let now;
-    try {
-      now = readFileSync6(target);
-    } catch {
-      now = void 0;
-    }
-    if (now === void 0 || !now.equals(expected))
-      throw new ConfigChangedError();
-    renameSync(tmp, target);
-    renamed = true;
-  } finally {
-    if (!renamed) {
+  writeFileAtomic(target, next, {
+    writeFile: (tmp, content) => {
+      if (seams.writeFile)
+        seams.writeFile(tmp, content, mode);
+      else
+        writeFileSync3(tmp, content, { mode });
+      chmodSync(tmp, mode);
+    },
+    rename: (tmp, path) => {
+      seams.beforeRename?.();
+      let now;
       try {
-        unlinkSync(tmp);
+        now = readFileSync7(path);
       } catch {
+        now = void 0;
       }
+      if (now === void 0 || !now.equals(expected))
+        throw new ConfigChangedError();
+      renameSync2(tmp, path);
     }
-  }
+  });
 }
 function writeConfigKey(target, key, update, seams = {}) {
   if (key === "storage" || key.startsWith("storage."))
     throw new StorageTransitionRequiredError(key);
-  const original = readFileSync6(target);
+  const original = readFileSync7(target);
   const raw = JSON.parse(original.toString("utf8"));
   raw[key] = update(raw[key], raw);
   replaceConfigFile(target, JSON.stringify(raw, null, 2) + "\n", original, seams);
@@ -53120,8 +53140,8 @@ function applyOverpassBypass(e, onError, path) {
 }
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync4, linkSync as linkSync2, mkdirSync as mkdirSync5, readdirSync, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { delimiter, dirname as dirname6, join as join10 } from "node:path";
+import { existsSync as existsSync5, linkSync as linkSync2, mkdirSync as mkdirSync5, readdirSync, readFileSync as readFileSync8, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { delimiter, dirname as dirname7, join as join11 } from "node:path";
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
   let host2;
@@ -53140,8 +53160,8 @@ function parseOriginRepo(url) {
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
-var prLoopPath = (root) => join10(root, PR_LOOP_REL);
-var prLoopFile = (root, prNumber) => join10(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
+var prLoopPath = (root) => join11(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber) => join11(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
 function parsePrLoopFile(file, rel) {
   try {
@@ -53154,7 +53174,7 @@ function parsePrLoopFile(file, rel) {
 function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
-    s2 = JSON.parse(readFileSync7(file, "utf8"));
+    s2 = JSON.parse(readFileSync8(file, "utf8"));
   } catch (e) {
     throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
@@ -53170,18 +53190,18 @@ function parsePrLoopFileOrThrow(file, rel) {
 }
 function readPrLoopEntries(root) {
   const entries = [];
-  const dir = join10(root, PR_LOOPS_DIR_REL);
-  if (existsSync4(dir)) {
+  const dir = join11(root, PR_LOOPS_DIR_REL);
+  if (existsSync5(dir)) {
     for (const name of readdirSync(dir).sort()) {
       const m = name.match(/^(\d+)\.json$/);
       if (!m) continue;
       const rel = prLoopFileRel(m[1]);
-      const state = parsePrLoopFile(join10(dir, name), rel);
+      const state = parsePrLoopFile(join11(dir, name), rel);
       if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
-      entries.push({ state, file: join10(dir, name), rel });
+      entries.push({ state, file: join11(dir, name), rel });
     }
   }
-  if (existsSync4(prLoopPath(root))) {
+  if (existsSync5(prLoopPath(root))) {
     const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
     if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
   }
@@ -53192,13 +53212,13 @@ function readPrLoops(root) {
 }
 function readPrLoopEntry(root, prNumber) {
   const file = prLoopFile(root, prNumber);
-  if (existsSync4(file)) {
+  if (existsSync5(file)) {
     const rel = prLoopFileRel(prNumber);
     const state2 = parsePrLoopFile(file, rel);
     if (state2.pr_number !== prNumber) throw Object.assign(new Error(`${rel} holds the loop of PR #${state2.pr_number}`), { rel });
     return { state: state2, file, rel };
   }
-  if (!existsSync4(prLoopPath(root))) return null;
+  if (!existsSync5(prLoopPath(root))) return null;
   const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
   return state.pr_number === prNumber ? { state, file: prLoopPath(root), rel: PR_LOOP_REL } : null;
 }
@@ -53232,13 +53252,13 @@ function autoMergeOnCleanOf(cfg) {
 }
 
 // packages/tui/dist/data-version.js
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 function openDataVersionProbe(paths, options = {}) {
   const conns = [];
   try {
     for (const path of paths) {
-      if (!existsSync5(path))
+      if (!existsSync6(path))
         continue;
       const db = new DatabaseSync4(path, { readOnly: true, timeout: options.busyTimeoutMs ?? 0 });
       conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
@@ -53260,8 +53280,8 @@ function openDataVersionProbe(paths, options = {}) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash2, randomUUID as randomUUID6 } from "node:crypto";
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync5, readdirSync as readdirSync2, existsSync as existsSync7, mkdirSync as mkdirSync6, statSync as statSync4, lstatSync as lstatSync4, unlinkSync as unlinkSync3, renameSync as renameSync4, linkSync as linkSync3 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID5 } from "node:crypto";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync5, readdirSync as readdirSync2, existsSync as existsSync7, mkdirSync as mkdirSync6, statSync as statSync4, lstatSync as lstatSync4, unlinkSync as unlinkSync2, renameSync as renameSync4, linkSync as linkSync3 } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -53361,28 +53381,6 @@ function renderPortableText(text, label) {
 }
 function renderOpenCodeFullText(text, label) {
   return render(text, label, ["sterling-only", "opencode-only"]);
-}
-
-// scripts/lib/atomic-write.mjs
-import { randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync6, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename2, dirname as dirname7, join as join11 } from "node:path";
-function atomicTempPath(path) {
-  return join11(dirname7(path), `.${basename2(path)}.tmp-${process.pid}-${randomUUID5().slice(0, 8)}`);
-}
-function replaceVia(tmp, path, content, { writeFile = writeFileSync4, rename = renameSync3 } = {}) {
-  try {
-    writeFile(tmp, content);
-    rename(tmp, path);
-  } catch (err) {
-    rmSync3(tmp, { force: true });
-    throw err;
-  }
-}
-function writeFileAtomicIfChanged(path, content, fs) {
-  if (existsSync6(path) && readFileSync8(path, "utf8") === content) return false;
-  replaceVia(atomicTempPath(path), path, content, fs);
-  return true;
 }
 
 // scripts/lib/agent-distribution.mjs
@@ -53548,7 +53546,7 @@ import { existsSync as existsSync8 } from "node:fs";
 import { join as join15, resolve as resolve6 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync6, readFileSync as readFileSync11, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync4, constants } from "node:fs";
+import { lstatSync as lstatSync6, readFileSync as readFileSync11, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync3, constants } from "node:fs";
 import { join as join14, resolve as resolve5 } from "node:path";
 
 // scripts/lib/store-path.mjs
@@ -53798,7 +53796,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
 import { basename as basename3, dirname as dirname8, isAbsolute, join as join17, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55350,7 +55348,7 @@ function storeBackend(root) {
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, renameSync as renameSync5, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
 import { join as join19 } from "node:path";
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host2 = hostname2()) {
   const safeHost = String(host2).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join19(root, ".sterling", "transient", `selection.${safeHost}.json`);
@@ -55358,7 +55356,7 @@ function selectionFilePath(root, host2 = hostname2()) {
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
   mkdirSync9(join19(root, ".sterling", "transient"), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID7()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
   writeFileSync7(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync5(tmp, path);
 }
@@ -55651,6 +55649,22 @@ function openDashboard(storePath2, options = {}) {
       return { ...base2, provider: null, providerInvalid: JSON.stringify(fields.provider) };
     return { ...base2, provider: fields.provider ?? "overpass" };
   }
+  let overpassRefusedEdit = false;
+  function overpassEffectiveIn(raw) {
+    try {
+      return resolveOverpass(raw, { host: options.host ?? "terminal" }).effective;
+    } catch {
+      return false;
+    }
+  }
+  function refuseOverpassModelEdit(key, raw) {
+    const roleKeys = OVERPASS_ROLES;
+    if (!roleKeys.includes(key) || !overpassEffectiveIn(raw))
+      return false;
+    overpassRefusedEdit = true;
+    ui = { ...ui, notice: "Overpass is on \u2014 the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written." };
+    return true;
+  }
   function loadRoster() {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
@@ -55710,6 +55724,8 @@ function openDashboard(storePath2, options = {}) {
     try {
       const original = readFileSync16(configPath2);
       const raw = JSON.parse(original.toString("utf8"));
+      if (refuseOverpassModelEdit(e.key, raw))
+        return;
       raw.models = raw.models ?? {};
       const prev = raw.models[e.key] ?? {};
       raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
@@ -55745,7 +55761,7 @@ function openDashboard(storePath2, options = {}) {
         ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
       }
       store.create({
-        id: randomUUID8(),
+        id: randomUUID7(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -55759,7 +55775,7 @@ function openDashboard(storePath2, options = {}) {
         statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
         rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID8() });
+      }, { operation_id: randomUUID7() });
     } catch (err) {
       ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
     }
@@ -55777,6 +55793,8 @@ function openDashboard(storePath2, options = {}) {
         throw new Error(`'${e.to}' is not a <provider>/<model> id`);
       configBefore = readFileSync16(configPath2);
       const raw = JSON.parse(configBefore.toString("utf8"));
+      if (refuseOverpassModelEdit(e.key, raw))
+        return;
       raw.models = raw.models ?? {};
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
       raw.models[e.key] = e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
@@ -55820,7 +55838,7 @@ function openDashboard(storePath2, options = {}) {
     const shown = (v) => v ?? `anthropic/${claudeModel}`;
     try {
       store.create({
-        id: randomUUID8(),
+        id: randomUUID7(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -55834,7 +55852,7 @@ function openDashboard(storePath2, options = {}) {
         statement: `config.models['${e.key}'].opencode_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
         rationale: "OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID8() });
+      }, { operation_id: randomUUID7() });
     } catch (err) {
       ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed \u2014 ${err.message}` };
       return;
@@ -55855,21 +55873,14 @@ function openDashboard(storePath2, options = {}) {
     const notice = (msg) => {
       ui = { ...ui, notice: msg };
     };
-    const overpassRoleKeys = OVERPASS_ROLES;
-    const modelEdit = (e) => (e.type === "model_swap" || e.type === "opencode_model") && overpassRoleKeys.includes(e.key);
-    let refused = false;
-    let swaps = effects.filter((e) => e.type === "model_swap");
-    let overrides = effects.filter((e) => e.type === "opencode_model");
-    if (effects.some(modelEdit) && readOverpass().effective) {
-      swaps = swaps.filter((e) => !modelEdit(e));
-      overrides = overrides.filter((e) => !modelEdit(e));
-      refused = true;
-      notice("Overpass is on \u2014 the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written.");
-    }
+    const swaps = effects.filter((e) => e.type === "model_swap");
+    const overrides = effects.filter((e) => e.type === "opencode_model");
+    overpassRefusedEdit = false;
     for (const e of swaps)
       await applySwap(e);
     for (const e of overrides)
       applyOpenCodeModel(e);
+    const refused = overpassRefusedEdit;
     const sparringModels = effects.filter((e) => e.type === "sparring_model");
     for (const e of sparringModels)
       applySparringModel(e);

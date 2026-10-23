@@ -319,6 +319,37 @@ test('controller: Overpass on shows the tier rows from config; the picker commit
   }
 });
 
+test('controller: Overpass switched on between two model edits of one batch refuses the later one from the bytes it would write, config stays byte-identical', async () => {
+  const models = { implementor: { model: 'claude-opus-5-5', effort: 'medium' } };
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-overpass-roles-race-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const configPath = join(dir, '.sterling', 'config.json');
+  writeFileSync(configPath, JSON.stringify({ mode: 'work', models }, null, 2) + '\n');
+  const external = JSON.stringify({ mode: 'work', models, overpass: { enabled: true } }, null, 2) + '\n';
+  // Overpass goes on in the window of the first write (after its read, before its rename).
+  // The batch started with Overpass off, so only a read made for the second edit sees it.
+  let fired = false;
+  const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'), {
+    host: 'opencode',
+    configWriteFs: { beforeRename: () => { if (!fired) { fired = true; writeFileSync(configPath, external); } } },
+  });
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    assert.equal(ctl.roster()?.overpass?.effective, false, 'Overpass is off when the batch starts');
+    await ctl.applyEffects([
+      { type: 'model_swap', key: 'implementor', from: { model: 'claude-opus-5-5', effort: 'medium' }, to: { model: 'claude-sonnet-5', effort: 'high' }, agents: [], decisionTitle: 't' },
+      { type: 'opencode_model', key: 'implementor', to: 'openai/gpt-6-terra', model: 'claude-opus-5-5', effort: 'medium', agents: [] },
+    ]);
+    assert.equal(fired, true, 'the interleaving ran');
+    assert.equal(readFileSync(configPath, 'utf8'), external, 'config.json is byte-identical to what the other writer left');
+    assert.match(ctl.ui().notice ?? '', /^Overpass is on — .*Nothing was written\./);
+    assert.equal(ctl.roster()?.overpass?.effective, true, 'the roster is refreshed');
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('controller: Overpass switched on since the roster loaded refuses a model swap and an OpenCode override on a role, writes nothing and refreshes the roster', async () => {
   const models = { implementor: { model: 'claude-opus-5-5', effort: 'medium' }, classifiers: { model: 'claude-haiku-5', effort: 'low' } };
   const dir = mkdtempSync(join(tmpdir(), 'sterling-overpass-roles-stale-'));
