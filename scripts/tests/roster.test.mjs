@@ -49,8 +49,9 @@ const CFG = { config: { models: MODELS }, models: MODELS };
 // added 2026-10-22, user-ruled "Yes, as stated"), plus plan: the
 // OpenCode-only Plan agent (registry hosts ["opencode"], GitHub #76), a primary
 // agent the user Tabs to, so it is in MAIN_SESSION_AGENTS like the conductor.
-// implementor-hard joined on 2026-10-23 (decision hard-implementor-is-its-own-agent-sterling-implementor-hard).
-const ROSTER = ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'conductor', 'plan'];
+// implementor-hard joined on 2026-10-23 (decision hard-implementor-is-its-own-agent-sterling-implementor-hard),
+// and so did preflight (decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la).
+const ROSTER = ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight', 'conductor', 'plan'];
 // What Claude Code installs to .claude/agents/: every agent but the OpenCode-only plan.
 const CLAUDE_ROSTER = ROSTER.filter((n) => n !== 'plan');
 
@@ -234,7 +235,7 @@ test('inherit-all implementor: no tools: line; disallowedTools denies exactly th
 });
 
 test('the allowlist agents keep their tools: line (a read-only agent must not silently gain an MCP writer)', () => {
-  for (const file of ['researcher.md', 'scout.md', 'librarian.md', 'reviewer.md', 'sparring.md']) {
+  for (const file of ['researcher.md', 'scout.md', 'librarian.md', 'reviewer.md', 'sparring.md', 'preflight.md']) {
     assert.match(fmOf(readFileSync(join(TPL, file), 'utf8')), /^tools:/m, `${file} keeps its allowlist`);
   }
 });
@@ -331,6 +332,37 @@ test('sparring: registered, holds exactly the reviewer\'s tool grant, body is th
     ['never read or write under .sterling', /Never read or write anything under `\.sterling\/`/],
   ]) assert.match(body, re, `sparring body carries: ${label}`);
   assert.doesNotMatch(body, /Test integrity:|Verdict: APPROVE/, 'the sparring body is not the review rubric');
+});
+
+// Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: preflight is a
+// read-only store lookup. It holds the store's read tools and Read/Grep/Glob, no shell, no edit
+// and no store write, and its body carries the verdict set and the lookup-only rule.
+test('preflight: registered, read-only grant with no store write, no shell, and a body with the four verdicts and the lookup-only rule', () => {
+  const registry = loadRegistry(join(TPL, 'registry.json'));
+  assert.ok(registry.agents.some((a) => a.name === 'preflight' && a.file === 'preflight.md'), 'preflight is registered against preflight.md');
+  assert.equal(AGENT_MODEL_KEY.preflight, 'preflight', 'preflight has a config.models key');
+  const text = readFileSync(join(TPL, 'preflight.md'), 'utf8');
+  const fm = fmOf(text);
+  assert.match(fm, /^name: preflight$/m);
+  assert.doesNotMatch(fm, /^disallowedTools:/m, 'an allowlist agent, not inherit-all');
+  const tools = fm.match(/^tools:\s*(.+)$/m)[1].split(',').map((t) => t.trim());
+  const names = new Set(tools.map((t) => t.replace(/^mcp__(?:plugin_sterling_sterling|sterling)__/, '')));
+  assert.deepEqual([...names].sort(), ['Glob', 'Grep', 'Read', 'ToolSearch', 'board_get', 'board_query', 'knowledge_get', 'knowledge_preflight', 'knowledge_query']);
+  for (const t of tools) assert.doesNotMatch(t, /^(Edit|Write|NotebookEdit|Bash|WebSearch|WebFetch|Task)$/, `${t} is not granted`);
+  assert.ok(!tools.some((t) => /__(knowledge_(create|update|append|edit|retire|array_remove|line_ref_fix)|board_(add|update|remove)|maintenance_remove)$/.test(t)), 'no store-write grant');
+  assert.deepEqual(lintToolGrants(text, 'preflight.md', readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'))), []);
+  const body = text.replace(/^---[\s\S]*?\n---/, '');
+  for (const [label, re] of [
+    ['the four verdicts', /governed[\s\S]*ungoverned[\s\S]*contradictory[\s\S]*inconclusive/],
+    ['inconclusive instead of ungoverned on a thin search', /Never report `ungoverned` when the search was insufficient; say `inconclusive`/],
+    ['a re-ask once in the store vocabulary', /re-ask once/],
+    ['rulings quoted with their justification clause', /justification clause/],
+    ['slug (id8) citation', /`slug \(id8\)`/],
+    ['lookup, never a source', /lookup, never a source/],
+    ['never reads or writes .sterling', /Do not read or write anything under `\.sterling\/`/],
+    ['first line complete or blocked', /first line is `complete` or `blocked`/],
+    ['ends with ESCALATE', /ESCALATE:/],
+  ]) assert.match(body, re, `preflight body carries: ${label}`);
 });
 
 // The reviewer body is the ONE rubric: the Codex Sol call is handed the same

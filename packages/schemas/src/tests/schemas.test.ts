@@ -791,6 +791,8 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
     librarian: 'librarian',
     reviewer: 'reviewer',
     sparring: 'sparring',
+    // the read-only pre-flight agent (decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la)
+    preflight: 'preflight',
   });
 
   const lookup = map as Record<string, string>;

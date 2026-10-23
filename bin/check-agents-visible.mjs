@@ -4808,7 +4808,8 @@ var AGENT_MODEL_KEY = {
   scout: "scout",
   librarian: "librarian",
   reviewer: "reviewer",
-  sparring: "sparring"
+  sparring: "sparring",
+  preflight: "preflight"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 
@@ -5061,7 +5062,11 @@ var configSchema = external_exports.object({
     // read-only grant as the reviewer, so the same install-time default. Every
     // dispatch pins its model (Astra, else a Fable model); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+    // preflight is the sterling/preflight agent (decision
+    // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
+    // lookup, so a cheap model at low effort like the scout.
+    preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -5507,7 +5512,7 @@ function extractBakedCommandPaths(content) {
   }
   return [...paths];
 }
-var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "websearch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validatePermissionMap(permission, where) {
   if (!permission || typeof permission !== "object" || Array.isArray(permission)) throw new Error(`${where} must be an object`);

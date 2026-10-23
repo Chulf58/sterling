@@ -228,9 +228,9 @@ test('the conductor owns the project\'s own test and check commands; `npm run ch
   }
 });
 
-// implementor-hard made the roster eight (decision hard-implementor-is-its-own-agent-sterling-implementor-hard).
-test('roster: all eight roles render for OpenCode, the conductor primary and the rest subagents', () => {
-  assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'implementor-hard', 'librarian', 'researcher', 'reviewer', 'scout', 'sparring']);
+// implementor-hard made the roster eight (decision hard-implementor-is-its-own-agent-sterling-implementor-hard), preflight nine (decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la).
+test('roster: all nine roles render for OpenCode, the conductor primary and the rest subagents', () => {
+  assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'implementor-hard', 'librarian', 'preflight', 'researcher', 'reviewer', 'scout', 'sparring']);
   const home = mkdtempSync(join(tmpdir(), 'oc-host-home-'));
   const dir = mkdtempSync(join(tmpdir(), 'oc-host-proj-'));
   for (const args of [['init', '-q'], ['config', 'user.email', 't@example.com'], ['config', 'user.name', 't'], ['config', 'core.autocrlf', 'false']]) {
@@ -249,14 +249,15 @@ test('roster: all eight roles render for OpenCode, the conductor primary and the
 
 test('roster permissions: the reviewer is read-only with no store write; the librarian writes only the store', () => {
   const reviewer = frontmatter(fullRender('reviewer'));
-  for (const line of ['edit: deny', 'webfetch: deny', 'task: deny', 'sterling_knowledge_create: deny', 'sterling_knowledge_update: deny', 'sterling_board_add: deny', 'sterling_maintenance_remove: deny']) {
+  for (const line of ['edit: deny', 'webfetch: deny', 'websearch: deny', 'task: deny', 'sterling_knowledge_create: deny', 'sterling_knowledge_update: deny', 'sterling_board_add: deny', 'sterling_maintenance_remove: deny']) {
     assert.match(reviewer, new RegExp(`^  ${line}$`, 'm'), `reviewer: ${line}`);
   }
   assert.doesNotMatch(reviewer, /^ {2}bash: deny$/m, 'the reviewer keeps bash (its Claude grant has Bash)');
   assert.doesNotMatch(reviewer, /sterling_knowledge_(query|get)|sterling_board_(query|get)/, 'the reviewer keeps its store reads');
 
   const librarian = frontmatter(fullRender('librarian'));
-  for (const line of ['edit: deny', 'bash: deny', 'webfetch: deny', 'task: deny']) {
+  // webfetch and websearch are separate OpenCode permission actions, so a role with no web grant denies both
+  for (const line of ['edit: deny', 'bash: deny', 'webfetch: deny', 'websearch: deny', 'task: deny']) {
     assert.match(librarian, new RegExp(`^  ${line}$`, 'm'), `librarian: ${line}`);
   }
   assert.doesNotMatch(librarian, /sterling_\w+: deny/, 'the librarian keeps its store-write tools');
@@ -270,11 +271,21 @@ test('roster permissions: the reviewer is read-only with no store write; the lib
 test('roster permissions: the sparring agent has the reviewer\'s grant exactly (no edit, no store write, shell and store reads kept)', () => {
   const sparring = frontmatter(fullRender('sparring'));
   assert.equal(sparring.replace(/^description: .*$/m, '').replace(/^model: .*$/m, ''), frontmatter(fullRender('reviewer')).replace(/^description: .*$/m, '').replace(/^model: .*$/m, ''), 'same permission block as the reviewer');
-  for (const line of ['edit: deny', 'webfetch: deny', 'task: deny', 'sterling_knowledge_create: deny', 'sterling_knowledge_update: deny', 'sterling_board_add: deny', 'sterling_maintenance_remove: deny']) {
+  for (const line of ['edit: deny', 'webfetch: deny', 'websearch: deny', 'task: deny', 'sterling_knowledge_create: deny', 'sterling_knowledge_update: deny', 'sterling_board_add: deny', 'sterling_maintenance_remove: deny']) {
     assert.match(sparring, new RegExp(`^  ${line}$`, 'm'), `sparring: ${line}`);
   }
   assert.doesNotMatch(sparring, /^ {2}bash: deny$/m, 'sparring keeps shell (its Claude grant has Bash)');
   assert.doesNotMatch(sparring, /sterling_knowledge_(query|get)|sterling_board_(query|get)/, 'sparring keeps its store reads');
+});
+
+// Decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la: the renderer discards the Claude
+// tools: allowlist, so the OpenCode permission map is what keeps preflight read-only there.
+test('roster permissions: the preflight agent denies edit, shell, web and delegation and every store write, and keeps its store reads', () => {
+  const preflight = frontmatter(fullRender('preflight'));
+  for (const line of ['edit: deny', 'bash: deny', 'webfetch: deny', 'websearch: deny', 'task: deny', 'sterling_knowledge_create: deny', 'sterling_knowledge_update: deny', 'sterling_board_add: deny', 'sterling_maintenance_remove: deny']) {
+    assert.match(preflight, new RegExp(`^  ${line}$`, 'm'), `preflight: ${line}`);
+  }
+  assert.doesNotMatch(preflight, /sterling_knowledge_(query|get|preflight)|sterling_board_(query|get)/, 'preflight keeps its store reads');
 });
 
 test('the portable (committed) set is unchanged: reviewer and librarian stay out of it', () => {

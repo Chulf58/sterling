@@ -15,7 +15,8 @@
     "classifiers": { "model": "claude-haiku-5-5", "effort": "low" },
     "librarian": { "model": "claude-haiku-5-5", "effort": "low" },
     "reviewer": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6.1-sol" },
-    "sparring": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6-astra" }
+    "sparring": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6-astra" },
+    "preflight": { "model": "claude-sonnet-5-5", "effort": "low" }
   },
   "session_events": {
     "research_agents": ["researcher", "claude-code-guide"]

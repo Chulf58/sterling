@@ -5014,7 +5014,8 @@ var init_records = __esm({
       scout: "scout",
       librarian: "librarian",
       reviewer: "reviewer",
-      sparring: "sparring"
+      sparring: "sparring",
+      preflight: "preflight"
     };
     REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
     s = (v) => typeof v === "string" ? v : "";
@@ -5655,7 +5656,11 @@ var init_config = __esm({
         // read-only grant as the reviewer, so the same install-time default. Every
         // dispatch pins its model (Astra, else a Fable model); under Overpass its
         // role tier decides.
-        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+        // preflight is the sterling/preflight agent (decision
+        // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
+        // lookup, so a cheap model at low effort like the scout.
+        preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -14042,7 +14047,7 @@ function describeConfigDrift(r) {
   return parts.join("; ");
 }
 var CONFIG_DRIFT_FIX = 'node "<Sterling root>/bin/install-agents.mjs" (--target <dir> for a sibling)';
-var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "websearch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validatePermissionMap(permission, where) {
   if (!permission || typeof permission !== "object" || Array.isArray(permission)) throw new Error(`${where} must be an object`);
@@ -17335,7 +17340,7 @@ var CONDUCTOR_AGENT = "sterling/conductor";
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
-var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian"];
+var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian", "preflight"];
 var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
 var LEGACY_SHELL_DENIES = ["*sterling.db*", "*.sterling/sterling.db*"];
 var PACKAGE_MARKER = "sterling-generated";
@@ -18109,9 +18114,10 @@ function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [], ownAg
 }
 var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
 var FULL_PERMISSIONS = {
-  reviewer: { edit: "deny", webfetch: "deny", task: "deny" },
-  sparring: { edit: "deny", webfetch: "deny", task: "deny" },
-  librarian: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny" }
+  reviewer: { edit: "deny", webfetch: "deny", websearch: "deny", task: "deny" },
+  sparring: { edit: "deny", webfetch: "deny", websearch: "deny", task: "deny" },
+  librarian: { edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny", task: "deny" },
+  preflight: { edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny", task: "deny" }
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {

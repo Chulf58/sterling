@@ -80,7 +80,7 @@ import { CONDUCTOR_AGENT, CONDUCTOR_ROLE } from './conductor-identity.mjs';
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export { CONDUCTOR_AGENT };
-export const ROSTER = ['conductor', 'implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian'];
+export const ROSTER = ['conductor', 'implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian', 'preflight'];
 export { STERLING_NPM_PACKAGE, parseJsonc };
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 // The shell denies an earlier Sterling wrote into shell, bash and "*" blocks. They are no longer
@@ -1272,11 +1272,14 @@ const CONDUCTOR_OPENCODE_DESCRIPTION = "Sterling's orchestrating main-session ag
 // `opencode` block, so they never reach the committed set). They mirror the Claude
 // tool grants: the reviewer and the sparring agent have Read/Grep/Glob/Bash and store
 // reads; the librarian has Read/Grep and the store tools, with no Edit, Write, Bash or
-// web tool.
+// web tool; the preflight agent has Read/Grep/Glob and the store reads, with no Edit,
+// Write, Bash or web tool (the renderer discards the Claude tools: allowlist, so this
+// map is what keeps it read-only on OpenCode).
 const FULL_PERMISSIONS = {
-  reviewer: { edit: 'deny', webfetch: 'deny', task: 'deny' },
-  sparring: { edit: 'deny', webfetch: 'deny', task: 'deny' },
-  librarian: { edit: 'deny', bash: 'deny', webfetch: 'deny', task: 'deny' },
+  reviewer: { edit: 'deny', webfetch: 'deny', websearch: 'deny', task: 'deny' },
+  sparring: { edit: 'deny', webfetch: 'deny', websearch: 'deny', task: 'deny' },
+  librarian: { edit: 'deny', bash: 'deny', webfetch: 'deny', websearch: 'deny', task: 'deny' },
+  preflight: { edit: 'deny', bash: 'deny', webfetch: 'deny', websearch: 'deny', task: 'deny' },
 };
 
 // Roles that may write the store on OpenCode, as on Claude: every other subagent

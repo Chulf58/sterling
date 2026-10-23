@@ -341,6 +341,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'stays on Sonnet: touching safety code is not by itself a reason. Open every implementor brief with a `Tier reason:` line naming the model and why,',
     after: 'stays on the implementor: touching safety code is not by itself a reason. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why,',
   },
+  {
+    commit: 'sterling/preflight',
+    date: '2026-10-23',
+    reason: 'new roster bullet for the read-only preflight agent and when to dispatch it (decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la)',
+    before: 'Each ends with `ESCALATE:` naming what it could not settle, or `none`.',
+    after: 'Each ends with `ESCALATE:` naming what it could not settle, or `none`.\n- **preflight** — read-only knowledge pre-flight, with no edit, shell or store-write grant (decision `knowledge-pre-flight-agent-sterling-preflight-a-read-only-la`). Dispatch it before a design settles, before a question goes to the user, and before a fan-out, to check the premise the lanes share; not before every lane, since lanes are already staged by H22 and H20, and no hook fires it. The brief carries the proposed action, its alternatives or the question\'s options, and the paths. It runs the store\'s pre-write check in the store\'s vocabulary, opens every match, and returns a first line of `complete` or `blocked`, then a verdict (`governed`, `ungoverned`, `contradictory` or `inconclusive`), the binding records as `slug (id8)` with verbatim extracts, prior answers and coverage gaps, and ends with `ESCALATE:`. Its digest is a lookup, never the source: you still open the binding records yourself before a consequential choice, and `inconclusive` means search again, not that nothing governs.',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
