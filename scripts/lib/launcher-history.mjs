@@ -36,7 +36,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
-import { INSTALLED_PATHS } from './launcher-tmux.mjs';
+import { INSTALLED_PATHS, OPENCODE_PANE_MARKER } from './launcher-tmux.mjs';
 
 /** The launcher templates init renders, by file name under templates/. */
 export const LAUNCHER_TEMPLATES = ['launcher-tmux.sh', 'launcher-win.bat', 'tui-win.bat'];
@@ -65,7 +65,9 @@ const QUOTED_PATH = /^"[^"\n]+"$/;
  *   WT, NODE           a path, quoted by init itself
  *   CLAUDE             "<claude>" --plugin-dir "<clone>"
  *   CLAUDE_PLUGIN_FLAG '' (installed copy) or the authoring flag, unchanged since 43232a67
- *   PLUGIN_PATHS       the authoring PLUGIN_DIR/TUI_BUNDLE pair, or a known installed block
+ *   PLUGIN_PATHS       the authoring PLUGIN_DIR/TUI_BUNDLE pair, alone or followed by the
+ *                      OpenCode pane block (OPENCODE_PANE_MARKER) some known installed block
+ *                      ends with, or a known installed block
  *   WIN_PLUGIN_DIR, WIN_NODE, WIN_TUI_BUNDLE   launcher-win-native.bat: a path inside "..."
  *   SNAPSHOT_SCRIPT, PROJECT_DIR_POSIX        launcher-win-native.bat: a path inside '...'
  *   MCP_ARGS           '' (host-native) or the strict Windows-node MCP config flags
@@ -90,9 +92,18 @@ export const PLACEHOLDER_VALUES = {
   PROJECT_DIR_POSIX: (v) => /^[^'\n]+$/.test(v),
   MCP_ARGS: (v) => v === '' || /^ --mcp-config "[^"\n]+\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config$/.test(v),
   MCP_MODE_NOTE: (v) => /^rem MODE: (?:host-native|dual-context) [^\n]*$/.test(v),
-  PLUGIN_PATHS: (v, { installedBlocks }) =>
-    /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"$/.test(v) || installedBlocks.has(v),
+  PLUGIN_PATHS: (v, { installedBlocks }) => installedBlocks.has(v) || authoringPaths(v, installedBlocks),
 };
+
+// The authoring pair, alone (before the OpenCode pane block) or followed by an OpenCode
+// pane block: the same renderer version appended that block to its installed block too,
+// so the replayed installed blocks are the record of every version of it.
+function authoringPaths(v, installedBlocks) {
+  const m = /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"(?:\n([\s\S]*))?$/.exec(v);
+  if (!m) return false;
+  if (m[1] === undefined) return true;
+  return m[1].startsWith(`${OPENCODE_PANE_MARKER}\n`) && [...installedBlocks].some((b) => b.endsWith(`\n${m[1]}`));
+}
 
 /**
  * The placeholder values when `text` is a render of `templateText`, else null.

@@ -964,6 +964,43 @@ test('roles: an unknown role or field refuses the dispatch like any invalid Over
   }
 });
 
+// GitHub #202: CH.Core's config.overpass.roles, written by a 0.19.116 dashboard and refused
+// by a 0.19.113 plugin. This build knows all five roles; a role from a still newer
+// Sterling ('future-role') stands in for the three 0.19.113 did not know.
+const ISSUE_202_ROLES = { 'maintenance-worker': { tier: 'agentic-auto' }, 'implementor-hard': { tier: 'agentic-premium' }, scout: { tier: 'agentic-auto' }, preflight: { tier: 'agentic-auto' }, librarian: { tier: 'agentic-auto' } };
+
+test('roles (#202): the issue\'s exact roles block dispatches on this build; a role a newer Sterling wrote is refused naming this plugin\'s version and opencode plugin update then /reload', async () => {
+  const version = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')).version;
+  const exact = makeProject({ mode: 'work', overpass: { enabled: true, provider: 'overpass', conductor_bypass: true, roles: ISSUE_202_ROLES } });
+  const ok = await setup(exact.dir);
+  try {
+    const { args } = await ok.dispatch({ agent: 'sterling/scout' });
+    assert.equal(args.model, 'overpass/agentic-auto', 'the scout runs on the tier the issue\'s config set');
+  } finally {
+    await ok.cleanup();
+    exact.cleanup();
+  }
+  const newer = makeProject({ mode: 'work', overpass: { enabled: true, provider: 'overpass', conductor_bypass: true, roles: { ...ISSUE_202_ROLES, 'future-role': { tier: 'agentic-auto' } } } });
+  const s = await setup(newer.dir);
+  try {
+    await assert.rejects(s.dispatch({ agent: 'sterling/reviewer' }), (e) => {
+      assert.match(e.message, /unknown role "future-role"/);
+      assert.ok(e.message.includes(`This Sterling plugin is version ${version} and does not know the role "future-role"`), e.message);
+      assert.ok(e.message.includes('Run `opencode plugin update`, then /reload'), e.message);
+      return true;
+    });
+  } finally {
+    await s.cleanup();
+    newer.cleanup();
+  }
+});
+
+test('roles (#202): an invalid value on a known role keeps the plain refusal, with no update advice', () => {
+  const msg = overpass.overpassRefusal(new Error('config.overpass.roles.reviewer.effort is "loud"'), { version: '9.9.9' });
+  assert.doesNotMatch(msg, /opencode plugin update|9\.9\.9/);
+  assert.match(msg, /Fix that value in \.sterling\/config\.json/);
+});
+
 test('effort: unset roles sends no reasoningEffort (today exactly)', async () => {
   const p = makeProject(ON);
   const s = await setup(p.dir);
