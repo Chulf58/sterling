@@ -148,7 +148,8 @@ const withoutHeader = (content) => content.replace(parseInstalledHeader(content)
 // Templates written after the fencing have no pre-fence commit to compare against. sparring.md
 // (2026-10-22, user-ruled "Yes, as stated") is one: it carries no host fence, so its Claude
 // render is its source and the pin that holds is that no fence or marker line exists in either.
-const WRITTEN_AFTER_FENCING = new Set(['sparring.md']);
+// preflight.md (2026-10-23, decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la) is the other.
+const WRITTEN_AFTER_FENCING = new Set(['sparring.md', 'preflight.md']);
 // implementor-hard.md (2026-10-23, decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
 // is the implementor's template as its own agent, fences included, so its Claude render is pinned to
 // the implementor's pinned baseline with its own name, description and one added paragraph.
@@ -234,6 +235,8 @@ const EXPECTED_FRONTMATTER = {
     '  edit: deny',
     '  bash: deny',
     '  webfetch: deny',
+    // webfetch and websearch are separate OpenCode permission actions; the scout has neither (a pin moved on purpose)
+    '  websearch: deny',
     '  task: deny',
     '---',
   ].join('\n'),

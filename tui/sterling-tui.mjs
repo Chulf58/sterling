@@ -43907,7 +43907,8 @@ var AGENT_MODEL_KEY = {
   scout: "scout",
   librarian: "librarian",
   reviewer: "reviewer",
-  sparring: "sparring"
+  sparring: "sparring",
+  preflight: "preflight"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
@@ -44381,7 +44382,11 @@ var configSchema = external_exports.object({
     // read-only grant as the reviewer, so the same install-time default. Every
     // dispatch pins its model (Astra, else a Fable model); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+    // preflight is the sterling/preflight agent (decision
+    // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
+    // lookup, so a cheap model at low effort like the scout.
+    preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -44701,7 +44706,7 @@ var configSchema = external_exports.object({
 });
 var DEFAULT_OVERPASS_PROVIDER = "overpass";
 var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring"];
+var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight"];
 var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -44713,7 +44718,8 @@ var DEFAULT_OVERPASS_ROLE_TIERS = {
   scout: DEFAULT_OVERPASS_TIER,
   reviewer: DEFAULT_OVERPASS_TIER,
   librarian: DEFAULT_OVERPASS_TIER,
-  sparring: "agentic-premium-max"
+  sparring: "agentic-premium-max",
+  preflight: DEFAULT_OVERPASS_TIER
 };
 function resolveOverpassRoles(raw, provider) {
   if (raw !== void 0 && !isPlainObject(raw)) {
@@ -53497,7 +53503,7 @@ ${frontmatter}
 ${newHeader}
 ${body}`;
 }
-var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "websearch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validatePermissionMap(permission, where) {
   if (!permission || typeof permission !== "object" || Array.isArray(permission)) throw new Error(`${where} must be an object`);
@@ -55167,7 +55173,7 @@ var CONDUCTOR_ROLE = "conductor";
 
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
-var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian"];
+var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian", "preflight"];
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
@@ -55196,9 +55202,10 @@ var EDIT_FAMILY = ["edit", "write", "patch"];
 var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY]);
 var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
 var FULL_PERMISSIONS = {
-  reviewer: { edit: "deny", webfetch: "deny", task: "deny" },
-  sparring: { edit: "deny", webfetch: "deny", task: "deny" },
-  librarian: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny" }
+  reviewer: { edit: "deny", webfetch: "deny", websearch: "deny", task: "deny" },
+  sparring: { edit: "deny", webfetch: "deny", websearch: "deny", task: "deny" },
+  librarian: { edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny", task: "deny" },
+  preflight: { edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny", task: "deny" }
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {

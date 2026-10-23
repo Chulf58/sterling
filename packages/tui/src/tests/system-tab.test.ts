@@ -259,6 +259,8 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       sparring: { model: 'claude-opus-4-8', effort: 'low' },
       // implementor-hard joined 2026-10-23 (decision hard-implementor-is-its-own-agent-sterling-implementor-hard); also last
       'implementor-hard': { model: 'claude-opus-4-8', effort: 'low' },
+      // preflight joined 2026-10-23 (decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la); also last
+      preflight: { model: 'claude-opus-4-8', effort: 'low' },
     },
     catalog: freshCatalog(),
     ...over,
