@@ -91,7 +91,7 @@ export const WORKER_AGENT_TEMPLATE = 'librarian';
 export const WORKER_RUN_BUDGET_USD = 5;
 /** The queue lanes the worker drains (user ruling (1)). Every other lane is
  *  the conductor's. */
-export const WORKER_LANES = ['reconcile_needed', 'state_review', 'stale_research', 'refresh_reference', 'article_missing'];
+export const WORKER_LANES = ['reconcile_needed', 'state_review', 'stale_research', 'refresh_reference', 'article_missing', 'retired_term_use'];
 /** One run takes at most this many items, picked round-robin across lanes and
  *  oldest first within a lane (design (g)); the rest wait for the next run. */
 export const RUN_BATCH_MAX = 12;
@@ -1426,6 +1426,8 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
  *    the item names no file.
  *  - article_missing: one of its files AND a knowledge_query (the search for
  *    an existing owner).
+ *  - retired_term_use: the target record (the rewrite is of its own text;
+ *    it names no file).
  *  The target counts by uuid, an 8+ char uuid prefix, or its slug. A file
  *  counts by a Read of it (`seenFiles`), or by a Grep whose path is that file
  *  or a directory containing it (`seenGrepPaths`; a Grep with no path
@@ -1455,6 +1457,8 @@ export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths =
       return target && (file || (keys.length === 0 && web));
     case 'article_missing':
       return file && Boolean(run.queried);
+    case 'retired_term_use':
+      return target;
     default:
       return target && file;
   }

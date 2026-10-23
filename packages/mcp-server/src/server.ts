@@ -368,6 +368,15 @@ export function createSterlingServer(
   // file that could not be removed is announced once here and never fails boot.
   const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
   if (ledgerRemoval) process.stderr.write(ledgerRemoval + '\n');
+  // Server start is also when a rename recorded in a mounted DOMAIN reaches
+  // this project (GitHub #188): the retired_term_use sweep is idempotent and
+  // never throws a refused mint, so it costs reads when nothing is new.
+  try {
+    const sweep = tools.retiredTermSweep();
+    for (const f of sweep.failures) process.stderr.write(`retired_term_use mint failed: ${f.error}\n`);
+  } catch (e) {
+    process.stderr.write(`retired_term_use sweep failed at server start (${e instanceof Error ? e.message : String(e)}); it runs again at the next decision write or server start.\n`);
+  }
   // Server start finishes or undoes any knowledge_move a crash interrupted
   // (MountedStores.recoverMoves); every knowledge_move call runs it again first,
   // so a failure here is announced and never fails boot.

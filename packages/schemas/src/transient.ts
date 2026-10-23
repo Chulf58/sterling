@@ -181,7 +181,7 @@ export type KnowledgeWrite = z.infer<typeof knowledgeWriteSchema>;
 // Unknown keys pass through, at the top level and on each item: the launcher
 // and runner keep their own fields, and an unknown key never widens what the
 // server allows, because the server reads only the keys named here.
-export const WORKER_POLICY_LANES = ['reconcile_needed', 'state_review', 'stale_research', 'refresh_reference', 'article_missing'] as const;
+export const WORKER_POLICY_LANES = ['reconcile_needed', 'state_review', 'stale_research', 'refresh_reference', 'article_missing', 'retired_term_use'] as const;
 export type WorkerPolicyLane = (typeof WORKER_POLICY_LANES)[number];
 export const workerPolicyItemSchema = z
   .object({

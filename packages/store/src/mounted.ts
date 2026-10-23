@@ -13,7 +13,7 @@ import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, assertNoFieldLoss, type MoveMarker, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
+import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, assertNoFieldLoss, type MoveMarker, type QueryOptions, type RetiredTermDecision, type BoardItemReadiness, type WriteOptions } from './index.js';
 import { validateRecord, parseStoreFence, STORE_FENCE_KEY, type DurableRecord, type RenameFence, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
 import { acquireMoveLock, releaseMoveLock, type MoveLockHandle } from './move-lock.js';
@@ -663,6 +663,14 @@ export class MountedStores {
     const perStore = this.fanValues((s) => s.query({ ...opts, cap }));
     const shares = allocateShares(perStore.map((r) => r.length), cap);
     return perStore.flatMap((records, i) => records.slice(0, shares[i]));
+  }
+
+  /** Cross-mount retiredTermDecisions (GitHub #188): the active rename decisions of the
+   *  project store and every readable mounted domain, project first. A rename held in a
+   *  domain covers every project mounting it (decision
+   *  retiring-a-renamed-term-a-retired-terms-field-on-the-rename), so the fan is the read. */
+  retiredTermDecisions(): RetiredTermDecision[] {
+    return this.fanValues((s) => s.retiredTermDecisions()).flat();
   }
 
   /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of

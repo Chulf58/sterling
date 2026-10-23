@@ -44,7 +44,7 @@ import {
   type ToolStore,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { isSourcePath, needsReasonAllowed } from '@sterling/schemas';
+import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
 import { HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, handoffEvidenceSchema, todoHandoffSchema, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
@@ -728,6 +728,10 @@ export interface KnowledgePreflightResult {
    *  failure the conduct rules name. */
   answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
   reason?: 'too_little_vocabulary';
+  /** Advisory lines, one per retired term (GitHub #188) the text uses outside
+   *  quotes, naming the replacement and the rename decision. Present only
+   *  when non-empty; never changes answerability. */
+  retired_terms?: string[];
   terms: string[];
   /** Count of qualifying records BEFORE the PREFLIGHT_MATCH_CAP window,
    *  among the candidates actually evaluated — always present, window
@@ -4366,6 +4370,7 @@ export class SterlingTools {
       : undefined;
     const findability = this.findabilityDisclosure(record);
     citationWarnings.push(...findability.warnings);
+    citationWarnings.push(...this.retiredTermWriteEffects(record));
     return {
       record,
       check_skipped: skipped,
@@ -6363,9 +6368,11 @@ export class SterlingTools {
    * window.
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
+    const retired = this.retiredTermTextWarnings(text);
+    const retiredDisclosure = retired.length ? { retired_terms: retired } : {};
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.unreadDomainsDisclosure() };
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.unreadDomainsDisclosure(), ...retiredDisclosure };
     }
     // B2G widening (the former finding 'preflight B2G measurement' (not in the current store) and
     // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
@@ -6441,6 +6448,7 @@ export class SterlingTools {
       matches,
       answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
       ...this.unreadDomainsDisclosure(),
+      ...retiredDisclosure,
     };
   }
 
@@ -7672,7 +7680,11 @@ export class SterlingTools {
       record: record as DurableRecord,
       same_subject,
       claims_check,
-      ledger_warnings: [...(ledger_warning ? [ledger_warning] : []), ...this.entryNotCheckedWarnings(record as unknown as Record<string, unknown>)],
+      ledger_warnings: [
+        ...(ledger_warning ? [ledger_warning] : []),
+        ...this.entryNotCheckedWarnings(record as unknown as Record<string, unknown>),
+        ...this.retiredTermWriteEffects(record as DurableRecord),
+      ],
     };
   }
 
@@ -7812,6 +7824,9 @@ export class SterlingTools {
     'refresh_reference',
     'stale_research',
     'state_review',
+    // GitHub #188: the worker's (and a conductor's) rewrite of a record that
+    // still uses a retired term closes its retired_term_use item on the same write.
+    'retired_term_use',
   ]);
 
   /** The one lane closeable ONLY by the files[]-append join described above. */
@@ -13703,6 +13718,7 @@ export class SterlingTools {
     const sameSubjectExclude = new Set(chain);
     sameSubjectExclude.add(updated.id);
     const sameSubject = this.sameSubjectDigest(registered ? registered.fts(parsed) : '', sameSubjectExclude);
+    citationWarnings.push(...this.retiredTermWriteEffects(updated));
 
     return {
       superseded: old.id,
@@ -13740,6 +13756,123 @@ export class SterlingTools {
    * maintenance_enqueue / maintenance_query (§10): the maintenance queue IS
    * the todo store filtered source=system (§3.2.7) — no second queue exists.
    */
+  /** Read window for the retired-term sweep: every record, never a ranked top-N. */
+  private static readonly RETIRED_TERM_SCAN_CAP = 1_000_000;
+
+  /**
+   * Every active retired term visible from this project (GitHub #188), each
+   * with the mount that physically holds its decision (scopeOfHolder, never
+   * the body's scope label). One narrow store read (retiredTermDecisions): no
+   * decision body without a rename is decoded.
+   */
+  private retiredTermsInScope(): (RetiredTerm & { holder: string })[] {
+    return this.store.retiredTermDecisions().flatMap((d) => {
+      const holder = this.store.scopeOfHolder(d.id);
+      return collectRetiredTerms([d]).map((t) => ({ ...t, holder }));
+    });
+  }
+
+  /**
+   * Same scope as the decision (user ruling 4): a project-held rename covers
+   * the project store; a rename held in a domain covers that domain store and
+   * the project store of every project mounting it.
+   */
+  private static retiredTermApplies(term: { holder: string }, recordHolder: string): boolean {
+    return term.holder === recordHolder || recordHolder === 'project';
+  }
+
+  /**
+   * The advisory warnings for a free text (knowledge_preflight). Every term
+   * visible here applies: the text is this project's own.
+   */
+  retiredTermTextWarnings(text: string): string[] {
+    try {
+      return retiredTermsInText(text, this.retiredTermsInScope()).map(retiredTermWarning);
+    } catch (e) {
+      return [`the retired-term check FAILED (${e instanceof Error ? e.message : String(e)}); this text was NOT checked against renamed terms.`];
+    }
+  }
+
+  /**
+   * After a knowledge write: warn when the written record uses a retired term
+   * that covers it, and, when the written record is a decision carrying
+   * retired_terms, run the sweep that queues a retired_term_use item per
+   * record still using one. The sweep is idempotent (enqueueSystemTodo keys on
+   * reason + feature_link), so re-running it on any write of such a decision
+   * costs reads only.
+   */
+  private retiredTermWriteEffects(record: DurableRecord): string[] {
+    // THE ADVISORY BOUNDARY: this runs after the write has committed, so a
+    // failure in the scan, the matcher or the sweep must not turn a stored
+    // record into an error the caller reads as 'nothing was written'. The
+    // write result stands and carries one warning saying the check did not run.
+    try {
+      return this.retiredTermWriteEffectsUnguarded(record);
+    } catch (e) {
+      return [
+        `the retired-term check FAILED after the write committed (${e instanceof Error ? e.message : String(e)}): the record ${record.id} IS written. ` +
+          `Retired terms in it, and the retired_term_use items for a new rename, were NOT checked; a decision with retired_terms re-runs the sweep at the next server start.`,
+      ];
+    }
+  }
+
+  private retiredTermWriteEffectsUnguarded(record: DurableRecord): string[] {
+    const warnings: string[] = [];
+    const terms = this.retiredTermsInScope();
+    if (!terms.length) return warnings;
+    const holder = this.store.scopeOfHolder(record.id);
+    const applicable = terms.filter((t) => SterlingTools.retiredTermApplies(t, holder));
+    for (const use of retiredTermUses(record as unknown as Record<string, unknown>, applicable)) {
+      warnings.push(`${retiredTermWarning(use)} This record still uses it in ${use.fields.join(', ')}.`);
+    }
+    if (record.type === 'decision' && Array.isArray((record as unknown as { retired_terms?: unknown }).retired_terms)) {
+      const sweep = this.retiredTermSweep();
+      warnings.push(
+        `retired_terms recorded: ${sweep.records} record(s) still use a retired term outside quotes and history; ` +
+          `${sweep.queued} retired_term_use maintenance item(s) queued or already open.` +
+          (sweep.failures.length ? ` ${sweep.failures.length} mint(s) FAILED: ${sweep.failures.map((f) => f.error).join('; ')}` : '')
+      );
+    }
+    return warnings;
+  }
+
+  /**
+   * The retired_term_use mint (GitHub #188): one project-local maintenance
+   * item per record that still uses a retired term covering it, keyed on the
+   * record (feature_link), so a repeat sweep adds nothing and a record that
+   * gains a second term gets its one item's text updated. Superseded and
+   * retired records, history entries, quoted text and each rename decision
+   * itself are skipped by the matcher. Runs after a decision with
+   * retired_terms is written and at MCP server start, which is when a rename
+   * recorded in a mounted domain reaches each mounting project. Never throws:
+   * a refused mint is returned.
+   */
+  retiredTermSweep(): { records: number; queued: number; failures: MintFailure[] } {
+    const terms = this.retiredTermsInScope();
+    const result = { records: 0, queued: 0, failures: [] as MintFailure[] };
+    if (!terms.length) return result;
+    const types = Object.keys(RECORD_TYPES).filter((t) => t !== 'todo');
+    for (const record of this.store.query({ types, cap: SterlingTools.RETIRED_TERM_SCAN_CAP })) {
+      const body = record as unknown as Record<string, unknown>;
+      // Match against every term first; the physical holder (a store lookup)
+      // is asked only for the few records that use one.
+      if (!retiredTermUses(body, terms).length) continue;
+      const holder = this.store.scopeOfHolder(record.id);
+      const uses = retiredTermUses(body, terms.filter((t) => SterlingTools.retiredTermApplies(t, holder)));
+      if (!uses.length) continue;
+      result.records++;
+      const label = SterlingTools.mintHeadlineOf(record.type, body) || record.type;
+      const text =
+        `retired term use: ${record.type} '${label}' (${record.id}, ${holder}) still uses ` +
+        uses.map((u) => `'${u.term}' (now '${u.replacement}', decision ${u.decision_slug ?? u.decision_id}) in ${u.fields.join(', ')}`).join('; ') +
+        `. Replace it outside quotes, blockquotes and history; hand back anything quoted, historical or ambiguous.`;
+      const failure = this.mintAtRead({ reason: 'retired_term_use', text, feature_link: record.id });
+      if (failure) result.failures.push(failure);
+      else result.queued++;
+    }
+    return result;
+  }
+
   maintenanceEnqueue(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }): {
     record: DurableRecord;
     check_skipped: SkippedCheck[];

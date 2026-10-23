@@ -4258,6 +4258,189 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/retired-terms.js
+function retiredTermRegex(term) {
+  const trimmed = term.trim();
+  const variants = [.../* @__PURE__ */ new Set([trimmed.normalize("NFC"), trimmed.normalize("NFD")])];
+  const alternatives = variants.map((t) => {
+    const points = Array.from(t);
+    const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+    const lead = WORD_CHAR.test(points[0] ?? "") ? `(?<![${WORD_CLASS}])` : "";
+    const trail = WORD_CHAR.test(points[points.length - 1] ?? "") ? `(?![${WORD_CLASS}])` : "";
+    return `${lead}${body}${trail}`;
+  });
+  return new RegExp(`(?:${alternatives.join("|")})`, "giu");
+}
+function protectedSpans(text) {
+  const spans = [];
+  const paragraphEnd = (at) => {
+    const sep3 = /\n[ \t]*\n/g;
+    sep3.lastIndex = at;
+    const m = sep3.exec(text);
+    return m ? m.index : text.length;
+  };
+  const straight = [...text.matchAll(/"/g)].map((m) => m.index ?? 0);
+  for (let i = 0; i < straight.length; i += 2)
+    spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : paragraphEnd(straight[i])]);
+  for (let i = text.indexOf("\u201C"); i !== -1; ) {
+    const close = text.indexOf("\u201D", i + 1);
+    if (close === -1) {
+      spans.push([i, paragraphEnd(i)]);
+      i = text.indexOf("\u201C", i + 1);
+    } else {
+      spans.push([i, close + 1]);
+      i = text.indexOf("\u201C", close + 1);
+    }
+  }
+  for (const m of text.matchAll(/^[ \t]*>/gm)) {
+    const at = m.index ?? 0;
+    spans.push([at, paragraphEnd(at)]);
+  }
+  return spans;
+}
+function findTermOccurrences(text, term, replacement) {
+  if (!text || !term.trim())
+    return [];
+  const spans = protectedSpans(text);
+  const canonical2 = [];
+  if (replacement?.trim()) {
+    const fold = (t) => t.normalize("NFC").trim().split(/\s+/).join(" ").toLowerCase();
+    const caseOnly = fold(term) === fold(replacement);
+    const re = retiredTermRegex(replacement);
+    const exact = caseOnly ? new RegExp(re.source, "gu") : re;
+    for (const m of text.matchAll(exact))
+      canonical2.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  }
+  const out = [];
+  for (const m of text.matchAll(retiredTermRegex(term))) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    out.push({
+      start,
+      end,
+      protected: spans.some(([s2, e]) => start < e && s2 < end),
+      resolved: canonical2.some(([s2, e]) => start >= s2 && end <= e)
+    });
+  }
+  return out;
+}
+function replaceRetiredTerms(text, terms) {
+  let out = text;
+  let replaced = 0;
+  let kept = 0;
+  for (const { term, replacement } of terms) {
+    const occ = findTermOccurrences(out, term, replacement);
+    kept += occ.filter((o) => o.protected && !o.resolved).length;
+    const hits = occ.filter(owed);
+    replaced += hits.length;
+    for (const o of [...hits].reverse())
+      out = out.slice(0, o.start) + replacement + out.slice(o.end);
+  }
+  return { text: out, replaced, protected: kept };
+}
+function retiredTermScanFields(record) {
+  const out = [];
+  const walk = (value, path) => {
+    if (typeof value === "string")
+      out.push([path, value]);
+    else if (Array.isArray(value))
+      value.forEach((v, i) => walk(v, `${path}[${i}]`));
+    else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value))
+        if (!NESTED_SKIPPED_KEYS.has(k))
+          walk(v, `${path}.${k}`);
+    }
+  };
+  for (const [k, v] of Object.entries(record))
+    if (!RETIRED_TERM_SKIPPED_FIELDS.has(k))
+      walk(v, k);
+  return out;
+}
+function collectRetiredTerms(decisions) {
+  const out = [];
+  for (const d of decisions) {
+    if (!d || d.type !== "decision" || d.status !== void 0 && d.status !== "active")
+      continue;
+    if (!Array.isArray(d.retired_terms))
+      continue;
+    for (const entry of d.retired_terms) {
+      const parsed = retiredTermSchema.safeParse(entry);
+      if (!parsed.success)
+        continue;
+      out.push({ ...parsed.data, decision_id: String(d.id), ...typeof d.slug === "string" ? { decision_slug: d.slug } : {} });
+    }
+  }
+  return out;
+}
+function retiredTermUses(record, terms) {
+  if (record.status !== void 0 && record.status !== "active")
+    return [];
+  const fields = retiredTermScanFields(record);
+  const out = [];
+  for (const t of terms) {
+    if (t.decision_id === record.id)
+      continue;
+    const hitFields = [];
+    let kept = 0;
+    for (const [path, text] of fields) {
+      const occ = findTermOccurrences(text, t.term, t.replacement);
+      kept += occ.filter((o) => o.protected && !o.resolved).length;
+      if (occ.some(owed))
+        hitFields.push(path);
+    }
+    if (hitFields.length)
+      out.push({ term: t.term, replacement: t.replacement, decision_id: t.decision_id, ...t.decision_slug ? { decision_slug: t.decision_slug } : {}, fields: hitFields, protected: kept });
+  }
+  return out;
+}
+function retiredTermsInText(text, terms) {
+  return terms.filter((t) => findTermOccurrences(text, t.term, t.replacement).some(owed));
+}
+function retiredTermWarning(t) {
+  return `retired term '${t.term}': renamed to '${t.replacement}' by decision ${t.decision_slug ?? t.decision_id} (knowledge_get ${t.decision_id}); use '${t.replacement}' unless you are quoting.`;
+}
+var retiredTermSchema, WORD_CLASS, WORD_CHAR, owed, RETIRED_TERM_SKIPPED_FIELDS, NESTED_SKIPPED_KEYS, RETIRED_TERM_REWRITE_FIELDS;
+var init_retired_terms = __esm({
+  "packages/schemas/dist/retired-terms.js"() {
+    "use strict";
+    init_zod();
+    retiredTermSchema = external_exports.object({
+      term: external_exports.string().trim().min(1),
+      replacement: external_exports.string().trim().min(1)
+    }).strict();
+    WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+    WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
+    owed = (o) => !o.protected && !o.resolved;
+    RETIRED_TERM_SKIPPED_FIELDS = /* @__PURE__ */ new Set([
+      "history",
+      "retired_terms",
+      "id",
+      "type",
+      "slug",
+      "status",
+      "scope",
+      "author",
+      "version",
+      "created_at",
+      "updated_at",
+      "superseded_by",
+      "links",
+      "file_keys",
+      "file_baselines",
+      "aliases",
+      "stack_tags",
+      "source_date",
+      "capture_date",
+      "location"
+    ]);
+    NESTED_SKIPPED_KEYS = /* @__PURE__ */ new Set(["path", "id", "ac_id", "target_id"]);
+    RETIRED_TERM_REWRITE_FIELDS = {
+      decision: ["title", "statement"],
+      feature_article: ["title", "what_it_does", "intended_behavior"]
+    };
+  }
+});
+
 // packages/schemas/dist/source-extensions.js
 function sourceExtensionOf(path) {
   const base2 = String(path).split("/").pop() ?? "";
@@ -4943,6 +5126,7 @@ var init_records = __esm({
     init_zod();
     init_envelope();
     init_paths();
+    init_retired_terms();
     verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
     base = external_exports.object(envelopeFields);
     decisionSchema = base.extend({
@@ -4974,7 +5158,13 @@ var init_records = __esm({
       // one-off instruction was once captured as standing policy and rewrote
       // the governing file three times; absent means unstated, and existing
       // records round-trip unchanged.
-      authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
+      authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional(),
+      // GitHub #188 (decision retiring-a-renamed-term-a-retired-terms-field-on-
+      // the-rename): a decision that rules a rename names the old term and its
+      // replacement. Preflight and H19/H20 delivery warn on the old term, a
+      // retired_term_use maintenance item is queued per record still using it,
+      // and record hygiene lists those records. The matcher is retired-terms.ts.
+      retired_terms: external_exports.array(retiredTermSchema).min(1).optional()
     }).superRefine(refineSupersession);
     notApplicableExemptionSchema = external_exports.object({
       not_applicable: external_exports.object({
@@ -5329,7 +5519,15 @@ var init_records = __esm({
       // (file_keys): a repeat restore of the same path refreshes the open item
       // rather than minting a second one — the obligation is "this path keeps
       // getting reverted", not "an event happened".
-      "restore_performed"
+      "restore_performed",
+      // A record still uses a term a rename decision retired (GitHub #188,
+      // decision retiring-a-renamed-term-a-retired-terms-field-on-the-rename).
+      // Minted per record (feature_link = the record) when a decision's
+      // retired_terms are created or changed, and at MCP server start for
+      // renames recorded in a mounted domain. The worker may replace the term
+      // outside quotes in decision titles and statements and article text;
+      // anything else is handed back.
+      "retired_term_use"
     ];
     DRAIN_VERBS = {
       reconcile_needed: "updated",
@@ -5353,7 +5551,9 @@ var init_records = __esm({
       article_oversize: "split",
       // The deed is closing the loop with the conductor on why the path keeps
       // getting reverted — a stamp attesting it up front, or the change dropped.
-      restore_performed: "resolved"
+      restore_performed: "resolved",
+      // The deed is rewriting the record to use the replacement term.
+      retired_term_use: "renamed"
     };
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
@@ -5792,7 +5992,7 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
-    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
     workerPolicyItemSchema = external_exports.object({
       id: external_exports.string().uuid(),
       lane: external_exports.enum(WORKER_POLICY_LANES),
@@ -6697,7 +6897,7 @@ var init_broker = __esm({
   "packages/schemas/dist/broker.js"() {
     "use strict";
     init_zod();
-    BROKER_PROTOCOL = 2;
+    BROKER_PROTOCOL = 3;
     BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
     BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
     BROKER_DISCOVERY_MAX_ENTRIES = 32;
@@ -6729,7 +6929,7 @@ var init_broker = __esm({
         "remove",
         "recordCheckSkipped"
       ],
-      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
+      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription", "retiredTermDecisions"]
     };
     BROKER_MAX_ARGS = 6;
     brokerIdentitySchema = external_exports.object({
@@ -6888,6 +7088,8 @@ __export(dist_exports, {
   RECORD_TYPES: () => RECORD_TYPES,
   REPO_PATH_FORMAT: () => REPO_PATH_FORMAT,
   REPO_PATH_REFUSALS: () => REPO_PATH_REFUSALS,
+  RETIRED_TERM_REWRITE_FIELDS: () => RETIRED_TERM_REWRITE_FIELDS,
+  RETIRED_TERM_SKIPPED_FIELDS: () => RETIRED_TERM_SKIPPED_FIELDS,
   REVIEWER_ROLES: () => REVIEWER_ROLES,
   SCOPE_RE: () => SCOPE_RE,
   SOURCE_EXTENSIONS: () => SOURCE_EXTENSIONS,
@@ -6914,6 +7116,7 @@ __export(dist_exports, {
   buildIdPath: () => buildIdPath,
   classifyLocation: () => classifyLocation,
   clipName: () => clipName,
+  collectRetiredTerms: () => collectRetiredTerms,
   configSchema: () => configSchema,
   decisionSchema: () => decisionSchema,
   describeUnreadConfigKeys: () => describeUnreadConfigKeys,
@@ -6926,6 +7129,7 @@ __export(dist_exports, {
   exampleRecordFor: () => exampleRecordFor,
   featureArticleSchema: () => featureArticleSchema,
   fieldShapeAt: () => fieldShapeAt,
+  findTermOccurrences: () => findTermOccurrences,
   handoffClosureReadSchema: () => handoffClosureReadSchema,
   handoffClosureSchema: () => handoffClosureSchema,
   handoffEvidenceFileReadSchema: () => handoffEvidenceFileReadSchema,
@@ -6961,16 +7165,24 @@ __export(dist_exports, {
   parseConfig: () => parseConfig,
   parseStoreFence: () => parseStoreFence,
   projectRegistrationSchema: () => projectRegistrationSchema,
+  protectedSpans: () => protectedSpans,
   readProjectIdentity: () => readProjectIdentity,
   readProjectMode: () => readProjectMode,
   recordSizes: () => recordSizes,
   referenceMaterialSchema: () => referenceMaterialSchema,
   refineSupersession: () => refineSupersession,
   renameFenceSchema: () => renameFenceSchema,
+  replaceRetiredTerms: () => replaceRetiredTerms,
   repoPath: () => repoPath,
   repoPathOfLocation: () => repoPathOfLocation,
   researchFindingSchema: () => researchFindingSchema,
   resolveOverpass: () => resolveOverpass,
+  retiredTermRegex: () => retiredTermRegex,
+  retiredTermScanFields: () => retiredTermScanFields,
+  retiredTermSchema: () => retiredTermSchema,
+  retiredTermUses: () => retiredTermUses,
+  retiredTermWarning: () => retiredTermWarning,
+  retiredTermsInText: () => retiredTermsInText,
   runtimeMarkerPath: () => runtimeMarkerPath,
   runtimeMarkerSchema: () => runtimeMarkerSchema,
   sameLocationAnyHost: () => sameLocationAnyHost,
@@ -6998,6 +7210,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_retired_terms();
     init_source_extensions();
     init_envelope();
     init_records();
@@ -8786,6 +8999,13 @@ var init_mounted = __esm({
         const perStore = this.fanValues((s2) => s2.query({ ...opts2, cap }));
         const shares = allocateShares(perStore.map((r) => r.length), cap);
         return perStore.flatMap((records, i) => records.slice(0, shares[i]));
+      }
+      /** Cross-mount retiredTermDecisions (GitHub #188): the active rename decisions of the
+       *  project store and every readable mounted domain, project first. A rename held in a
+       *  domain covers every project mounting it (decision
+       *  retiring-a-renamed-term-a-retired-terms-field-on-the-rename), so the fan is the read. */
+      retiredTermDecisions() {
+        return this.fanValues((s2) => s2.retiredTermDecisions()).flat();
       }
       /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
        *  query(), summed project-first across every mounted store (countBySource is
@@ -12770,6 +12990,31 @@ var init_dist2 = __esm({
        */
       recordIdIndex() {
         return this.db.prepare("SELECT id, type, status FROM records").all();
+      }
+      /**
+       * The active decisions that carry retired_terms (GitHub #188, decision
+       * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+       * minimal shape collectRetiredTerms reads. This is the one read every write
+       * warning, preflight, delivery hook, worker check and hygiene listing makes,
+       * so it never decodes or hydrates a record body that holds none: a plain
+       * substring test on the body column drops those rows inside the database,
+       * and the JSON extraction runs only on the survivors. With no rename
+       * recorded it costs one indexed type scan and returns [].
+       */
+      retiredTermDecisions() {
+        return this.readTx(() => {
+          const d = this.db.dialect;
+          const rows = this.db.prepare(`SELECT id, ${d.jsonText("body", "slug")} AS slug, ${d.jsonText("body", "retired_terms")} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText("body", "retired_terms")} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`).all();
+          return rows.map((r) => ({
+            id: r.id,
+            type: "decision",
+            status: "active",
+            ...r.slug ? { slug: r.slug } : {},
+            retired_terms: JSON.parse(r.retired_terms)
+          }));
+        });
       }
       /**
        * Every non-superseded feature_article carrying this EXACT slug, newest first.
