@@ -72,6 +72,7 @@ import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
+import { modelListItems } from './dispatch-model.mjs';
 import { convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, requestEffort } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
@@ -219,7 +220,9 @@ export function createSterlingServer(deps = {}) {
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels: () => models?.list?.() });
+    // OpenCode's model list as an array: ctx.model.list() returns { location, data } (modelListItems).
+    const listModels = async () => modelListItems(await models?.list?.());
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     /** { agent, directory } of session `sessionID`, from session.get (throws when it cannot be read). */
@@ -281,7 +284,7 @@ export function createSterlingServer(deps = {}) {
       await onVolatileResult(input);
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
-    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels, env });
     // The root session the user last prompted, for the launcher's --session (conductor-session.mjs).
     const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     // Each session's agent and model, for the Overpass mismatch notice (overpass.mjs).

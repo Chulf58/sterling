@@ -20901,6 +20901,9 @@ function dispatchModel(config, args) {
   const intent = parseIntent(args?.prompt);
   const role = agentRole(args?.agent);
   const named = typeof args?.model === "string" && args.model ? args.model : null;
+  if (typeof args?.sessionID === "string" && args.sessionID && intent.kind === "normal") {
+    return { model: null, line: named ? null : "MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied)." };
+  }
   const res = resolveDispatchModel(role, intent, config);
   if (res === null) {
     return intent.kind === "normal" ? { model: null, line: null } : { model: null, line: `MODEL: the MODEL-INTENT line was not applied: the agent ${JSON.stringify(args?.agent)} has no config.models entry, so the call ${named ? `kept ${named}` : "runs on the agent's own model"}.` };
@@ -20919,6 +20922,10 @@ function dispatchModel(config, args) {
   return intent.kind === "fallback" ? { model: res.ref, line, notice: `Sterling models: fallback dispatch on ${res.ref} (reason: ${intent.reason}).`, resolved: true } : { model: res.ref, line, resolved: true };
 }
 var variantIds = (entry) => Array.isArray(entry?.variants) ? entry.variants.map((v) => typeof v === "string" ? v : v?.id).filter((v) => typeof v === "string") : null;
+function modelListItems(result) {
+  if (Array.isArray(result?.data)) return result.data;
+  return result;
+}
 function checkVariant(ref, list, listError = null) {
   const hash = ref.lastIndexOf("#");
   if (hash === -1) return { model: ref, note: null };
@@ -26817,7 +26824,8 @@ function createSterlingServer(deps = {}) {
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels: () => models?.list?.() });
+    const listModels = async () => modelListItems(await models?.list?.());
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     async function sessionInfo(sessionID) {
@@ -26867,7 +26875,7 @@ function createSterlingServer(deps = {}) {
       await onVolatileResult(input);
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
-    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels, env });
     const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     const sessionModels = createSessionModels();
     async function convergeOverpass(root) {
