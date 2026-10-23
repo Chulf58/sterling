@@ -119,7 +119,9 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   const S = fwd(repoRoot);
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/)[1].split('\n');
   assert.match(fm[0], /^description: Sterling's planning agent for OpenCode\. Plans only, never implements\./);
-  assert.deepEqual(fm.slice(1, 24), [
+  // one line longer since implementor-hard joined the roster: the Plan agent denies it as it
+  // denies the implementor (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+  assert.deepEqual(fm.slice(1, 25), [
     'mode: primary',
     'permission:',
     '  edit:',
@@ -132,6 +134,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
     '    "sterling/reviewer": allow',
     '    "sterling/sparring": allow',
     '    "sterling/implementor": deny',
+    '    "sterling/implementor-hard": deny',
     '  bash:',
     '    "*": deny',
     `    "node ${S}/bin/plan-lock.mjs --bind-pending": allow`,

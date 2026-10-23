@@ -2,7 +2,11 @@
 // subagent-model-choice-on-opencode-conductor-states-dispatch). While Overpass is NOT
 // effective, each subagent call's model comes from the project's config.models, driven by
 // the dispatch intent the conductor states on one brief line:
-//   MODEL-INTENT: hard               the role's hard_task pin
+//   MODEL-INTENT: hard               the role's hard_task pin; on sterling/implementor, the
+//                                    models.implementor-hard entry (back-compat: the hard
+//                                    implementor lane is its own agent now, decision
+//                                    hard-implementor-is-its-own-agent-sterling-implementor-hard,
+//                                    so dispatch sterling/implementor-hard instead)
 //   MODEL-INTENT: review-of=<p>      a reviewer of work written on provider <p>; the
 //                                    reviewer is moved off that provider when it can be
 //   MODEL-INTENT: fallback=<reason>  the role's Claude model (models.<role>.model), announced
@@ -83,6 +87,19 @@ function hardRef(model) {
 }
 
 /**
+ * MODEL-INTENT: hard on sterling/implementor: the models.implementor-hard entry's normal
+ * model, as a sterling/implementor-hard dispatch gets it. A models.implementor.hard_task
+ * still in the file is no longer read, and the note says so.
+ */
+function hardImplementor(config) {
+  const res = resolveDispatchModel('implementor-hard', { kind: 'normal' }, config);
+  if (!res || res.problem) return res;
+  const stale = isObject(config?.models?.implementor) && Object.hasOwn(config.models.implementor, 'hard_task');
+  const note = `${res.note} (MODEL-INTENT hard on implementor; dispatch sterling/implementor-hard instead${stale ? '; models.implementor.hard_task is no longer read, and /sterling:update moves it into models.implementor-hard' : ''})`;
+  return { ...res, note };
+}
+
+/**
  * The pure resolver: (role, intent, raw config, project mode) -> what config.models gives
  * the dispatch. Returns null when the role has no config.models entry (an agent Sterling
  * does not configure: the call is left alone), { problem } when the entry fails validation,
@@ -91,6 +108,7 @@ function hardRef(model) {
  */
 export function resolveDispatchModel(role, intent, config, mode = null) {
   if (typeof role !== 'string' || !role) return null;
+  if (role === 'implementor' && intent.kind === 'hard') return hardImplementor(config);
   const judged = roleEntry(config, role);
   if (judged.problem) return { problem: judged.problem };
   const { entry } = judged;

@@ -6,9 +6,10 @@
     },
     "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
-  "applied_config_migrations": ["model-defaults-2026-10-23"],
+  "applied_config_migrations": ["model-defaults-2026-10-23", "implementor-hard-2026-10-23"],
   "models": {
-    "implementor": { "model": "claude-sonnet-5-5", "effort": "high", "hard_task": { "model": "claude-opus-5-5" } },
+    "implementor": { "model": "claude-sonnet-5-5", "effort": "high" },
+    "implementor-hard": { "model": "claude-opus-5-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5-5", "effort": "low" },
     "classifiers": { "model": "claude-haiku-5-5", "effort": "low" },

@@ -4927,6 +4927,7 @@ var briefSchema = base.extend({
 });
 var AGENT_MODEL_KEY = {
   implementor: "implementor",
+  "implementor-hard": "implementor-hard",
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
@@ -5360,15 +5361,21 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    // The hard_task, and the reviewer's and sparring's opencode_model below, are the
-    // models the conductor named on those dispatches before the OpenCode dispatch
-    // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
-    // They are whole-entry defaults only, never hidden field defaults: an entry that
-    // exists without them means "none" (clearing opencode_model in the System tab runs
-    // the role on its Claude model). Live entries written before them get them once,
-    // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
-    // "Write it into each config").
-    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
+    // The reviewer's and sparring's opencode_model below are the models the conductor
+    // named on those dispatches before the OpenCode dispatch model resolver (decision
+    // subagent-model-choice-on-opencode-conductor-states-dispatch). They are whole-entry
+    // defaults only, never hidden field defaults: an entry that exists without them means
+    // "none" (clearing opencode_model in the System tab runs the role on its Claude
+    // model). Live entries written before them get them once, visibly, from
+    // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
+    // config").
+    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+    // implementor-hard is the sterling/implementor-hard agent (decision
+    // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
+    // lane, with its own Overpass tier and System tab row. It replaces
+    // models.implementor.hard_task, whose default it keeps (Opus 5.5, at the
+    // implementor's effort); moveImplementorHardTask below moves a live hard_task here.
+    "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -14633,7 +14640,7 @@ function tddPostureLine({ config, configUnreadable }) {
 var SUBJECT_MAX_DECISIONS = 5;
 var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
 var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
-var CHROME_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor"]);
+var CHROME_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor", "implementor-hard"]);
 var PLAN_TITLE_MAX = 120;
 var PLAN_PATH_MAX = 320;
 function dispatchChrome(cwd, agentType) {

@@ -320,6 +320,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "a `Plan` agent with `model: \"fable\"` pinned at the call (user-ruled 2026-10-01 through the question form, 'Fallback only').",
     after: "the `sparring` agent with `model: \"fable\"` pinned at the call (user-ruled 2026-10-01 through the question form, 'Fallback only'; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22).",
   },
+  {
+    commit: 'sterling/implementor-hard',
+    date: '2026-10-23',
+    reason: 'the hard implementor lane is its own agent, implementor-hard, so its brief opens with the Tier reason line too (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)',
+    before: 'an implementor brief also opens with its `Tier reason:` line.',
+    after: 'an implementor or implementor-hard brief also opens with its `Tier reason:` line.',
+  },
+  {
+    commit: 'sterling/implementor-hard',
+    date: '2026-10-23',
+    reason: 'where the implementor rule said pin Opus, the conductor dispatches implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)',
+    before: '- **implementor** (Sonnet 5.5 by default; pin **Opus 5.5** only when the lane designs',
+    after: '- **implementor** (Sonnet 5.5 by default; dispatch **implementor-hard** instead, the same contract as its own agent on Opus 5.5 by default (decision `hard-implementor-is-its-own-agent-sterling-implementor-hard`), only when the lane designs',
+  },
+  {
+    commit: 'sterling/implementor-hard',
+    date: '2026-10-23',
+    reason: 'the Tier reason line names implementor or implementor-hard and why, instead of a model (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)',
+    before: 'stays on Sonnet: touching safety code is not by itself a reason. Open every implementor brief with a `Tier reason:` line naming the model and why,',
+    after: 'stays on the implementor: touching safety code is not by itself a reason. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why,',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

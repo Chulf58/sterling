@@ -63,7 +63,9 @@ const ref = (role, intent, config = {}, mode = null) => {
 
 test('resolver: the shipped defaults reproduce the models the conductor named before (hobby)', () => {
   assert.equal(ref('implementor', null), SONNET);
-  assert.equal(ref('implementor', 'hard'), OPUS, 'hard -> models.implementor.hard_task (Opus 5.5)');
+  // decision hard-implementor-is-its-own-agent-sterling-implementor-hard: the hard lane is models.implementor-hard
+  assert.equal(ref('implementor', 'hard'), OPUS, 'hard on implementor -> models.implementor-hard (Opus 5.5)');
+  assert.equal(ref('implementor-hard', null), OPUS, 'sterling/implementor-hard runs on models.implementor-hard (Opus 5.5)');
   assert.equal(ref('reviewer', null), SOL);
   assert.equal(ref('sparring', null), ASTRA);
   assert.equal(ref('researcher', null), 'anthropic/claude-sonnet-5-5#medium');
@@ -84,6 +86,25 @@ test('resolver: review-of pairs the reviewer off the author family in hobby mode
   assert.match(dm.resolveDispatchModel('reviewer', { kind: 'review-of', author: 'openai' }, { mode: 'later' }).problem, /config\.mode is "later"/);
 });
 
+// Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: with Overpass off a
+// sterling/implementor-hard dispatch resolves through config.models like any role, and
+// MODEL-INTENT: hard on sterling/implementor resolves to the same entry, for older briefs.
+test('resolver: implementor-hard is its own config.models role, and MODEL-INTENT hard on implementor resolves to it', () => {
+  const cfg = { models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-4-8' } },
+    'implementor-hard': { model: 'claude-opus-5-5', effort: 'xhigh', opencode_model: 'openai/gpt-6.1-sol' },
+  } };
+  assert.equal(ref('implementor-hard', null, cfg), 'openai/gpt-6.1-sol#xhigh');
+  const hard = dm.resolveDispatchModel('implementor', { kind: 'hard' }, cfg);
+  assert.equal(hard.ref, 'openai/gpt-6.1-sol#xhigh', 'the implementor-hard entry, never the stale implementor.hard_task');
+  assert.match(hard.note, /^config\.models\.implementor-hard \(MODEL-INTENT hard on implementor; dispatch sterling\/implementor-hard instead; models\.implementor\.hard_task is no longer read/);
+  assert.doesNotMatch(dm.resolveDispatchModel('implementor', { kind: 'hard' }, {}).note, /no longer read/, 'no stale hard_task, no warning');
+  const viaAgent = dm.dispatchModel(cfg, { agent: 'sterling/implementor-hard', prompt: 'do it' });
+  assert.equal(viaAgent.model, 'openai/gpt-6.1-sol#xhigh');
+  assert.match(viaAgent.line, /from config\.models\.implementor-hard\.$/);
+  assert.equal(dm.dispatchModel(cfg, { agent: 'sterling/implementor', prompt: brief('hard') }).model, 'openai/gpt-6.1-sol#xhigh');
+});
+
 test('resolver: fallback runs on the role\'s Claude model with its effort', () => {
   assert.equal(ref('reviewer', 'fallback=openai not logged in'), OPUS);
   assert.equal(ref('sparring', 'fallback=Astra capped'), OPUS);
@@ -92,12 +113,15 @@ test('resolver: fallback runs on the role\'s Claude model with its effort', () =
 
 test('resolver: config wins over defaults; effort becomes the variant; hard_task takes a Claude id or a provider ref', () => {
   const cfg = { models: {
-    implementor: { model: 'claude-sonnet-5-5', effort: 'medium', opencode_model: 'openai/gpt-5.6-terra', hard_task: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' } },
+    implementor: { model: 'claude-sonnet-5-5', effort: 'medium', opencode_model: 'openai/gpt-5.6-terra' },
     reviewer: { model: 'claude-opus-5-5', effort: 'low' },
     researcher: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } },
+    // the provider-ref hard_task case moved here from implementor, whose hard lane is now
+    // models.implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+    scout: { model: 'claude-sonnet-5-5', effort: 'low', hard_task: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' } },
   } };
   assert.equal(ref('implementor', null, cfg), 'openai/gpt-5.6-terra#medium', 'Terra as the implementor choice via config');
-  assert.equal(ref('implementor', 'hard', cfg), 'openai/gpt-6.1-sol#xhigh', 'hard_task effort wins over the role effort');
+  assert.equal(ref('scout', 'hard', cfg), 'openai/gpt-6.1-sol#xhigh', 'hard_task effort wins over the role effort');
   assert.equal(ref('reviewer', null, cfg), 'anthropic/claude-opus-5-5#low', 'an entry without opencode_model runs on its Claude model (the add step writes Sol into live configs once)');
   assert.equal(ref('researcher', 'hard', cfg), 'anthropic/claude-opus-5-5#high', 'hard_task without effort takes the role effort');
   const r = dm.resolveDispatchModel('implementor', { kind: 'normal' }, cfg);
@@ -115,9 +139,13 @@ test('resolver: an unconfigured agent is left alone; an invalid entry is a probl
     const role = Object.keys(config.models ?? {})[0] ?? 'reviewer';
     assert.match(dm.resolveDispatchModel(typeof config.models === 'string' ? 'reviewer' : role, { kind: 'normal' }, config).problem, why, JSON.stringify(config));
   }
-  const badHard = dm.resolveDispatchModel('implementor', { kind: 'hard' }, { models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } });
+  // researcher, not implementor, since the implementor's hard lane moved to models.implementor-hard
+  // (decision hard-implementor-is-its-own-agent-sterling-implementor-hard); the hard_task path is the same.
+  const badHard = dm.resolveDispatchModel('researcher', { kind: 'hard' }, { models: { researcher: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } });
   assert.match(badHard.problem, /hard_task\.model is "not a model", neither a Claude model id nor <provider>\/<model>/);
-  assert.equal(dm.resolveDispatchModel('implementor', { kind: 'normal' }, { models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } }).ref, SONNET, 'a bad hard_task only matters on a hard dispatch');
+  assert.equal(dm.resolveDispatchModel('researcher', { kind: 'normal' }, { models: { researcher: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } }).ref, SONNET, 'a bad hard_task only matters on a hard dispatch');
+  const badEntry = dm.resolveDispatchModel('implementor', { kind: 'hard' }, { models: { 'implementor-hard': { model: 'claude-opus-5-5' } } });
+  assert.match(badEntry.problem, /config\.models\.implementor-hard\.effort/, 'hard on implementor judges the implementor-hard entry');
 });
 
 // ── the dispatch step (precedence) ────────────────────────────────────────────
@@ -227,10 +255,10 @@ test('seam: Overpass off (hobby and work) sets each role\'s model from config.mo
 test('seam: Overpass on keeps the tier and OVERPASS-BYPASS exactly; an intent line is ignored, even a malformed one', async () => {
   await withPlugin({ mode: 'work', overpass: { enabled: true } }, async ({ dispatch }) => {
     const plain = await dispatch({ prompt: brief('hard') });
-    assert.equal(plain.args.model, 'overpass/agentic-premium');
+    assert.equal(plain.args.model, 'overpass/agentic-auto');
     assert.doesNotMatch(plain.result, /MODEL:/);
     assert.equal((await dispatch({ agent: 'sterling/reviewer', prompt: brief('review-of=openai'), model: SOL })).args.model, 'overpass/agentic-high');
-    assert.equal((await dispatch({ prompt: brief('hrad') })).args.model, 'overpass/agentic-premium', 'no refusal while Overpass decides');
+    assert.equal((await dispatch({ prompt: brief('hrad') })).args.model, 'overpass/agentic-auto', 'no refusal while Overpass decides');
     const bypass = await dispatch({ model: OPUS, prompt: `${brief('hard')}\nOVERPASS-BYPASS: needs Opus` });
     assert.equal(bypass.args.model, OPUS);
     assert.match(bypass.result, /OVERPASS-BYPASS: Overpass bypassed for this dispatch/);
@@ -381,7 +409,7 @@ test('seam: resuming leaves the model unset (hobby and work); an intent line set
   }
   await withPlugin({ mode: 'work', overpass: { enabled: true } }, async ({ dispatch }) => {
     const resumed = await dispatch({ sessionID: 'ses_warm' });
-    assert.equal(resumed.args.model, 'overpass/agentic-premium', 'Overpass still sets the tier on a resume');
+    assert.equal(resumed.args.model, 'overpass/agentic-auto', 'Overpass still sets the tier on a resume');
     assert.doesNotMatch(resumed.result, /resumed session/);
   });
 });

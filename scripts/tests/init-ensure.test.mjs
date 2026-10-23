@@ -1003,6 +1003,32 @@ test('a re-run lists the config keys Sterling no longer reads and deletes none, 
   }
 });
 
+// Sol review [HIGH] on the implementor-hard move: init rendered the Claude agents from the config it
+// parsed BEFORE the migration, so the moved hard_task was saved under implementor-hard while the
+// installed agent pinned the schema default (claude-opus-5-5/high). The render must use the migrated document.
+test('a re-run that moves models.implementor.hard_task installs implementor-hard with the moved pin, matching the saved entry', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const cfgPath = join(dir, '.sterling', 'config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    delete cfg.models['implementor-hard'];
+    cfg.models.implementor.hard_task = { model: 'claude-opus-4-8', effort: 'xhigh' };
+    cfg.applied_config_migrations = cfg.applied_config_migrations.filter((id) => id !== 'implementor-hard-2026-10-23');
+    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    // a project updating from before implementor-hard existed has no agent file for it yet
+    rmSync(join(dir, '.claude', 'agents', 'implementor-hard.md'));
+    const rerun = init(dir);
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(rerun.stdout, /note: config migration: models\.implementor\.hard_task .* moved to models\.implementor-hard/);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')).models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'xhigh' });
+    const pins = readFileSync(join(dir, '.claude', 'agents', 'implementor-hard.md'), 'utf8').split('\n').filter((l) => /^(model|effort): /.test(l));
+    assert.deepEqual(pins, ['model: claude-opus-4-8', 'effort: xhigh'], 'the installed pin is the migrated entry');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test('a re-run that init refuses later leaves a config with retired models keys byte-identical (the drop is committed only after every preflight)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {

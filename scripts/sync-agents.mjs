@@ -93,16 +93,20 @@ try {
   process.exit(2);
 }
 
-// Retired config.models keys are dropped from the file (drop only: they were already
-// ignored, so the parse above is the same before and after) and every value is printed.
-// A refusal (the file changed under the write, or is a symlink) stops the sync here, before
-// any rendering or setupOpenCode call, like the refusals above.
+// Retired config.models keys are dropped from the file and every value is printed; the
+// model defaults are added and models.implementor.hard_task is moved into
+// models.implementor-hard. A refusal (the file changed under the write, or is a symlink)
+// stops the sync here, before any rendering or setupOpenCode call, like the refusals above.
 const configMigration = migrateProjectConfig(targetDir);
 for (const line of configMigration.lines) console.log(line);
 if (configMigration.status === 'refused') {
   console.log('refused_config_migration: .sterling/config.json was not migrated (retired models keys or missing model defaults); rerun /sterling:update once the file is stable; nothing synced');
   process.exit(2);
 }
+// The migration can change model values (the implementor-hard move), so the agents render
+// from the document just written, never from the parse above (Sol review: a moved hard_task
+// was saved under implementor-hard while the installed agent pinned the schema default).
+if (configMigration.status === 'migrated') config = parseConfig(configMigration.config);
 
 const { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: '' } : syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),

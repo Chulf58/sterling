@@ -149,6 +149,11 @@ const withoutHeader = (content) => content.replace(parseInstalledHeader(content)
 // (2026-10-22, user-ruled "Yes, as stated") is one: it carries no host fence, so its Claude
 // render is its source and the pin that holds is that no fence or marker line exists in either.
 const WRITTEN_AFTER_FENCING = new Set(['sparring.md']);
+// implementor-hard.md (2026-10-23, decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+// is the implementor's template as its own agent, fences included, so its Claude render is pinned to
+// the implementor's pinned baseline with its own name, description and one added paragraph.
+const DERIVED_FROM_IMPLEMENTOR = new Set(['implementor-hard.md']);
+const IMPLEMENTOR_HARD_PARAGRAPH = "You are the hard-task implementor: you are dispatched instead of the implementor when a change is hard (a mechanism, a schema or a change at many sites), so that you can run on a stronger model. Everything below is the implementor's contract, unchanged.";
 
 // Only the entries Claude Code installs: an OpenCode-only template (plan.md) has no Claude render.
 for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
@@ -159,6 +164,23 @@ for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
       const after = renderInstalledAgent(source, entry.file, renderOpts).installedContent;
       assert.doesNotMatch(after, /(sterling|portable)-only/, 'no marker line may reach a Claude agent');
       assert.equal(withoutHeader(after).replace(/^model: .*$/m, '').replace(/^effort: .*$/m, ''), source.replace(/^model: .*$/m, '').replace(/^effort: .*$/m, ''), 'the render is the source apart from the header and the model and effort tokens');
+    });
+    continue;
+  }
+  if (DERIVED_FROM_IMPLEMENTOR.has(entry.file)) {
+    test(`Claude render of ${entry.file} is the implementor's pinned render with its own name, description and hard-task paragraph (header aside)`, () => {
+      const baseline = BASELINE_OVERRIDES['implementor.md'] ?? FENCE_BASELINE;
+      const shown = spawnSync('git', ['show', `${baseline}:agent-templates/implementor.md`], { cwd: root, encoding: 'utf8' });
+      assert.equal(shown.status, 0, `git show ${baseline} failed: ${shown.stderr}`);
+      const source = template(entry.name);
+      const baselineText = applyImplementorWordingEdits(shown.stdout)
+        .replace(/^name: .*$/m, () => source.match(/^name: .*$/m)[0])
+        .replace(/^description: .*$/m, () => source.match(/^description: .*$/m)[0])
+        .replace(/(# Role & owned judgment\n\n[^\n]*\n)/, (m) => `${m}\n${IMPLEMENTOR_HARD_PARAGRAPH}\n`);
+      const before = renderInstalledAgent(baselineText, entry.file, renderOpts).installedContent;
+      const after = renderInstalledAgent(source, entry.file, renderOpts).installedContent;
+      assert.equal(withoutHeader(after), withoutHeader(before));
+      assert.doesNotMatch(after, /(sterling|portable)-only/, 'no marker line may reach a Claude agent');
     });
     continue;
   }

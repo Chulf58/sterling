@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_TIER, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_TIERS, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -287,11 +287,11 @@ function overpassRoute(view: OverpassView, role: OverpassRole): { tier: string; 
   return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
 }
 
-/** The tier picker's options: the tiers the schema names (the default lane tier and
- *  every role default; the schema accepts any `agentic-*` name, so this is not a closed
- *  set), plus the role's current tier when it is a custom one. */
+/** The tier picker's options: the Overpass tiers the user listed (OVERPASS_TIERS, in that
+ *  order; the schema accepts any `agentic-*` name, so this is not a closed set), plus the
+ *  role's current tier when it is a custom one. */
 function overpassTierOptions(view: OverpassView, role: OverpassRole): string[] {
-  const known = [...new Set([DEFAULT_OVERPASS_TIER, ...Object.values(DEFAULT_OVERPASS_ROLE_TIERS)])];
+  const known: string[] = [...OVERPASS_TIERS];
   const current = overpassRoute(view, role).tier;
   return known.includes(current) ? known : [...known, current];
 }

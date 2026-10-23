@@ -5,8 +5,11 @@
 // set the successor by hand. The add step (addModelDefaults in packages/schemas,
 // user-ruled 2026-10-23, "Write it into each config") writes, once per file, the
 // opencode_model of reviewer and sparring and the implementor's hard_task where they are
-// absent, never overwriting a value, and reports each add. The rewrites are
-// migrateRetiredModelKeys and addModelDefaults in packages/schemas; this wraps them in two steps so a caller can defer the write:
+// absent, never overwriting a value, and reports each add. The move step
+// (moveImplementorHardTask, decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+// then moves models.implementor.hard_task into models.implementor-hard, once per file, and
+// reports it. The rewrites are migrateRetiredModelKeys, addModelDefaults and
+// moveImplementorHardTask in packages/schemas; this wraps them in two steps so a caller can defer the write:
 //   prepareConfigMigration  reads, parses and plans; writes nothing.
 //   commitConfigMigration   replaces the file only if its bytes are still the ones
 //                           the plan was made from (the compare-and-swap config_set
@@ -18,7 +21,7 @@
 // keys plus the added defaults: parseConfig is a gate only, never serialized (it would materialize defaults).
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, parseConfig } from '@sterling/schemas';
+import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, moveImplementorHardTask, parseConfig } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -45,12 +48,20 @@ export function describeAdded(added) {
   );
 }
 
+/** The report line of the implementor-hard move (moveImplementorHardTask), or none. */
+export function describeHardMove(move) {
+  if (!move) return [];
+  if (move.kind === 'moved') return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task ${show(move.hard_task)} moved to models.implementor-hard as ${show(move.entry)}, the sterling/implementor-hard agent's model; change it in the System tab`];
+  if (move.kind === 'dropped') return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task dropped (value was ${show(move.hard_task)}); models.implementor-hard ${show(move.entry)} was already set and is kept`];
+  return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
+}
+
 class ConcurrentChange extends Error {}
 
 const oneLine = (err) => err.message.replace(/\s+/g, ' ');
 
 /** Plan the migration of `<projectDir>/.sterling/config.json` and write nothing.
- *  status: absent (no file), unchanged (no retired key, defaults already applied), ready (a plan to commit) or
+ *  status: absent (no file), unchanged (no retired key, defaults and the implementor-hard move already applied), ready (a plan to commit) or
  *  refused (the file stays as it is; `lines[0]` says why). */
 export function prepareConfigMigration(projectDir) {
   const configPath = join(projectDir, '.sterling', 'config.json');
@@ -67,7 +78,8 @@ export function prepareConfigMigration(projectDir) {
   }
   const m = migrateRetiredModelKeys(raw);
   const d = addModelDefaults(m.config);
-  if (!m.changed && !d.changed) return { status: 'unchanged', lines: [] };
+  const h = moveImplementorHardTask(d.config);
+  if (!m.changed && !d.changed && !h.changed) return { status: 'unchanged', lines: [] };
   // A linked .sterling would send the rewrite to a config outside the project.
   try {
     containedPath(projectDir, '.sterling', 'dir');
@@ -78,7 +90,7 @@ export function prepareConfigMigration(projectDir) {
   const stat = lstatSync(configPath);
   if (stat.isSymbolicLink()) return refuse('is a symlink, which the rewrite would replace');
   try {
-    parseConfig(d.config);
+    parseConfig(h.config);
   } catch (err) {
     return refuse(`would not validate after the migration (${oneLine(err)})`);
   }
@@ -89,14 +101,17 @@ export function prepareConfigMigration(projectDir) {
     shown,
     originalBytes,
     mode: stat.mode & 0o777,
-    next: JSON.stringify(d.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
-    config: d.config,
+    next: JSON.stringify(h.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
+    config: h.config,
     dropped: m.dropped,
     added: d.added,
+    hardMove: h.move,
     lines: [
       ...describeMigration(m.dropped),
       ...describeAdded(d.added),
       ...(d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : []),
+      ...describeHardMove(h.move),
+      ...(h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : []),
     ],
   };
 }

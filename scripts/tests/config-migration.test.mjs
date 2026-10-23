@@ -20,9 +20,10 @@ function project(text) {
 }
 const cfgPath = (dir) => join(dir, '.sterling', 'config.json');
 const read = (dir) => readFileSync(cfgPath(dir), 'utf8');
-// The fixtures below are about the retired keys, so they record the model-defaults add as
-// already applied (added with that step, user-ruled 2026-10-23); its own tests are at the end.
-const DEFAULTS_DONE = { applied_config_migrations: ['model-defaults-2026-10-23'] };
+// The fixtures below are about the retired keys, so they record the model-defaults add and
+// the implementor-hard move as already applied (added with those steps, user-ruled 2026-10-23,
+// and decision hard-implementor-is-its-own-agent-sterling-implementor-hard); their own tests are at the end.
+const DEFAULTS_DONE = { applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'] };
 const retiredConfig = () => ({
   ...DEFAULTS_DONE,
   mode: 'hobby',
@@ -219,6 +220,28 @@ test('sync-agents drops the retired keys, prints the report, and renders every p
   }
 });
 
+// Sol review [HIGH] on the implementor-hard move: sync rendered the Claude agents from the config it
+// parsed BEFORE the migration, so a moved hard_task was saved under implementor-hard while the newly
+// installed agent pinned the schema default (claude-opus-5-5/high), and every later sync reported
+// config_drift without fixing it. The render must use the migrated document.
+test('sync-agents: after the implementor-hard move, the saved entry and the installed implementor-hard pin agree, and a second sync reports no drift', () => {
+  const dir = project(JSON.stringify({ applied_config_migrations: ['model-defaults-2026-10-23'], mode: 'hobby', models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-4-8', effort: 'xhigh' } },
+  } }));
+  try {
+    const r = sync(dir);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /config migration: models\.implementor\.hard_task .* moved to models\.implementor-hard/);
+    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'xhigh' });
+    assert.deepEqual(pinLines(dir, 'implementor-hard'), ['model: claude-opus-4-8', 'effort: xhigh'], 'the installed pin is the migrated entry');
+    const again = sync(dir);
+    assert.equal(again.code, 0, again.out);
+    assert.doesNotMatch(again.out, /config_drift/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
 // Skipped as root, which ignores directory permissions.
 const canTestReadOnly = process.platform !== 'win32' && process.getuid?.() !== 0;
 
@@ -271,14 +294,18 @@ test('model defaults: absent opencode_model and hard_task are added and reported
     const r = migrateProjectConfig(dir);
     assert.equal(r.status, 'migrated');
     const after = JSON.parse(read(dir));
-    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } });
+    // the hard_task the add step writes is then moved into models.implementor-hard by the
+    // implementor-hard step (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' });
+    assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
     assert.deepEqual(after.models.reviewer, { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' }, 'a value the user set stays');
     assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }, 'a role with no entry gets the shipped default entry');
     assert.deepEqual(after.models.researcher, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'other roles are not touched');
-    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23']);
-    assert.equal(r.lines.length, 2);
+    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23']);
+    assert.equal(r.lines.length, 3);
     assert.match(r.lines[0], /^config migration: models\.implementor\.hard_task added as \{"model":"claude-opus-5-5"\}/);
     assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra"\}/);
+    assert.match(r.lines[2], /^config migration: models\.implementor\.hard_task \{"model":"claude-opus-5-5"\} moved to models\.implementor-hard as \{"model":"claude-opus-5-5","effort":"high"\}/);
   } finally {
     cleanup(dir);
   }
@@ -309,7 +336,11 @@ test('model defaults: a config that already has them records the step once, says
   try {
     const r = migrateProjectConfig(dir);
     assert.equal(r.status, 'migrated');
-    assert.deepEqual(r.lines, ['config migration: model defaults already set; recorded model-defaults-2026-10-23 in applied_config_migrations so they are never added again']);
+    assert.deepEqual(r.lines, [
+      'config migration: model defaults already set; recorded model-defaults-2026-10-23 in applied_config_migrations so they are never added again',
+      // the implementor-hard step that follows moves the hard_task (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
+      'config migration: models.implementor.hard_task {"model":"claude-opus-5-5"} moved to models.implementor-hard as {"model":"claude-opus-5-5","effort":"high"}, the sterling/implementor-hard agent\'s model; change it in the System tab',
+    ]);
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
   } finally {
     cleanup(dir);
@@ -320,6 +351,80 @@ test('model defaults: the shipped default-config.json already carries them, so a
   const dir = project(readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
   try {
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// ── the implementor-hard move (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) ──
+// models.implementor.hard_task moves into models.implementor-hard, once per file; other roles keep theirs.
+const MOVE_PRE = { applied_config_migrations: ['model-defaults-2026-10-23'] };
+
+test('implementor-hard move: a Claude hard_task becomes the entry at the implementor\'s effort; other roles keep their hard_task', () => {
+  const dir = project(JSON.stringify({ ...MOVE_PRE, mode: 'hobby', models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-4-8' } },
+    researcher: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-5-5' } },
+  } }));
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    const after = JSON.parse(read(dir));
+    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'hard_task leaves the implementor entry');
+    assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'medium' }, 'no hard_task effort: the implementor effort a hard dispatch was sent with');
+    assert.deepEqual(after.models.researcher.hard_task, { model: 'claude-opus-5-5' }, 'another role keeps its hard_task');
+    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23']);
+    assert.deepEqual(r.lines, ['config migration: models.implementor.hard_task {"model":"claude-opus-4-8"} moved to models.implementor-hard as {"model":"claude-opus-4-8","effort":"medium"}, the sterling/implementor-hard agent\'s model; change it in the System tab']);
+    assert.equal(prepareConfigMigration(dir).status, 'unchanged', 'runs once');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('implementor-hard move: a <provider>/<model> hard_task becomes opencode_model, and its own effort wins', () => {
+  const dir = project(JSON.stringify({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' } } } }));
+  try {
+    assert.equal(migrateProjectConfig(dir).status, 'migrated');
+    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'xhigh', opencode_model: 'openai/gpt-6.1-sol' });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('implementor-hard move: an existing implementor-hard entry wins and the hard_task is dropped with its value reported', () => {
+  const dir = project(JSON.stringify({ ...MOVE_PRE, models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } },
+    'implementor-hard': { model: 'claude-sonnet-5-5', effort: 'low' },
+  } }));
+  try {
+    const r = migrateProjectConfig(dir);
+    const after = JSON.parse(read(dir));
+    assert.deepEqual(after.models['implementor-hard'], { model: 'claude-sonnet-5-5', effort: 'low' });
+    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' });
+    assert.deepEqual(r.lines, ['config migration: models.implementor.hard_task dropped (value was {"model":"claude-opus-5-5"}); models.implementor-hard {"model":"claude-sonnet-5-5","effort":"low"} was already set and is kept']);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('implementor-hard move: a cleared hard_task (no separate hard lane) copies the implementor pin, so a hard lane runs where it ran', () => {
+  const dir = project(JSON.stringify({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } }));
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' });
+    assert.match(r.lines[0], /^config migration: models\.implementor-hard added as .*a copy of models\.implementor, because models\.implementor had no hard_task/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('implementor-hard move: a hard_task model that is neither a Claude id nor <provider>/<model> is refused, and the file is left untouched', () => {
+  const text = JSON.stringify({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } });
+  const dir = project(text);
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'refused');
+    assert.match(r.lines[0], /would not validate after the migration/);
+    assert.equal(read(dir), text);
   } finally {
     cleanup(dir);
   }
