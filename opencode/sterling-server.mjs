@@ -7511,7 +7511,7 @@ var init_mounted = __esm({
     init_pg_driver();
     PROBE_ID = "00000000-0000-0000-0000-000000000000";
     DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
-    DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+    DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired (OpenCode: opencode reload)";
     errorText = (e) => String(e?.message ?? e);
     DomainUnavailableError = class extends Error {
       domain;
@@ -7548,7 +7548,7 @@ var init_mounted = __esm({
       renamed_to;
       renamed_path;
       constructor(domain, dbPath, fence) {
-        super(`domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') in this project's .sterling/config.json, then restart the session.`);
+        super(`domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') in this project's .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
         this.name = "DomainRenamedError";
         this.domain = domain;
         this.db_path = dbPath;
@@ -7556,7 +7556,7 @@ var init_mounted = __esm({
         this.renamed_path = fence.to_path;
       }
     };
-    RENAMED_AT_MOUNT_NOTE = "refused at mount because the domain was renamed; update stack_tags and restart the session";
+    RENAMED_AT_MOUNT_NOTE = "refused at mount because the domain was renamed; update stack_tags and restart the session (OpenCode: opencode reload)";
     MountedStores = class {
       /** The project store — also the home of the board/maintenance queue and
        *  other project-local transient state (the run/handoff protocol this
@@ -7763,7 +7763,7 @@ var init_mounted = __esm({
       assertWritable(name) {
         if (!this.isUnreadable(name))
           return;
-        throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
+        throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
       }
       /** `fn` on the project store and then on EVERY mounted domain, dropped ones
        *  included, for a check where "not read" must never count as "absent" (slug
@@ -7778,7 +7778,7 @@ var init_mounted = __esm({
             if (!this.isStoreFailure(e))
               throw e;
             this.dropDomain(name, e);
-            throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+            throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
           }
         }
         return out;
@@ -8242,7 +8242,7 @@ var init_mounted = __esm({
         }
         for (const [name, store] of this.domains) {
           if (store === holders[0] && this.isUnreadable(name)) {
-            throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
+            throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
           }
         }
         return holders[0];
@@ -10260,7 +10260,7 @@ var init_dist2 = __esm({
             const f = parseStoreFence(fence);
             if (f.kind === "rename") {
               renamedTo = f.to_domain;
-              message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+              message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`;
             }
           } catch (e) {
             message = `store '${db_path}' carries a write fence that could not be read (${e.message}), so writes to it are refused; nothing was written.`;
@@ -10485,7 +10485,7 @@ var init_dist2 = __esm({
           return;
         const current = this.db.schemaVersion();
         if (current !== this.openedSchemaVersion) {
-          throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
+          throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. Claude Code: EXIT AND RELAUNCH this session; OpenCode: run \`opencode reload\` (or \`/reload\` in the TUI) \u2014 either reopens the store against the current schema. Nothing was written.`);
         }
       }
       /**
@@ -23375,7 +23375,7 @@ var HOST_TEXT2 = {
   opencode: {
     label: "OpenCode plugin",
     restartShort: "agents synced \u2014 RELOAD to load them (run `opencode reload`; a /new is NOT enough)",
-    restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`) before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
+    restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `/reload` in the TUI, or `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`), before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
     retry: "retries the next time OpenCode starts",
     rerun: "re-runs at every OpenCode start"
   }
@@ -24135,7 +24135,7 @@ Resume from next_slice. The board and knowledge store remain the authorities for
   if (host === "opencode") {
     return `
 
-ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. run \`opencode reload\`, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`opencode reload\` before this new session \u2014 a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`);
+ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. run \`/reload\` in the TUI or \`opencode reload\` in any shell, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`/reload\` or \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`/reload\` or \`opencode reload\` before this new session \u2014 a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`);
   }
   const isClear = source === "clear";
   return `
@@ -24236,7 +24236,7 @@ async function sweepStaleDispatches(root) {
     return lines.join("\n\n");
   } catch (e) {
     if (e?.code !== "register_lock_held") throw e;
-    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; run \`opencode reload\` to retry the sweep.`;
   }
 }
 function regularFiles(root, files) {
@@ -24576,7 +24576,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
-      schema = found === SUPPORTED_SCHEMA_VERSION ? `store schema v${found} (current)` : `store schema v${found}, this Sterling expects v${SUPPORTED_SCHEMA_VERSION}: run migrate-stores, then restart OpenCode`;
+      schema = found === SUPPORTED_SCHEMA_VERSION ? `store schema v${found} (current)` : `store schema v${found}, this Sterling expects v${SUPPORTED_SCHEMA_VERSION}: run migrate-stores, then run \`opencode reload\``;
     } catch (e) {
       schema = `store schema probe failed (${errText2(e)})`;
     }
@@ -24774,7 +24774,7 @@ ${opencodeHostTail(pluginRoot)}`;
         try {
           line = await sweepStale(root);
         } catch (e) {
-          line = `STERLING DISPATCH SWEEP FAILED (${errText2(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+          line = `STERLING DISPATCH SWEEP FAILED (${errText2(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; run \`opencode reload\` to retry the sweep.`;
         }
         if (line) {
           holdLine(`${root}\0sweep`, line);
@@ -25973,7 +25973,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
       }
       for (const text of duties.notices) addNotice(root, text, at);
       if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
-      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at, heldKey(dispatch.why));
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), run \`opencode reload\`: the reloaded plugin's first root request sweeps the dispatch records a dead process left live.`, at, heldKey(dispatch.why));
     } catch (e) {
       logLine(root, `settle failed: ${errText2(e)}`);
       addNotice(root, `Sterling settlement failed (${errText2(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);
@@ -27231,7 +27231,7 @@ ${notice}`;
           if (subRoot && !abort.signal.aborted) {
             try {
               logLine(subRoot, `event subscription ended: ${errText2(e)}`);
-              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText2(e)}); settlement stops until OpenCode restarts.`);
+              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText2(e)}); settlement stops until the plugin reloads: run /reload in the TUI or \`opencode reload\` in a shell.`);
             } catch (reportError) {
               process.stderr.write(`[sterling] event subscription ended (${errText2(e)}) and could not be reported (${errText2(reportError)})
 `);

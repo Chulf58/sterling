@@ -343,7 +343,7 @@ export class StoreMovedError extends Error {
           renamedTo = f.to_domain;
           message =
             `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. ` +
-            `Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+            `Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`;
         }
       } catch (e) {
         message = `store '${db_path}' carries a write fence that could not be read (${(e as Error).message}), so writes to it are refused; nothing was written.`;
@@ -1798,7 +1798,7 @@ export class SterlingStore {
       throw new Error(
         `Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ` +
           `${current} — another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every ` +
-          `other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`
+          `other write are refused until this session is closed. Claude Code: EXIT AND RELAUNCH this session; OpenCode: run \`opencode reload\` (or \`/reload\` in the TUI) — either reopens the store against the current schema. Nothing was written.`
       );
     }
   }

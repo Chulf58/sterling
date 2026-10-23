@@ -6942,7 +6942,7 @@ var StoreMovedError = class extends Error {
         const f = parseStoreFence(fence);
         if (f.kind === "rename") {
           renamedTo = f.to_domain;
-          message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+          message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`;
         }
       } catch (e) {
         message = `store '${db_path}' carries a write fence that could not be read (${e.message}), so writes to it are refused; nothing was written.`;
@@ -7426,7 +7426,7 @@ var SterlingStore = class _SterlingStore {
       return;
     const current2 = this.db.schemaVersion();
     if (current2 !== this.openedSchemaVersion) {
-      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current2} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
+      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current2} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. Claude Code: EXIT AND RELAUNCH this session; OpenCode: run \`opencode reload\` (or \`/reload\` in the TUI) \u2014 either reopens the store against the current schema. Nothing was written.`);
     }
   }
   /**
@@ -10516,5 +10516,5 @@ for (const line of done) console.log(`  ${line}`);
 for (const note of notes) console.log(`Note: ${note}`);
 if (toAdd.length || created) {
   console.log("");
-  console.log("Restart the session for the new mount to load: the Sterling MCP server mounts domains once, when it starts, so knowledge_query and knowledge_create do not see a new domain until then.");
+  console.log("Restart the session for the new mount to load (Claude Code: exit and relaunch; OpenCode: run `opencode reload`): the Sterling MCP server mounts domains once, when it starts, so knowledge_query and knowledge_create do not see a new domain until then.");
 }

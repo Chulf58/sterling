@@ -67,5 +67,5 @@ export function readCloneCurrency(root) {
 export function cloneCurrencyCaveat(root) {
   const result = readCloneCurrency(root);
   if (!result || result.behind <= 0) return null;
-  return `⚠ Sterling clone is ${result.behind} update(s) behind origin — these check results may be running an outdated ruleset. Run /sterling:update (or double-click sterling-update.bat), then restart the session.`;
+  return `⚠ Sterling clone is ${result.behind} update(s) behind origin — these check results may be running an outdated ruleset. Run /sterling:update (or double-click sterling-update.bat), then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`;
 }

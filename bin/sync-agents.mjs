@@ -9354,7 +9354,7 @@ var refused = 0;
 for (const r of report) {
   if (r.status === "config_drift") {
     console.log(
-      `config_drift: ${r.name} \u2014 ${describeConfigDrift(r)}; NOT rewritten by sync \u2014 realize it with ${r.fix}, then restart the session`
+      `config_drift: ${r.name} \u2014 ${describeConfigDrift(r)}; NOT rewritten by sync \u2014 realize it with ${r.fix}, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`)`
     );
   } else {
     console.log(`${r.status}: ${r.name}`);

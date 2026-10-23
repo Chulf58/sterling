@@ -462,5 +462,5 @@ for (const line of done) console.log(`  ${line}`);
 for (const note of notes) console.log(`Note: ${note}`);
 if (toAdd.length || created) {
   console.log('');
-  console.log('Restart the session for the new mount to load: the Sterling MCP server mounts domains once, when it starts, so knowledge_query and knowledge_create do not see a new domain until then.');
+  console.log('Restart the session for the new mount to load (Claude Code: exit and relaunch; OpenCode: run `opencode reload`): the Sterling MCP server mounts domains once, when it starts, so knowledge_query and knowledge_create do not see a new domain until then.');
 }

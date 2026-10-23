@@ -567,7 +567,7 @@ test('the first root context of a process sweeps dispatch records a dead process
     writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 5;\n');
     git(p.dir, ['commit', '-qam', 'change']);
     await first.plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
-    assert.match(noticeTexts(p.dir).join('\n'), /not advanced because[^\n]*restart OpenCode/, 'the hold notice names the manual remedy');
+    assert.match(noticeTexts(p.dir).join('\n'), /not advanced because[^\n]*opencode reload/, 'the hold notice names the manual remedy');
     await first.cleanup?.();
 
     // A new process: its child context does not sweep, its first root context does.

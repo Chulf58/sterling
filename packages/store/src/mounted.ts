@@ -88,7 +88,7 @@ const PROBE_ID = '00000000-0000-0000-0000-000000000000';
 const DROPPED_AFTER_MOUNT_NOTE = 'dropped after mount; reads skip it until the session restarts';
 
 /** UnreadableDomain.note for a domain dropped by the mount-time check. */
-const DROPPED_AT_MOUNT_NOTE = 'dropped at mount; restart the session after the store is repaired';
+const DROPPED_AT_MOUNT_NOTE = 'dropped at mount; restart the session after the store is repaired (OpenCode: opencode reload)';
 
 /** True for a failure of the STORE under an open or a read, the only kind that
  *  drops a domain: an error node:sqlite raised (every one carries code
@@ -212,7 +212,7 @@ export class DomainRenamedError extends Error {
       `domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); ` +
         `the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. ` +
         `The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') ` +
-        `in this project's .sterling/config.json, then restart the session.`
+        `in this project's .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`
     );
     this.name = 'DomainRenamedError';
     this.domain = domain;
@@ -223,7 +223,7 @@ export class DomainRenamedError extends Error {
 }
 
 /** UnreadableDomain.note for a domain refused at mount because it was renamed. */
-const RENAMED_AT_MOUNT_NOTE = 'refused at mount because the domain was renamed; update stack_tags and restart the session';
+const RENAMED_AT_MOUNT_NOTE = 'refused at mount because the domain was renamed; update stack_tags and restart the session (OpenCode: opencode reload)';
 
 /** The rename fence a store carries, or null for none (or a move fence). A
  *  fence value that does not parse is left to the write path, which refuses
@@ -504,7 +504,7 @@ export class MountedStores {
     if (!this.isUnreadable(name)) return;
     throw new Error(
       `domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. ` +
-        `Repair the store, then restart the session.`
+        `Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`
     );
   }
 
@@ -522,7 +522,7 @@ export class MountedStores {
         this.dropDomain(name, e);
         throw new Error(
           `${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. ` +
-            `Nothing was written. Repair the store, then restart the session.`
+            `Nothing was written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`
         );
       }
     }
@@ -1058,7 +1058,7 @@ export class MountedStores {
       if (store === holders[0] && this.isUnreadable(name)) {
         throw new Error(
           `record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. ` +
-            `Nothing was read or written. Repair the store, then restart the session.`
+            `Nothing was read or written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`
         );
       }
     }

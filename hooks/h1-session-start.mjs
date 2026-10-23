@@ -7323,7 +7323,7 @@ var init_mounted = __esm({
     init_pg_driver();
     PROBE_ID = "00000000-0000-0000-0000-000000000000";
     DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
-    DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+    DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired (OpenCode: opencode reload)";
     errorText = (e) => String(e?.message ?? e);
     DomainUnavailableError = class extends Error {
       domain;
@@ -7360,7 +7360,7 @@ var init_mounted = __esm({
       renamed_to;
       renamed_path;
       constructor(domain, dbPath, fence) {
-        super(`domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') in this project's .sterling/config.json, then restart the session.`);
+        super(`domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') in this project's .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
         this.name = "DomainRenamedError";
         this.domain = domain;
         this.db_path = dbPath;
@@ -7368,7 +7368,7 @@ var init_mounted = __esm({
         this.renamed_path = fence.to_path;
       }
     };
-    RENAMED_AT_MOUNT_NOTE = "refused at mount because the domain was renamed; update stack_tags and restart the session";
+    RENAMED_AT_MOUNT_NOTE = "refused at mount because the domain was renamed; update stack_tags and restart the session (OpenCode: opencode reload)";
     MountedStores = class {
       /** The project store — also the home of the board/maintenance queue and
        *  other project-local transient state (the run/handoff protocol this
@@ -7575,7 +7575,7 @@ var init_mounted = __esm({
       assertWritable(name) {
         if (!this.isUnreadable(name))
           return;
-        throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
+        throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
       }
       /** `fn` on the project store and then on EVERY mounted domain, dropped ones
        *  included, for a check where "not read" must never count as "absent" (slug
@@ -7590,7 +7590,7 @@ var init_mounted = __esm({
             if (!this.isStoreFailure(e))
               throw e;
             this.dropDomain(name, e);
-            throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+            throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
           }
         }
         return out;
@@ -8054,7 +8054,7 @@ var init_mounted = __esm({
         }
         for (const [name, store2] of this.domains) {
           if (store2 === holders[0] && this.isUnreadable(name)) {
-            throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
+            throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`);
           }
         }
         return holders[0];
@@ -9769,7 +9769,7 @@ var init_dist2 = __esm({
             const f = parseStoreFence(fence);
             if (f.kind === "rename") {
               renamedTo = f.to_domain;
-              message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+              message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session (Claude Code: exit and relaunch; OpenCode: run \`opencode reload\`).`;
             }
           } catch (e) {
             message = `store '${db_path}' carries a write fence that could not be read (${e.message}), so writes to it are refused; nothing was written.`;
@@ -9994,7 +9994,7 @@ var init_dist2 = __esm({
           return;
         const current = this.db.schemaVersion();
         if (current !== this.openedSchemaVersion) {
-          throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
+          throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. Claude Code: EXIT AND RELAUNCH this session; OpenCode: run \`opencode reload\` (or \`/reload\` in the TUI) \u2014 either reopens the store against the current schema. Nothing was written.`);
         }
       }
       /**
@@ -14681,7 +14681,7 @@ Resume from next_slice. The board and knowledge store remain the authorities for
   if (host === "opencode") {
     return `
 
-ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. run \`opencode reload\`, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`opencode reload\` before this new session \u2014 a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`);
+ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. run \`/reload\` in the TUI or \`opencode reload\` in any shell, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`/reload\` or \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`/reload\` or \`opencode reload\` before this new session \u2014 a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`);
   }
   const isClear = source === "clear";
   return `
@@ -15790,7 +15790,7 @@ var HOST_TEXT = {
   opencode: {
     label: "OpenCode plugin",
     restartShort: "agents synced \u2014 RELOAD to load them (run `opencode reload`; a /new is NOT enough)",
-    restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`) before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
+    restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `/reload` in the TUI, or `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`), before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
     retry: "retries the next time OpenCode starts",
     rerun: "re-runs at every OpenCode start"
   }

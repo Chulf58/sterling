@@ -867,7 +867,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // Hooks re-read config.json from disk on every invocation, so they see
       // this write immediately; the MCP server is the one long-lived reader
       // that does not — restart the session to pick the new value up there.
-      notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
+      notice('config.json updated — hooks pick this up on their next invocation; restart the session (Claude Code) or run opencode reload (OpenCode) to reload the MCP server.');
     }
     if (refused || swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
     for (const e of effects) {

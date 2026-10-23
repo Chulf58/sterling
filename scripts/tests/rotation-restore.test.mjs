@@ -189,10 +189,10 @@ test("host 'opencode' names the new session and OpenCode's relaunch; the way bac
     const oc = renderRotationRestore(note, { cwd: dir, host: 'opencode' });
     assert.match(oc, /^\n\nROTATION RESTORE \(Sterling OpenCode plugin\): a rotation note was prepared before this new session; this injection CONSUMES it \(single-shot\)\./);
     assert.match(oc, /`opencode --session ses_abc`/);
-    assert.match(oc, /having run `opencode reload` before this new session/);
+    assert.match(oc, /having run `\/reload` or `opencode reload` before this new session/);
     assert.ok(!/relaunch/i.test(oc), 'no relaunch advice on OpenCode');
     for (const claudeOnly of ['/clear', 'claude --resume', 'SendMessage', 'Claude Code CLI', 'H1']) assert.ok(!oc.includes(claudeOnly), `no ${claudeOnly} on OpenCode`);
-    assert.match(renderRotationRestore({ ...note, reason: 'code-reload' }, { cwd: dir, host: 'opencode' }), /1\. run `opencode reload`, 2\. THEN start this new session/);
+    assert.match(renderRotationRestore({ ...note, reason: 'code-reload' }, { cwd: dir, host: 'opencode' }), /1\. run `\/reload` in the TUI or `opencode reload` in any shell, 2\. THEN start this new session/);
     // An OpenCode-written note restored on Claude Code still points back at OpenCode.
     assert.match(renderRotationRestore(note, { cwd: dir, source: 'clear', host: 'claude' }), /`opencode --session ses_abc`/);
     // A Claude-written note restored on OpenCode points back at Claude Code.

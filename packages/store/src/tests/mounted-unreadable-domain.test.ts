@@ -138,7 +138,7 @@ test('unreadable domain: it stays listed, every write into it refuses naming the
   const h = harness();
   try {
     assert.deepEqual(h.stores.domainNames(), ['old', 'genesys']);
-    const refusal = /domain 'old' cannot be written: this session cannot read it \(no such table: record_relations.*\)\. Nothing was written\. Repair the store, then restart the session\./s;
+    const refusal = /domain 'old' cannot be written: this session cannot read it \(no such table: record_relations.*\)\. Nothing was written\. Repair the store, then restart the session \(Claude Code: exit and relaunch; OpenCode: run `opencode reload`\)\./s;
     assert.throws(() => h.stores.create(ref('domain:old')), refusal);
     assert.throws(() => h.stores.setDomainDescription('old', 'new text'), refusal);
     assert.throws(() => h.stores.scopeOfHolder(h.oldRecord.id), /is held by domain 'old', which this session cannot read \(no such table: record_relations/);

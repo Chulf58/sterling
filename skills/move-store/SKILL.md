@@ -65,7 +65,7 @@ Then run the same command without `--dry-run`:
 
 Each store is checked read-only first, so a refusal anywhere stops the run before any store is fenced. Then each store is fenced on the side it leaves, copied, compared against a content-hash manifest of both sides and given a receipt. `config.storage` is written last. Check before moving on: no `FAILED` line, every store shows `hash match: yes`, and the last lines read `config.storage switched to <backend>` and `config.mode unchanged (<mode>)`.
 
-Tell the user to restart the session, so the running tools pick up the new `config.storage`.
+Tell the user to restart the session (Claude Code: exit and relaunch; OpenCode: run `/reload` in the TUI or `opencode reload`), so the running tools pick up the new `config.storage`.
 
 ## 6. Shared domains fork
 
@@ -84,7 +84,7 @@ The side the move leaves is fenced. A write to a fenced store is refused with `S
 
 What the user may see:
 
-- `StoreMovedError` from a tool or hook that still opens the old backend. It means the project moved. Check `config.storage`, and restart the session if it already names the new backend.
+- `StoreMovedError` from a tool or hook that still opens the old backend. It means the project moved. Check `config.storage`, and restart the session (OpenCode: `opencode reload`) if it already names the new backend.
 - Do not remove the fence or copy files between backends to get around it. A fenced copy is also what a later move back replaces, and only when its content is untouched since the fence.
 
 ## 8. Recovery and refusals
@@ -118,7 +118,7 @@ Steps:
 
 1. Run `--attach --dry-run` and show the user the report. It lists each store with the receipt that filled it, says what happens to this machine's own SQLite file, and changes nothing.
 2. Put the choice to the user through the question form, as in section 5.
-3. Run `--attach` without `--dry-run`. Check that the report ends with `config.storage switched to postgres` and `config.mode unchanged (<mode>)`, where `<mode>` is the project's own mode (`hobby` or `work`), then tell the user to restart the session.
+3. Run `--attach` without `--dry-run`. Check that the report ends with `config.storage switched to postgres` and `config.mode unchanged (<mode>)`, where `<mode>` is the project's own mode (`hobby` or `work`), then tell the user to restart the session (Claude Code: exit and relaunch; OpenCode: run `/reload` in the TUI or `opencode reload`).
 
 This machine's own project SQLite file (`.sterling/sterling.db`), if there is one:
 
