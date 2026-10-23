@@ -4211,7 +4211,7 @@ var init_paths = __esm({
 });
 
 // packages/schemas/dist/retired-terms.js
-var retiredTermSchema;
+var retiredTermSchema, WORD_CLASS, WORD_CHAR;
 var init_retired_terms = __esm({
   "packages/schemas/dist/retired-terms.js"() {
     "use strict";
@@ -4220,6 +4220,8 @@ var init_retired_terms = __esm({
       term: external_exports.string().trim().min(1),
       replacement: external_exports.string().trim().min(1)
     }).strict();
+    WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+    WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
   }
 });
 

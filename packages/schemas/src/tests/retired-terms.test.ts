@@ -59,3 +59,33 @@ test('registry: retired_terms on decision, retired_term_use registered with a dr
   assert.equal(DRAIN_VERBS.retired_term_use, 'renamed');
   assert.ok((WORKER_POLICY_LANES as readonly string[]).includes('retired_term_use'));
 });
+
+test('an occurrence that overlaps a protected span is protected, not only one wholly inside it', () => {
+  // The blockquote line is broken mid-term by a newline: still one blockquote paragraph.
+  assert.deepEqual(hits('> North\nBarn stays', 'North Barn'), [['North\nBarn', true]]);
+  assert.deepEqual(hits('say "go to the North Barn', 'North Barn'), [['North Barn', true]], 'an unclosed quote protects to the end of its paragraph');
+  const r = replaceRetiredTerms('> North\nBarn stays', [{ term: 'North Barn', replacement: 'Hay Barn' }]);
+  assert.equal(r.text, '> North\nBarn stays');
+  assert.equal(r.protected, 1);
+});
+
+test('unclosed quotes and blockquotes end at the paragraph, never later', () => {
+  const text = 'He said "unclosed North Barn here\n\nNext paragraph about North Barn.';
+  assert.deepEqual(hits(text, 'North Barn').map(([, p]) => p), [true, false]);
+  const curly = 'She said \u201cunclosed North Barn\n\nLater North Barn.';
+  assert.deepEqual(hits(curly, 'North Barn').map(([, p]) => p), [true, false]);
+  const bq = '> quoted North Barn\ncontinuation North Barn\n\nPlain North Barn.';
+  assert.deepEqual(hits(bq, 'North Barn').map(([, p]) => p), [true, true, false]);
+});
+
+test('boundaries work on code points and treat combining marks as part of the word', () => {
+  assert.deepEqual(hits('x\u{1D49C}y and \u{1D49C} alone', '\u{1D49C}'), [['\u{1D49C}', false]], 'an astral letter is not found inside a word');
+  assert.deepEqual(hits('x\u{1D49C}', '\u{1D49C}'), []);
+  // decomposed écurie = e + U+0301; the bare term 'e' must not match the start of it.
+  assert.deepEqual(hits('e\u0301curie', 'e'), []);
+  assert.deepEqual(hits('un e seul', 'e'), [['e', false]]);
+  // the composed term finds the decomposed spelling and the reverse
+  assert.deepEqual(hits('une e\u0301curie ici', '\u00e9curie'), [['e\u0301curie', false]]);
+  assert.deepEqual(hits('une \u00e9curie ici', 'e\u0301curie'), [['\u00e9curie', false]]);
+  assert.deepEqual(hits('e\u0301curies', '\u00e9curie'), [], 'a plural is still a different word');
+});

@@ -4260,17 +4260,43 @@ var init_paths = __esm({
 
 // packages/schemas/dist/retired-terms.js
 function retiredTermRegex(term) {
-  const t = term.trim();
-  const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
-  const lead = WORD_CHAR.test(t[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
-  const trail = WORD_CHAR.test(t[t.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
-  return new RegExp(`${lead}${body}${trail}`, "giu");
+  const trimmed = term.trim();
+  const variants = [.../* @__PURE__ */ new Set([trimmed.normalize("NFC"), trimmed.normalize("NFD")])];
+  const alternatives = variants.map((t) => {
+    const points = Array.from(t);
+    const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+    const lead = WORD_CHAR.test(points[0] ?? "") ? `(?<![${WORD_CLASS}])` : "";
+    const trail = WORD_CHAR.test(points[points.length - 1] ?? "") ? `(?![${WORD_CLASS}])` : "";
+    return `${lead}${body}${trail}`;
+  });
+  return new RegExp(`(?:${alternatives.join("|")})`, "giu");
 }
 function protectedSpans(text) {
   const spans = [];
-  for (const re of [/"[^"]*"/g, /\u201c[^\u201d]*\u201d/g, /^[ \t]*>.*$/gm]) {
-    for (const m of text.matchAll(re))
-      spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  const bounds = [];
+  let from = 0;
+  for (const sep3 of text.matchAll(/\n[ \t]*\n/g)) {
+    bounds.push([from, sep3.index ?? 0]);
+    from = (sep3.index ?? 0) + sep3[0].length;
+  }
+  bounds.push([from, text.length]);
+  for (const [ps, pe] of bounds) {
+    const para = text.slice(ps, pe);
+    const straight = [...para.matchAll(/"/g)].map((m) => ps + (m.index ?? 0));
+    for (let i = 0; i < straight.length; i += 2)
+      spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : pe]);
+    for (let i = para.indexOf("\u201C"); i !== -1; ) {
+      const close = para.indexOf("\u201D", i + 1);
+      if (close === -1) {
+        spans.push([ps + i, pe]);
+        break;
+      }
+      spans.push([ps + i, ps + close + 1]);
+      i = para.indexOf("\u201C", close + 1);
+    }
+    const bq = /^[ \t]*>/m.exec(para);
+    if (bq)
+      spans.push([ps + bq.index, pe]);
   }
   return spans;
 }
@@ -4282,7 +4308,7 @@ function findTermOccurrences(text, term) {
   for (const m of text.matchAll(retiredTermRegex(term))) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    out.push({ start, end, protected: spans.some(([s2, e]) => start >= s2 && end <= e) });
+    out.push({ start, end, protected: spans.some(([s2, e]) => start < e && s2 < end) });
   }
   return out;
 }
@@ -4361,7 +4387,7 @@ function retiredTermsInText(text, terms) {
 function retiredTermWarning(t) {
   return `retired term '${t.term}': renamed to '${t.replacement}' by decision ${t.decision_slug ?? t.decision_id} (knowledge_get ${t.decision_id}); use '${t.replacement}' unless you are quoting.`;
 }
-var retiredTermSchema, WORD_CHAR, RETIRED_TERM_SKIPPED_FIELDS, NESTED_SKIPPED_KEYS, RETIRED_TERM_REWRITE_FIELDS;
+var retiredTermSchema, WORD_CLASS, WORD_CHAR, RETIRED_TERM_SKIPPED_FIELDS, NESTED_SKIPPED_KEYS, RETIRED_TERM_REWRITE_FIELDS;
 var init_retired_terms = __esm({
   "packages/schemas/dist/retired-terms.js"() {
     "use strict";
@@ -4370,7 +4396,8 @@ var init_retired_terms = __esm({
       term: external_exports.string().trim().min(1),
       replacement: external_exports.string().trim().min(1)
     }).strict();
-    WORD_CHAR = /[\p{L}\p{N}_]/u;
+    WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+    WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
     RETIRED_TERM_SKIPPED_FIELDS = /* @__PURE__ */ new Set([
       "history",
       "retired_terms",
@@ -6812,7 +6839,7 @@ var init_broker = __esm({
   "packages/schemas/dist/broker.js"() {
     "use strict";
     init_zod();
-    BROKER_PROTOCOL = 2;
+    BROKER_PROTOCOL = 3;
     BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
     BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
     BROKER_DISCOVERY_MAX_ENTRIES = 32;
@@ -6844,7 +6871,7 @@ var init_broker = __esm({
         "remove",
         "recordCheckSkipped"
       ],
-      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
+      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription", "retiredTermDecisions"]
     };
     BROKER_MAX_ARGS = 6;
     brokerIdentitySchema = external_exports.object({
@@ -8912,6 +8939,13 @@ var init_mounted = __esm({
         const perStore = this.fanValues((s2) => s2.query({ ...opts2, cap }));
         const shares = allocateShares(perStore.map((r) => r.length), cap);
         return perStore.flatMap((records, i) => records.slice(0, shares[i]));
+      }
+      /** Cross-mount retiredTermDecisions (GitHub #188): the active rename decisions of the
+       *  project store and every readable mounted domain, project first. A rename held in a
+       *  domain covers every project mounting it (decision
+       *  retiring-a-renamed-term-a-retired-terms-field-on-the-rename), so the fan is the read. */
+      retiredTermDecisions() {
+        return this.fanValues((s2) => s2.retiredTermDecisions()).flat();
       }
       /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
        *  query(), summed project-first across every mounted store (countBySource is
@@ -12896,6 +12930,31 @@ var init_dist2 = __esm({
        */
       recordIdIndex() {
         return this.db.prepare("SELECT id, type, status FROM records").all();
+      }
+      /**
+       * The active decisions that carry retired_terms (GitHub #188, decision
+       * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+       * minimal shape collectRetiredTerms reads. This is the one read every write
+       * warning, preflight, delivery hook, worker check and hygiene listing makes,
+       * so it never decodes or hydrates a record body that holds none: a plain
+       * substring test on the body column drops those rows inside the database,
+       * and the JSON extraction runs only on the survivors. With no rename
+       * recorded it costs one indexed type scan and returns [].
+       */
+      retiredTermDecisions() {
+        return this.readTx(() => {
+          const d = this.db.dialect;
+          const rows = this.db.prepare(`SELECT id, ${d.jsonText("body", "slug")} AS slug, ${d.jsonText("body", "retired_terms")} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText("body", "retired_terms")} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`).all();
+          return rows.map((r) => ({
+            id: r.id,
+            type: "decision",
+            status: "active",
+            ...r.slug ? { slug: r.slug } : {},
+            retired_terms: JSON.parse(r.retired_terms)
+          }));
+        });
       }
       /**
        * Every non-superseded feature_article carrying this EXACT slug, newest first.

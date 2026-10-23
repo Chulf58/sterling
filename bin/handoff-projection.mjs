@@ -4119,6 +4119,8 @@ var retiredTermSchema = external_exports.object({
   term: external_exports.string().trim().min(1),
   replacement: external_exports.string().trim().min(1)
 }).strict();
+var WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+var WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -7368,6 +7370,13 @@ var MountedStores = class {
     const shares = allocateShares(perStore.map((r) => r.length), cap);
     return perStore.flatMap((records2, i) => records2.slice(0, shares[i]));
   }
+  /** Cross-mount retiredTermDecisions (GitHub #188): the active rename decisions of the
+   *  project store and every readable mounted domain, project first. A rename held in a
+   *  domain covers every project mounting it (decision
+   *  retiring-a-renamed-term-a-retired-terms-field-on-the-rename), so the fan is the read. */
+  retiredTermDecisions() {
+    return this.fanValues((s2) => s2.retiredTermDecisions()).flat();
+  }
   /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
    *  query(), summed project-first across every mounted store (countBySource is
    *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
@@ -10018,6 +10027,31 @@ var SterlingStore = class _SterlingStore {
    */
   recordIdIndex() {
     return this.db.prepare("SELECT id, type, status FROM records").all();
+  }
+  /**
+   * The active decisions that carry retired_terms (GitHub #188, decision
+   * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+   * minimal shape collectRetiredTerms reads. This is the one read every write
+   * warning, preflight, delivery hook, worker check and hygiene listing makes,
+   * so it never decodes or hydrates a record body that holds none: a plain
+   * substring test on the body column drops those rows inside the database,
+   * and the JSON extraction runs only on the survivors. With no rename
+   * recorded it costs one indexed type scan and returns [].
+   */
+  retiredTermDecisions() {
+    return this.readTx(() => {
+      const d = this.db.dialect;
+      const rows = this.db.prepare(`SELECT id, ${d.jsonText("body", "slug")} AS slug, ${d.jsonText("body", "retired_terms")} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText("body", "retired_terms")} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`).all();
+      return rows.map((r) => ({
+        id: r.id,
+        type: "decision",
+        status: "active",
+        ...r.slug ? { slug: r.slug } : {},
+        retired_terms: JSON.parse(r.retired_terms)
+      }));
+    });
   }
   /**
    * Every non-superseded feature_article carrying this EXACT slug, newest first.

@@ -8,14 +8,17 @@
 // Matching (user ruling 3, 'Whole word, skip quotes and history'):
 // - the term is a literal (regex metacharacters escaped), matched
 //   case-insensitively; a run of whitespace inside the term matches any run of
-//   whitespace, so 'North Barn' also finds 'north\nbarn';
-// - the OUTER boundaries are Unicode-aware: an edge of the term that is a
-//   letter, digit or underscore must not touch another one, so 'écurie' is not
-//   found inside 'écuries' and 'C++' is found in 'C++ code' (plain \b gets
-//   both wrong);
-// - protected spans are text inside straight or curly double quotes and
-//   blockquote lines (a line starting with '>'); an occurrence there is
-//   counted but never reported as a use and never rewritten;
+//   whitespace, so 'North Barn' also finds 'north\nbarn'. The term is matched
+//   in both its NFC and NFD forms, so a composed term finds decomposed text;
+// - the OUTER boundaries are Unicode-aware and work on code points: an edge of
+//   the term that is a letter, digit, combining mark or underscore must not
+//   touch another one, so 'écurie' is not found inside 'écuries' (or 'e' at
+//   the start of a decomposed 'écurie'), 'C++' is found in 'C++ code', and an
+//   astral letter such as '𝒜' is not found inside 'x𝒜y' (plain \b and
+//   UTF-16 indexing get all of these wrong);
+// - protected spans (see protectedSpans) are text inside double quotes and
+//   blockquotes. An occurrence that overlaps a protected span at all is
+//   protected: it is counted but never reported as a use and never rewritten;
 // - history entries are excluded structurally (the field is never scanned),
 //   and so is the rename decision itself and any superseded or retired record.
 import { z } from 'zod';
@@ -40,25 +43,64 @@ export interface TermOccurrence {
   protected: boolean;
 }
 
-const WORD_CHAR = /[\p{L}\p{N}_]/u;
+// \p{M}: a combining mark continues the word it follows.
+const WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+const WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, 'u');
 
-/** The regex that finds `term` as a whole word (global, case-insensitive, Unicode). */
+/** The regex that finds `term` as a whole word (global, case-insensitive, Unicode, code-point based). */
 export function retiredTermRegex(term: string): RegExp {
-  const t = term.trim();
-  const body = t
-    .split(/\s+/)
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('\\s+');
-  const lead = WORD_CHAR.test(t[0] ?? '') ? '(?<![\\p{L}\\p{N}_])' : '';
-  const trail = WORD_CHAR.test(t[t.length - 1] ?? '') ? '(?![\\p{L}\\p{N}_])' : '';
-  return new RegExp(`${lead}${body}${trail}`, 'giu');
+  const trimmed = term.trim();
+  const variants = [...new Set([trimmed.normalize('NFC'), trimmed.normalize('NFD')])];
+  const alternatives = variants.map((t) => {
+    const points = Array.from(t);
+    const body = t
+      .split(/\s+/)
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('\\s+');
+    const lead = WORD_CHAR.test(points[0] ?? '') ? `(?<![${WORD_CLASS}])` : '';
+    const trail = WORD_CHAR.test(points[points.length - 1] ?? '') ? `(?![${WORD_CLASS}])` : '';
+    return `${lead}${body}${trail}`;
+  });
+  return new RegExp(`(?:${alternatives.join('|')})`, 'giu');
 }
 
-/** [start, end) ranges of quoted text and blockquote lines. */
+/**
+ * [start, end) ranges of protected text, worked out one paragraph at a time
+ * (a paragraph ends at a blank line), so a stray mark never protects past it:
+ * - straight double quotes pair up in order; an opening quote with no closing
+ *   one protects to the end of its paragraph, because an unclosed quote is
+ *   ambiguous about where the quoted words stop and the safe answer for a
+ *   rewrite is to leave them alone and hand the record back;
+ * - curly quotes run from an opening mark to the next closing mark, or to the
+ *   end of the paragraph when none follows;
+ * - a blockquote line (leading '>') protects from its line start to the end of
+ *   its paragraph, since a markdown blockquote carries on over the unmarked
+ *   lines that follow it.
+ */
 export function protectedSpans(text: string): [number, number][] {
   const spans: [number, number][] = [];
-  for (const re of [/"[^"]*"/g, /\u201c[^\u201d]*\u201d/g, /^[ \t]*>.*$/gm]) {
-    for (const m of text.matchAll(re)) spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  const bounds: [number, number][] = [];
+  let from = 0;
+  for (const sep of text.matchAll(/\n[ \t]*\n/g)) {
+    bounds.push([from, sep.index ?? 0]);
+    from = (sep.index ?? 0) + sep[0].length;
+  }
+  bounds.push([from, text.length]);
+  for (const [ps, pe] of bounds) {
+    const para = text.slice(ps, pe);
+    const straight = [...para.matchAll(/"/g)].map((m) => ps + (m.index ?? 0));
+    for (let i = 0; i < straight.length; i += 2) spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : pe]);
+    for (let i = para.indexOf('\u201c'); i !== -1; ) {
+      const close = para.indexOf('\u201d', i + 1);
+      if (close === -1) {
+        spans.push([ps + i, pe]);
+        break;
+      }
+      spans.push([ps + i, ps + close + 1]);
+      i = para.indexOf('\u201c', close + 1);
+    }
+    const bq = /^[ \t]*>/m.exec(para);
+    if (bq) spans.push([ps + bq.index, pe]);
   }
   return spans;
 }
@@ -71,7 +113,7 @@ export function findTermOccurrences(text: string, term: string): TermOccurrence[
   for (const m of text.matchAll(retiredTermRegex(term))) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    out.push({ start, end, protected: spans.some(([s, e]) => start >= s && end <= e) });
+    out.push({ start, end, protected: spans.some(([s, e]) => start < e && s < end) });
   }
   return out;
 }

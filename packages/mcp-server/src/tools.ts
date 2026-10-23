@@ -7824,6 +7824,9 @@ export class SterlingTools {
     'refresh_reference',
     'stale_research',
     'state_review',
+    // GitHub #188: the worker's (and a conductor's) rewrite of a record that
+    // still uses a retired term closes its retired_term_use item on the same write.
+    'retired_term_use',
   ]);
 
   /** The one lane closeable ONLY by the files[]-append join described above. */
@@ -13753,22 +13756,20 @@ export class SterlingTools {
    * maintenance_enqueue / maintenance_query (§10): the maintenance queue IS
    * the todo store filtered source=system (§3.2.7) — no second queue exists.
    */
-  /** Read window for the retired-term scans: every record, never a ranked top-N. */
+  /** Read window for the retired-term sweep: every record, never a ranked top-N. */
   private static readonly RETIRED_TERM_SCAN_CAP = 1_000_000;
 
   /**
    * Every active retired term visible from this project (GitHub #188), each
    * with the mount that physically holds its decision (scopeOfHolder, never
-   * the body's scope label).
+   * the body's scope label). One narrow store read (retiredTermDecisions): no
+   * decision body without a rename is decoded.
    */
   private retiredTermsInScope(): (RetiredTerm & { holder: string })[] {
-    const decisions = this.store.query({ types: ['decision'], cap: SterlingTools.RETIRED_TERM_SCAN_CAP });
-    return decisions
-      .filter((d) => Array.isArray((d as unknown as { retired_terms?: unknown }).retired_terms))
-      .flatMap((d) => {
-        const holder = this.store.scopeOfHolder(d.id);
-        return collectRetiredTerms([d]).map((t) => ({ ...t, holder }));
-      });
+    return this.store.retiredTermDecisions().flatMap((d) => {
+      const holder = this.store.scopeOfHolder(d.id);
+      return collectRetiredTerms([d]).map((t) => ({ ...t, holder }));
+    });
   }
 
   /**
@@ -13785,7 +13786,11 @@ export class SterlingTools {
    * visible here applies: the text is this project's own.
    */
   retiredTermTextWarnings(text: string): string[] {
-    return retiredTermsInText(text, this.retiredTermsInScope()).map(retiredTermWarning);
+    try {
+      return retiredTermsInText(text, this.retiredTermsInScope()).map(retiredTermWarning);
+    } catch (e) {
+      return [`the retired-term check FAILED (${e instanceof Error ? e.message : String(e)}); this text was NOT checked against renamed terms.`];
+    }
   }
 
   /**
@@ -13797,6 +13802,21 @@ export class SterlingTools {
    * costs reads only.
    */
   private retiredTermWriteEffects(record: DurableRecord): string[] {
+    // THE ADVISORY BOUNDARY: this runs after the write has committed, so a
+    // failure in the scan, the matcher or the sweep must not turn a stored
+    // record into an error the caller reads as 'nothing was written'. The
+    // write result stands and carries one warning saying the check did not run.
+    try {
+      return this.retiredTermWriteEffectsUnguarded(record);
+    } catch (e) {
+      return [
+        `the retired-term check FAILED after the write committed (${e instanceof Error ? e.message : String(e)}): the record ${record.id} IS written. ` +
+          `Retired terms in it, and the retired_term_use items for a new rename, were NOT checked; a decision with retired_terms re-runs the sweep at the next server start.`,
+      ];
+    }
+  }
+
+  private retiredTermWriteEffectsUnguarded(record: DurableRecord): string[] {
     const warnings: string[] = [];
     const terms = this.retiredTermsInScope();
     if (!terms.length) return warnings;
@@ -13833,8 +13853,11 @@ export class SterlingTools {
     if (!terms.length) return result;
     const types = Object.keys(RECORD_TYPES).filter((t) => t !== 'todo');
     for (const record of this.store.query({ types, cap: SterlingTools.RETIRED_TERM_SCAN_CAP })) {
-      const holder = this.store.scopeOfHolder(record.id);
       const body = record as unknown as Record<string, unknown>;
+      // Match against every term first; the physical holder (a store lookup)
+      // is asked only for the few records that use one.
+      if (!retiredTermUses(body, terms).length) continue;
+      const holder = this.store.scopeOfHolder(record.id);
       const uses = retiredTermUses(body, terms.filter((t) => SterlingTools.retiredTermApplies(t, holder)));
       if (!uses.length) continue;
       result.records++;

@@ -157,3 +157,23 @@ test('worker policy: retired_term_use allows exactly the term swap outside quote
     h.cleanup();
   }
 });
+
+test('retiredTermDecisions: the narrow read returns only active decisions that carry retired_terms, across the project and a mounted domain', () => {
+  const h = harnessMounted(['farm'], { now: '2026-10-23T12:00:00.000Z', prefix: 'sterling-retired-narrow-' });
+  try {
+    const tools = h.tools as SterlingTools;
+    assert.deepEqual(h.store.retiredTermDecisions(), [], 'no rename recorded: nothing returned');
+    const mk = (fields: Record<string, unknown>) => (tools.knowledgeCreate('decision', { alternatives_rejected: [], rationale: 'r', statement: 's', ...fields } as never) as unknown as { record: Rec }).record;
+    const plain = mk({ title: 'A decision that merely mentions retired_terms in prose', statement: 'retired_terms are a field' });
+    const mine = mk({ title: 'Project rename', retired_terms: [RENAME] });
+    const theirs = mk({ scope: 'domain:farm', title: 'Domain rename', retired_terms: [{ term: 'Old Shed', replacement: 'Tool Shed' }] });
+    const old = mk({ title: 'Superseded rename', retired_terms: [{ term: 'Gone', replacement: 'Here' }] });
+    tools.knowledgeSupersede(old.id, { title: 'Clean', statement: 's', alternatives_rejected: [], rationale: 'r' } as never);
+    const rows = h.store.retiredTermDecisions();
+    assert.deepEqual(rows.map((r) => r.id).sort(), [mine.id, theirs.id].sort());
+    assert.ok(!rows.some((r) => r.id === plain.id), 'a body that only mentions the word is dropped by the field check');
+    assert.deepEqual(h.store.project.retiredTermDecisions().map((r) => r.id), [mine.id], 'the project store alone holds only its own');
+  } finally {
+    h.cleanup();
+  }
+});

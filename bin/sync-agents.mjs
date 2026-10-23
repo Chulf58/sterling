@@ -4112,6 +4112,8 @@ var retiredTermSchema = external_exports.object({
   term: external_exports.string().trim().min(1),
   replacement: external_exports.string().trim().min(1)
 }).strict();
+var WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+var WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];

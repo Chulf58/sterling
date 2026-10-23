@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { posix } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MountedStores } from '@sterling/store';
-import { collectRetiredTerms, normalizeRepoPath, replaceRetiredTerms, RETIRED_TERM_REWRITE_FIELDS, workerPolicySchema, type WorkerPolicy, type WorkerPolicyItem, type WorkerPolicyLane } from '@sterling/schemas';
+import { collectRetiredTerms, normalizeRepoPath, replaceRetiredTerms, retiredTermUses, RETIRED_TERM_REWRITE_FIELDS, workerPolicySchema, type WorkerPolicy, type WorkerPolicyItem, type WorkerPolicyLane } from '@sterling/schemas';
 
 export interface WorkerPolicyArgs {
   /** Absolute path to the run's eligible.json. */
@@ -121,9 +121,9 @@ export class WorkerPolicyRefusal extends Error {
   }
 }
 
-// `query` reads the active retired terms for the retired_term_use lane; a
-// view without it allows no retired_term_use write (fail closed).
-type RecordView = Pick<MountedStores, 'projectStoreHolds' | 'get'> & Partial<Pick<MountedStores, 'query'>>;
+// `retiredTermDecisions` reads the active retired terms for the retired_term_use
+// lane; a view without it allows no retired_term_use write (fail closed).
+type RecordView = Pick<MountedStores, 'projectStoreHolds' | 'get'> & Partial<Pick<MountedStores, 'retiredTermDecisions'>>;
 
 /** The root field a knowledge_edit field, append field or array_remove
  *  selector names: `files[path=x].role` -> `files`. */
@@ -298,7 +298,7 @@ export class WorkerGuard {
     const fault = (text: string): Fault => ({ rule: 'field_not_allowed', text });
     if (tool !== 'knowledge_update') return fault('a retired_term_use item allows only a knowledge_update of whole field values');
     const id = String(input.id);
-    const decisions = this.records.query ? this.records.query({ types: ['decision'], cap: 1_000_000 }) : [];
+    const decisions = this.records.retiredTermDecisions ? this.records.retiredTermDecisions() : [];
     const terms = collectRetiredTerms(decisions).filter((t) => t.decision_id !== id);
     if (!terms.length) return fault('no active retired term covers this record');
     const written = { ...((input.body ?? {}) as Record<string, unknown>), ...((input.fields ?? {}) as Record<string, unknown>) };
@@ -311,6 +311,15 @@ export class WorkerGuard {
       if (expected.replaced === 0) return fault(`field ${f} holds no retired term outside quotes and blockquotes`);
       if (after !== expected.text) {
         return fault(`field ${f} is not the stored value with the retired term(s) replaced outside quotes; the worker may only swap ${terms.map((t) => `'${t.term}' -> '${t.replacement}'`).join(', ')}`);
+      }
+    }
+    // A write that claims the item closes it, so it must leave no use behind:
+    // a partial swap (one field of two) would otherwise discharge a debt that
+    // is still owed. The record as it will stand is checked, not the diff.
+    if (Array.isArray(input.resolves) && input.resolves.length > 0) {
+      const left = retiredTermUses({ ...stored, ...written }, terms);
+      if (left.length) {
+        return fault(`resolves would close the item while the record still uses ${left.map((u) => `'${u.term}' in ${u.fields.join(', ')}`).join('; ')} outside quotes; write every replacement in one update, or hand the item off`);
       }
     }
     return null;

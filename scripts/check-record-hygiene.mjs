@@ -9,9 +9,9 @@
 //   shared_central_terms  records whose central-term sets are identical
 //   filler_central_terms  filler words among a record's central terms
 //   retired_term_use      a record still using a term a project-held rename
-//                         decision retired (GitHub #188; renames held in a
-//                         mounted domain are not read here, the project
-//                         store is the only one this arm opens)
+//                         decision retired (GitHub #188), whether the rename
+//                         is held by the project or by a mounted domain; only
+//                         the project's own records are audited
 // Central terms are recordCentralTerms from packages/store/src/axis.ts.
 //
 //   node scripts/check-record-hygiene.mjs [root] [--all]
@@ -25,7 +25,8 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { openProjectReadOnly } from './lib/project.mjs';
-import { auditRecords, AUDITED_TYPES } from './lib/record-hygiene.mjs';
+import { resolveDomainMounts } from '@sterling/store';
+import { auditRecords, readDomainRetiredDecisions, AUDITED_TYPES } from './lib/record-hygiene.mjs';
 
 const PRINT_CAP = 10;
 const args = process.argv.slice(2);
@@ -54,10 +55,12 @@ function main() {
   }
   const headFiles = new Set(tree.stdout.split('\0').filter(Boolean));
 
-  const { store, close } = openProjectReadOnly(root);
+  const { store, config, close } = openProjectReadOnly(root);
   let records;
+  let mounts = [];
   try {
     records = store.query({ types: AUDITED_TYPES, cap: 1_000_000 });
+    mounts = resolveDomainMounts(config);
   } finally {
     close();
   }
@@ -66,7 +69,9 @@ function main() {
     return;
   }
 
-  const { scanned, findings } = auditRecords(records, { headFiles });
+  const { decisions: domainDecisions, unread } = readDomainRetiredDecisions(mounts);
+  for (const u of unread) console.log(`record hygiene: domain '${u.name}' was not read for retired terms (${u.error}) — renames it holds are NOT checked`);
+  const { scanned, findings } = auditRecords(records, { headFiles, domainDecisions });
   const byKind = new Map();
   for (const f of findings) {
     if (!byKind.has(f.kind)) byKind.set(f.kind, []);

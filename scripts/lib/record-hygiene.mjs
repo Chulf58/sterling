@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { recordCentralTerms, MODELS_CATALOG_LOCATION } from '@sterling/store';
+import { recordCentralTerms, MODELS_CATALOG_LOCATION, openForeignDbReadOnly } from '@sterling/store';
 import { collectRetiredTerms, retiredTermUses } from '@sterling/schemas';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -61,18 +61,20 @@ const label = (rec) => rec.slug || rec.title || rec.question || rec.id;
 
 /**
  * @param {object[]} records  active knowledge records (full bodies)
- * @param {{ headFiles: Set<string> }} deps  repo-relative POSIX paths at HEAD
+ * @param {{ headFiles: Set<string>, domainDecisions?: object[] }} deps  repo-relative POSIX paths at HEAD; the active rename decisions held by mounted domains (readDomainRetiredDecisions)
  * @returns {{ scanned: number, findings: { kind: string, type: string, ids: string[], detail: string }[] }}
  */
-export function auditRecords(records, { headFiles }) {
+export function auditRecords(records, { headFiles, domainDecisions = [] }) {
   const findings = [];
   const add = (rec, kind, detail) =>
     findings.push({ kind, type: rec.type, ids: [rec.id], detail: `${rec.type} ${label(rec)} (${rec.id.slice(0, 8)}): ${detail}` });
 
   // Retired terms (GitHub #188): the active rename decisions among these
-  // records, matched by the one schemas matcher (quotes, blockquotes, history
-  // and the rename decision itself skipped).
-  const retiredTerms = collectRetiredTerms(records);
+  // records plus those held by mounted domains (a rename held in a domain
+  // covers every project mounting it), matched by the one schemas matcher
+  // (quotes, blockquotes, history and the rename decision itself skipped).
+  // Only the project's own records are audited; domain records are not.
+  const retiredTerms = collectRetiredTerms([...records, ...domainDecisions]);
   const groups = new Map();
   for (const rec of records) {
     for (const use of retiredTerms.length ? retiredTermUses(rec, retiredTerms) : []) {
@@ -122,4 +124,37 @@ export function auditRecords(records, { headFiles }) {
     });
   }
   return { scanned: records.length, findings };
+}
+
+/**
+ * The active rename decisions held by the given domain mounts, read through a
+ * read-only open of each domain store (nothing is written beside it) with one
+ * narrow query, so no unrelated record is decoded. A domain store that
+ * exists but cannot be read is listed in `unread` with the reason, never
+ * silently skipped; one that was never created holds no rename and is not.
+ * @param {{ name: string, dbPath: string }[]} mounts
+ * @returns {{ decisions: object[], unread: { name: string, error: string }[] }}
+ */
+export function readDomainRetiredDecisions(mounts) {
+  const decisions = [];
+  const unread = [];
+  for (const m of mounts) {
+    let db;
+    try {
+      db = openForeignDbReadOnly(m.dbPath, 1000);
+      const rows = db
+        .prepare("SELECT body FROM records WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%'")
+        .all();
+      for (const r of rows) {
+        const body = JSON.parse(r.body);
+        if (Array.isArray(body.retired_terms)) decisions.push({ ...body, source_store: `domain:${m.name}` });
+      }
+    } catch (e) {
+      // A mounted domain whose store was never created holds no rename.
+      if (!String(e?.message ?? e).startsWith('no database at ')) unread.push({ name: m.name, error: String(e?.message ?? e) });
+    } finally {
+      db?.close();
+    }
+  }
+  return { decisions, unread };
 }

@@ -9,11 +9,11 @@ var __export = (target, all) => {
 // scripts/check-record-hygiene.mjs
 import { dirname as dirname6, join as join10 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync5, existsSync as existsSync3, mkdtempSync, rmSync as rmSync3 } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync4, mkdtempSync, rmSync as rmSync3 } from "node:fs";
 import { join as join8 } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -4123,19 +4123,46 @@ var retiredTermSchema = external_exports.object({
   term: external_exports.string().trim().min(1),
   replacement: external_exports.string().trim().min(1)
 }).strict();
-var WORD_CHAR = /[\p{L}\p{N}_]/u;
+var WORD_CLASS = String.raw`\p{L}\p{N}\p{M}_`;
+var WORD_CHAR = new RegExp(`[${WORD_CLASS}]`, "u");
 function retiredTermRegex(term) {
-  const t = term.trim();
-  const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
-  const lead = WORD_CHAR.test(t[0] ?? "") ? "(?<![\\p{L}\\p{N}_])" : "";
-  const trail = WORD_CHAR.test(t[t.length - 1] ?? "") ? "(?![\\p{L}\\p{N}_])" : "";
-  return new RegExp(`${lead}${body}${trail}`, "giu");
+  const trimmed = term.trim();
+  const variants = [.../* @__PURE__ */ new Set([trimmed.normalize("NFC"), trimmed.normalize("NFD")])];
+  const alternatives = variants.map((t) => {
+    const points = Array.from(t);
+    const body = t.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+    const lead = WORD_CHAR.test(points[0] ?? "") ? `(?<![${WORD_CLASS}])` : "";
+    const trail = WORD_CHAR.test(points[points.length - 1] ?? "") ? `(?![${WORD_CLASS}])` : "";
+    return `${lead}${body}${trail}`;
+  });
+  return new RegExp(`(?:${alternatives.join("|")})`, "giu");
 }
 function protectedSpans(text) {
   const spans = [];
-  for (const re of [/"[^"]*"/g, /\u201c[^\u201d]*\u201d/g, /^[ \t]*>.*$/gm]) {
-    for (const m of text.matchAll(re))
-      spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  const bounds = [];
+  let from = 0;
+  for (const sep2 of text.matchAll(/\n[ \t]*\n/g)) {
+    bounds.push([from, sep2.index ?? 0]);
+    from = (sep2.index ?? 0) + sep2[0].length;
+  }
+  bounds.push([from, text.length]);
+  for (const [ps, pe] of bounds) {
+    const para = text.slice(ps, pe);
+    const straight = [...para.matchAll(/"/g)].map((m) => ps + (m.index ?? 0));
+    for (let i = 0; i < straight.length; i += 2)
+      spans.push([straight[i], i + 1 < straight.length ? straight[i + 1] + 1 : pe]);
+    for (let i = para.indexOf("\u201C"); i !== -1; ) {
+      const close = para.indexOf("\u201D", i + 1);
+      if (close === -1) {
+        spans.push([ps + i, pe]);
+        break;
+      }
+      spans.push([ps + i, ps + close + 1]);
+      i = para.indexOf("\u201C", close + 1);
+    }
+    const bq = /^[ \t]*>/m.exec(para);
+    if (bq)
+      spans.push([ps + bq.index, pe]);
   }
   return spans;
 }
@@ -4147,7 +4174,7 @@ function findTermOccurrences(text, term) {
   for (const m of text.matchAll(retiredTermRegex(term))) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    out.push({ start, end, protected: spans.some(([s2, e]) => start >= s2 && end <= e) });
+    out.push({ start, end, protected: spans.some(([s2, e]) => start < e && s2 < end) });
   }
   return out;
 }
@@ -5841,7 +5868,7 @@ function parseStoreFence(value) {
 }
 
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync as statSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
 import { dirname as dirname4, join as join5, resolve as resolvePath2 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 
@@ -7478,6 +7505,13 @@ var MountedStores = class {
     const shares = allocateShares(perStore.map((r) => r.length), cap);
     return perStore.flatMap((records, i) => records.slice(0, shares[i]));
   }
+  /** Cross-mount retiredTermDecisions (GitHub #188): the active rename decisions of the
+   *  project store and every readable mounted domain, project first. A rename held in a
+   *  domain covers every project mounting it (decision
+   *  retiring-a-renamed-term-a-retired-terms-field-on-the-rename), so the fan is the read. */
+  retiredTermDecisions() {
+    return this.fanValues((s2) => s2.retiredTermDecisions()).flat();
+  }
   /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
    *  query(), summed project-first across every mounted store (countBySource is
    *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
@@ -8333,11 +8367,49 @@ import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readFileSync as readFileSync4, readSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 function sentHandoffOf(rec) {
   if (rec.handoff === void 0)
     return void 0;
   const parsed = todoHandoffReadSchema.safeParse(rec.handoff);
   return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
+}
+function journalTopology(path) {
+  const header = Buffer.alloc(100);
+  const fd = openSync2(path, "r");
+  let read;
+  try {
+    read = readSync(fd, header, 0, 100, 0);
+  } finally {
+    closeSync2(fd);
+  }
+  if (read < 100 || header.toString("latin1", 0, 16) !== "SQLite format 3\0")
+    throw new Error(`${path} is not a SQLite database`);
+  return header[18] === 2 ? "wal" : "rollback";
+}
+function openForeignDbReadOnly(path, busyTimeoutMs) {
+  let topology;
+  try {
+    topology = journalTopology(path);
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      throw new Error(`no database at ${path}`);
+    throw e;
+  }
+  let db;
+  if (topology === "rollback" || existsSync2(`${path}-wal`)) {
+    db = new DatabaseSync2(path, { readOnly: true });
+  } else {
+    const url = pathToFileURL(path);
+    url.searchParams.set("immutable", "1");
+    db = new DatabaseSync2(url, { readOnly: true });
+  }
+  setBusyTimeout(db, busyTimeoutMs);
+  return db;
+}
+function setBusyTimeout(db, ms) {
+  db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(ms))}`);
 }
 
 // packages/store/dist/sqlite-driver.js
@@ -10324,6 +10396,31 @@ var SterlingStore = class _SterlingStore {
     return this.db.prepare("SELECT id, type, status FROM records").all();
   }
   /**
+   * The active decisions that carry retired_terms (GitHub #188, decision
+   * retiring-a-renamed-term-a-retired-terms-field-on-the-rename), as the
+   * minimal shape collectRetiredTerms reads. This is the one read every write
+   * warning, preflight, delivery hook, worker check and hygiene listing makes,
+   * so it never decodes or hydrates a record body that holds none: a plain
+   * substring test on the body column drops those rows inside the database,
+   * and the JSON extraction runs only on the survivors. With no rename
+   * recorded it costs one indexed type scan and returns [].
+   */
+  retiredTermDecisions() {
+    return this.readTx(() => {
+      const d = this.db.dialect;
+      const rows = this.db.prepare(`SELECT id, ${d.jsonText("body", "slug")} AS slug, ${d.jsonText("body", "retired_terms")} AS retired_terms FROM records
+            WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%' AND ${d.jsonText("body", "retired_terms")} IS NOT NULL
+            ORDER BY updated_at DESC, ${d.insertionOrder()} DESC`).all();
+      return rows.map((r) => ({
+        id: r.id,
+        type: "decision",
+        status: "active",
+        ...r.slug ? { slug: r.slug } : {},
+        retired_terms: JSON.parse(r.retired_terms)
+      }));
+    });
+  }
+  /**
    * Every non-superseded feature_article carrying this EXACT slug, newest first.
    * A deterministic identity lookup, deliberately NOT a search (decision
    * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
@@ -11102,7 +11199,7 @@ var SterlingStore = class _SterlingStore {
   /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
   snapshot(targetPath) {
     const target = targetPath.replace(/\\/g, "/");
-    if (existsSync2(target)) {
+    if (existsSync3(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
     mkdirSync3(dirname4(target), { recursive: true });
@@ -11528,7 +11625,7 @@ var SterlingStore = class _SterlingStore {
 };
 
 // packages/store/dist/routing.js
-import { lstatSync as lstatSync2, readFileSync as readFileSync4 } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join6, resolve as resolve2 } from "node:path";
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
@@ -11571,7 +11668,7 @@ function readConfig(root2) {
   }
   let raw;
   try {
-    raw = JSON.parse(readFileSync4(path, "utf8"));
+    raw = JSON.parse(readFileSync5(path, "utf8"));
   } catch (e) {
     throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
   }
@@ -12005,10 +12102,10 @@ function resolveProject(cwd) {
     fail(named(e));
   }
   if (route?.storage === "postgres") return { storage: "postgres", dbPath, config: route.config };
-  if (!existsSync3(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
+  if (!existsSync4(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
   let config;
   try {
-    config = route ? route.config : parseConfig(existsSync3(configPath) ? JSON.parse(readFileSync5(configPath, "utf8")) : {});
+    config = route ? route.config : parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync6(configPath, "utf8")) : {});
   } catch (e) {
     fail(`malformed .sterling/config.json \u2014 failing loud, never half-applying (P5): ${e.message}`);
   }
@@ -12053,11 +12150,11 @@ function openProjectReadOnly(cwd = process.cwd()) {
 }
 
 // scripts/lib/record-hygiene.mjs
-import { readFileSync as readFileSync6 } from "node:fs";
+import { readFileSync as readFileSync7 } from "node:fs";
 import { dirname as dirname5, join as join9 } from "node:path";
 import { fileURLToPath } from "node:url";
 var here = dirname5(fileURLToPath(new URL("../scripts/lib/record-hygiene.mjs", import.meta.url).href));
-var FILLER_WORDS = JSON.parse(readFileSync6(join9(here, "record-hygiene-filler.json"), "utf8")).words;
+var FILLER_WORDS = JSON.parse(readFileSync7(join9(here, "record-hygiene-filler.json"), "utf8")).words;
 var FILLER = new Set(FILLER_WORDS);
 var AUDITED_TYPES = [
   "decision",
@@ -12085,10 +12182,10 @@ function pathClaims(rec) {
 }
 var carriesPaths = (rec) => !(rec.type === "reference_material" && (rec.kind !== "doc" || isSeededCatalog(rec)));
 var label = (rec) => rec.slug || rec.title || rec.question || rec.id;
-function auditRecords(records, { headFiles }) {
+function auditRecords(records, { headFiles, domainDecisions = [] }) {
   const findings = [];
   const add = (rec, kind, detail) => findings.push({ kind, type: rec.type, ids: [rec.id], detail: `${rec.type} ${label(rec)} (${rec.id.slice(0, 8)}): ${detail}` });
-  const retiredTerms = collectRetiredTerms(records);
+  const retiredTerms = collectRetiredTerms([...records, ...domainDecisions]);
   const groups = /* @__PURE__ */ new Map();
   for (const rec of records) {
     for (const use of retiredTerms.length ? retiredTermUses(rec, retiredTerms) : []) {
@@ -12134,6 +12231,26 @@ function auditRecords(records, { headFiles }) {
   }
   return { scanned: records.length, findings };
 }
+function readDomainRetiredDecisions(mounts) {
+  const decisions = [];
+  const unread = [];
+  for (const m of mounts) {
+    let db;
+    try {
+      db = openForeignDbReadOnly(m.dbPath, 1e3);
+      const rows = db.prepare("SELECT body FROM records WHERE type = 'decision' AND status = 'active' AND body LIKE '%retired_terms%'").all();
+      for (const r of rows) {
+        const body = JSON.parse(r.body);
+        if (Array.isArray(body.retired_terms)) decisions.push({ ...body, source_store: `domain:${m.name}` });
+      }
+    } catch (e) {
+      if (!String(e?.message ?? e).startsWith("no database at ")) unread.push({ name: m.name, error: String(e?.message ?? e) });
+    } finally {
+      db?.close();
+    }
+  }
+  return { decisions, unread };
+}
 
 // scripts/check-record-hygiene.mjs
 var PRINT_CAP = 10;
@@ -12145,7 +12262,7 @@ process.on("exit", (code) => {
   process.exitCode = 0;
 });
 function main() {
-  if (!existsSync4(join10(root, ".sterling", "sterling.db"))) {
+  if (!existsSync5(join10(root, ".sterling", "sterling.db"))) {
     console.log("record hygiene: skipped (no store)");
     return;
   }
@@ -12160,10 +12277,12 @@ function main() {
     return;
   }
   const headFiles = new Set(tree.stdout.split("\0").filter(Boolean));
-  const { store, close } = openProjectReadOnly(root);
+  const { store, config, close } = openProjectReadOnly(root);
   let records;
+  let mounts = [];
   try {
     records = store.query({ types: AUDITED_TYPES, cap: 1e6 });
+    mounts = resolveDomainMounts(config);
   } finally {
     close();
   }
@@ -12171,7 +12290,9 @@ function main() {
     console.log("record hygiene: skipped (project store holds no knowledge records \u2014 a consumer clone)");
     return;
   }
-  const { scanned, findings } = auditRecords(records, { headFiles });
+  const { decisions: domainDecisions, unread } = readDomainRetiredDecisions(mounts);
+  for (const u of unread) console.log(`record hygiene: domain '${u.name}' was not read for retired terms (${u.error}) \u2014 renames it holds are NOT checked`);
+  const { scanned, findings } = auditRecords(records, { headFiles, domainDecisions });
   const byKind = /* @__PURE__ */ new Map();
   for (const f of findings) {
     if (!byKind.has(f.kind)) byKind.set(f.kind, []);

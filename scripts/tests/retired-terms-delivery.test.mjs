@@ -17,7 +17,11 @@ const base = (type, extra) => ({
   id: randomUUID(), type, version: 1, status: 'active', superseded_by: null, created_at: NOW, updated_at: NOW, author: 'conductor', links: [], scope: 'project', stack_tags: [], ...extra,
 });
 const rename = base('decision', { slug: 'rename-north-barn', title: 'Rename North Barn to Hay Barn', statement: 'North Barn is now Hay Barn.', alternatives_rejected: [], rationale: 'r', retired_terms: [{ term: 'North Barn', replacement: 'Hay Barn' }] });
-const fakeStore = (records) => ({ query: ({ types }) => records.filter((r) => types.includes(r.type)), inboundSupersedes: () => [] });
+const fakeStore = (records) => ({
+  query: ({ types }) => records.filter((r) => types.includes(r.type)),
+  inboundSupersedes: () => [],
+  retiredTermDecisions: () => records.filter((r) => r.type === 'decision' && r.status === 'active' && Array.isArray(r.retired_terms)),
+});
 
 function compose(records, outgoing) {
   const root = mkdtempSync(join(tmpdir(), 'h20-retired-'));
@@ -62,4 +66,17 @@ test('record hygiene lists records still using a retired term and skips quotes, 
   const listed = findings.filter((f) => f.kind === 'retired_term_use');
   assert.deepEqual(listed.map((f) => f.ids[0]), [plain.id]);
   assert.match(listed[0].detail, /still uses retired term 'North Barn' \(now 'Hay Barn', decision rename-north-barn\) in title/);
+});
+
+test('retiredTermNotice: a failing scan becomes one loud line, and composeMechanismAxis still delivers the rest', () => {
+  const broken = { ...fakeStore([rename]), retiredTermDecisions: () => { throw new Error('injected scan failure'); } };
+  const line = retiredTermNotice(broken, 'north barn fixtures');
+  assert.match(line, /retired-term check FAILED \(injected scan failure\).*NOT checked/);
+  const root = mkdtempSync(join(tmpdir(), 'h20-retired-fault-'));
+  try {
+    const composed = composeMechanismAxis(broken, { root, outgoing: 'Feed the north barn cows', toolInput: { prompt: 'x' }, surface: 'dispatch', subagentType: 'implementor', guardFor: () => ({}), host: 'claude' });
+    assert.match(composed.assembled.text, /retired-term check FAILED/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
