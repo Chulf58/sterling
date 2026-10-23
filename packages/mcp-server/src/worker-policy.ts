@@ -242,7 +242,7 @@ export class WorkerGuard {
 
     const fields =
       tool === 'knowledge_update'
-        ? Object.keys((input.body ?? {}) as Record<string, unknown>)
+        ? Object.keys({ ...((input.body ?? {}) as Record<string, unknown>), ...((input.fields ?? {}) as Record<string, unknown>) })
         : [rootField(String(tool === 'knowledge_array_remove' ? input.selector : input.field))];
     const faults: Fault[] = [];
     for (const item of ordered) {

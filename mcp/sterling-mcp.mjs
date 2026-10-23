@@ -30721,7 +30721,7 @@ var WorkerGuard = class {
     const record2 = this.records.get(id);
     if (!record2)
       throw new WorkerPolicyRefusal(tool, "target_not_project_held", `record '${id}' was not found`, candidateIds);
-    const fields = tool === "knowledge_update" ? Object.keys(input.body ?? {}) : [rootField(String(tool === "knowledge_array_remove" ? input.selector : input.field))];
+    const fields = tool === "knowledge_update" ? Object.keys({ ...input.body ?? {}, ...input.fields ?? {} }) : [rootField(String(tool === "knowledge_array_remove" ? input.selector : input.field))];
     const faults = [];
     for (const item of ordered) {
       const fault = this.laneFault(tool, item, record2, fields, input);
@@ -40170,15 +40170,26 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));
   server.registerTool("knowledge_update", {
-    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` (or its alias `fields`, the name knowledge_create uses; pass exactly one) is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
-      body: passthrough,
+      // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
+      body: external_exports.object({}).passthrough().optional().describe("the partial patch; exactly one of body or fields"),
+      fields: external_exports.object({}).passthrough().optional().describe("alias of body, the name knowledge_create uses; exactly one of body or fields"),
       resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
       expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
-  }, ({ id, body, resolves, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves, expected_version), projection)));
+  }, ({ id, body, fields, resolves, expected_version, projection }) => {
+    if (body !== void 0 && fields !== void 0) {
+      throw new Error("knowledge_update takes the payload as body or fields, not both: you passed both. Send one of them; nothing was written.");
+    }
+    const payload = body ?? fields;
+    if (payload === void 0) {
+      throw new Error("knowledge_update takes the payload as body (or fields): neither was passed. Nothing was written.");
+    }
+    return json(tools.writeProjected(tools.knowledgeUpdateResult(id, payload, resolves, expected_version), projection));
+  });
   server.registerTool("knowledge_append", {
     description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
