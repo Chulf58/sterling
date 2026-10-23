@@ -661,7 +661,8 @@ test('postUpdateSync, host opencode: the async runner syncs and the text names O
     const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep: (root, name, args) => runStepAsync(root, name, args, { nodeBin: process.execPath }) });
     assert.equal(r.outcome, 'synced');
     assert.equal(markerOf(project), `${VERSION}\n`);
-    assert.match(r.context, /^\n\nPOST-UPDATE SYNC \(OpenCode plugin\): Sterling 0\.0\.1→9\.9\.9-fixture — agents synced — RESTART to load them \(EXIT AND RELAUNCH OpenCode; a \/new is NOT enough\)\. RESTART REQUIRED — agents load when OpenCode starts/);
+    assert.match(r.context, /^\n\nPOST-UPDATE SYNC \(OpenCode plugin\): Sterling 0\.0\.1→9\.9\.9-fixture — agents synced — RELOAD to load them \(run `opencode reload`; a \/new is NOT enough\)\. RELOAD REQUIRED — agents load when the shared OpenCode server loads them/);
+    assert.match(r.context, /`opencode service restart`, which interrupts every project open on that server/);
     assert.doesNotMatch(r.context, /Claude Code/);
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [`sync-agents --target ${project}`, `stamp-contract --apply-inserts --project ${project}`]);
   } finally {
@@ -676,7 +677,7 @@ test('postUpdateSync, host opencode: a refreshed Sterling-full agent is a change
   try {
     const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep: (root, name, args) => runStepAsync(root, name, args, { nodeBin: process.execPath }) });
     assert.equal(r.outcome, 'synced');
-    assert.match(r.context, /RESTART REQUIRED — agents load when OpenCode starts/);
+    assert.match(r.context, /RELOAD REQUIRED — agents load when the shared OpenCode server loads them/);
     assert.doesNotMatch(r.context, /none changed/);
   } finally {
     delete process.env.FIXTURE_LOG;
@@ -761,7 +762,7 @@ test('OpenCode sync: a child session does nothing; the first ROOT session syncs 
     assert.equal(markerOf(project), `${VERSION}\n`);
     const texts = noticeTexts(project);
     assert.equal(texts.length, 1);
-    assert.match(texts[0], /^POST-UPDATE SYNC \(OpenCode plugin\): Sterling 0\.0\.1→9\.9\.9-fixture — agents synced — RESTART/);
+    assert.match(texts[0], /^POST-UPDATE SYNC \(OpenCode plugin\): Sterling 0\.0\.1→9\.9\.9-fixture — agents synced — RELOAD to load them \(run `opencode reload`; a \/new is NOT enough\)/);
     await syncOnce(project, 'ses_root');
     await syncOnce(project, 'ses_next');
     await syncOnce.idle();

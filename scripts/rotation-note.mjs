@@ -314,10 +314,10 @@ process.stdout.write(
     (host === 'opencode'
       ? (note.reason === 'code-reload'
           ? `CODE RELOAD REQUIRED (--reason=code-reload) — a new session alone will NOT load it (OpenCode loads plugins and MCP servers at startup). The sequence is:\n` +
-            `  1. exit and relaunch OpenCode now\n` +
+            `  1. RUN OPENCODE RELOAD now: run \`opencode reload\` in any shell (or \`! ~/.opencode/bin/opencode reload\`); fallback \`opencode service restart\`, which interrupts every project open on that server\n` +
             `  2. THEN start a new session (/new) — the Sterling OpenCode plugin restores and consumes this note in that session's first turn\n`
           : `Tell the user READY FOR NEW SESSION — on /new, the Sterling OpenCode plugin restores and consumes this note in the new session's first turn, single-shot.\n` +
-            `If plugin or MCP-server CODE changed since this session started (migration, update, rebuild), a new session alone will not reload it — EXIT AND RELAUNCH OpenCode first, THEN /new.\n`)
+            `If plugin or MCP-server CODE changed since this session started (migration, update, rebuild), a new session alone will not reload it — RUN OPENCODE RELOAD first (\`opencode reload\` in any shell; fallback \`opencode service restart\`, which interrupts every project open on that server), THEN /new.\n`)
       : note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +
         `  1. exit and relaunch the Claude Code CLI now — H1 restores and consumes this note automatically at that very startup\n` +

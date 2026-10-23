@@ -136,7 +136,11 @@ test('OpenCode: the session id comes from OPENCODE_SESSION_ID, the note says ses
   assert.match(got.stdout, /\/new/);
   for (const claudeOnly of ['READY TO CLEAR', '/clear', 'Claude Code CLI', 'H1']) assert.ok(!got.stdout.includes(claudeOnly), `no ${claudeOnly} on OpenCode`);
   const reload = run({ OPENCODE_SESSION_ID: 'ses_0abc', OPENCODE: '1' }, ['--reason=code-reload']);
-  assert.match(reload.stdout, /exit and relaunch OpenCode/);
+  assert.match(reload.stdout, /RUN OPENCODE RELOAD now: run `opencode reload` in any shell/);
+  assert.match(reload.stdout, /opencode service restart/);
+  assert.ok(!/relaunch/i.test(reload.stdout));
+  assert.match(got.stdout, /RUN OPENCODE RELOAD first/);
+  assert.ok(!/relaunch/i.test(got.stdout));
   assert.ok(!reload.stdout.includes('/clear'));
 });
 

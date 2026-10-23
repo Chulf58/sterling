@@ -14606,7 +14606,7 @@ Resume from next_slice. The board and knowledge store remain the authorities for
   if (host === "opencode") {
     return `
 
-ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch OpenCode, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: exit and relaunch OpenCode now.` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED OpenCode before this new session \u2014 a new session alone never reloads code, so relaunch now if that didn't happen yet.`);
+ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. run \`opencode reload\`, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: run \`opencode reload\` now (fallback \`opencode service restart\`, which interrupts every project open on that server).` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having run \`opencode reload\` before this new session \u2014 a new session alone never reloads code, so run it now if that didn't happen yet (fallback \`opencode service restart\`, which interrupts every project open on that server).`);
   }
   const isClear = source === "clear";
   return `
@@ -15714,8 +15714,8 @@ var HOST_TEXT = {
   },
   opencode: {
     label: "OpenCode plugin",
-    restartShort: "agents synced \u2014 RESTART to load them (EXIT AND RELAUNCH OpenCode; a /new is NOT enough)",
-    restartLong: "RESTART REQUIRED \u2014 agents load when OpenCode starts: EXIT AND RELAUNCH OpenCode before dispatching any agent.",
+    restartShort: "agents synced \u2014 RELOAD to load them (run `opencode reload`; a /new is NOT enough)",
+    restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`) before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
     retry: "retries the next time OpenCode starts",
     rerun: "re-runs at every OpenCode start"
   }
