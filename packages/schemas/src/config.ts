@@ -44,27 +44,12 @@ export const CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])
 // opencode-only-model-override-per-role-for-openai-picks): `model` stays the
 // Claude model Claude Code runs, and the OpenCode agent pins opencode_model
 // when it is set, anthropic/<model> otherwise.
-const opencodeModelRef = z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra');
 const agentModelEntry = z.object({
   model: z.string().regex(CLAUDE_MODEL_ID_RE, 'model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines'),
   effort: effortLevel,
   hard_task: modelPin.optional(),
-  opencode_model: opencodeModelRef.optional(),
+  opencode_model: z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra').optional(),
 }).strict();
-
-// Per-role field defaults for the OpenCode dispatch model resolver (decision
-// subagent-model-choice-on-opencode-conductor-states-dispatch,
-// packages/opencode-plugin/src/dispatch-model.mjs): they reproduce the models the
-// conductor named on each call before the resolver existed: Sol 6.1 reviews, Astra 6
-// spars, Opus 5.5 takes a hard implementor lane. They sit on the FIELD, not only on the
-// role's whole-entry default, so a live config whose entry predates them (written from
-// templates/default-config.json, with model and effort only) gets them too and is not
-// silently moved to anthropic/<model> (anti-pattern 94f16632). A value written in the
-// config wins; to run a role on its Claude model on OpenCode, set opencode_model to
-// anthropic/<model>.
-const reviewerEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default('openai/gpt-6.1-sol') });
-const sparringEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default('openai/gpt-6-astra') });
-const implementorEntry = agentModelEntry.extend({ hard_task: modelPin.default({ model: 'claude-opus-5-5' }) });
 
 // One pin per vendor, shared by sparring_partner.models and review.models.
 const vendorPins = z
@@ -265,7 +250,15 @@ export const configSchema = z.object({
   // key.
   models: z
     .object({
-      implementor: implementorEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
+      // The hard_task, and the reviewer's and sparring's opencode_model below, are the
+      // models the conductor named on those dispatches before the OpenCode dispatch
+      // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
+      // They are whole-entry defaults only, never hidden field defaults: an entry that
+      // exists without them means "none" (clearing opencode_model in the System tab runs
+      // the role on its Claude model). Live entries written before them get them once,
+      // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
+      // "Write it into each config").
+      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } }),
       researcher: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
       scout: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
       classifiers: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
@@ -276,12 +269,12 @@ export const configSchema = z.object({
       // reviewer judges a diff (decision
       // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
       // dispatch pins its model explicitly; this is the install-time default.
-      reviewer: reviewerEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
+      reviewer: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' }),
       // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
       // read-only grant as the reviewer, so the same install-time default. Every
       // dispatch pins its model (Astra, else a Fable model); under Overpass its
       // role tier decides.
-      sparring: sparringEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
+      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }),
     })
     // Any installed agent's name is a key (decision
     // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
@@ -627,6 +620,10 @@ export const configSchema = z.object({
   // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
   overpass: z.unknown().default({ enabled: false, provider: 'overpass', conductor_bypass: false }),
+  // The one-time config migrations already applied to this file (addModelDefaults),
+  // so a value a migration added and the user later cleared is never added again.
+  // Written by sync and init only.
+  applied_config_migrations: z.array(z.string()).optional(),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;
@@ -806,6 +803,67 @@ export function normalizeRawConfig(raw: unknown): unknown {
 
 export function parseConfig(raw: unknown): SterlingConfig {
   return configSchema.parse(normalizeRawConfig(raw));
+}
+
+// ── Model defaults: the one-time on-disk add ─────────────────────────────────
+// The OpenCode dispatch model resolver (decision
+// subagent-model-choice-on-opencode-conductor-states-dispatch) reads
+// models.<role>.opencode_model and hard_task, whose shipped defaults reproduce the
+// models the conductor named before. A live entry written before those defaults
+// lacks them and would silently move (Sol reviews to Opus): anti_pattern
+// wiring-a-formerly-inert-config-field-to-authoritative-without-migrating-the-live-config-values.
+// User-ruled 2026-10-23 through the question form, "Write it into each config
+// (Recommended)": the value is written into the file, visibly and reported, never
+// held as a hidden schema default. ADD ONLY: a field already present is never
+// overwritten, and a role with no entry gets the schema's whole default entry. It
+// runs once per file: its id goes into applied_config_migrations, so a value the
+// user clears afterwards (meaning "use the Claude model", or "no hard lane") stays cleared.
+export const MODEL_DEFAULTS_MIGRATION_ID = 'model-defaults-2026-10-23';
+const MODEL_DEFAULT_FIELDS: ReadonlyArray<readonly [string, 'opencode_model' | 'hard_task']> = [
+  ['implementor', 'hard_task'],
+  ['reviewer', 'opencode_model'],
+  ['sparring', 'opencode_model'],
+];
+
+export interface ModelDefaultAdd {
+  role: string;
+  /** The field added, or 'entry' when the role had no entry and got the schema's whole default. */
+  field: 'opencode_model' | 'hard_task' | 'entry';
+  value: unknown;
+}
+
+export interface ModelDefaultsMigration {
+  config: unknown;
+  /** True when the file must be rewritten: something was added, or the migration id was recorded. */
+  changed: boolean;
+  added: ModelDefaultAdd[];
+}
+
+/** Add the model defaults a live config lacks (see above). Pure; anything that is not a
+ *  plain object with an absent-or-object `models`, or a file that already records the
+ *  migration, comes back unchanged. */
+export function addModelDefaults(raw: unknown): ModelDefaultsMigration {
+  const none = { config: raw, changed: false, added: [] };
+  if (!isPlainObject(raw)) return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== undefined && !(Array.isArray(applied) && applied.every((x) => typeof x === 'string'))) return none;
+  if ((applied ?? []).includes(MODEL_DEFAULTS_MIGRATION_ID)) return none;
+  if (raw.models !== undefined && !isPlainObject(raw.models)) return none;
+  const defaults = configSchema.shape.models.parse({}) as Record<string, Record<string, unknown>>;
+  const models: Record<string, unknown> = { ...(raw.models ?? {}) };
+  const added: ModelDefaultAdd[] = [];
+  for (const [role, field] of MODEL_DEFAULT_FIELDS) {
+    const entry = models[role];
+    if (entry === undefined) {
+      models[role] = defaults[role];
+      added.push({ role, field: 'entry', value: defaults[role] });
+    } else if (isPlainObject(entry) && !Object.prototype.hasOwnProperty.call(entry, field)) {
+      models[role] = { ...entry, [field]: defaults[role][field] };
+      added.push({ role, field, value: defaults[role][field] });
+    }
+  }
+  const config = { ...raw, ...(added.length ? { models } : {}), applied_config_migrations: [...(applied ?? []), MODEL_DEFAULTS_MIGRATION_ID] };
+  return { config, changed: true, added };
 }
 
 // ── Retired models keys: the on-disk migration ──────────────────────────────

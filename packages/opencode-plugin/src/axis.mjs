@@ -45,7 +45,7 @@ import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
 import { dispatchOverpass, dispatchPin, overpassRefusal, overpassUnknownLine } from './overpass.mjs';
-import { dispatchModel } from './dispatch-model.mjs';
+import { checkVariant, dispatchModel } from './dispatch-model.mjs';
 import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
@@ -118,7 +118,7 @@ function reportOverpass(root, message) {
  * delivers to the session that makes the call, so it reaches a blind lane only
  * when that lane dispatches (decision blind-lane-sterling-delivery-off-brief-line, point 6).
  */
-export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels }) {
   if (!deliveryPolicy) throw new Error('createAxisHandlers needs the deliveryPolicy tracker');
   const pending = new Map();
 
@@ -168,6 +168,18 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
+        }
+        // A resolved model whose variant OpenCode does not list runs without it (checkVariant).
+        if (pin.resolved) {
+          let list = null;
+          let listError = null;
+          try {
+            list = await listModels?.();
+          } catch (e) {
+            listError = e;
+          }
+          const checked = checkVariant(pin.model, list, listError);
+          pin = { ...pin, model: checked.model, line: checked.note ? `${pin.line} ${checked.note}` : pin.line };
         }
         if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
         pinLine = pin.line;

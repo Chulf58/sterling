@@ -520,11 +520,12 @@ const pins = (raw: unknown) => parseConfig(raw) as unknown as PinCfg;
 
 test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-trips, and a junk pin is refused loud', () => {
   // Changed with the OpenCode dispatch model resolver (decision
-  // subagent-model-choice-on-opencode-conductor-states-dispatch): the implementor's hard
-  // lane defaults to Opus 5.5, the model the conductor named on a hard dispatch before; it
-  // is a field default, so an entry written without it gets it too. No other role gets one.
+  // subagent-model-choice-on-opencode-conductor-states-dispatch): the implementor's shipped
+  // default ENTRY carries hard_task Opus 5.5, the model the conductor named on a hard
+  // dispatch before. It is not a hidden field default: an entry written without it has none
+  // (addModelDefaults writes it into live configs once, visibly). No other role gets one.
   assert.deepEqual(pins({}).models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'the implementor hard lane defaults to Opus 5.5');
-  assert.deepEqual(pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'an entry written without hard_task gets the default');
+  assert.equal(pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor.hard_task, undefined, 'an entry written without hard_task has none');
   assert.equal(pins({}).models.researcher.hard_task, undefined, 'no hard_task is invented for the other roles');
   const withHard = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } });
   assert.deepEqual(withHard.models.implementor.hard_task, { model: 'claude-opus-5-5', effort: 'high' });
@@ -722,4 +723,19 @@ test('migrateRetiredModelKeys: idempotent, and a config with nothing retired com
     assert.equal(m.changed, false);
     assert.equal(m.config, raw);
   }
+});
+
+test('addModelDefaults: adds only what is absent, once, and records the migration id', async () => {
+  const { addModelDefaults, MODEL_DEFAULTS_MIGRATION_ID } = await import('../config.js');
+  const m = addModelDefaults({ models: { reviewer: { model: 'claude-opus-5-5', effort: 'high' } } });
+  assert.equal(m.changed, true);
+  assert.deepEqual(m.added.map((a) => `${a.role}.${a.field}`), ['implementor.entry', 'reviewer.opencode_model', 'sparring.entry']);
+  const cfg = m.config as { models: Record<string, Record<string, unknown>>; applied_config_migrations: string[] };
+  assert.equal(cfg.models.reviewer.opencode_model, 'openai/gpt-6.1-sol');
+  assert.deepEqual(cfg.applied_config_migrations, [MODEL_DEFAULTS_MIGRATION_ID]);
+  parseConfig(m.config);
+  const again = addModelDefaults(m.config);
+  assert.equal(again.changed, false, 'a second run changes nothing');
+  assert.equal(addModelDefaults('x').changed, false);
+  assert.equal(addModelDefaults({ models: 'x' }).changed, false, 'a malformed models block is left to the parse gate');
 });

@@ -158,6 +158,33 @@ export function dispatchModel(config, args) {
   }
   const line = `MODEL: this dispatch runs on ${res.ref}, from ${res.note}.`;
   return intent.kind === 'fallback'
-    ? { model: res.ref, line, notice: `Sterling models: fallback dispatch on ${res.ref} (reason: ${intent.reason}).` }
-    : { model: res.ref, line };
+    ? { model: res.ref, line, notice: `Sterling models: fallback dispatch on ${res.ref} (reason: ${intent.reason}).`, resolved: true }
+    : { model: res.ref, line, resolved: true };
+}
+
+const variantIds = (entry) => (Array.isArray(entry?.variants) ? entry.variants.map((v) => (typeof v === 'string' ? v : v?.id)).filter((v) => typeof v === 'string') : null);
+
+/**
+ * The variant guard (user-ruled 2026-10-23, "Send for all, verify live"): a resolved
+ * `provider/model#variant` whose model OpenCode lists without that variant runs without
+ * it, and the note says so, rather than the dispatch failing. `list` is OpenCode's model
+ * list (ctx.model.list(): items { providerID, id or modelID, variants: [{ id }] }).
+ * Returns { model, note }: `note` is null when the variant is listed. A model that is not
+ * in the list, or a list that could not be read (`listError`), keeps the variant, and the
+ * note says it was not checked: OpenCode refuses an unavailable model loudly on its own.
+ */
+export function checkVariant(ref, list, listError = null) {
+  const hash = ref.lastIndexOf('#');
+  if (hash === -1) return { model: ref, note: null };
+  const base = ref.slice(0, hash);
+  const variant = ref.slice(hash + 1);
+  if (listError || !Array.isArray(list)) return { model: ref, note: `(variant ${variant} not checked: OpenCode's model list could not be read${listError ? `: ${listError.message ?? listError}` : ''})` };
+  const slash = base.indexOf('/');
+  const providerID = base.slice(0, slash);
+  const id = base.slice(slash + 1);
+  const entry = list.find((m) => m?.providerID === providerID && (m?.modelID === id || m?.id === id));
+  if (!entry) return { model: ref, note: `(variant ${variant} not checked: ${base} is not in OpenCode's model list)` };
+  const ids = variantIds(entry) ?? [];
+  if (ids.includes(variant)) return { model: ref, note: null };
+  return { model: base, note: `(variant ${variant} dropped: OpenCode lists ${ids.length ? `only ${ids.join(', ')}` : 'no variants'} for ${base}, so this dispatch runs on ${base} with its default effort)` };
 }

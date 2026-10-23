@@ -4857,16 +4857,12 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
-var opencodeModelRef = external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra");
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
   hard_task: modelPin.optional(),
-  opencode_model: opencodeModelRef.optional()
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
-var reviewerEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default("openai/gpt-6.1-sol") });
-var sparringEntry = agentModelEntry.extend({ opencode_model: opencodeModelRef.default("openai/gpt-6-astra") });
-var implementorEntry = agentModelEntry.extend({ hard_task: modelPin.default({ model: "claude-opus-5-5" }) });
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
   anthropic: modelPin.optional()
@@ -5025,7 +5021,15 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: implementorEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+    // The hard_task, and the reviewer's and sparring's opencode_model below, are the
+    // models the conductor named on those dispatches before the OpenCode dispatch
+    // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
+    // They are whole-entry defaults only, never hidden field defaults: an entry that
+    // exists without them means "none" (clearing opencode_model in the System tab runs
+    // the role on its Claude model). Live entries written before them get them once,
+    // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
+    // "Write it into each config").
+    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -5036,12 +5040,12 @@ var configSchema = external_exports.object({
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: reviewerEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6.1-sol" }),
     // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
     // read-only grant as the reviewer, so the same install-time default. Every
     // dispatch pins its model (Astra, else a Fable model); under Overpass its
     // role tier decides.
-    sparring: sparringEntry.default({ model: "claude-opus-5-5", effort: "high" })
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -5353,7 +5357,11 @@ var configSchema = external_exports.object({
   // including an unknown role or field under the optional `roles` map
   // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
-  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
+  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+  // The one-time config migrations already applied to this file (addModelDefaults),
+  // so a value a migration added and the user later cleared is never added again.
+  // Written by sync and init only.
+  applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
 
 // packages/schemas/dist/registry.js

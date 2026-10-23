@@ -98,7 +98,7 @@ test('resolver: config wins over defaults; effort becomes the variant; hard_task
   } };
   assert.equal(ref('implementor', null, cfg), 'openai/gpt-5.6-terra#medium', 'Terra as the implementor choice via config');
   assert.equal(ref('implementor', 'hard', cfg), 'openai/gpt-6.1-sol#xhigh', 'hard_task effort wins over the role effort');
-  assert.equal(ref('reviewer', null, cfg), 'openai/gpt-6.1-sol#low', 'a live entry written without opencode_model still gets the Sol field default');
+  assert.equal(ref('reviewer', null, cfg), 'anthropic/claude-opus-5-5#low', 'an entry without opencode_model runs on its Claude model (the add step writes Sol into live configs once)');
   assert.equal(ref('researcher', 'hard', cfg), 'anthropic/claude-opus-5-5#high', 'hard_task without effort takes the role effort');
   const r = dm.resolveDispatchModel('implementor', { kind: 'normal' }, cfg);
   assert.deepEqual({ model: r.model, variant: r.variant }, { model: 'openai/gpt-5.6-terra', variant: 'medium' }, 'model and effort stay separate until composed');
@@ -257,4 +257,52 @@ test('seam: an unreadable config leaves the call alone with the existing UNKNOWN
     assert.equal(Object.hasOwn(unnamed.args, 'model'), false);
     assert.match(unnamed.result, /Overpass routing UNKNOWN/);
   });
+});
+
+// ── the variant guard (user-ruled 2026-10-23, "Send for all, verify live") ──
+
+const LIST = [
+  { providerID: 'openai', id: 'gpt-6.1-sol', variants: [{ id: 'low' }, { id: 'medium' }, { id: 'high' }, { id: 'xhigh' }] },
+  { providerID: 'anthropic', id: 'claude-haiku-5-5', variants: [] },
+  { providerID: 'anthropic', modelID: 'claude-sonnet-5-5', id: 'claude-sonnet-5-5', variants: ['low', 'high'] },
+];
+
+test('variant guard: a listed variant is kept; an unlisted one is dropped with a note; an unlisted model or unreadable list is not checked', () => {
+  assert.deepEqual(dm.checkVariant(SOL, LIST), { model: SOL, note: null });
+  assert.deepEqual(dm.checkVariant('anthropic/claude-sonnet-5-5#high', LIST), { model: 'anthropic/claude-sonnet-5-5#high', note: null }, 'string variants count');
+  const haiku = dm.checkVariant('anthropic/claude-haiku-5-5#low', LIST);
+  assert.equal(haiku.model, 'anthropic/claude-haiku-5-5');
+  assert.match(haiku.note, /variant low dropped: OpenCode lists no variants for anthropic\/claude-haiku-5-5/);
+  assert.match(dm.checkVariant('anthropic/claude-sonnet-5-5#medium', LIST).note, /lists only low, high/);
+  assert.deepEqual(dm.checkVariant('openai/gpt-6-astra#high', LIST), { model: 'openai/gpt-6-astra#high', note: "(variant high not checked: openai/gpt-6-astra is not in OpenCode's model list)" });
+  assert.match(dm.checkVariant(SOL, null, new Error('boom')).note, /not checked: OpenCode's model list could not be read: boom/);
+  assert.deepEqual(dm.checkVariant('anthropic/claude-opus-5-5', LIST), { model: 'anthropic/claude-opus-5-5', note: null }, 'no variant, nothing to check');
+});
+
+test('seam: the plugin checks a resolved variant against ctx.model.list and drops one the model lacks', async () => {
+  const p = makeProject({});
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env: {} });
+  const ctx = stubCtx(p.dir);
+  ctx.model.list = async () => LIST;
+  const cleanup = await plugin.setup(ctx);
+  try {
+    const run = async (args, id) => {
+      const input = { tool: 'subagent', id, sessionID: 'ses_root', input: { description: 'd', prompt: 'p', ...args } };
+      await ctx.hooks.tool['execute.before'](input);
+      const after = { ...input, status: 'completed', result: { content: [{ type: 'text', text: 'done' }], metadata: {} } };
+      await ctx.hooks.tool['execute.after'](after);
+      return { model: input.input.model, text: after.result.content.map((x) => x.text).join('\n') };
+    };
+    const lib = await run({ agent: 'sterling/librarian' }, 'c1');
+    assert.equal(lib.model, 'anthropic/claude-haiku-5-5', 'the variant is dropped, the dispatch still runs');
+    assert.match(lib.text, /variant low dropped/);
+    const rev = await run({ agent: 'sterling/reviewer' }, 'c2');
+    assert.equal(rev.model, SOL);
+    assert.doesNotMatch(rev.text, /variant/);
+    const named = await run({ agent: 'sterling/librarian', model: 'anthropic/claude-haiku-5-5#low' }, 'c3');
+    assert.equal(named.model, 'anthropic/claude-haiku-5-5#low', 'a model the call names is not touched by the guard');
+  } finally {
+    await cleanup?.();
+    p.cleanup();
+  }
 });

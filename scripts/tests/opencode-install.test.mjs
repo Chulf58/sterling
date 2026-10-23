@@ -927,10 +927,10 @@ test('a role config.json does not write pins the default the System tab shows; t
     implementor: 'model: anthropic/claude-sonnet-5-5',
     researcher: 'model: anthropic/claude-sonnet-5-5',
     scout: 'model: anthropic/claude-sonnet-5-5',
+    reviewer: 'model: anthropic/claude-haiku-4-5',
     // Changed with the dispatch model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch):
-    // reviewer and sparring carry an opencode_model FIELD default (Sol 6.1, Astra 6), so an entry written with only
-    // model and effort, as this one is, pins the OpenCode agent to it; config.models.reviewer.model stays the Claude Code pin.
-    reviewer: 'model: openai/gpt-6.1-sol',
+    // the sparring role's shipped default entry now carries opencode_model openai/gpt-6-astra, the model the
+    // conductor named on sparring dispatches before; this config has no sparring entry, so the default applies.
     sparring: 'model: openai/gpt-6-astra',
     // the librarian's schema default moved to claude-haiku-5-5 (haiku-5-5-classifiers)
     librarian: 'model: anthropic/claude-haiku-5-5',
