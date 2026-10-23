@@ -1,9 +1,12 @@
 // JSONC (JSON with comments and trailing commas), the form OpenCode reads its config in.
 // Builtins only, and no Sterling imports, so the resolver (sterling-roots.mjs, bundled into
-// hooks) and the installer share one parser.
+// hooks) and the installer share one parser. JSONC_SOURCE is the parser as text, for
+// generated files that cannot import this module (the tmux launcher's OpenCode pane,
+// launcher-tmux.mjs); parseJsonc is built from that same text, so the two cannot diverge.
 
-/** JSONC text to a value: comments and trailing commas outside strings removed. Throws on invalid input. */
-export function parseJsonc(text) {
+// No backticks and no dollar-brace in here: it is a String.raw template literal.
+export const JSONC_SOURCE = String.raw`
+function parseJsonc(text) {
   let out = '';
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -25,3 +28,7 @@ export function parseJsonc(text) {
   }
   return JSON.parse(out);
 }
+`;
+
+/** JSONC text to a value: comments and trailing commas outside strings removed. Throws on invalid input. */
+export const parseJsonc = new Function(`${JSONC_SOURCE}\nreturn parseJsonc;`)();

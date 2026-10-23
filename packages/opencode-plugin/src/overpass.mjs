@@ -29,9 +29,10 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { resolveOverpass } from '@sterling/schemas';
+import { OverpassUnknownRoleError, resolveOverpass } from '@sterling/schemas';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
-import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
+import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, sterlingRootFrom, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
+import { readCopyVersion } from '../../../scripts/lib/sterling-roots.mjs';
 import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 
@@ -234,9 +235,29 @@ export function createLaneDispatches() {
   };
 }
 
-/** The message a subagent dispatch is refused with when the config reads but its overpass block is invalid (`error` from dispatchOverpass). */
-export function overpassRefusal(error) {
-  return `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}). While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs. Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+/** This plugin's own Sterling version, from its copy's package.json; 'unknown (<why>)' when it cannot be read. */
+export function pluginVersion(moduleUrl = import.meta.url) {
+  try {
+    const v = readCopyVersion(sterlingRootFrom(moduleUrl), 'opencode');
+    return v.version ?? `unknown (${v.reason})`;
+  } catch (e) {
+    return `unknown (${e?.message ?? e})`;
+  }
+}
+
+/**
+ * The message a subagent dispatch is refused with when the config reads but its overpass
+ * block is invalid (`error` from dispatchOverpass). An unknown role key was most likely
+ * written by a newer Sterling than this plugin (GitHub #202), so that message names this
+ * plugin's version (`version`, default pluginVersion()) and the update that teaches it the role.
+ */
+export function overpassRefusal(error, { version } = {}) {
+  const head = `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}).`;
+  const tail = 'While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs.';
+  if (error instanceof OverpassUnknownRoleError) {
+    return `${head} This Sterling plugin is version ${version ?? pluginVersion()} and does not know the role ${JSON.stringify(error.role)}; a newer Sterling most likely wrote it. Run \`opencode plugin update\`, then /reload, so the plugin knows that role. ${tail} Or remove that role from overpass.roles, or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+  }
+  return `${head} ${tail} Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
 }
 
 /** The agent entries the overlay should hold: { [agent]: model }. */

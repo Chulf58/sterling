@@ -14944,29 +14944,35 @@ import { join as join19 } from "node:path";
 import { existsSync as existsSync9, readFileSync as readFileSync12, readdirSync as readdirSync4, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join18, resolve as resolve6, sep as sep2 } from "node:path";
+import { createHash as createHash4 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
+var JSONC_SOURCE = String.raw`
 function parseJsonc(text) {
-  let out = "";
+  let out = '';
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === '"') {
       let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
       out += text.slice(i, j + 1);
       i = j;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      if (end === -1) throw new Error("unterminated /* comment");
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
       i = end + 1;
-    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
     } else out += c;
   }
   return JSON.parse(out);
 }
+`;
+var parseJsonc = new Function(`${JSONC_SOURCE}
+return parseJsonc;`)();
 
 // scripts/lib/sterling-roots.mjs
 var RESOLVER_IMPORTS = [
@@ -15122,18 +15128,75 @@ var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 var STERLING_NPM_PACKAGE = "@chulf58/sterling";
-var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-var isNpmSpec = (s2) => s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`);
-var namesSterling = (s2) => typeof s2 === "string" && (isNpmSpec(s2) || STERLING_GIT_REPO.test(s2.split("#")[0]));
+var SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
 function sterlingPluginSpecs(plugins) {
   if (!Array.isArray(plugins)) return [];
   const out = [];
   for (const entry of plugins) {
-    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
-    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
   }
   return out;
 }
+`;
+var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
+return sterlingPluginSpecs;`)();
+var OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+var loaded = new Function(
+  "createHash",
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
+return { openCodeCacheKey, openCodeLoadedSterling };`
+)(createHash4, existsSync9, readFileSync12, readdirSync4, join18, homedir4);
+var openCodeCacheKey = loaded.openCodeCacheKey;
+var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function canonical(p) {
   try {
     return realpathSync4(p);
@@ -15382,7 +15445,7 @@ function codexUserScopeLine(probe, { nodeBinDir, unreadable } = {}) {
 }
 
 // scripts/lib/launchers.mjs
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { appendFileSync as appendFileSync3, chmodSync as chmodSync2, existsSync as existsSync13, readFileSync as readFileSync18, statSync as statSync6, unlinkSync as unlinkSync4, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { basename as basename3, delimiter, join as join25, resolve as resolve7 } from "node:path";
@@ -15391,7 +15454,31 @@ import { basename as basename3, delimiter, join as join25, resolve as resolve7 }
 import { readFileSync as readFileSync16 } from "node:fs";
 import { join as join23 } from "node:path";
 var fwd4 = (p) => p.replace(/\\/g, "/");
-var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd4(pluginRoot2)}"`, `TUI_BUNDLE="${fwd4(pluginRoot2)}/tui/sterling-tui.mjs"`].join("\n");
+var OPENCODE_PANE_MARKER = "# OpenCode pane: the dashboard of the Sterling copy the OpenCode plugin loads";
+var OPENCODE_PANE_PATHS = [
+  OPENCODE_PANE_MARKER,
+  "# (the newest install of the Sterling spec in OpenCode's global config), resolved when the pane opens",
+  "opencode_tui_bundle() {",
+  `  "$NODE_BIN" --input-type=module <<'STERLING_OPENCODE_RESOLVER'`,
+  "import { createHash } from 'node:crypto';",
+  RESOLVER_IMPORTS,
+  RESOLVER_SOURCE.trim(),
+  JSONC_SOURCE.trim(),
+  SPECS_SOURCE.trim(),
+  OPENCODE_LOADED_SOURCE.trim(),
+  "const keep = 'so the OpenCode pane runs the launcher\\'s own dashboard, which may be another Sterling version than the plugin';",
+  "const loaded = openCodeLoadedSterling();",
+  "if (loaded.error) console.error('sterling-launch: could not read ' + loaded.configPath + ' (' + loaded.error + '), so which Sterling OpenCode loads is unknown, ' + keep);",
+  "else if (loaded.copies.length) {",
+  "  const [first] = loaded.copies;",
+  "  if (new Set(loaded.copies.map((c) => c.root)).size > 1) console.error('sterling-launch: ' + loaded.configPath + ' lists Sterling ' + loaded.copies.length + ' times (' + loaded.copies.map((c) => c.spec).join(', ') + '); the OpenCode pane follows the first, ' + first.spec);",
+  "  if (first.root === null) console.error('sterling-launch: OpenCode has not installed ' + first.spec + ' yet (nothing in ' + first.dir + '), ' + keep);",
+  "  else process.stdout.write(join(first.root, 'tui', 'sterling-tui.mjs'));",
+  "}",
+  "STERLING_OPENCODE_RESOLVER",
+  "}"
+].join("\n");
+var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd4(pluginRoot2)}"`, `TUI_BUNDLE="${fwd4(pluginRoot2)}/tui/sterling-tui.mjs"`, OPENCODE_PANE_PATHS].join("\n");
 var INSTALLED_PATHS = [
   "# installed copy: nothing below names a versioned install directory; the newest",
   "# installed Sterling (Claude Code or OpenCode) is resolved when this runs",
@@ -15405,7 +15492,8 @@ var INSTALLED_PATHS = [
   "if (found) process.stdout.write(join(found.root, 'tui', 'sterling-tui.mjs'));",
   "else console.error('sterling-launch: ' + sterlingNotFoundMessage('claude-code'));",
   "STERLING_RESOLVER",
-  ')"'
+  ')"',
+  OPENCODE_PANE_PATHS
 ].join("\n");
 function renderTmuxLauncher(pluginRoot2, { session, legacySession = session, splitPercent, installed = isInstalledCopy(pluginRoot2) }) {
   return readFileSync16(join23(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{LEGACY_SESSION}}", () => legacySession).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent));
@@ -15443,8 +15531,16 @@ var PLACEHOLDER_VALUES = {
   PROJECT_DIR_POSIX: (v) => /^[^'\n]+$/.test(v),
   MCP_ARGS: (v) => v === "" || /^ --mcp-config "[^"\n]+\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config$/.test(v),
   MCP_MODE_NOTE: (v) => /^rem MODE: (?:host-native|dual-context) [^\n]*$/.test(v),
-  PLUGIN_PATHS: (v, { installedBlocks }) => /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"$/.test(v) || installedBlocks.has(v)
+  PLUGIN_PATHS: (v, { installedBlocks }) => installedBlocks.has(v) || authoringPaths(v, installedBlocks)
 };
+function authoringPaths(v, installedBlocks) {
+  const m = /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"(?:\n([\s\S]*))?$/.exec(v);
+  if (!m) return false;
+  if (m[1] === void 0) return true;
+  return m[1].startsWith(`${OPENCODE_PANE_MARKER}
+`) && [...installedBlocks].some((b) => b.endsWith(`
+${m[1]}`));
+}
 function matchTemplateRender(text, templateText, { installedBlocks = /* @__PURE__ */ new Set([INSTALLED_PATHS]) } = {}) {
   const parts = lf(templateText).split(/\{\{([A-Z_]+)\}\}/);
   const literals = parts.filter((_, i) => i % 2 === 0);
@@ -15781,7 +15877,7 @@ var wslCdPath = (target2) => {
   return /^\/mnt\/[a-z](\/|$)/.test(posix2) || !posix2.startsWith("/") ? toWindowsPath2(posix2) : posix2;
 };
 var legacySessionName = (target2) => `sterling-${basename3(target2).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project"}`;
-var sessionName = (target2) => `${legacySessionName(target2)}-${createHash4("sha256").update(fwd5(resolve7(target2))).digest("hex").slice(0, 4)}`;
+var sessionName = (target2) => `${legacySessionName(target2)}-${createHash5("sha256").update(fwd5(resolve7(target2))).digest("hex").slice(0, 4)}`;
 function renderOpener(pluginRoot2, target2, host, opener) {
   const template = readFileSync18(join25(pluginRoot2, "templates", OPENER_TEMPLATES[host]), "utf8");
   const body = lf2(template).replaceAll("{{APP}}", () => opener.app).replaceAll("{{MODE}}", () => opener.mode).replaceAll("{{WIN_PROJECT_DIR}}", () => wslCdPath(target2));
@@ -16195,7 +16291,7 @@ function renderUnavailable(reason) {
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { existsSync as existsSync15, mkdirSync as mkdirSync8, readFileSync as readFileSync20, readdirSync as readdirSync5, realpathSync as realpathSync6, rmSync as rmSync5, statSync as statSync8, unlinkSync as unlinkSync6, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { basename as basename4, dirname as dirname11, isAbsolute, join as join27, resolve as resolve8 } from "node:path";
@@ -17573,7 +17669,7 @@ var TUI_MATERIALIZED_FILES = ["package.json", "sterling-tui.bundle.tsx"];
 var TUI_MATERIALIZED_KEEP = 2;
 var MATERIALIZED_MARKER = ".sterling-materialized.json";
 var SEMVER_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-var bytesHash = (b) => createHash5("sha256").update(b).digest("hex");
+var bytesHash = (b) => createHash6("sha256").update(b).digest("hex");
 function materializedTuiRoot({ home = homedir9() } = {}) {
   return join27(home, ".sterling", "opencode", "tui");
 }

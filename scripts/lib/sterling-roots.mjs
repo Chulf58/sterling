@@ -32,7 +32,8 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { parseJsonc } from './jsonc.mjs';
+import { createHash } from 'node:crypto';
+import { JSONC_SOURCE, parseJsonc } from './jsonc.mjs';
 
 /**
  * The Git spec OpenCode installs Sterling from (decision
@@ -214,18 +215,20 @@ export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
 
 // A `plugins` entry is the spec as typed (the former finding 'a plugins entry is the spec as typed' (not in the current store)): the Git spec in any of the
 // forms npm-package-arg reads as Chulf58/sterling on GitHub, with any #committish or
-// #semver range, or the package name as a registry spec.
+// #semver range, or the package name as a registry spec. SPECS_SOURCE is the scanner as
+// text, for the tmux launcher's OpenCode pane (OPENCODE_LOADED_SOURCE inlines it);
+// sterlingPluginSpecs is built from that same text.
+// No backticks and no dollar-brace in here: it is a String.raw template literal.
+export const SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
 const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-const isNpmSpec = (s) => s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`);
-const namesSterling = (s) => typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
-
-/**
- * The one scanner of an opencode.json `plugins` list for Sterling: every entry that names
- * it, in list order, as { spec, kind } with the spec as typed and kind 'npm' (the package
- * name) or 'git' (the repo). An entry is a string, a [spec, options] tuple, or an object
- * carrying the spec in its `package` field; no other field of an object is read.
- */
-export function sterlingPluginSpecs(plugins) {
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
+function sterlingPluginSpecs(plugins) {
   if (!Array.isArray(plugins)) return [];
   const out = [];
   for (const entry of plugins) {
@@ -234,6 +237,78 @@ export function sterlingPluginSpecs(plugins) {
   }
   return out;
 }
+`;
+
+/**
+ * The one scanner of an opencode.json `plugins` list for Sterling: every entry that names
+ * it, in list order, as { spec, kind } with the spec as typed and kind 'npm' (the package
+ * name) or 'git' (the repo). An entry is a string, a [spec, options] tuple, or an object
+ * carrying the spec in its `package` field; no other field of an object is read.
+ */
+export const sterlingPluginSpecs = new Function(`${SPECS_SOURCE}\nreturn sterlingPluginSpecs;`)();
+
+// The Sterling copy OpenCode loads, mirroring OpenCode v2.1.2 packages/util/src/npm.ts
+// (key(), gitSlug(), sanitize() and Npm.Service's generations()/current(), read 2026-10-23):
+// each plugin spec has its own cache directory <cache>/npm/<key>, where key is
+// git-<gitSlug(spec)>-<first 12 hex of sha256(spec)> for a Git spec and <name>@<spec>
+// (<name>@latest for the bare name) for a registry spec; current() takes the entry of that
+// directory whose name is all digits and largest as a number, so a .staging-* directory or
+// another spec's directory is never it. That is the timestamp of the latest install, not the
+// highest version: after a rollback or with an older configured spec the two differ (Sol
+// review of GitHub #202). The specs are the Sterling entries of the global opencode.json
+// `plugins` list, in list order (OpenCode loads each; the .jsonc form is not read, as in
+// configuredSterlingSpec). sanitize() changes characters only on Windows, so the
+// Linux/WSL key is the spec unchanged. Returns { configPath, copies: [{ spec, dir, root,
+// version|reason }] } with a copy per configured spec (root null when nothing is installed
+// for it yet) or { configPath, error } when the config cannot be read or parsed; a missing
+// config is no copies. Needs SPECS_SOURCE, JSONC_SOURCE and RESOLVER_SOURCE, plus
+// createHash, existsSync, readFileSync, readdirSync, join and homedir.
+// No backticks and no dollar-brace in here: it is a String.raw template literal.
+export const OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+
+const loaded = new Function(
+  'createHash', 'existsSync', 'readFileSync', 'readdirSync', 'join', 'homedir',
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}\nreturn { openCodeCacheKey, openCodeLoadedSterling };`,
+)(createHash, existsSync, readFileSync, readdirSync, join, homedir);
+/** (spec, 'npm' | 'git') -> the directory name OpenCode keeps that spec's installs under, in <cache>/npm (OPENCODE_LOADED_SOURCE). */
+export const openCodeCacheKey = loaded.openCodeCacheKey;
+/** (env, home) -> { configPath, copies: [{ spec, dir, root, version?, reason? }] } | { configPath, error }: the copy OpenCode loads per configured Sterling spec (OPENCODE_LOADED_SOURCE). */
+export const openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 
 // Which cache the refused copy lives in: OpenCode keys a Git-spec install `git-<slug>-<sha12>`
 // and a registry install `name@spec` (header). null when `root` is unknown or not under the

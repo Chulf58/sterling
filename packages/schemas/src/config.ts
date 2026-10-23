@@ -722,6 +722,20 @@ export interface OverpassResolution {
   reason?: string;
 }
 
+/**
+ * The error resolveOverpass throws for a config.overpass.roles key outside OVERPASS_ROLES.
+ * Its own class so a reader can tell the likely cause: a newer Sterling, which knows more
+ * roles, wrote the key (GitHub #202), and the remedy is updating the reader.
+ */
+export class OverpassUnknownRoleError extends Error {
+  readonly role: string;
+  constructor(role: string) {
+    super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} — the roles are ${OVERPASS_ROLES.join(', ')}`);
+    this.name = 'OverpassUnknownRoleError';
+    this.role = role;
+  }
+}
+
 /** config.overpass.roles judged strictly: unknown roles, unknown entry fields and bad values throw. */
 function resolveOverpassRoles(raw: unknown, provider: string): Record<OverpassRole, OverpassRoleRoute> {
   if (raw !== undefined && !isPlainObject(raw)) {
@@ -730,7 +744,7 @@ function resolveOverpassRoles(raw: unknown, provider: string): Record<OverpassRo
   const block = raw ?? {};
   for (const key of Object.keys(block)) {
     if (!(OVERPASS_ROLES as readonly string[]).includes(key)) {
-      throw new Error(`config.overpass.roles has the unknown role ${JSON.stringify(key)} — the roles are ${OVERPASS_ROLES.join(', ')}`);
+      throw new OverpassUnknownRoleError(key);
     }
   }
   const out = {} as Record<OverpassRole, OverpassRoleRoute>;

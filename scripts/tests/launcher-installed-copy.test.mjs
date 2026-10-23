@@ -163,6 +163,158 @@ test('installed copy, run time: a fresh session starts claude with no --plugin-d
   }
 });
 
+// GitHub #202 (decision in-an-opencode-project-the-tmux-side-pane-runs-the-dashboard): an
+// OpenCode session's pane runs the dashboard of the copy the OpenCode plugin loads, resolved
+// when the pane opens; never the clone and never a Claude Code copy. Which copy that is
+// follows OpenCode's own rule (Sol review): the newest install generation of the Sterling
+// spec in OpenCode's global config, not the highest version in the cache. A Claude Code
+// session's pane is unchanged.
+
+const GIT_SPEC = 'github:Chulf58/sterling#semver:>=0.18.0';
+/** An `opencode plugin add` copy under a cache key (the shipped Git spec's by default), with its manifest and a TUI bundle. */
+function openCodeCacheCopy(home, stamp, version, key = 'git-sterling-8c334bb56af9') {
+  const dir = join(home, '.cache', 'opencode', 'npm', key, stamp, 'node_modules', '@chulf58', 'sterling');
+  touch(join(dir, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version }));
+  touch(join(dir, 'tui', 'sterling-tui.mjs'));
+  return dir;
+}
+const openCodeConfig = (home, body) => touch(join(home, '.config', 'opencode', 'opencode.json'), typeof body === 'string' ? body : JSON.stringify(body));
+
+// A fake tmux that logs every call, reports no session and no pane, and, when `session`
+// is given, answers `display -p '#S'` with it (the caller's own session under $TMUX).
+function runPane(script, mode, { home, session }) {
+  const work = tmp('sterling-lic-work-');
+  const bin = tmp('sterling-lic-bin-');
+  touch(join(work, '.sterling', 'sterling.db'));
+  const log = join(work, 'tmux.log');
+  writeFileSync(join(bin, 'tmux'), `#!/bin/sh\necho "$@" >> "${log}"\n[ "$1" = "has-session" ] && exit 1\n[ "$1" = "display" ] && [ "$3" = "#S" ] && echo "${session ?? ''}"\nexit 0\n`);
+  chmodSync(join(bin, 'tmux'), 0o755);
+  writeFileSync(join(work, 'sterling-launch.sh'), script);
+  const env = { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, CLAUDE_BIN: '/bin/true', OPENCODE_BIN: '/bin/true', ...(session ? { TMUX: '/tmp/fake,1,0' } : {}) };
+  const r = spawnSync('bash', [join(work, 'sterling-launch.sh'), mode], { cwd: work, env, encoding: 'utf8', timeout: 30_000 });
+  const calls = existsSync(log) ? readFileSync(log, 'utf8') : '';
+  const split = calls.split('\n').find((l) => l.startsWith('split-window')) ?? '';
+  return { r, split, cleanup: () => rm(work, bin) };
+}
+
+/** Runs `opencode` and `tui` (inside the OpenCode session) on both shapes; `check(run, root)` per run. */
+function eachOpenCodePane(home, check) {
+  for (const git of [true, false]) {
+    const root = pluginRoot({ git });
+    const runs = [];
+    try {
+      touch(join(root, 'tui', 'sterling-tui.mjs'));
+      const script = renderTmuxLauncher(root, OPTS);
+      for (const [mode, session] of [['opencode'], ['tui', 'sterling-demo-opencode']]) {
+        const run = runPane(script, mode, { home, session });
+        runs.push(run);
+        assert.equal(run.r.status, 0, run.r.stderr);
+        assert.ok(run.split.endsWith('--host opencode'), run.split);
+        check(run, root, `${git ? 'authoring' : 'installed'} ${mode}`);
+      }
+    } finally {
+      runs.forEach((x) => x.cleanup());
+      rm(root);
+    }
+  }
+}
+
+test('#202: an OpenCode session\'s pane runs the configured spec\'s copy, not the clone and not a newer Claude Code copy', () => {
+  const home = tmp('sterling-lic-home-');
+  try {
+    claudeCacheCopy(join(home, '.claude', 'plugins', 'cache'), 'mkt', '2.0.0');
+    openCodeConfig(home, { plugins: [GIT_SPEC] });
+    const want = join(openCodeCacheCopy(home, '1792750000000', '1.10.0'), 'tui', 'sterling-tui.mjs');
+    eachOpenCodePane(home, (run, root, label) => assert.ok(run.split.includes(want), `${label}: the OpenCode plugin's copy runs the pane — got: ${run.split}`));
+  } finally {
+    rm(home);
+  }
+});
+
+test('#202 (Sol): within one spec the NEWEST GENERATION runs the pane even when it holds the older version (a rollback)', () => {
+  const home = tmp('sterling-lic-home-');
+  try {
+    openCodeConfig(home, { plugins: [GIT_SPEC] });
+    const newer = openCodeCacheCopy(home, '1792747812087', '0.19.116');
+    const loaded = openCodeCacheCopy(home, '1792750000000', '0.19.113');
+    eachOpenCodePane(home, (run, root, label) => {
+      assert.ok(run.split.includes(join(loaded, 'tui', 'sterling-tui.mjs')), `${label}: the generation OpenCode loads — got: ${run.split}`);
+      assert.ok(!run.split.includes(newer), `${label}: never the higher version in an older generation`);
+    });
+  } finally {
+    rm(home);
+  }
+});
+
+test('#202 (Sol): across specs the configured spec runs the pane, not a higher version under a spec the config does not list', () => {
+  const home = tmp('sterling-lic-home-');
+  try {
+    openCodeConfig(home, { plugins: [GIT_SPEC] });
+    const loaded = openCodeCacheCopy(home, '1792747812087', '0.19.113');
+    openCodeCacheCopy(home, '1792750000000', '0.19.116', join('@chulf58', 'sterling@latest'));
+    eachOpenCodePane(home, (run, root, label) => assert.ok(run.split.includes(join(loaded, 'tui', 'sterling-tui.mjs')), `${label}: the configured spec's copy — got: ${run.split}`));
+  } finally {
+    rm(home);
+  }
+});
+
+test('#202: a Claude Code session\'s pane is unchanged: the clone on the authoring shape, the newest copy of either host on the installed shape', () => {
+  const home = tmp('sterling-lic-home-');
+  const cloneRoot = pluginRoot({ git: true });
+  const installedRoot = pluginRoot({ git: false });
+  const runs = [];
+  try {
+    touch(join(cloneRoot, 'tui', 'sterling-tui.mjs'));
+    const claude = claudeCacheCopy(join(home, '.claude', 'plugins', 'cache'), 'mkt', '2.0.0');
+    openCodeConfig(home, { plugins: [GIT_SPEC] });
+    openCodeCacheCopy(home, '1792750000000', '1.10.0');
+    for (const [root, want] of [[cloneRoot, `${cloneRoot}/tui/sterling-tui.mjs`], [installedRoot, join(claude, 'tui', 'sterling-tui.mjs')]]) {
+      for (const [mode, session] of [['up'], ['tui', 'sterling-demo-claude']]) {
+        const run = runPane(renderTmuxLauncher(root, OPTS), mode, { home, session });
+        runs.push(run);
+        assert.equal(run.r.status, 0, run.r.stderr);
+        assert.ok(run.split.includes(want) && !run.split.includes('--host'), `${mode}: ${want} runs the Claude Code pane — got: ${run.split}`);
+      }
+    }
+  } finally {
+    runs.forEach((x) => x.cleanup());
+    rm(home, cloneRoot, installedRoot);
+  }
+});
+
+test('#202: with no Sterling in OpenCode\'s plugin list the OpenCode pane keeps TUI_BUNDLE (the copy init\'s server shim loads), silently', () => {
+  const home = tmp('sterling-lic-home-');
+  try {
+    const cached = openCodeCacheCopy(home, '1792750000000', '9.0.0');
+    openCodeConfig(home, { plugins: ['@nemlig/overpass-gateway@1.14.3'] });
+    eachOpenCodePane(home, (run, root, label) => {
+      // TUI_BUNDLE: the clone (authoring), or the newest installed copy (installed), which is
+      // also what the server shim's sterlingInstallRoot() loads there.
+      const want = label.startsWith('authoring') ? `${root}/tui/sterling-tui.mjs` : join(cached, 'tui', 'sterling-tui.mjs');
+      assert.ok(run.split.includes(want), `${label}: TUI_BUNDLE runs the pane — got: ${run.split}`);
+      assert.equal(run.r.stderr, '', `${label}: nothing to report`);
+    });
+  } finally {
+    rm(home);
+  }
+});
+
+test('#202: a listed spec with nothing installed yet, or an unreadable OpenCode config, keeps TUI_BUNDLE and says so on stderr', () => {
+  for (const [body, why] of [[{ plugins: [GIT_SPEC] }, /OpenCode has not installed github:Chulf58\/sterling#semver:>=0\.18\.0 yet/], ['{ "plugins": [ ', /could not read .*opencode\.json .*which Sterling OpenCode loads is unknown/]]) {
+    const home = tmp('sterling-lic-home-');
+    try {
+      claudeCacheCopy(join(home, '.claude', 'plugins', 'cache'), 'mkt', '1.0.0');
+      openCodeConfig(home, body);
+      eachOpenCodePane(home, (run, root, label) => {
+        assert.match(run.r.stderr, why, label);
+        assert.match(run.r.stderr, /the OpenCode pane runs the launcher's own dashboard/, label);
+      });
+    } finally {
+      rm(home);
+    }
+  }
+});
+
 test('ensureUpdateLauncher: an installed copy is skipped — no sterling-update.bat, no .gitignore entry; the authoring clone still gets one', () => {
   const installedRoot = pluginRoot({ git: false });
   const cloneRoot = pluginRoot({ git: true });
