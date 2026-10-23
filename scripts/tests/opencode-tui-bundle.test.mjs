@@ -62,7 +62,12 @@ test('the shipped TUI entry is a committed bundle that imports only host-provide
   assert.notEqual(entryRel, './tui.tsx', 'the entry is the bundle, not the source');
   const code = readFileSync(join(pkgDir, entryRel), 'utf8');
   assert.match(code.split('\n')[0], /@jsxImportSource @opentui\/solid/, 'the JSX pragma OpenCode compiles with leads the file');
-  const specifiers = [...code.matchAll(/(?:^|[\s;])(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/gm)].map((m) => m[1] ?? m[2]);
+  // A static import or re-export counts only at the start of a line, where esbuild writes every one.
+  // The earlier pattern also matched after any whitespace, so the usage example in a vendored
+  // package's doc comment (js-yaml's " * import { CORE_SCHEMA, ... } from 'js-yaml'", bundled
+  // since 0.19.106) read as an import the bundle does not make.
+  const specifiers = [...code.matchAll(/^(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/gm)].map((m) => m[1] ?? m[2]);
+  assert.ok(!/^import\s[^'"]*?from\s*['"]js-yaml['"]/m.test(code), 'js-yaml is bundled in, never imported at run time');
   assert.ok(specifiers.length > 0);
   for (const s of specifiers) assert.match(s, /^(node:|solid-js$|@opentui\/solid$)/, `unexpected import '${s}'`);
 

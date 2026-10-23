@@ -5649,7 +5649,15 @@ var init_config = __esm({
       // longer needs an indirection layer between an agent's name and its config
       // key.
       models: external_exports.object({
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        // The hard_task, and the reviewer's and sparring's opencode_model below, are the
+        // models the conductor named on those dispatches before the OpenCode dispatch
+        // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
+        // They are whole-entry defaults only, never hidden field defaults: an entry that
+        // exists without them means "none" (clearing opencode_model in the System tab runs
+        // the role on its Claude model). Live entries written before them get them once,
+        // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
+        // "Write it into each config").
+        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
         classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -5660,12 +5668,12 @@ var init_config = __esm({
         // reviewer judges a diff (decision
         // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
         // dispatch pins its model explicitly; this is the install-time default.
-        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6.1-sol" }),
         // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
         // read-only grant as the reviewer, so the same install-time default. Every
         // dispatch pins its model (Astra, else a Fable model); under Overpass its
         // role tier decides.
-        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -5977,7 +5985,11 @@ var init_config = __esm({
       // including an unknown role or field under the optional `roles` map
       // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
       // (config.test.ts pins that they agree).
-      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+      // The one-time config migrations already applied to this file (addModelDefaults),
+      // so a value a migration added and the user later cleared is never added again.
+      // Written by sync and init only.
+      applied_config_migrations: external_exports.array(external_exports.string()).optional()
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
@@ -20684,17 +20696,17 @@ function dispatchOverpass(root) {
     return { res: null, unreadable: e };
   }
   if (!isObject(config)) return { res: null, unreadable: new Error("it is not a JSON object") };
-  return { res: resolveOverpass(config, { host: "opencode" }), unreadable: null };
+  return { res: resolveOverpass(config, { host: "opencode" }), unreadable: null, config };
 }
 function overpassUnknownLine(error) {
   return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
 }
 var BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/;
 var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-function bypassMarker(prompt) {
-  if (typeof prompt !== "string") return null;
+function unfencedMarkers(prompt, lineRe) {
+  if (typeof prompt !== "string") return [];
   let fence = null;
-  const reasons = [];
+  const found = [];
   for (const line of prompt.split(/\r?\n/)) {
     if (fence) {
       const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
@@ -20706,9 +20718,13 @@ function bypassMarker(prompt) {
       fence = open2[1];
       continue;
     }
-    const m = BYPASS_LINE.exec(line);
-    if (m) reasons.push(m[1].trim());
+    const m = lineRe.exec(line);
+    if (m) found.push(m[1].trim());
   }
+  return found;
+}
+function bypassMarker(prompt) {
+  const reasons = unfencedMarkers(prompt, BYPASS_LINE);
   if (!reasons.length) return null;
   return { reason: reasons.every(Boolean) ? reasons[0] : "" };
 }
@@ -20970,6 +20986,138 @@ function createSessionModels() {
     },
     get: (sessionID) => sessions.get(sessionID) ?? null
   };
+}
+
+// packages/opencode-plugin/src/dispatch-model.mjs
+init_dist();
+var INTENT_LINE = /^[ \t]*MODEL-INTENT:(.*)$/;
+var PROVIDER_RE = /^[a-z0-9][a-z0-9-]*$/;
+var isObject2 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+function intentRefusal(why) {
+  return `Sterling refused this subagent dispatch: its brief carries a MODEL-INTENT line but ${why}. Use exactly one line, "MODEL-INTENT: hard", "MODEL-INTENT: review-of=<provider>" (the provider the reviewed work was written on, for example openai) or "MODEL-INTENT: fallback=<reason>", or drop the line to run on the role's normal model.`;
+}
+function parseIntent(prompt) {
+  const lines = unfencedMarkers(prompt, INTENT_LINE);
+  if (!lines.length) return { kind: "normal" };
+  if (lines.length > 1) throw new Error(intentRefusal(`it has ${lines.length} of them`));
+  const value = lines[0];
+  if (value === "hard") return { kind: "hard" };
+  const review = /^review-of=(.*)$/.exec(value);
+  if (review) {
+    const author = review[1].trim();
+    if (!PROVIDER_RE.test(author)) throw new Error(intentRefusal(`review-of names ${JSON.stringify(author)}, which is not a provider id such as openai or anthropic`));
+    return { kind: "review-of", author };
+  }
+  const fallback = /^fallback=(.*)$/.exec(value);
+  if (fallback) {
+    const reason = fallback[1].trim();
+    if (!reason) throw new Error(intentRefusal("the fallback gives no reason"));
+    return { kind: "fallback", reason };
+  }
+  throw new Error(intentRefusal(`its value ${JSON.stringify(value)} is not one of hard, review-of=<provider> or fallback=<reason>`));
+}
+var providerOf = (ref) => ref.slice(0, ref.indexOf("/"));
+var claudeRef = (entry) => `anthropic/${entry.model}`;
+function roleEntry(config, role) {
+  const models = config?.models;
+  if (models !== void 0 && !isObject2(models)) return { problem: `config.models is ${JSON.stringify(models)}, not an object` };
+  const raw = models ?? {};
+  const parsed = configSchema.shape.models.safeParse(Object.hasOwn(raw, role) ? { [role]: raw[role] } : {});
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return { problem: `config.models.${[role, ...issue.path.slice(1)].join(".")}: ${issue.message}` };
+  }
+  return { entry: Object.hasOwn(parsed.data, role) ? parsed.data[role] : null };
+}
+function hardRef(model) {
+  if (OPENCODE_MODEL_REF_RE.test(model)) return model;
+  if (CLAUDE_MODEL_ID_RE.test(model)) return `anthropic/${model}`;
+  return null;
+}
+function resolveDispatchModel(role, intent, config, mode = null) {
+  if (typeof role !== "string" || !role) return null;
+  const judged = roleEntry(config, role);
+  if (judged.problem) return { problem: judged.problem };
+  const { entry } = judged;
+  if (!entry) return null;
+  const normal = entry.opencode_model ?? claudeRef(entry);
+  let model = normal;
+  let variant = entry.effort;
+  let note = `config.models.${role}`;
+  if (intent.kind === "hard") {
+    if (!entry.hard_task) note = `config.models.${role} (MODEL-INTENT hard, but ${role} has no hard_task, so its normal model)`;
+    else {
+      const ref = hardRef(entry.hard_task.model);
+      if (!ref) return { problem: `config.models.${role}.hard_task.model is ${JSON.stringify(entry.hard_task.model)}, neither a Claude model id nor <provider>/<model>` };
+      model = ref;
+      variant = entry.hard_task.effort ?? entry.effort;
+      note = `config.models.${role}.hard_task (MODEL-INTENT hard)`;
+    }
+  } else if (intent.kind === "review-of") {
+    let judgedMode = mode;
+    if (judgedMode === null) {
+      try {
+        judgedMode = judgeProjectMode(config?.mode, ".sterling/config.json");
+      } catch (e) {
+        return { problem: e.message };
+      }
+    }
+    const alt = claudeRef(entry);
+    if (judgedMode === "work") note = `config.models.${role} (work mode: every pre-PR reviewer runs on the normal reviewer model, whoever wrote the work)`;
+    else if (providerOf(normal) !== intent.author) note = `config.models.${role} (already a different provider from the author's ${intent.author})`;
+    else if (providerOf(alt) !== intent.author) {
+      model = alt;
+      note = `config.models.${role}.model (the author wrote on ${intent.author}, so the dispatch moves to the role's Claude model)`;
+    } else note = `config.models.${role} (CROSS-FAMILY NOT POSSIBLE: the author wrote on ${intent.author} and this role configures no model on another provider)`;
+  } else if (intent.kind === "fallback") {
+    model = claudeRef(entry);
+    note = `config.models.${role}.model (announced fallback: ${intent.reason})`;
+  }
+  return { model, variant, ref: `${model}#${variant}`, note };
+}
+function dispatchModel(config, args) {
+  const intent = parseIntent(args?.prompt);
+  const role = agentRole(args?.agent);
+  const named = typeof args?.model === "string" && args.model ? args.model : null;
+  if (typeof args?.sessionID === "string" && args.sessionID && intent.kind === "normal") {
+    return { model: null, line: named ? null : "MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied)." };
+  }
+  const res = resolveDispatchModel(role, intent, config);
+  if (res === null) {
+    return intent.kind === "normal" ? { model: null, line: null } : { model: null, line: `MODEL: the MODEL-INTENT line was not applied: the agent ${JSON.stringify(args?.agent)} has no config.models entry, so the call ${named ? `kept ${named}` : "runs on the agent's own model"}.` };
+  }
+  if (res.problem) {
+    const text = `config.models is invalid (${res.problem}), so this dispatch was not given a model from it and ${named ? `kept ${named} as the call named` : "runs on the agent's own model"}. Fix the value in .sterling/config.json (TUI System tab).`;
+    return { model: null, line: `MODEL: ${text}`, notice: `Sterling models: ${text}` };
+  }
+  if (named) {
+    const differs = named !== res.ref;
+    const line2 = differs ? `MODEL: kept ${named} as the call named; ${res.note} gives ${res.ref}. Omit the call's model to run on config.models.` : null;
+    const notice = intent.kind === "fallback" ? `Sterling models: fallback dispatch on ${named} (reason: ${intent.reason}).` : void 0;
+    return notice ? { model: null, line: line2 ?? `MODEL: fallback dispatch on ${named} (reason: ${intent.reason}).`, notice } : { model: null, line: line2 };
+  }
+  const line = `MODEL: this dispatch runs on ${res.ref}, from ${res.note}.`;
+  return intent.kind === "fallback" ? { model: res.ref, line, notice: `Sterling models: fallback dispatch on ${res.ref} (reason: ${intent.reason}).`, resolved: true } : { model: res.ref, line, resolved: true };
+}
+var variantIds = (entry) => Array.isArray(entry?.variants) ? entry.variants.map((v) => typeof v === "string" ? v : v?.id).filter((v) => typeof v === "string") : null;
+function modelListItems(result) {
+  if (Array.isArray(result?.data)) return result.data;
+  return result;
+}
+function checkVariant(ref, list, listError = null) {
+  const hash = ref.lastIndexOf("#");
+  if (hash === -1) return { model: ref, note: null };
+  const base2 = ref.slice(0, hash);
+  const variant = ref.slice(hash + 1);
+  if (listError || !Array.isArray(list)) return { model: ref, note: `(variant ${variant} not checked: OpenCode's model list could not be read${listError ? `: ${listError.message ?? listError}` : ""})` };
+  const slash = base2.indexOf("/");
+  const providerID = base2.slice(0, slash);
+  const id = base2.slice(slash + 1);
+  const entry = list.find((m) => m?.providerID === providerID && (m?.modelID === id || m?.id === id));
+  if (!entry) return { model: ref, note: `(variant ${variant} not checked: ${base2} is not in OpenCode's model list)` };
+  const ids = variantIds(entry) ?? [];
+  if (ids.includes(variant)) return { model: ref, note: null };
+  return { model: base2, note: `(variant ${variant} dropped: OpenCode lists ${ids.length ? `only ${ids.join(", ")}` : "no variants"} for ${base2}, so this dispatch runs on ${base2} with its default effort)` };
 }
 
 // packages/opencode-plugin/src/log.mjs
@@ -21373,6 +21521,21 @@ var namedText = (e) => `${e?.constructor?.name ?? e?.name ?? "Error"}: ${errorTe
 var CODEX_OPENERS = /* @__PURE__ */ new Set(["codex_codex", "codex.codex"]);
 var CODEX_TOOL = /^codex[._]/;
 var PENDING_CAP2 = 200;
+var MODEL_LIST_TIMEOUT_MS = 2e3;
+async function boundedModelList(listModels, ms) {
+  let timer;
+  try {
+    const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
+    const late2 = new Promise((resolve17) => {
+      timer = setTimeout(() => resolve17({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    });
+    return await Promise.race([call, late2]);
+  } catch (e) {
+    return { error: e };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 function axisSurface(tool) {
   if (tool === "subagent") return "dispatch";
   if (tool === "question") return "question";
@@ -21414,7 +21577,7 @@ function reportOverpass(root, message) {
 `);
   }
 }
-function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy, listModels, modelListTimeoutMs = MODEL_LIST_TIMEOUT_MS }) {
   if (!deliveryPolicy) throw new Error("createAxisHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
   async function onBefore(input) {
@@ -21446,10 +21609,15 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
       } else {
         let pin;
         try {
-          pin = dispatchPin(read.res, args);
+          pin = read.res.effective ? dispatchPin(read.res, args) : dispatchModel(read.config, args);
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
+        }
+        if (pin.resolved) {
+          const { list, error } = await boundedModelList(listModels, modelListTimeoutMs);
+          const checked = checkVariant(pin.model, list, error);
+          pin = { ...pin, model: checked.model, line: checked.note ? `${pin.line} ${checked.note}` : pin.line };
         }
         if (pin.model && input.input && typeof input.input === "object") input.input.model = pin.model;
         pinLine = pin.line;
@@ -26841,7 +27009,8 @@ function createSterlingServer(deps = {}) {
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
+    const listModels = async () => modelListItems(await models?.list?.());
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     async function sessionInfo(sessionID) {
@@ -26891,7 +27060,7 @@ function createSterlingServer(deps = {}) {
       await onVolatileResult(input);
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
-    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels, env });
     const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     const sessionModels = createSessionModels();
     async function convergeOverpass(root) {

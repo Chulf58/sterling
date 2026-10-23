@@ -100,7 +100,7 @@ try {
 const configMigration = migrateProjectConfig(targetDir);
 for (const line of configMigration.lines) console.log(line);
 if (configMigration.status === 'refused') {
-  console.log('refused_config_migration: .sterling/config.json still carries retired models keys; rerun /sterling:update once the file is stable; nothing synced');
+  console.log('refused_config_migration: .sterling/config.json was not migrated (retired models keys or missing model defaults); rerun /sterling:update once the file is stable; nothing synced');
   process.exit(2);
 }
 
