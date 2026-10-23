@@ -228,8 +228,9 @@ test('the conductor owns the project\'s own test and check commands; `npm run ch
   }
 });
 
-test('roster: all seven roles render for OpenCode, the conductor primary and the rest subagents', () => {
-  assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'librarian', 'researcher', 'reviewer', 'scout', 'sparring']);
+// implementor-hard made the roster eight (decision hard-implementor-is-its-own-agent-sterling-implementor-hard).
+test('roster: all eight roles render for OpenCode, the conductor primary and the rest subagents', () => {
+  assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'implementor-hard', 'librarian', 'researcher', 'reviewer', 'scout', 'sparring']);
   const home = mkdtempSync(join(tmpdir(), 'oc-host-home-'));
   const dir = mkdtempSync(join(tmpdir(), 'oc-host-proj-'));
   for (const args of [['init', '-q'], ['config', 'user.email', 't@example.com'], ['config', 'user.name', 't'], ['config', 'core.autocrlf', 'false']]) {
@@ -260,7 +261,7 @@ test('roster permissions: the reviewer is read-only with no store write; the lib
   }
   assert.doesNotMatch(librarian, /sterling_\w+: deny/, 'the librarian keeps its store-write tools');
 
-  for (const name of ['implementor', 'researcher', 'scout']) {
+  for (const name of ['implementor', 'implementor-hard', 'researcher', 'scout']) {
     assert.match(frontmatter(fullRender(name)), /^ {2}sterling_knowledge_create: deny$/m, `${name} holds no store write`);
   }
   assert.doesNotMatch(frontmatter(fullRender('conductor')), /permission:/, 'the conductor is unrestricted');

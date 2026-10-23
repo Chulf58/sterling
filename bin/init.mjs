@@ -5009,6 +5009,7 @@ var init_records = __esm({
     });
     AGENT_MODEL_KEY = {
       implementor: "implementor",
+      "implementor-hard": "implementor-hard",
       researcher: "researcher",
       scout: "scout",
       librarian: "librarian",
@@ -5330,7 +5331,8 @@ function addModelDefaults(raw) {
     return none;
   if (raw.models !== void 0 && !isPlainObject(raw.models))
     return none;
-  const defaults = configSchema.shape.models.parse({});
+  const schemaDefaults = configSchema.shape.models.parse({});
+  const defaults = { ...schemaDefaults, implementor: { ...schemaDefaults.implementor, hard_task: ADDED_IMPLEMENTOR_HARD_TASK } };
   const models = { ...raw.models ?? {} };
   const added = [];
   for (const [role, field] of MODEL_DEFAULT_FIELDS) {
@@ -5345,6 +5347,48 @@ function addModelDefaults(raw) {
   }
   const config = { ...raw, ...added.length ? { models } : {}, applied_config_migrations: [...applied ?? [], MODEL_DEFAULTS_MIGRATION_ID] };
   return { config, changed: true, added };
+}
+function moveImplementorHardTask(raw) {
+  const none = { config: raw, changed: false, move: null };
+  if (!isPlainObject(raw))
+    return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
+    return none;
+  if ((applied ?? []).includes(IMPLEMENTOR_HARD_MIGRATION_ID))
+    return none;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return none;
+  const record = (models2, move) => ({
+    config: { ...raw, ...models2 ? { models: models2 } : {}, applied_config_migrations: [...applied ?? [], IMPLEMENTOR_HARD_MIGRATION_ID] },
+    changed: true,
+    move
+  });
+  const models = { ...raw.models ?? {} };
+  const implementor = models.implementor;
+  if (!isPlainObject(implementor))
+    return record(null, null);
+  const hasHard = Object.prototype.hasOwnProperty.call(implementor, "hard_task");
+  const existing = models["implementor-hard"];
+  if (!hasHard) {
+    if (existing !== void 0)
+      return record(null, null);
+    const entry2 = { model: implementor.model, effort: implementor.effort };
+    if (implementor.opencode_model !== void 0)
+      entry2.opencode_model = implementor.opencode_model;
+    models["implementor-hard"] = entry2;
+    return record(models, { kind: "copied", entry: entry2 });
+  }
+  const { hard_task, ...rest } = implementor;
+  models.implementor = rest;
+  if (existing !== void 0)
+    return record(models, { kind: "dropped", hard_task, entry: existing });
+  const pin = isPlainObject(hard_task) ? hard_task : {};
+  const effort = pin.effort ?? implementor.effort;
+  const fallbackModel = configSchema.shape.models.parse({})["implementor-hard"].model;
+  const entry = typeof pin.model === "string" && OPENCODE_MODEL_REF_RE.test(pin.model) ? { model: fallbackModel, effort, opencode_model: pin.model } : { model: pin.model, effort };
+  models["implementor-hard"] = entry;
+  return record(models, { kind: "moved", hard_task, entry });
 }
 function migrateRetiredModelKeys(raw) {
   const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
@@ -5403,7 +5447,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5581,15 +5625,21 @@ var init_config = __esm({
       // longer needs an indirection layer between an agent's name and its config
       // key.
       models: external_exports.object({
-        // The hard_task, and the reviewer's and sparring's opencode_model below, are the
-        // models the conductor named on those dispatches before the OpenCode dispatch
-        // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
-        // They are whole-entry defaults only, never hidden field defaults: an entry that
-        // exists without them means "none" (clearing opencode_model in the System tab runs
-        // the role on its Claude model). Live entries written before them get them once,
-        // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
-        // "Write it into each config").
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
+        // The reviewer's and sparring's opencode_model below are the models the conductor
+        // named on those dispatches before the OpenCode dispatch model resolver (decision
+        // subagent-model-choice-on-opencode-conductor-states-dispatch). They are whole-entry
+        // defaults only, never hidden field defaults: an entry that exists without them means
+        // "none" (clearing opencode_model in the System tab runs the role on its Claude
+        // model). Live entries written before them get them once, visibly, from
+        // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
+        // config").
+        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        // implementor-hard is the sterling/implementor-hard agent (decision
+        // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
+        // lane, with its own Overpass tier and System tab row. It replaces
+        // models.implementor.hard_task, whose default it keeps (Opus 5.5, at the
+        // implementor's effort); moveImplementorHardTask below moves a live hard_task here.
+        "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
         classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -5939,6 +5989,8 @@ var init_config = __esm({
       ["reviewer", "opencode_model"],
       ["sparring", "opencode_model"]
     ];
+    ADDED_IMPLEMENTOR_HARD_TASK = { model: "claude-opus-5-5" };
+    IMPLEMENTOR_HARD_MIGRATION_ID = "implementor-hard-2026-10-23";
     CONFIG_KEY_RENAMES = {
       "models.coder": "models.implementor",
       "models.explorer": "models.scout"
@@ -14718,6 +14770,12 @@ function describeAdded(added) {
     (a) => a.field === "entry" ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role} added as the shipped default ${show(a.value)}, so the System tab shows the model each OpenCode dispatch of this role runs on; change it there` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role}.${a.field} added as ${show(a.value)} (the model the conductor named on these dispatches before); change it in the System tab, or clear it to run the role on its Claude model${a.field === "hard_task" ? " (cleared: no separate hard lane)" : ""}`
   );
 }
+function describeHardMove(move) {
+  if (!move) return [];
+  if (move.kind === "moved") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task ${show(move.hard_task)} moved to models.implementor-hard as ${show(move.entry)}, the sterling/implementor-hard agent's model; change it in the System tab`];
+  if (move.kind === "dropped") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task dropped (value was ${show(move.hard_task)}); models.implementor-hard ${show(move.entry)} was already set and is kept`];
+  return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
+}
 var ConcurrentChange = class extends Error {
 };
 var oneLine = (err) => err.message.replace(/\s+/g, " ");
@@ -14736,7 +14794,8 @@ function prepareConfigMigration(projectDir) {
   }
   const m = migrateRetiredModelKeys(raw);
   const d = addModelDefaults(m.config);
-  if (!m.changed && !d.changed) return { status: "unchanged", lines: [] };
+  const h = moveImplementorHardTask(d.config);
+  if (!m.changed && !d.changed && !h.changed) return { status: "unchanged", lines: [] };
   try {
     containedPath(projectDir, ".sterling", "dir");
   } catch (err) {
@@ -14746,7 +14805,7 @@ function prepareConfigMigration(projectDir) {
   const stat = lstatSync5(configPath2);
   if (stat.isSymbolicLink()) return refuse("is a symlink, which the rewrite would replace");
   try {
-    parseConfig(d.config);
+    parseConfig(h.config);
   } catch (err) {
     return refuse(`would not validate after the migration (${oneLine(err)})`);
   }
@@ -14757,14 +14816,17 @@ function prepareConfigMigration(projectDir) {
     shown,
     originalBytes,
     mode: stat.mode & 511,
-    next: JSON.stringify(d.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
-    config: d.config,
+    next: JSON.stringify(h.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
+    config: h.config,
     dropped: m.dropped,
     added: d.added,
+    hardMove: h.move,
     lines: [
       ...describeMigration(m.dropped),
       ...describeAdded(d.added),
-      ...d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : []
+      ...d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : [],
+      ...describeHardMove(h.move),
+      ...h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : []
     ]
   };
 }
@@ -17273,7 +17335,7 @@ var CONDUCTOR_AGENT = "sterling/conductor";
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
-var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "sparring", "librarian"];
+var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian"];
 var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
 var LEGACY_SHELL_DENIES = ["*sterling.db*", "*.sterling/sterling.db*"];
 var PACKAGE_MARKER = "sterling-generated";
@@ -18587,7 +18649,10 @@ if (existsSync16(configPath)) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate \u2014 cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
   }
   if (configMigration.status === "refused") fail(`init REFUSED: ${configMigration.lines[0]}. Nothing was written.`, 2);
-  if (configMigration.status === "ready") rawRecorded = configMigration.config;
+  if (configMigration.status === "ready") {
+    rawRecorded = configMigration.config;
+    recorded = parseConfig(rawRecorded);
+  }
 }
 if (!recorded) {
   const noConfigAt = `no recorded config found at '${target}' (.sterling/config.json absent) \u2014 these declarations are required only on a first init; if this target is wrong, pass the intended --target`;

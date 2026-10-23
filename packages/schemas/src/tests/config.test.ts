@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, normalizeRawConfig, migrateRetiredModelKeys, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
+import { parseConfig, normalizeRawConfig, migrateRetiredModelKeys, moveImplementorHardTask, IMPLEMENTOR_HARD_MIGRATION_ID, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
@@ -524,7 +524,11 @@ test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-
   // default ENTRY carries hard_task Opus 5.5, the model the conductor named on a hard
   // dispatch before. It is not a hidden field default: an entry written without it has none
   // (addModelDefaults writes it into live configs once, visibly). No other role gets one.
-  assert.deepEqual(pins({}).models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'the implementor hard lane defaults to Opus 5.5');
+  // Changed again with decision hard-implementor-is-its-own-agent-sterling-implementor-hard:
+  // the hard implementor lane is the models.implementor-hard entry, which keeps that Opus 5.5
+  // default (at the implementor's effort), and the implementor's default entry has no hard_task.
+  assert.deepEqual(pins({}).models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' }, 'the implementor hard lane defaults to Opus 5.5');
+  assert.equal(pins({}).models.implementor.hard_task, undefined, 'the implementor default entry no longer carries the hard lane');
   assert.equal(pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor.hard_task, undefined, 'an entry written without hard_task has none');
   assert.equal(pins({}).models.researcher.hard_task, undefined, 'no hard_task is invented for the other roles');
   const withHard = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } });
@@ -738,4 +742,21 @@ test('addModelDefaults: adds only what is absent, once, and records the migratio
   assert.equal(again.changed, false, 'a second run changes nothing');
   assert.equal(addModelDefaults('x').changed, false);
   assert.equal(addModelDefaults({ models: 'x' }).changed, false, 'a malformed models block is left to the parse gate');
+});
+
+// Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: the pure move of
+// models.implementor.hard_task into models.implementor-hard, once per file.
+test('moveImplementorHardTask: moves the hard_task, records its id once, and leaves a non-object config alone', () => {
+  const raw = { models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5', effort: 'xhigh' } } } };
+  const m = moveImplementorHardTask(raw);
+  assert.equal(m.changed, true);
+  assert.deepEqual(m.move, { kind: 'moved', hard_task: { model: 'claude-opus-5-5', effort: 'xhigh' }, entry: { model: 'claude-opus-5-5', effort: 'xhigh' } });
+  assert.deepEqual((m.config as { models: unknown }).models, { implementor: { model: 'claude-sonnet-5-5', effort: 'high' }, 'implementor-hard': { model: 'claude-opus-5-5', effort: 'xhigh' } });
+  assert.deepEqual((m.config as { applied_config_migrations: string[] }).applied_config_migrations, [IMPLEMENTOR_HARD_MIGRATION_ID]);
+  assert.deepEqual(raw.models.implementor.hard_task, { model: 'claude-opus-5-5', effort: 'xhigh' }, 'the input is not mutated');
+  const again = moveImplementorHardTask(m.config);
+  assert.equal(again.changed, false, 'a file that records the id is never moved again');
+  assert.equal(moveImplementorHardTask(null).changed, false);
+  assert.equal(moveImplementorHardTask({ models: 'x' }).changed, false);
+  parseConfig(m.config);
 });

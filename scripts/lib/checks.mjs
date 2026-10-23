@@ -55,7 +55,7 @@ export const MAIN_SESSION_AGENTS = ['conductor.md', 'plan.md'];
 // every session tool including every project MCP server. Explicit, like
 // MAIN_SESSION_AGENTS: any OTHER template with disallowedTools and no tools:
 // fails the tool-grant linter — the read-only agents must keep their allowlists.
-export const INHERIT_ALL_AGENTS = ['implementor.md'];
+export const INHERIT_ALL_AGENTS = ['implementor.md', 'implementor-hard.md'];
 
 // §7.3 agent-prompt contract: every agent definition contains, in order.
 // The linter enforces presence; missing = build failure.

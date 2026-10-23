@@ -43902,6 +43902,7 @@ var briefSchema = base.extend({
 });
 var AGENT_MODEL_KEY = {
   implementor: "implementor",
+  "implementor-hard": "implementor-hard",
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
@@ -44350,15 +44351,21 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    // The hard_task, and the reviewer's and sparring's opencode_model below, are the
-    // models the conductor named on those dispatches before the OpenCode dispatch
-    // model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
-    // They are whole-entry defaults only, never hidden field defaults: an entry that
-    // exists without them means "none" (clearing opencode_model in the System tab runs
-    // the role on its Claude model). Live entries written before them get them once,
-    // visibly, from addModelDefaults below at sync and init (user-ruled 2026-10-23,
-    // "Write it into each config").
-    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high", hard_task: { model: "claude-opus-5-5" } }),
+    // The reviewer's and sparring's opencode_model below are the models the conductor
+    // named on those dispatches before the OpenCode dispatch model resolver (decision
+    // subagent-model-choice-on-opencode-conductor-states-dispatch). They are whole-entry
+    // defaults only, never hidden field defaults: an entry that exists without them means
+    // "none" (clearing opencode_model in the System tab runs the role on its Claude
+    // model). Live entries written before them get them once, visibly, from
+    // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
+    // config").
+    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+    // implementor-hard is the sterling/implementor-hard agent (decision
+    // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
+    // lane, with its own Overpass tier and System tab row. It replaces
+    // models.implementor.hard_task, whose default it keeps (Opus 5.5, at the
+    // implementor's effort); moveImplementorHardTask below moves a live hard_task here.
+    "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
@@ -44694,12 +44701,14 @@ var configSchema = external_exports.object({
 });
 var DEFAULT_OVERPASS_PROVIDER = "overpass";
 var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-var OVERPASS_ROLES = ["implementor", "researcher", "scout", "reviewer", "librarian", "sparring"];
+var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring"];
 var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var DEFAULT_OVERPASS_TIER = "agentic-high";
+var OVERPASS_TIERS = ["agentic-low", "agentic-high", "agentic-conductor", "agentic-auto", "agentic-premium", "agentic-premium-max"];
 var DEFAULT_OVERPASS_ROLE_TIERS = {
-  implementor: "agentic-premium",
+  implementor: "agentic-auto",
+  "implementor-hard": "agentic-premium",
   researcher: DEFAULT_OVERPASS_TIER,
   scout: DEFAULT_OVERPASS_TIER,
   reviewer: DEFAULT_OVERPASS_TIER,
@@ -51683,7 +51692,7 @@ function overpassRoute(view, role) {
   return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
 }
 function overpassTierOptions(view, role) {
-  const known = [.../* @__PURE__ */ new Set([DEFAULT_OVERPASS_TIER, ...Object.values(DEFAULT_OVERPASS_ROLE_TIERS)])];
+  const known = [...OVERPASS_TIERS];
   const current = overpassRoute(view, role).tier;
   return known.includes(current) ? known : [...known, current];
 }
@@ -55158,7 +55167,7 @@ var CONDUCTOR_ROLE = "conductor";
 
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
-var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "sparring", "librarian"];
+var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian"];
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
