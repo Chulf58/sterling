@@ -42,6 +42,7 @@ import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRest
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES, readProjectMode, ProjectModeError } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
+import { prepareConfigMigration, commitConfigMigration } from './lib/config-migration.mjs';
 import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED } from './lib/project-identity.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -218,6 +219,10 @@ let recorded;
 // can be applied to what the config actually says on disk, never to a
 // defaults-materialized copy that would clobber an intentionally-absent field.
 let rawRecorded;
+// Retired config.models keys are dropped from the file (drop only), but PLANNED here and
+// COMMITTED below, after every preflight and refusal has passed, so a refused init leaves
+// config.json byte-identical. An unparseable config is refused by the read just below.
+const configMigration = prepareConfigMigration(target);
 if (existsSync(configPath)) {
   try {
     rawRecorded = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -225,6 +230,10 @@ if (existsSync(configPath)) {
   } catch (e) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate — cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
   }
+  if (configMigration.status === 'refused') fail(`init REFUSED: ${configMigration.lines[0]}. Nothing was written.`, 2);
+  // The managed mutation below serializes this raw document, so it must already be the
+  // migrated one or it would write the retired keys back.
+  if (configMigration.status === 'ready') rawRecorded = configMigration.config;
 }
 if (!recorded) {
   const noConfigAt = `no recorded config found at '${target}' (.sterling/config.json absent) — these declarations are required only on a first init; if this target is wrong, pass the intended --target`;
@@ -413,6 +422,15 @@ if (!recorded) {
   if (modeFlagGiven && modeFlag !== recorded.mode) {
     modeLines.push(`⚠ --mode ${modeFlag} NOT applied: this project's recorded mode is ${recordedMode} — switch it in the TUI System tab, then rerun init or /sterling:update`);
   }
+}
+
+// Every preflight above has passed: commit the planned migration now, before the first
+// write below, and print its report right away. A file that changed since it was read
+// (a concurrent writer) stops init here, before any other write.
+{
+  const committed = commitConfigMigration(configMigration);
+  if (committed.status === 'refused') fail(`init REFUSED: ${committed.lines[0]}. Nothing else was written.`, 2);
+  for (const line of committed.lines) console.log(`note: ${line}`);
 }
 
 // ---- §12 manifest, in order: per-item verify → create absent → skip matching → leave-and-report ----

@@ -364,6 +364,69 @@ test('postUpdateSync: a SIMILAR_BULLET_KEPT line from stamp-contract is named in
   assert.doesNotMatch(r.warning, /gained new Sterling text/);
 });
 
+// The retired-models-key drops (board c45a4507) reach the user through the banner and the
+// model-facing context, and are never agent changes (no restart owed for them alone).
+const DROP_LINE = 'config migration: models.coder dropped (ignored since the roster rename to models.implementor); value was {"model":"claude-opus-5","effort":"high"}; set models.implementor in the System tab if you want it';
+
+test('postUpdateSync: dropped retired models keys are named in the banner and the context with their values, and owe no restart', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `up_to_date: implementor\n${DROP_LINE}\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'synced', r.context);
+  assert.match(r.warning, /agents synced, none changed\. \.sterling\/config\.json lost 1 retired models key \(/, r.warning);
+  assert.doesNotMatch(r.warning, /RESTART/, 'a dropped key alone owes no restart');
+  assert.ok(r.context.includes('models.coder dropped (ignored since the roster rename to models.implementor); value was {"model":"claude-opus-5","effort":"high"}'), r.context);
+  assert.doesNotMatch(r.context, /RESTART REQUIRED/);
+});
+
+test('cloneAgentSync: dropped retired models keys are named in the banner and the context', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  const project = makeProject({ marker: null, store: false });
+  const out = `up_to_date: implementor\n${DROP_LINE}\n`;
+  const { runStep } = recordingSteps({ 'sync-agents.mjs': { status: 0, error: null, out, tail: out } });
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+  assert.equal(r.outcome, 'synced', r.context);
+  assert.match(r.warning, /lost 1 retired models key \(/, r.warning);
+  assert.ok(r.context.includes('value was {"model":"claude-opus-5","effort":"high"}'), r.context);
+});
+
+// A failure after the drop must still carry the receipts: the values are gone from the file and the
+// refusal's last-eight-lines `tail` does not hold them.
+const DROP_OUT = `up_to_date: implementor\n${DROP_LINE}\n`;
+const failureSteps = {
+  'a sync-agents refusal after the drop': (runStepFor) => runStepFor({
+    'sync-agents.mjs': { status: 2, error: null, out: `${DROP_OUT}locally_modified: scout\n`, tail: 'locally_modified: scout' },
+  }),
+  'a stamp-contract failure after the drop': (runStepFor) => runStepFor({
+    'sync-agents.mjs': { status: 0, error: null, out: DROP_OUT, tail: DROP_OUT },
+    'stamp-contract.mjs': { status: 1, error: null, out: 'boom', tail: 'boom' },
+  }),
+};
+for (const [label, make] of Object.entries(failureSteps)) {
+  const stepsFor = (results) => async (root, name) => results[name] ?? { status: 0, error: null, out: '', tail: '' };
+  test(`postUpdateSync: ${label} still names the dropped retired models keys with their values, and writes no marker`, async () => {
+    const plugin = makePluginRoot();
+    const project = makeProject({ marker: '0.0.1', store: false });
+    const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep: make(stepsFor) });
+    assert.equal(r.outcome, 'failed', r.context);
+    assert.equal(markerOf(project), '0.0.1\n', 'no marker advance on failure');
+    assert.match(r.warning, /\.sterling\/config\.json lost 1 retired models key \(/, r.warning);
+    assert.ok(r.context.includes('value was {"model":"claude-opus-5","effort":"high"}'), r.context);
+  });
+
+  test(`cloneAgentSync: ${label} still names the dropped retired models keys with their values`, async () => {
+    const plugin = makePluginRoot({ clone: true });
+    const project = makeProject({ marker: null, store: false });
+    const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep: make(stepsFor) });
+    assert.equal(r.outcome, 'failed', r.context);
+    assert.match(r.warning, /\.sterling\/config\.json lost 1 retired models key \(/, r.warning);
+    assert.ok(r.context.includes('value was {"model":"claude-opus-5","effort":"high"}'), r.context);
+  });
+}
+
 // CLONE AGENT SYNC (user-ruled 2026-10-06, "Sync at session start (Recommended)"): the
 // same two steps on a git clone, triggered by H1's agent-currency hash compare and
 // never recorded in the version marker. The H1 end of it, with the real syncAgents, is
@@ -421,7 +484,7 @@ test('runPostUpdateSteps: a project that is the plugin root, directly or through
   for (const [project, root] of [[plugin, plugin], [link, plugin], [plugin, link]]) {
     const { calls, runStep } = recordingSteps();
     const r = await runPostUpdateSteps(root, project, runStep);
-    assert.deepEqual(r, { ok: true, restart: true, drift: false, driftOut: '', inserted: [] }, `project ${project}, root ${root}`);
+    assert.deepEqual(r, { ok: true, restart: true, drift: false, driftOut: '', inserted: [], migrated: [] }, `project ${project}, root ${root}`);
     assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`], 'stamp-contract is never invoked');
   }
   // A different directory still goes through stamp-contract.

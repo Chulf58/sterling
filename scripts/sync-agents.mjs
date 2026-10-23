@@ -14,6 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
+import { migrateProjectConfig } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
@@ -89,6 +90,17 @@ try {
   config = parseConfig(JSON.parse(readFileSync(configSource, 'utf8')));
 } catch (err) {
   console.log(`refused_config: ${configSource.replace(/\\/g, '/')} does not validate (${err.message.replace(/\s+/g, ' ')}); fix it (the TUI System tab writes config.models), then rerun /sterling:update; nothing synced`);
+  process.exit(2);
+}
+
+// Retired config.models keys are dropped from the file (drop only: they were already
+// ignored, so the parse above is the same before and after) and every value is printed.
+// A refusal (the file changed under the write, or is a symlink) stops the sync here, before
+// any rendering or setupOpenCode call, like the refusals above.
+const configMigration = migrateProjectConfig(targetDir);
+for (const line of configMigration.lines) console.log(line);
+if (configMigration.status === 'refused') {
+  console.log('refused_config_migration: .sterling/config.json still carries retired models keys; rerun /sterling:update once the file is stable; nothing synced');
   process.exit(2);
 }
 

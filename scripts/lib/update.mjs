@@ -865,8 +865,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // Its status line is hyphenated, so the agent-status filter above never matches it;
       // relayed from stdout only — the stderr NOTICE: line carries the same text.
       const autoMemoryNotices = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^auto-memory off: (kept|wrong_type)\b/.test(l));
+      // Retired-models-key drops (sync-agents prints one "config migration: ..." line per key with its
+      // value). The prefix has a space, so the status filter above never counts them as agent changes;
+      // relayed on success here and verbatim in the failure output below.
+      const configMigrationLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('config migration: '));
       const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
-      Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length });
+      Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length, config_migration: configMigrationLines.length });
       if (r.status === 2) {
         log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         fail(2);
@@ -879,6 +883,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
         for (const line of autoMemoryNotices) log(`      ⚠ ${line}`);
+        for (const line of configMigrationLines) log(`      ⚠ ${line}`);
       }
       // An absent handoff key with handoff files on disk that git does not track:
       // they stopped being maintained, so the run names them (sync-agents prints

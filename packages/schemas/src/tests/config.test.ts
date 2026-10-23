@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, normalizeRawConfig, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
+import { parseConfig, normalizeRawConfig, migrateRetiredModelKeys, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
@@ -669,4 +669,51 @@ test('normalizeRawConfig: converts without mutating its input, and passes non-ob
   assert.equal(normalizeRawConfig(null), null);
   assert.deepEqual(normalizeRawConfig([1]), [1]);
   assert.equal(configSchema.safeParse(normalizeRawConfig({ sparring_partner: { model: 42 } })).success, false, 'the validator path (config_set) refuses it too');
+});
+
+test('migrateRetiredModelKeys: drops every retired key with its value, names the successor of a renamed one, never carries, keeps live keys', () => {
+  const raw = {
+    mode: 'hobby',
+    models: {
+      coder: { model: 'claude-opus-5', effort: 'high' },
+      explorer: { model: 'claude-haiku-5-5', effort: 'low' },
+      reviewers: { model: 'claude-opus-5', effort: 'high' },
+      coder_hard: { model: 'claude-opus-5', effort: 'xhigh' },
+      reviewer: { model: 'claude-opus-5-5', effort: 'high' },
+    },
+  };
+  const before = JSON.stringify(raw);
+  const m = migrateRetiredModelKeys(raw);
+  assert.equal(JSON.stringify(raw), before, 'the input is never mutated');
+  assert.equal(m.changed, true);
+  assert.deepEqual(m.dropped, [
+    { key: 'coder', value: { model: 'claude-opus-5', effort: 'high' }, renamed_to: 'implementor' },
+    { key: 'coder_hard', value: { model: 'claude-opus-5', effort: 'xhigh' } },
+    { key: 'explorer', value: { model: 'claude-haiku-5-5', effort: 'low' }, renamed_to: 'scout' },
+    { key: 'reviewers', value: { model: 'claude-opus-5', effort: 'high' } },
+  ]);
+  assert.deepEqual(m.untouched, ['reviewer']);
+  assert.deepEqual(m.config, { mode: 'hobby', models: { reviewer: { model: 'claude-opus-5-5', effort: 'high' } } });
+  assert.equal(parseConfig(m.config).models.implementor.model, parseConfig(raw).models.implementor.model, 'dropping changes no parsed model');
+  assert.equal(parseConfig(m.config).models.scout.model, parseConfig(raw).models.scout.model);
+  assert.deepEqual(unreadConfigKeys(m.config), []);
+});
+
+test('migrateRetiredModelKeys: an existing successor key is kept as written', () => {
+  const m = migrateRetiredModelKeys({ models: { coder: { model: 'old' }, implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } });
+  assert.deepEqual(m.dropped, [{ key: 'coder', value: { model: 'old' }, renamed_to: 'implementor' }]);
+  assert.deepEqual(m.config, { models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } });
+});
+
+test('migrateRetiredModelKeys: idempotent, and a config with nothing retired comes back as the same object', () => {
+  const once = migrateRetiredModelKeys({ models: { coder: { model: 'claude-opus-5', effort: 'high' }, scout: { model: 'claude-sonnet-5-5', effort: 'low' } } });
+  const twice = migrateRetiredModelKeys(once.config);
+  assert.equal(twice.changed, false);
+  assert.equal(twice.config, once.config);
+  assert.deepEqual([twice.dropped, twice.untouched], [[], ['scout']]);
+  for (const raw of [null, [1], { mode: 'hobby' }, { models: 'x' }]) {
+    const m = migrateRetiredModelKeys(raw);
+    assert.equal(m.changed, false);
+    assert.equal(m.config, raw);
+  }
 });
