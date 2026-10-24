@@ -6375,6 +6375,10 @@ var TARGET_LEADS = [
   // which were already tracked.
   "- **Lint and tests before done.**",
   "- **Write plainly; no AI tells.**",
+  // 2026-10-24: text meant to be copied (decision copy-friendly-text-a-prompt-or-message-for-the-user-to-paste).
+  // NEW to every sibling, anchored on the plain-writing bullet it follows in the template; it sits
+  // before the background bullet there, so that bullet's anchors below name it first.
+  "- **Text meant to be copied goes between two horizontal rules.**",
   // 2026-10-10: every subagent starts in the background (user-ruled 2026-10-09 and restated
   // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
   // plain-writing bullet it follows in the template.
@@ -6415,7 +6419,8 @@ var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Write plainly; no AI tells.**", ["- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Start every subagent in the background.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Text meant to be copied goes between two horizontal rules.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Start every subagent in the background.**", ["- **Text meant to be copied goes between two horizontal rules.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Finish what you start.**", ["- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Resolve a review thread once its finding is handled.**", ["- **Finish what you start.**", "- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
@@ -6446,6 +6451,7 @@ var SUBJECT_MARKERS = /* @__PURE__ */ new Map([
   ["- **Instruction-file proposals replace memory.**", [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],
   ["- **Lint and tests before done.**", [/^(?=.*\blint\b)(?=.*\btests?\b)(?=.*\b(before|done|reporting|finished|complete)\b)/i]],
   ["- **Write plainly; no AI tells.**", [/\bwrit(e|ing) plainly\b/i, /\bai tells\b/i, /\bsigns of ai\b/i]],
+  ["- **Text meant to be copied goes between two horizontal rules.**", [/^(?=.*\b(copy|copied|paste)\b)(?=.*\b(text|prompts?|messages?)\b)(?=.*\b(rules?|fence|block)\b)/i]],
   ["- **Start every subagent in the background.**", [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
   ["- **Finish what you start.**", [
     /\bfinish what you start\b/i,

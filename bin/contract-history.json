@@ -93,6 +93,7 @@
   "- **Start every subagent in the background.**": [
     "- **Start every subagent in the background.** Keep reporting and do work that does not depend on the lanes while they run, and act on each lane when its completion notification arrives. On OpenCode, pass `background: true` on every `subagent` call, so the user never has to press ctrl+B; OpenCode V2 has no setting that makes background the default (its agent docs list none), so the flag goes on each call. User-ruled 2026-10-09 through the question form, \"Add it to CLAUDE.md (Recommended)\", after the user asked (verbatim): \"Can I choose a setting to always spawn the subagents in the background and not have to press to ctrl+B?\"; restated 2026-10-10 (verbatim): \"Also make sure that it is stated in the agents.md that all subagents are run in the background.\""
   ],
+  "- **Text meant to be copied goes between two horizontal rules.**": [],
   "- **What not to do:** a Salesforce project": [],
   "- **Wired, not just asked:**": [
     "- **Wired, not just asked:** H7 marks owning articles → `reconcile_needed` (runs) or a maintenance item (direct mode); the disposal gate refuses a run with outstanding reconciliation; H10 demands the owning article for unowned territory and the concept article for a registered `concept_designed` event (`concept_article_missing` survives the session).",
