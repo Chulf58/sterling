@@ -695,6 +695,7 @@ test('stamp-contract --apply-inserts: a missing tracked bullet is inserted too',
 
 const LINT_LEAD = '- **Lint and tests before done.**';
 const WRITE_PLAINLY_LEAD = '- **Write plainly; no AI tells.**';
+const COPY_LEAD = '- **Text meant to be copied goes between two horizontal rules.**';
 const BACKGROUND_LEAD = '- **Start every subagent in the background.**';
 const OLD_NAMING = '- **Canonical naming:** one name per concept, from the registries; no dead terms.';
 const OLD_EXIT_CODE = "- **A toolchain-invoked process's exit code can read as a crash when the real cause is a missing required flag.** Some test/build runners exit with an unfamiliar non-zero code when a required headless/CI-mode flag is omitted, rather than failing informatively — check the runner's own headless/CI documentation before treating a red run as a real regression.";
@@ -758,7 +759,7 @@ test('stamp-contract --apply-inserts: a project without the lint bullet gets it 
   }
 });
 
-test('stamp-contract --apply-inserts: a project without the background-subagents bullet gets it once, right after the plain-writing bullet, and a second run writes nothing', () => {
+test('stamp-contract --apply-inserts: a project without the background-subagents bullet gets it once, right after the copy-friendly-text bullet, and a second run writes nothing', () => {
   const f = sectionFixture('background-bullet', (agents) => dropBlock(agents, BACKGROUND_LEAD));
   try {
     assert.ok(!f.read().agents.includes(BACKGROUND_LEAD), 'the fixture lacks the bullet');
@@ -769,7 +770,7 @@ test('stamp-contract --apply-inserts: a project without the background-subagents
     const lines = f.read().agents.split('\n');
     assert.equal(lines.filter((l) => l.startsWith(BACKGROUND_LEAD)).length, 1, 'inserted once');
     const at = lines.findIndex((l) => l.startsWith(BACKGROUND_LEAD));
-    assert.ok(lines[at - 1].startsWith(WRITE_PLAINLY_LEAD), 'right after the plain-writing bullet');
+    assert.ok(lines[at - 1].startsWith(COPY_LEAD), 'right after the copy-friendly-text bullet, which follows the plain-writing bullet');
 
     const again = runStampContract(f.regDb, ['--apply-inserts']);
     assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
@@ -950,6 +951,7 @@ const OWN_WORDING = new Map([
   ['- **Instruction-file proposals replace memory.**', '- **Propose instruction-file changes instead of memory.** Ours.'],
   [LINT_LEAD, '- **Run lint and tests before reporting done.** Ours.'],
   [WRITE_PLAINLY_LEAD, '- **Write plainly in docs; no AI tells.** Ours.'],
+  [COPY_LEAD, '- **Put text to paste between horizontal rules.** Ours.'],
   [BACKGROUND_LEAD, '- **Run subagents in the background.** Ours.'],
   [FINISH_LEAD, '- **Never stop with work half done.** Ours.'],
   [RESOLVE_LEAD, '- **Resolve review threads when handled.** Ours.'],
@@ -1009,6 +1011,7 @@ const UNRELATED_WORDING = new Map([
   ['- **Instruction-file proposals replace memory.**', ['- **Turn off memory profiling.** Ours.']],
   [LINT_LEAD, ['- **Lint config lives next to the tests.** Ours.']],
   [WRITE_PLAINLY_LEAD, ['- **Write plain SQL migrations.** Ours.']],
+  [COPY_LEAD, ['- **Copy edited text into the CMS.** Ours.', '- **Respect copyright rules for copied text.** Cite the source.', '- **Never copy secrets to the clipboard.** Ours.', '- **Use horizontal rules to separate documentation sections.** Ours.', '- **Redact secrets from text intended to be copied.** Ours.']],
   [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.']],
   [FINISH_LEAD, ['- **Never stop the dev server with unfinished migrations pending.** Ours.', '- **Glossy finish for buttons.** Ours.']],
   [RESOLVE_LEAD, ['- **Resolve thread pool starvation first.** Ours.']],
@@ -1016,6 +1019,12 @@ const UNRELATED_WORDING = new Map([
   [SOLVE_LEAD, ['- **Every user ask goes to the support board.** Ours.']],
   [CLOSE_LEAD, ['- **Close-on-commit for support tickets.** Ours.']],
 ]);
+
+test('stamp-contract (#111): the copy-text marker matches a bullet naming both a copy context and a formatting context, in either wording', () => {
+  for (const own of ['- **Put text to paste between two `---` lines.** Ours.', '- **Put text to paste between horizontal rules.** Ours.', '- **Copy-friendly text sits between two horizontal rules.** Ours.']) {
+    assert.ok(findCoveringBullet(`${own}\n`, COPY_LEAD), `${own} covers the copy-text rule`);
+  }
+});
 
 test('stamp-contract (#111): an unrelated bullet that shares a generic word with a marker never withholds the template bullet, for every marker entry', () => {
   assert.deepEqual([...UNRELATED_WORDING.keys()].sort(), [...SUBJECT_MARKERS.keys()].sort(), 'a negative case per marker entry');
