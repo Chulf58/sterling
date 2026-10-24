@@ -1011,7 +1011,7 @@ const UNRELATED_WORDING = new Map([
   ['- **Instruction-file proposals replace memory.**', ['- **Turn off memory profiling.** Ours.']],
   [LINT_LEAD, ['- **Lint config lives next to the tests.** Ours.']],
   [WRITE_PLAINLY_LEAD, ['- **Write plain SQL migrations.** Ours.']],
-  [COPY_LEAD, ['- **Copy edited text into the CMS.** Ours.', '- **Respect copyright rules for copied text.** Cite the source.', '- **Never copy secrets to the clipboard.** Ours.']],
+  [COPY_LEAD, ['- **Copy edited text into the CMS.** Ours.', '- **Respect copyright rules for copied text.** Cite the source.', '- **Never copy secrets to the clipboard.** Ours.', '- **Use horizontal rules to separate documentation sections.** Ours.', '- **Redact secrets from text intended to be copied.** Ours.']],
   [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.']],
   [FINISH_LEAD, ['- **Never stop the dev server with unfinished migrations pending.** Ours.', '- **Glossy finish for buttons.** Ours.']],
   [RESOLVE_LEAD, ['- **Resolve thread pool starvation first.** Ours.']],
@@ -1019,6 +1019,12 @@ const UNRELATED_WORDING = new Map([
   [SOLVE_LEAD, ['- **Every user ask goes to the support board.** Ours.']],
   [CLOSE_LEAD, ['- **Close-on-commit for support tickets.** Ours.']],
 ]);
+
+test('stamp-contract (#111): the copy-text marker matches a bullet naming both a copy context and a formatting context, in either wording', () => {
+  for (const own of ['- **Put text to paste between two `---` lines.** Ours.', '- **Put text to paste between horizontal rules.** Ours.', '- **Copy-friendly text sits between two horizontal rules.** Ours.']) {
+    assert.ok(findCoveringBullet(`${own}\n`, COPY_LEAD), `${own} covers the copy-text rule`);
+  }
+});
 
 test('stamp-contract (#111): an unrelated bullet that shares a generic word with a marker never withholds the template bullet, for every marker entry', () => {
   assert.deepEqual([...UNRELATED_WORDING.keys()].sort(), [...SUBJECT_MARKERS.keys()].sort(), 'a negative case per marker entry');

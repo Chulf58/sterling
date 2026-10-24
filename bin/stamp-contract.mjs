@@ -6451,7 +6451,9 @@ var SUBJECT_MARKERS = /* @__PURE__ */ new Map([
   ["- **Instruction-file proposals replace memory.**", [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],
   ["- **Lint and tests before done.**", [/^(?=.*\blint\b)(?=.*\btests?\b)(?=.*\b(before|done|reporting|finished|complete)\b)/i]],
   ["- **Write plainly; no AI tells.**", [/\bwrit(e|ing) plainly\b/i, /\bai tells\b/i, /\bsigns of ai\b/i]],
-  ["- **Text meant to be copied goes between two horizontal rules.**", [/\bhorizontal rules?\b/i, /\bcopy[- ]friendly\b/i, /\btext (meant|to be|intended) (to be )?(copied|pasted)\b/i, /\bbetween two `?-{3}`?/i]],
+  // Both a copy/paste context AND a formatting context at once: each alone matches unrelated bullets
+  // ('Use horizontal rules to separate sections', 'Redact secrets from text intended to be copied').
+  ["- **Text meant to be copied goes between two horizontal rules.**", [/^(?=.*\b(copied|pasted?|copy[- ]friendly)\b)(?=.*(\bhorizontal rules?\b|-{3}))/i]],
   ["- **Start every subagent in the background.**", [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
   ["- **Finish what you start.**", [
     /\bfinish what you start\b/i,
