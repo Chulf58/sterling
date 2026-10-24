@@ -118,12 +118,19 @@ export function buildOpencodeConfig({ mcpConfig, model = null }) {
 /** `opencode run` argv. --standalone runs a private server (no background
  *  service, no port); --auto approves what is not explicitly denied, so the
  *  run never waits on a prompt nobody will answer; --agent picks the worker
- *  agent, so the user's default agent's rules never apply. --variant is the
- *  provider's reasoning effort for the model, set only for the Overpass role's
- *  effort (config.overpass.roles.maintenance-worker.effort). */
-export function buildOpencodeArgs({ prompt, model = null, variant = null }) {
-  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : []), ...(variant ? ['--variant', variant] : []), prompt];
+ *  agent, so the user's default agent's rules never apply. No --variant: OpenCode
+ *  2.1.2's `run` refuses that flag (it prints its usage and exits 1, measured
+ *  2026-10-24), so the Overpass role's effort travels in the child's environment
+ *  instead (opencodeEnv, WORKER_EFFORT_ENV). */
+export function buildOpencodeArgs({ prompt, model = null }) {
+  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : []), prompt];
 }
+
+/** The child's environment variables carrying the Overpass maintenance-worker effort and
+ *  the model it applies to. The Sterling plugin, which loads in the child, sets that effort
+ *  on each of the child's requests on exactly that model (packages/opencode-plugin/src/overpass.mjs workerRequestEffort). */
+export const WORKER_EFFORT_ENV = 'STERLING_MAINTENANCE_WORKER_EFFORT';
+export const WORKER_EFFORT_MODEL_ENV = 'STERLING_MAINTENANCE_WORKER_EFFORT_MODEL';
 
 /** The child's environment additions. PWD picks the session directory
  *  (measured). OPENCODE_DISABLE_PROJECT_CONFIG is meant to keep the project's
@@ -134,9 +141,17 @@ export function buildOpencodeArgs({ prompt, model = null, variant = null }) {
  *  STERLING_MAINTENANCE_WORKER=1 in its process.env. The Sterling plugin is
  *  installed globally (scripts/lib/opencode-install.mjs), so it loads in the
  *  child and no-ops its settlement and worker launch on that flag, which
- *  runWorker sets in the child's environment. */
-export function opencodeEnv({ root, config }) {
-  return { PWD: root, OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_DISABLE_PROJECT_CONFIG: '1' };
+ *  runWorker sets in the child's environment. `effort` (the Overpass role's
+ *  effort, or null) is added with the run's model (config.model) as
+ *  WORKER_EFFORT_ENV and WORKER_EFFORT_MODEL_ENV, only when both are set. */
+export function opencodeEnv({ root, config, effort = null }) {
+  const model = config?.model;
+  return {
+    PWD: root,
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+    OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+    ...(effort && typeof model === 'string' && model ? { [WORKER_EFFORT_ENV]: effort, [WORKER_EFFORT_MODEL_ENV]: model } : {}),
+  };
 }
 
 /**

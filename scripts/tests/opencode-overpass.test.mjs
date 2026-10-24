@@ -83,8 +83,8 @@ function stubCtx(directory) {
   };
 }
 
-async function setup(dir) {
-  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env: {} });
+async function setup(dir, env = {}) {
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env });
   const ctx = stubCtx(dir);
   const cleanup = await plugin.setup(ctx);
   // One subagent call through execute.before and execute.after; returns its live input and result text.
@@ -742,12 +742,17 @@ test('session line: ON, bypass, not in effect, off, invalid and unknown', () => 
   // the implementor defaults to agentic-auto and implementor-hard to agentic-premium.
   // Changed again 2026-10-23 (user-ruled, 'Defaults + reset + bypass ON'): scout, librarian, preflight and the
   // maintenance worker default to agentic-auto, and the conductor is bypassed unless conductor_bypass is false.
-  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto \(implementor, scout, librarian, preflight\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high \(researcher, reviewer\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-auto; other agents and the Plan agent run on overpass\/agentic-high\./);
+  // Changed again 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): the line
+  // names each role's default effort, which the plugin now sends (the worker's too, through its child's
+  // environment); reviewer and researcher have none.
+  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto at effort high \(implementor, scout, librarian, preflight\), overpass\/agentic-premium at effort xhigh \(implementor-hard\), overpass\/agentic-high \(researcher, reviewer\), overpass\/agentic-premium-max at effort xhigh \(sparring\); the maintenance worker runs on overpass\/agentic-auto at effort high; other agents and the Plan agent run on overpass\/agentic-high\./);
   // An explicit override: a role tier moves that role to its own group, an effort adds "at effort" to the group.
   // implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) keeps its own default
   // tier when the implementor's is overridden, so it is a group of its own here.
   const overridden = line({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' }, implementor: { tier: 'agentic-high' } } } });
-  assert.match(overridden, /subagent roles run on overpass\/agentic-high \(implementor, researcher\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-auto at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-auto \(librarian, preflight\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-auto; other agents and the Plan agent run on overpass\/agentic-high\./);
+  // Changed 2026-10-24: the implementor keeps its default effort when only its tier is overridden, so it no longer
+  // shares a group with the researcher (no default effort); the other defaults show as 'at effort'.
+  assert.match(overridden, /subagent roles run on overpass\/agentic-high at effort high \(implementor\), overpass\/agentic-premium at effort xhigh \(implementor-hard\), overpass\/agentic-high \(researcher\), overpass\/agentic-auto at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-auto at effort high \(librarian, preflight\), overpass\/agentic-premium-max at effort xhigh \(sparring\); the maintenance worker runs on overpass\/agentic-auto at effort high; other agents and the Plan agent run on overpass\/agentic-high\./);
   assert.doesNotMatch(overridden, /agentic-premium \((?:[^)]*, )?implementor[,)]/, 'the implementor override replaces its default');
   assert.match(line({ mode: 'work', overpass: { enabled: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin/, 'an absent conductor_bypass reads as true');
   assert.match(line({ mode: 'work', overpass: { enabled: true, conductor_bypass: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin; .* run on overpass-agentic\/agentic-high/);
@@ -1006,14 +1011,25 @@ test('roles (#202): an invalid value on a known role keeps the plain refusal, wi
   assert.match(msg, /Fix that value in \.sterling\/config\.json/);
 });
 
-test('effort: unset roles sends no reasoningEffort (today exactly)', async () => {
+// Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles, GitHub #203):
+// was "unset roles sends no reasoningEffort". An unset role now sends its default effort (implementor
+// high, implementor-hard and sparring xhigh); reviewer and researcher have none and still send nothing.
+test('effort: an unset role sends its default effort; reviewer and researcher send none', async () => {
   const p = makeProject(ON);
   const s = await setup(p.dir);
   try {
     childSessions(s);
-    for (const [i, agent] of ['sterling/implementor', 'sterling/reviewer'].entries()) {
+    const lanes = [
+      ['sterling/implementor', IMPL_LANE, 'high'],
+      ['sterling/implementor-hard', { providerID: 'overpass', id: 'agentic-premium' }, 'xhigh'],
+      ['sterling/sparring', { providerID: 'overpass', id: 'agentic-premium-max' }, 'xhigh'],
+      ['sterling/scout', IMPL_LANE, 'high'],
+      ['sterling/reviewer', LANE, undefined],
+      ['sterling/researcher', LANE, undefined],
+    ];
+    for (const [i, [agent, model, effort]] of lanes.entries()) {
       await linkedLane(s, agent, `ses_child${i}`, `call_${i}`);
-      assert.equal(has(await request(s, agent, agent === 'sterling/implementor' ? IMPL_LANE : LANE, {}, `ses_child${i}`)), false, agent);
+      assert.equal((await request(s, agent, model, {}, `ses_child${i}`)).reasoningEffort, effort, agent);
     }
     assert.equal(has(await request(s, 'plan', LANE)), false);
     assert.equal(has(await request(s, 'sterling/conductor', LANE)), false);
@@ -1206,7 +1222,8 @@ test('effort: never set for another model, a bypass that kept an overpass/* mode
       ['plan', LANE, 'ses_plan', 'Plan'],
       ['sterling-maintenance-worker', LANE, 'ses_worker', 'the maintenance worker'],
       ['sterling/conductor', { providerID: 'overpass', id: 'agentic-conductor' }, 'ses_root', 'the conductor'],
-      ['sterling/scout', { providerID: 'overpass', id: 'agentic-fast' }, 'ses_child3', 'a role with a tier but no effort'],
+      // Changed 2026-10-24: the scout now has a default effort (high), so a request off its tier model is the case left.
+      ['sterling/scout', LANE, 'ses_child3', 'a role on a model that is not its tier model'],
       ['sterling/researcher', LANE, 'ses_child4', 'a role with no entry'],
     ];
     for (const [agent, model, sessionID, why] of cases) assert.equal(has(await request(s, agent, model, {}, sessionID)), false, why);
@@ -1252,6 +1269,38 @@ test('effort: an invalid overpass block or an unreadable config sends none and s
   }
 });
 
+// Ruled 2026-10-24 (option a, decision overpass-default-effort-per-role-high-for-agentic-auto-roles): the worker's
+// effort reaches its requests through the plugin's context hook inside the worker child, from the environment the
+// launch set (maintenance-worker-opencode.mjs opencodeEnv), never as `opencode run --variant`.
+test('effort: inside the maintenance worker child, the launch\'s effort applies to requests on exactly its model', async () => {
+  const p = makeProject(ON);
+  const env = { STERLING_MAINTENANCE_WORKER: '1', STERLING_MAINTENANCE_WORKER_EFFORT: 'high', STERLING_MAINTENANCE_WORKER_EFFORT_MODEL: 'overpass/agentic-auto' };
+  const s = await setup(p.dir, env);
+  try {
+    childSessions(s);
+    const worker = 'sterling-maintenance-worker';
+    assert.equal((await request(s, worker, IMPL_LANE, {}, 'ses_worker')).reasoningEffort, 'high', 'the worker route model gets the effort');
+    assert.equal((await request(s, worker, IMPL_LANE, { reasoningEffort: 'max' }, 'ses_worker')).reasoningEffort, 'high', 'it replaces an effort already there, as requestEffort does');
+    assert.equal(has(await request(s, worker, LANE, {}, 'ses_worker')), false, 'another model gets none');
+    assert.equal(has(await request(s, worker, { providerID: 'overpass-agentic', id: 'agentic-auto' }, {}, 'ses_worker')), false, 'another provider with the same id gets none');
+    assert.equal(has(await request(s, worker, undefined, {}, 'ses_worker')), false, 'no model, no effort');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+  assert.equal(overpass.workerRequestEffort({ STERLING_MAINTENANCE_WORKER_EFFORT: 'loud', STERLING_MAINTENANCE_WORKER_EFFORT_MODEL: 'overpass/agentic-auto' }, IMPL_LANE), null, 'an unknown effort is never sent');
+  assert.equal(overpass.workerRequestEffort({ STERLING_MAINTENANCE_WORKER_EFFORT: 'high' }, IMPL_LANE), null, 'no model in the environment, no effort');
+  // Outside the worker child the same variables mean nothing: the per-role path decides.
+  const q = makeProject({ mode: 'hobby' });
+  const t = await setup(q.dir, { STERLING_MAINTENANCE_WORKER_EFFORT: 'high', STERLING_MAINTENANCE_WORKER_EFFORT_MODEL: 'overpass/agentic-auto' });
+  try {
+    assert.equal(has(await request(t, 'sterling-maintenance-worker', IMPL_LANE, {}, 'ses_worker')), false);
+  } finally {
+    await t.cleanup();
+    q.cleanup();
+  }
+});
+
 test('roles: the maintenance worker has its own role, which no agent name reaches; laneRoute and dispatchPin ignore it', () => {
   const p = makeProject({ mode: 'work', overpass: { enabled: true, roles: { 'maintenance-worker': { tier: 'agentic-premium', effort: 'high' } } } });
   try {
@@ -1260,7 +1309,8 @@ test('roles: the maintenance worker has its own role, which no agent name reache
     // the worker's own agent name is not the role's key, so its session is not routed as a role
     assert.deepEqual(overpass.laneRoute(res, 'sterling-maintenance-worker'), { model: 'overpass/agentic-high' });
     // a dispatch of a subagent that is not a role still takes the lane model
-    assert.deepEqual(overpass.laneRoute(res, 'sterling/implementor'), { model: 'overpass/agentic-auto' });
+    // Changed 2026-10-24: the implementor's route now carries its default effort (high).
+    assert.deepEqual(overpass.laneRoute(res, 'sterling/implementor'), { model: 'overpass/agentic-auto', effort: 'high' });
     assert.equal(overpass.requestEffort(res, 'sterling-maintenance-worker', { providerID: 'overpass', id: 'agentic-premium' }, { bypassed: false }), null);
   } finally {
     p.cleanup();

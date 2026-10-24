@@ -651,8 +651,9 @@ export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 // role to an optional tier (the role's lanes run on <provider>/<tier> instead of the
 // role's default tier, DEFAULT_OVERPASS_ROLE_TIERS) and an optional client reasoning effort, which the OpenCode
 // plugin sends on each request of that role's lane. Effort is an exact override, not a
-// minimum: 'high' also replaces an xhigh the gateway would have picked. Both are off by
-// default. Plan is not a role here and keeps laneModel.
+// minimum: 'high' also replaces an xhigh the gateway would have picked. A role with no
+// effort set takes its default effort (DEFAULT_OVERPASS_ROLE_EFFORTS), which for some roles
+// is none. Plan is not a role here and keeps laneModel.
 // 'maintenance-worker' (board c97ddc97, user-ruled 2026-10-23, "Row + its own Overpass tier") is
 // the one role that is not a subagent: no installed agent has that name, so a dispatch never
 // reaches it through agentRole (the worker's own agent is WORKER_AGENT, 'sterling-maintenance-worker').
@@ -699,11 +700,29 @@ export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
   preflight: 'agentic-auto',
   'maintenance-worker': 'agentic-auto',
 };
+// Per-role default client efforts (decision overpass-default-effort-per-role-high-for-agentic-auto-roles,
+// user-ruled 2026-10-24 for GitHub #203): with no effort sent, the gateway used each
+// member's own default (max on some members), and a max-effort lane failed at OpenCode
+// compaction. The plugin cannot set a default per served model, because the gateway picks
+// the member, so the default is per role: high for the agentic-auto roles, xhigh for
+// implementor-hard and sparring, and none for reviewer and researcher, whose agentic-high
+// members carry their own effort and never served max. No default is ever max. An explicit
+// roles.<role>.effort still wins.
+export const DEFAULT_OVERPASS_ROLE_EFFORTS: Readonly<Partial<Record<OverpassRole, OverpassEffort>>> = {
+  implementor: 'high',
+  'implementor-hard': 'xhigh',
+  scout: 'high',
+  librarian: 'high',
+  sparring: 'xhigh',
+  preflight: 'high',
+  'maintenance-worker': 'high',
+};
 
 export interface OverpassRoleRoute {
   /** <provider>/<roles[role].tier ?? DEFAULT_OVERPASS_ROLE_TIERS[role]>. */
   model: string;
-  /** The client reasoning effort for the role's requests; absent when none is set. */
+  /** The client reasoning effort for the role's requests: roles[role].effort, else
+   *  DEFAULT_OVERPASS_ROLE_EFFORTS[role]; absent when neither is set. */
   effort?: OverpassEffort;
 }
 
@@ -767,7 +786,8 @@ function resolveOverpassRoles(raw: unknown, provider: string): Record<OverpassRo
     if (effort !== undefined && (typeof effort !== 'string' || !(OVERPASS_EFFORTS as readonly string[]).includes(effort))) {
       throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} — it must be one of ${OVERPASS_EFFORTS.join(', ')}`);
     }
-    out[role] = effort === undefined ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: effort as OverpassEffort };
+    const chosen = (effort as OverpassEffort | undefined) ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === undefined ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
   }
   return out;
 }

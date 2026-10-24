@@ -5664,6 +5664,15 @@ var DEFAULT_OVERPASS_ROLE_TIERS = {
   preflight: "agentic-auto",
   "maintenance-worker": "agentic-auto"
 };
+var DEFAULT_OVERPASS_ROLE_EFFORTS = {
+  implementor: "high",
+  "implementor-hard": "xhigh",
+  scout: "high",
+  librarian: "high",
+  sparring: "xhigh",
+  preflight: "high",
+  "maintenance-worker": "high"
+};
 var OverpassUnknownRoleError = class extends Error {
   role;
   constructor(role) {
@@ -5701,7 +5710,8 @@ function resolveOverpassRoles(raw, provider) {
     if (effort !== void 0 && (typeof effort !== "string" || !OVERPASS_EFFORTS.includes(effort))) {
       throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} \u2014 it must be one of ${OVERPASS_EFFORTS.join(", ")}`);
     }
-    out[role] = effort === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort };
+    const chosen = effort ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
   }
   return out;
 }
@@ -12556,6 +12566,13 @@ var isOverpassRole = (key) => OVERPASS_ROLES.includes(key);
 function overpassRoute(view, role) {
   return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
 }
+function overpassEffortText(view, role) {
+  const set = overpassRoute(view, role).effort;
+  if (set)
+    return ` ${set}`;
+  const fallback = DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+  return fallback ? ` ${fallback} (default)` : "";
+}
 function overpassTierOptions(view, role) {
   const known = [...OVERPASS_TIERS];
   const current = overpassRoute(view, role).tier;
@@ -12757,9 +12774,11 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
         out.push({ text: clip3(`  ${m}tier ${tier}`), kind: "option", selected: oi === selector.highlight });
       });
     } else if (selector.stage === "role_effort") {
+      const fallback = isOverpassRole(key) ? DEFAULT_OVERPASS_ROLE_EFFORTS[key] : void 0;
       OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
         const m = oi === selector.highlight ? "\u203A " : "  ";
-        out.push({ text: clip3(`  ${m}effort ${eff}`), kind: "option", selected: oi === selector.highlight });
+        const shown2 = eff === "default" ? `default (${fallback ?? "none sent"})` : eff;
+        out.push({ text: clip3(`  ${m}effort ${shown2}`), kind: "option", selected: oi === selector.highlight });
       });
     }
     return out;
@@ -12772,7 +12791,7 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
       const lines2 = [];
       if (overpassEffective) {
         const route2 = overpassRoute(overpassView, MAINTENANCE_WORKER_ROLE);
-        lines2.push({ text: clip3(`${marker2}Maintenance worker: ${route2.tier} (Overpass)${route2.effort ? ` ${route2.effort}` : ""}`), kind: "title", selected: i === ui.cursor });
+        lines2.push({ text: clip3(`${marker2}Maintenance worker: ${route2.tier} (Overpass)${overpassEffortText(overpassView, MAINTENANCE_WORKER_ROLE)}`), kind: "title", selected: i === ui.cursor });
         if (worker.unreadable !== void 0)
           lines2.push({ text: clip3(`    maintenance_worker unreadable: ${worker.unreadable}`), kind: "meta" });
         else if (saved)
@@ -12806,7 +12825,7 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     const label = key.charAt(0).toUpperCase() + key.slice(1);
     const route = overpassEffective && isOverpassRole(key) ? overpassRoute(overpassView, key) : void 0;
     const lines = route ? [
-      { text: clip3(`${marker}${label}: ${route.tier} (Overpass)${route.effort ? ` ${route.effort}` : ""}`), kind: "title", selected },
+      { text: clip3(`${marker}${label}: ${route.tier} (Overpass)${overpassEffortText(overpassView, key)}`), kind: "title", selected },
       // 'saved' is the user's config.models pair (decision
       // system-tab-agent-catalog-with-overpass-on-each-row-shows-the); the
       // installed-frontmatter drift check stays a separate marker
@@ -16652,8 +16671,13 @@ function openDashboard(storePath, options = {}) {
     try {
       const resolved = resolveOverpass(raw, { host: options.host ?? "terminal" });
       effective = resolved.effective;
-      if (effective)
-        roles = Object.fromEntries(Object.entries(resolved.roles).map(([role, route]) => [role, { tier: route.model.slice(route.model.indexOf("/") + 1), ...route.effort === void 0 ? {} : { effort: route.effort } }]));
+      const rawRoles = root.overpass?.roles;
+      if (effective) {
+        roles = Object.fromEntries(Object.entries(resolved.roles).map(([role, route]) => {
+          const explicit = rawRoles?.[role]?.effort;
+          return [role, { tier: route.model.slice(route.model.indexOf("/") + 1), ...typeof explicit === "string" ? { effort: explicit } : {} }];
+        }));
+      }
     } catch {
     }
     if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {

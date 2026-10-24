@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, WORKER_EFFORT, WORKER_MODEL, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
-import { buildOpencodeArgs, CLAUDE_TOOLS_LINE, OPENCODE_ALLOWED_TOOLS, OPENCODE_PROMPT_NOTE, OPENCODE_WORKER_AGENT, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
+import { buildOpencodeArgs, opencodeEnv, WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV, CLAUDE_TOOLS_LINE, OPENCODE_ALLOWED_TOOLS, OPENCODE_PROMPT_NOTE, OPENCODE_WORKER_AGENT, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -418,18 +418,28 @@ test('[overpass] the worker takes the maintenance-worker role\'s tier and effort
     assert.equal(seen.workerEffort, 'high');
     const tierOnly = pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw', roles: { 'maintenance-worker': { tier: 'agentic-low' } } } })[0];
     assert.equal(tierOnly.workerModel, 'acme-gw/agentic-low');
-    assert.equal(tierOnly.workerEffort, undefined, 'no effort set, none sent');
-    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true } })[0].workerModel, 'overpass/agentic-auto', 'the default role tier is agentic-auto (agentic-high until 2026-10-23)');
+    // Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): a tier-only entry now
+    // takes the role's default effort, high, instead of sending none.
+    assert.equal(tierOnly.workerEffort, 'high', 'no effort set, the role default high is sent');
+    const byDefault = pluginLaunch(fx, { mode: 'work', overpass: { enabled: true } })[0];
+    assert.equal(byDefault.workerModel, 'overpass/agentic-auto', 'the default role tier is agentic-auto (agentic-high until 2026-10-23)');
+    // The worker's default effort is high (DEFAULT_OVERPASS_ROLE_EFFORTS); it now travels in the child's
+    // environment, not as `opencode run --variant`, which OpenCode 2.1.2 refuses.
+    assert.equal(byDefault.workerEffort, 'high', 'the default worker launch carries effort high');
   } finally {
     fx.cleanup();
   }
 });
 
-test('[overpass] the role\'s effort travels as the OpenCode run\'s --variant, through eligible.json, and is absent without one', () => {
-  const args = (variant) => buildOpencodeArgs({ prompt: 'p', model: 'overpass/agentic-premium', variant });
-  assert.deepEqual(args('high').slice(-3), ['--variant', 'high', 'p']);
-  assert.ok(!args(null).includes('--variant'));
-  assert.ok(!buildOpencodeArgs({ prompt: 'p', model: 'm' }).includes('--variant'));
+// Changed 2026-10-24 (ruled option a): was "the role's effort travels as the OpenCode run's --variant". OpenCode
+// 2.1.2's `run` refuses --variant (it prints its usage and exits 1), so the effort now rides in the child's
+// environment with the model it applies to, and the plugin in the child sets it on each request.
+test('[overpass] the role\'s effort travels in the worker child\'s environment, through eligible.json, never as --variant, and is absent without one', async () => {
+  assert.ok(!buildOpencodeArgs({ prompt: 'p', model: 'overpass/agentic-premium', variant: 'high' }).includes('--variant'), 'a stale variant argument is ignored');
+  assert.deepEqual(opencodeEnv({ root: '/r', config: { model: 'overpass/agentic-premium' }, effort: 'high' })[WORKER_EFFORT_ENV], 'high');
+  assert.deepEqual(opencodeEnv({ root: '/r', config: { model: 'overpass/agentic-premium' }, effort: 'high' })[WORKER_EFFORT_MODEL_ENV], 'overpass/agentic-premium');
+  assert.ok(!Object.hasOwn(opencodeEnv({ root: '/r', config: { model: 'm' } }), WORKER_EFFORT_ENV), 'no effort, no variable');
+  assert.ok(!Object.hasOwn(opencodeEnv({ root: '/r', config: {}, effort: 'high' }), WORKER_EFFORT_ENV), 'no model, no variable');
   const fx = fixture();
   try {
     const cfg = { maintenance_worker: { enabled: true } };
@@ -437,10 +447,17 @@ test('[overpass] the role\'s effort travels as the OpenCode run\'s --variant, th
     const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
     assert.equal(e.opencode_variant, 'high');
     assert.equal(e.opencode_model, 'overpass/agentic-premium');
+    // the run itself: no --variant on the argv, the effort and its model in the child's environment
+    const child = fakeOpencode([text('{"verdict":"none","reason":"x"}')]);
+    await runWorker({ ...opencodeRun(fx, [ITEM], { model: 'overpass/agentic-premium' }), opencodeVariant: 'high', spawn: child.fn });
+    const [call] = child.calls;
+    assert.ok(!call.args.includes('--variant'), call.args.join(' '));
+    assert.equal(call.opts.env[WORKER_EFFORT_ENV], 'high');
+    assert.equal(call.opts.env[WORKER_EFFORT_MODEL_ENV], 'overpass/agentic-premium');
     rmSync(fx.paths.lock, { force: true });
     rmSync(fx.paths.lastLaunch, { force: true });
     launch(fx, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: cfg, workerModel: 'overpass/agentic-high', spawn: fakeSpawn().fn });
-    assert.equal(JSON.parse(readFileSync(fx.paths.eligible, 'utf8')).opencode_variant, undefined, 'a role with no effort sends no variant');
+    assert.equal(JSON.parse(readFileSync(fx.paths.eligible, 'utf8')).opencode_variant, undefined, 'a launch with no effort records none');
   } finally {
     fx.cleanup();
   }

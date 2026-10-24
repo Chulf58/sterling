@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, resolveOverpass, resetOverpassDefaults, OVERPASS_DEFAULTS_MIGRATION_ID, migrateRetiredModelKeys, unreadConfigKeys, MAINTENANCE_WORKER_ROLE, DEFAULT_OVERPASS_ROLE_TIERS, OVERPASS_ROLES, OVERPASS_TIERS, OVERPASS_TIER_RE, judgeProjectMode, ProjectModeError } from '../index.js';
+import { parseConfig, resolveOverpass, resetOverpassDefaults, OVERPASS_DEFAULTS_MIGRATION_ID, migrateRetiredModelKeys, unreadConfigKeys, MAINTENANCE_WORKER_ROLE, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OVERPASS_EFFORTS, OVERPASS_ROLES, OVERPASS_TIERS, OVERPASS_TIER_RE, judgeProjectMode, ProjectModeError } from '../index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const shippedRaw = (): Record<string, unknown> => JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
@@ -46,17 +46,19 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
     provider: 'overpass',
     conductorModel: 'overpass/agentic-conductor',
     laneModel: 'overpass/agentic-high',
+    // Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): the
+    // roles with a default effort now carry it; reviewer and researcher carry none.
     roles: {
-      implementor: { model: 'overpass/agentic-auto' },
-      'implementor-hard': { model: 'overpass/agentic-premium' },
+      implementor: { model: 'overpass/agentic-auto', effort: 'high' },
+      'implementor-hard': { model: 'overpass/agentic-premium', effort: 'xhigh' },
       researcher: { model: 'overpass/agentic-high' },
-      scout: { model: 'overpass/agentic-auto' },
+      scout: { model: 'overpass/agentic-auto', effort: 'high' },
       reviewer: { model: 'overpass/agentic-high' },
-      librarian: { model: 'overpass/agentic-auto' },
-      sparring: { model: 'overpass/agentic-premium-max' },
-      preflight: { model: 'overpass/agentic-auto' },
+      librarian: { model: 'overpass/agentic-auto', effort: 'high' },
+      sparring: { model: 'overpass/agentic-premium-max', effort: 'xhigh' },
+      preflight: { model: 'overpass/agentic-auto', effort: 'high' },
       // the maintenance worker's own role (board c97ddc97), not a subagent
-      'maintenance-worker': { model: 'overpass/agentic-auto' },
+      'maintenance-worker': { model: 'overpass/agentic-auto', effort: 'high' },
     },
   });
 });
@@ -163,17 +165,19 @@ test('overpass: a non-boolean conductor_bypass throws, naming the key and the va
 // The implementor default moved from agentic-premium to agentic-auto (user-ruled 2026-10-23, "the regular
 // implementer should run angentic-auto"); implementor-hard took agentic-premium.
 // scout, librarian, preflight and maintenance-worker moved to agentic-auto (user-ruled 2026-10-23, 'Defaults + reset + bypass ON').
-test('overpass roles: unset gives the per-role default tier and no effort (implementor, scout, librarian, preflight and maintenance-worker auto, implementor-hard premium, sparring premium-max, researcher and reviewer high)', () => {
+// Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): unset now
+// gives each role's default effort too (title and expectations), not "no effort".
+test('overpass roles: unset gives the per-role default tier and default effort (implementor, scout, librarian, preflight and maintenance-worker auto, implementor-hard premium, sparring premium-max, researcher and reviewer high)', () => {
   const expected = {
-    implementor: { model: 'overpass/agentic-auto' },
-    'implementor-hard': { model: 'overpass/agentic-premium' },
+    implementor: { model: 'overpass/agentic-auto', effort: 'high' },
+    'implementor-hard': { model: 'overpass/agentic-premium', effort: 'xhigh' },
     researcher: { model: 'overpass/agentic-high' },
-    scout: { model: 'overpass/agentic-auto' },
+    scout: { model: 'overpass/agentic-auto', effort: 'high' },
     reviewer: { model: 'overpass/agentic-high' },
-    librarian: { model: 'overpass/agentic-auto' },
-    sparring: { model: 'overpass/agentic-premium-max' },
-    preflight: { model: 'overpass/agentic-auto' },
-    'maintenance-worker': { model: 'overpass/agentic-auto' },
+    librarian: { model: 'overpass/agentic-auto', effort: 'high' },
+    sparring: { model: 'overpass/agentic-premium-max', effort: 'xhigh' },
+    preflight: { model: 'overpass/agentic-auto', effort: 'high' },
+    'maintenance-worker': { model: 'overpass/agentic-auto', effort: 'high' },
   };
   for (const cfg of [on(), on({ roles: {} }), on({ roles: { reviewer: {} } }), on({ roles: { implementor: {} } }), on({ roles: { sparring: {} } })]) {
     const r = resolveOverpass(cfg, { host: 'opencode' });
@@ -184,7 +188,8 @@ test('overpass roles: unset gives the per-role default tier and no effort (imple
 
 test('overpass roles: the premium tiers are accepted as an explicit tier and an explicit tier replaces the role default', () => {
   const r = resolveOverpass(on({ roles: { scout: { tier: 'agentic-premium-max' }, researcher: { tier: 'agentic-premium' }, reviewer: { tier: 'agentic-premium-max' }, sparring: { tier: 'agentic-high', effort: 'high' }, implementor: { tier: 'agentic-premium-max', effort: 'max' } } }), { host: 'opencode' });
-  assert.deepEqual(r.roles.scout, { model: 'overpass/agentic-premium-max' });
+  // Changed 2026-10-24: an explicit tier keeps the role's default effort (scout: high).
+  assert.deepEqual(r.roles.scout, { model: 'overpass/agentic-premium-max', effort: 'high' });
   assert.deepEqual(r.roles.researcher, { model: 'overpass/agentic-premium' });
   assert.deepEqual(r.roles.reviewer, { model: 'overpass/agentic-premium-max' });
   assert.deepEqual(r.roles.sparring, { model: 'overpass/agentic-high', effort: 'high' });
@@ -195,7 +200,9 @@ test('overpass roles: a tier and an effort apply to that role only, under the co
   const r = resolveOverpass(on({ provider: 'overpass-agentic', roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' } } }), { host: 'opencode' });
   assert.deepEqual(r.roles.reviewer, { model: 'overpass-agentic/agentic-max', effort: 'xhigh' });
   assert.deepEqual(r.roles.scout, { model: 'overpass-agentic/agentic-auto', effort: 'low' });
-  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-auto' });
+  // Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): a role
+  // with no effort set now takes its default effort, high for the implementor.
+  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-auto', effort: 'high' });
   assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan keeps the default lane model');
 });
 
@@ -206,7 +213,8 @@ test('overpass roles: preflight is a role that defaults to agentic-auto and take
   assert.equal(DEFAULT_OVERPASS_ROLE_TIERS.preflight, 'agentic-auto');
   const r = resolveOverpass(on({ roles: { preflight: { tier: 'agentic-low', effort: 'low' } } }), { host: 'opencode' });
   assert.deepEqual(r.roles.preflight, { model: 'overpass/agentic-low', effort: 'low' });
-  assert.deepEqual(r.roles.scout, { model: 'overpass/agentic-auto' }, 'the scout keeps its own tier');
+  // Changed 2026-10-24: the scout's default effort (high) now rides with its own tier.
+  assert.deepEqual(r.roles.scout, { model: 'overpass/agentic-auto', effort: 'high' }, 'the scout keeps its own tier and default effort');
 });
 
 // Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: implementor-hard is its
@@ -216,10 +224,51 @@ test('overpass roles: implementor-hard defaults to agentic-premium, the implemen
   assert.equal(DEFAULT_OVERPASS_ROLE_TIERS.implementor, 'agentic-auto');
   const r = resolveOverpass(on({ roles: { 'implementor-hard': { tier: 'agentic-premium-max', effort: 'xhigh' } } }), { host: 'opencode' });
   assert.deepEqual(r.roles['implementor-hard'], { model: 'overpass/agentic-premium-max', effort: 'xhigh' });
-  assert.deepEqual(r.roles.implementor, { model: 'overpass/agentic-auto' }, 'the implementor keeps its own tier');
+  // Changed 2026-10-24: the implementor's default effort (high) now rides with its own tier.
+  assert.deepEqual(r.roles.implementor, { model: 'overpass/agentic-auto', effort: 'high' }, 'the implementor keeps its own tier and default effort');
   const s = resolveOverpass(on({ roles: { implementor: { tier: 'agentic-high' } } }), { host: 'opencode' });
-  assert.deepEqual(s.roles['implementor-hard'], { model: 'overpass/agentic-premium' }, 'an implementor tier does not move implementor-hard');
+  // Changed 2026-10-24: implementor-hard's default effort (xhigh) now rides with its own tier.
+  assert.deepEqual(s.roles['implementor-hard'], { model: 'overpass/agentic-premium', effort: 'xhigh' }, 'an implementor tier does not move implementor-hard');
   assert.throws(() => resolveOverpass(on({ roles: { implementor_hard: {} } }), { host: 'opencode' }), /unknown role "implementor_hard"/);
+});
+
+// Decision overpass-default-effort-per-role-high-for-agentic-auto-roles (user-ruled 2026-10-24, GitHub #203).
+test('overpass roles: a role with no effort set takes its default effort; reviewer and researcher send none', () => {
+  const r = resolveOverpass(on({}), { host: 'opencode' });
+  const efforts = Object.fromEntries(OVERPASS_ROLES.map((role) => [role, r.roles[role].effort]));
+  assert.deepEqual(efforts, {
+    implementor: 'high',
+    'implementor-hard': 'xhigh',
+    researcher: undefined,
+    scout: 'high',
+    reviewer: undefined,
+    librarian: 'high',
+    sparring: 'xhigh',
+    preflight: 'high',
+    'maintenance-worker': 'high',
+  });
+  assert.ok(!Object.hasOwn(r.roles.reviewer, 'effort'), 'no effort key at all for a role with no default');
+  assert.ok(!Object.hasOwn(r.roles.researcher, 'effort'));
+});
+
+test('overpass roles: no default effort is ever max, and each is a known effort', () => {
+  for (const role of OVERPASS_ROLES) {
+    const effort = DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    if (effort === undefined) continue;
+    assert.notEqual(effort, 'max', role);
+    assert.ok((OVERPASS_EFFORTS as readonly string[]).includes(effort), role);
+    assert.notEqual(resolveOverpass(on({}), { host: 'opencode' }).roles[role].effort, 'max', role);
+  }
+  assert.deepEqual(Object.keys(DEFAULT_OVERPASS_ROLE_EFFORTS).filter((k) => !(OVERPASS_ROLES as readonly string[]).includes(k)), [], 'every key is a role');
+});
+
+test('overpass roles: an explicit effort overrides the role default, and a role with no default takes one too', () => {
+  const r = resolveOverpass(on({ roles: { implementor: { effort: 'low' }, 'implementor-hard': { effort: 'medium' }, sparring: { effort: 'max' }, reviewer: { effort: 'xhigh' } } }), { host: 'opencode' });
+  assert.equal(r.roles.implementor.effort, 'low', 'an explicit effort below the default wins');
+  assert.equal(r.roles['implementor-hard'].effort, 'medium');
+  assert.equal(r.roles.sparring.effort, 'max', 'an explicit max is the project\'s choice and still allowed');
+  assert.equal(r.roles.reviewer.effort, 'xhigh', 'a role with no default takes an explicit effort');
+  assert.equal(r.roles.scout.effort, 'high', 'untouched roles keep their default');
 });
 
 test('overpass roles: every effort level is accepted', () => {
