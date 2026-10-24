@@ -7,7 +7,8 @@
 //     any model the call named (axis.mjs calls dispatchPin);
 //   - the request effort: while effective, a request of a role with an effort set, on
 //     exactly that role's lane model, carries it as options.reasoningEffort (requestEffort,
-//     set from server.mjs's context hook);
+//     set from server.mjs's context hook); inside the maintenance worker's child the
+//     effort its launch passed in the environment applies instead (workerRequestEffort);
 //   - the opencode.json overlay: while effective, agent.plan.model is the lane model
 //     and, unless the conductor is bypassed, agent["sterling/conductor"].model is the
 //     conductor model. A `variant` on those entries is taken out while the tier model
@@ -29,7 +30,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { OverpassUnknownRoleError, resolveOverpass } from '@sterling/schemas';
+import { OVERPASS_EFFORTS, OverpassUnknownRoleError, resolveOverpass } from '@sterling/schemas';
+import { WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV } from '../../../scripts/hooks/lib/maintenance-worker-opencode.mjs';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, sterlingRootFrom, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
 import { readCopyVersion } from '../../../scripts/lib/sterling-roots.mjs';
@@ -179,6 +181,22 @@ export function requestEffort(res, agent, model, dispatched) {
   if (!route?.effort) return null;
   if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
   return `${model.providerID}/${model.id}` === route.model ? route.effort : null;
+}
+
+/**
+ * The client reasoning effort for one model request inside the maintenance worker's
+ * `opencode run` child, or null. The worker launch decides the effort (the Overpass
+ * maintenance-worker role's, or the one pinned for a chained run) and passes it with its
+ * model in the child's environment (maintenance-worker-opencode.mjs opencodeEnv). Like
+ * requestEffort, it applies only to a request on exactly that model, and only a known
+ * effort level is sent.
+ */
+export function workerRequestEffort(env, model) {
+  const effort = env?.[WORKER_EFFORT_ENV];
+  const routeModel = env?.[WORKER_EFFORT_MODEL_ENV];
+  if (typeof effort !== 'string' || !OVERPASS_EFFORTS.includes(effort) || typeof routeModel !== 'string' || !routeModel) return null;
+  if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
+  return `${model.providerID}/${model.id}` === routeModel ? effort : null;
 }
 
 /**

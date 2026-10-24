@@ -1556,8 +1556,9 @@ export async function runWorker(opts) {
       const model = opts.opencodeModel ?? eligible?.opencode_model ?? null;
       if (typeof model !== 'string' || !model.trim()) throw new Error(OPENCODE_MODEL_UNSET);
       const config = buildOpencodeConfig({ mcpConfig, model });
-      const variant = opts.opencodeVariant ?? eligible?.opencode_variant ?? null;
-      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model, variant }), env: opencodeEnv({ root: opts.root, config }) };
+      // The Overpass role's effort rides in the child's environment (opencodeEnv), never as --variant.
+      const effort = opts.opencodeVariant ?? eligible?.opencode_variant ?? null;
+      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model }), env: opencodeEnv({ root: opts.root, config, effort }) };
     }
     if (host !== 'claude') throw new Error(`unknown runner host '${host}'`);
     return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };

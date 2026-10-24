@@ -76,8 +76,10 @@ test('worker row, Overpass off, model set: the title shows maintenance_worker.op
   assert.equal(texts(snapshot(), st({ cursor: WORKER_CURSOR }))[0].startsWith('› '), true, 'the cursor marker lands on it');
 });
 
+// Changed 2026-10-24 (ruled option a): the worker now has a default effort, high, sent through its child's
+// environment, so its Overpass title shows 'high (default)'.
 test('worker row, Overpass on: its tier with (Overpass) and effort, the saved model dimmed as saved OpenCode, no claude CLI line', () => {
-  assert.deepEqual(texts(snapshot({ overpass: on() })), ['  Maintenance worker: agentic-auto (Overpass)']);
+  assert.deepEqual(texts(snapshot({ overpass: on() })), ['  Maintenance worker: agentic-auto (Overpass) high (default)']);
   const set = snapshot({ overpass: on({ 'maintenance-worker': { tier: 'agentic-premium', effort: 'high' } }), maintenanceWorker: { opencodeModel: 'openai/gpt-6.1-sol' } });
   assert.deepEqual(texts(set), ['  Maintenance worker: agentic-premium (Overpass) high', '    saved OpenCode: openai/gpt-6.1-sol']);
   assert.equal(workerRow(set).lines[1].kind, 'meta', 'dimmed like the saved line');
@@ -208,12 +210,14 @@ test('controller: an unreadable or non-object config reads as unreadable, never 
   assert.deepEqual(await unreadableOf({}), { opencodeModel: null });
 });
 
+// Changed 2026-10-24 (ruled option a): the worker now has a default effort, high, sent through its child's
+// environment, so its Overpass title shows 'high (default)'.
 test('worker row: an unreadable config renders as config unreadable (no "not set", no claude CLI claim); Overpass on keeps the tier and adds the problem; the model picker will not open', () => {
   const unreadable = { opencodeModel: null, unreadable: 'maintenance_worker is 5, not an object' };
   const off = texts(snapshot({ maintenanceWorker: unreadable }));
   assert.deepEqual(off, ['  Maintenance worker: config unreadable: maintenance_worker is 5, not an object']);
   assert.ok(!off.join('\n').includes('not set'));
-  assert.deepEqual(texts(snapshot({ overpass: on(), maintenanceWorker: unreadable })), ['  Maintenance worker: agentic-auto (Overpass)', '    maintenance_worker unreadable: maintenance_worker is 5, not an object']);
+  assert.deepEqual(texts(snapshot({ overpass: on(), maintenanceWorker: unreadable })), ['  Maintenance worker: agentic-auto (Overpass) high (default)', '    maintenance_worker unreadable: maintenance_worker is 5, not an object']);
   const r = drive(snapshot({ maintenanceWorker: unreadable }), st({ cursor: WORKER_CURSOR }), ['ENTER']);
   assert.equal(r.ui.selector, undefined);
   assert.deepEqual(r.effects, []);

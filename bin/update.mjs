@@ -6130,7 +6130,8 @@ function resolveOverpassRoles(raw, provider) {
     if (effort !== void 0 && (typeof effort !== "string" || !OVERPASS_EFFORTS.includes(effort))) {
       throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} \u2014 it must be one of ${OVERPASS_EFFORTS.join(", ")}`);
     }
-    out[role] = effort === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort };
+    const chosen = effort ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
   }
   return out;
 }
@@ -6339,7 +6340,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6889,6 +6890,15 @@ var init_config = __esm({
       preflight: "agentic-auto",
       "maintenance-worker": "agentic-auto"
     };
+    DEFAULT_OVERPASS_ROLE_EFFORTS = {
+      implementor: "high",
+      "implementor-hard": "xhigh",
+      scout: "high",
+      librarian: "high",
+      sparring: "xhigh",
+      preflight: "high",
+      "maintenance-worker": "high"
+    };
     OverpassUnknownRoleError = class extends Error {
       role;
       constructor(role) {
@@ -7146,6 +7156,7 @@ __export(dist_exports, {
   BUILD_ID_FILE: () => BUILD_ID_FILE,
   CLAUDE_MODEL_ID_RE: () => CLAUDE_MODEL_ID_RE,
   DEFAULT_OVERPASS_PROVIDER: () => DEFAULT_OVERPASS_PROVIDER,
+  DEFAULT_OVERPASS_ROLE_EFFORTS: () => DEFAULT_OVERPASS_ROLE_EFFORTS,
   DEFAULT_OVERPASS_ROLE_TIERS: () => DEFAULT_OVERPASS_ROLE_TIERS,
   DEFAULT_OVERPASS_TIER: () => DEFAULT_OVERPASS_TIER,
   DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS: () => DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS,

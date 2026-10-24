@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -290,6 +290,15 @@ const isOverpassRole = (key: string): key is OverpassRole => (OVERPASS_ROLES as 
 /** The tier and effort a role runs on while Overpass is effective. */
 function overpassRoute(view: OverpassView, role: OverpassRole): { tier: string; effort?: string } {
   return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
+}
+
+/** The effort text of a role's Overpass title: the config's effort, else the role's default
+ *  effort marked '(default)', else nothing (no effort is sent). */
+function overpassEffortText(view: OverpassView, role: OverpassRole): string {
+  const set = overpassRoute(view, role).effort;
+  if (set) return ` ${set}`;
+  const fallback = DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+  return fallback ? ` ${fallback} (default)` : '';
 }
 
 /** The tier picker's options: the Overpass tiers the user listed (OVERPASS_TIERS, in that
@@ -1025,9 +1034,12 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
         out.push({ text: clip(`  ${m}tier ${tier}`), kind: 'option', selected: oi === selector.highlight });
       });
     } else if (selector.stage === 'role_effort') {
+      // 'default' clears the config's effort; the role's default effort, when it has one, applies then
+      const fallback = isOverpassRole(key) ? DEFAULT_OVERPASS_ROLE_EFFORTS[key] : undefined;
       OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
         const m = oi === selector.highlight ? '› ' : '  ';
-        out.push({ text: clip(`  ${m}effort ${eff}`), kind: 'option', selected: oi === selector.highlight });
+        const shown = eff === 'default' ? `default (${fallback ?? 'none sent'})` : eff;
+        out.push({ text: clip(`  ${m}effort ${shown}`), kind: 'option', selected: oi === selector.highlight });
       });
     }
     return out;
@@ -1043,7 +1055,7 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
       const lines: SystemLine[] = [];
       if (overpassEffective) {
         const route = overpassRoute(overpassView, MAINTENANCE_WORKER_ROLE);
-        lines.push({ text: clip(`${marker}Maintenance worker: ${route.tier} (Overpass)${route.effort ? ` ${route.effort}` : ''}`), kind: 'title', selected: i === ui.cursor });
+        lines.push({ text: clip(`${marker}Maintenance worker: ${route.tier} (Overpass)${overpassEffortText(overpassView, MAINTENANCE_WORKER_ROLE)}`), kind: 'title', selected: i === ui.cursor });
         if (worker.unreadable !== undefined) lines.push({ text: clip(`    maintenance_worker unreadable: ${worker.unreadable}`), kind: 'meta' });
         else if (saved) lines.push({ text: clip(`    saved OpenCode: ${saved}`), kind: 'meta' });
       } else if (worker.unreadable !== undefined) {
@@ -1088,7 +1100,7 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     const route = overpassEffective && isOverpassRole(key) ? overpassRoute(overpassView, key) : undefined;
     const lines: SystemLine[] = route
       ? [
-          { text: clip(`${marker}${label}: ${route.tier} (Overpass)${route.effort ? ` ${route.effort}` : ''}`), kind: 'title', selected },
+          { text: clip(`${marker}${label}: ${route.tier} (Overpass)${overpassEffortText(overpassView, key as OverpassRole)}`), kind: 'title', selected },
           // 'saved' is the user's config.models pair (decision
           // system-tab-agent-catalog-with-overpass-on-each-row-shows-the); the
           // installed-frontmatter drift check stays a separate marker
