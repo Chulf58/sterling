@@ -348,6 +348,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'Each ends with `ESCALATE:` naming what it could not settle, or `none`.',
     after: 'Each ends with `ESCALATE:` naming what it could not settle, or `none`.\n- **preflight** — read-only knowledge pre-flight, with no edit, shell or store-write grant (decision `knowledge-pre-flight-agent-sterling-preflight-a-read-only-la`). Dispatch it before a design settles, before a question goes to the user, and before a fan-out, to check the premise the lanes share; not before every lane, since lanes are already staged by H22 and H20, and no hook fires it. The brief carries the proposed action, its alternatives or the question\'s options, and the paths. It runs the store\'s pre-write check in the store\'s vocabulary, opens every match, and returns a first line of `complete` or `blocked`, then a verdict (`governed`, `ungoverned`, `contradictory` or `inconclusive`), the binding records as `slug (id8)` with verbatim extracts, prior answers and coverage gaps, and ends with `ESCALATE:`. Its digest is a lookup, never the source: you still open the binding records yourself before a consequential choice, and `inconclusive` means search again, not that nothing governs.',
   },
+  {
+    commit: 'sterling/regrill-rule',
+    date: '2026-10-24',
+    reason: "new paragraph after the intake-grill paragraph: grill again when a finding changes an ask's premise (decision grill-again-when-a-finding-changes-an-ask-s-premise-restate; user-ruled 2026-10-24, \"Add it (Recommended)\")",
+    before: 'you name that choice before starting it (decision `sterling-grill-skill-design`).\n',
+    after: "you name that choice before starting it (decision `sterling-grill-skill-design`).\n\nGrill again when a finding changes an ask's premise. When research shows the ask cannot be met as the user framed it (the thing is 'by design', the fix 'we have' does not exist, the place to change is elsewhere), the next question restates the user's goal in their words and asks whether it still stands, before any option built on the finding. Every option list leads with a way to keep the user's goal. Before recommending any artifact as a fix, state in the question what changes at runtime once it merges; if the answer is 'nothing', say so. (User-raised 2026-10-24, after a docs-only Overpass PR was offered as the fix and the user's goal that their own effort wins was never asked; decision `grill-again-when-a-finding-changes-an-ask-s-premise-restate`.)\n",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
