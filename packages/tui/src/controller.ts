@@ -478,8 +478,19 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     try {
       const resolved = resolveOverpass(raw, { host: options.host ?? 'terminal' });
       effective = resolved.effective;
-      // the tier is the model reference after '<provider>/' (a provider id holds no '/')
-      if (effective) roles = Object.fromEntries(Object.entries(resolved.roles).map(([role, route]) => [role, { tier: route.model.slice(route.model.indexOf('/') + 1), ...(route.effort === undefined ? {} : { effort: route.effort }) }]));
+      // the tier is the model reference after '<provider>/' (a provider id holds no '/');
+      // the effort is only the one config.overpass.roles sets (the resolver accepted it), so a
+      // role's default effort (DEFAULT_OVERPASS_ROLE_EFFORTS) is shown as the default and never
+      // carried into a tier edit's write
+      const rawRoles = (root.overpass as { roles?: Record<string, { effort?: unknown }> } | undefined)?.roles;
+      if (effective) {
+        roles = Object.fromEntries(
+          Object.entries(resolved.roles).map(([role, route]) => {
+            const explicit = rawRoles?.[role]?.effort;
+            return [role, { tier: route.model.slice(route.model.indexOf('/') + 1), ...(typeof explicit === 'string' ? { effort: explicit } : {}) }];
+          }),
+        );
+      }
     } catch {
       // a config the resolver refuses is not effective; the rows say which field is invalid
     }

@@ -73,7 +73,7 @@ import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { modelListItems } from './dispatch-model.mjs';
-import { convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, requestEffort } from './overpass.mjs';
+import { convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, requestEffort, workerRequestEffort } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
@@ -340,6 +340,15 @@ export function createSterlingServer(deps = {}) {
      */
     async function applyRequestEffort(root, input) {
       if (!input || typeof input !== 'object') return;
+      // Inside the maintenance worker's child the launch already decided the effort and passed
+      // it in the environment (workerRequestEffort); the child never resolves its own.
+      if (inWorkerChild(env)) {
+        const effort = workerRequestEffort(env, input.model);
+        if (!effort) return;
+        if (!input.options || typeof input.options !== 'object') input.options = {};
+        input.options.reasoningEffort = effort;
+        return;
+      }
       let read;
       try {
         read = dispatchOverpass(root);
