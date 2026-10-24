@@ -1011,7 +1011,7 @@ const UNRELATED_WORDING = new Map([
   ['- **Instruction-file proposals replace memory.**', ['- **Turn off memory profiling.** Ours.']],
   [LINT_LEAD, ['- **Lint config lives next to the tests.** Ours.']],
   [WRITE_PLAINLY_LEAD, ['- **Write plain SQL migrations.** Ours.']],
-  [COPY_LEAD, ['- **Copy edited text into the CMS.** Ours.']],
+  [COPY_LEAD, ['- **Copy edited text into the CMS.** Ours.', '- **Respect copyright rules for copied text.** Cite the source.', '- **Never copy secrets to the clipboard.** Ours.']],
   [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.']],
   [FINISH_LEAD, ['- **Never stop the dev server with unfinished migrations pending.** Ours.', '- **Glossy finish for buttons.** Ours.']],
   [RESOLVE_LEAD, ['- **Resolve thread pool starvation first.** Ours.']],
