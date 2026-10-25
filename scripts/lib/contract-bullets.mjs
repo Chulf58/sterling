@@ -95,7 +95,7 @@ export const TARGET_LEADS = [
   // 2026-10-10: every subagent starts in the background (user-ruled 2026-10-09 and restated
   // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
   // plain-writing bullet it follows in the template.
-  '- **Start every subagent in the background.**',
+  '- **Start every subagent and every long shell command in the background.**',
   // 2026-10-12: finish a started task before ending a turn (GitHub issue #79), and resolve a
   // review thread once its finding is handled (GitHub issues #42 and #78; user-ruled through the
   // question form, "AGENTS.md + conductor"). Both are NEW to every sibling, so they arrive through
@@ -148,9 +148,9 @@ export const INSERT_AFTER = new Map([
   ['- **Lint and tests before done.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Write plainly; no AI tells.**', ['- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Text meant to be copied goes between two horizontal rules.**', ['- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Start every subagent in the background.**', ['- **Text meant to be copied goes between two horizontal rules.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Finish what you start.**', ['- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Resolve a review thread once its finding is handled.**', ['- **Finish what you start.**', '- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Start every subagent and every long shell command in the background.**', ['- **Text meant to be copied goes between two horizontal rules.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Finish what you start.**', ['- **Start every subagent and every long shell command in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Resolve a review thread once its finding is handled.**', ['- **Finish what you start.**', '- **Start every subagent and every long shell command in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ["- **Solve, don't board.**", ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ['- **Close-on-commit: a commit that fulfils a board item pays it**', ["- **Solve, don't board.**"]],
@@ -178,6 +178,9 @@ export const RENAMED_LEADS = new Map([
   ['- **Close-on-commit: a commit that fulfils a board item pays it**', ['- **Close-on-commit:**']],
   // 2026-10-10: the auto-report bullet's lead said "stamp the version" while the rule is to file the issue.
   ["- **Report Sterling defects to its GitHub issues without asking.**", ["- **Stamp Sterling's version when reporting on Sterling.**"]],
+  // 2026-10-25: the background bullet now covers long shell commands too (finding
+  // why-do-customer-hub-ch-conductors-sit-waiting-while-shells-r), so its lead gained the shells.
+  ['- **Start every subagent and every long shell command in the background.**', ['- **Start every subagent in the background.**']],
 ]);
 
 // Subject markers (decision stamp-contract-skips-insert-when-project-bullet-covers-the-rule,
@@ -202,7 +205,7 @@ export const SUBJECT_MARKERS = new Map([
   // Both a copy/paste context AND a formatting context at once: each alone matches unrelated bullets
   // ('Use horizontal rules to separate sections', 'Redact secrets from text intended to be copied').
   ['- **Text meant to be copied goes between two horizontal rules.**', [/^(?=.*\b(copied|pasted?|copy[- ]friendly)\b)(?=.*(\bhorizontal rules?\b|-{3}))/i]],
-  ['- **Start every subagent in the background.**', [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
+  ['- **Start every subagent and every long shell command in the background.**', [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
   ['- **Finish what you start.**', [
     /\bfinish what you start\b/i,
     /^(?=.*\b(never|don'?t|do not)\b)(?=.*\b(stop|end|quit)\b)(?=.*\b(work|tasks?)\b)(?=.*\b(half|unfinished|incomplete)\b)/i,

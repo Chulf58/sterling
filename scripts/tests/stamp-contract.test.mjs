@@ -696,17 +696,37 @@ test('stamp-contract --apply-inserts: a missing tracked bullet is inserted too',
 const LINT_LEAD = '- **Lint and tests before done.**';
 const WRITE_PLAINLY_LEAD = '- **Write plainly; no AI tells.**';
 const COPY_LEAD = '- **Text meant to be copied goes between two horizontal rules.**';
-const BACKGROUND_LEAD = '- **Start every subagent in the background.**';
+const BACKGROUND_LEAD = '- **Start every subagent and every long shell command in the background.**';
+const OLD_BACKGROUND_LEAD = '- **Start every subagent in the background.**';
 const OLD_NAMING = '- **Canonical naming:** one name per concept, from the registries; no dead terms.';
 const OLD_EXIT_CODE = "- **A toolchain-invoked process's exit code can read as a crash when the real cause is a missing required flag.** Some test/build runners exit with an unfamiliar non-zero code when a required headless/CI-mode flag is omitted, rather than failing informatively — check the runner's own headless/CI documentation before treating a red run as a real regression.";
 
 test('the AGENTS.md template and this repo\'s AGENTS.md both tell agents to start every subagent in the background', () => {
   for (const file of [join('templates', 'target-agents-md.md'), 'AGENTS.md']) {
     const text = readFileSync(join(root, file), 'utf8');
-    const bullet = text.split('\n').find((l) => l.startsWith('- **Start every subagent in the background.**'));
+    const bullet = text.split('\n').find((l) => l.startsWith(BACKGROUND_LEAD));
     assert.ok(bullet, `${file} carries the background-subagents bullet`);
     assert.ok(bullet.includes('`background: true`'), `${file} names the OpenCode flag`);
   }
+});
+
+test('the AGENTS.md template and this repo\'s AGENTS.md put long shell commands in the background and forbid foreground sleep polling, in the same sentence', () => {
+  const bullets = [join('templates', 'target-agents-md.md'), 'AGENTS.md'].map((file) => {
+    const bullet = readFileSync(join(root, file), 'utf8').split('\n').find((l) => l.startsWith(BACKGROUND_LEAD));
+    assert.ok(bullet, `${file} carries the background bullet`);
+    assert.match(bullet, /more than about 20 seconds/, `${file} names the threshold`);
+    assert.match(bullet, /Never wait with a foreground \`sleep\`/, `${file} forbids foreground sleep polling`);
+    assert.match(bullet, /\`dotnet test\`.*\`pr-review-wait\`.*\`gh run watch\`/, `${file} lists the long commands`);
+    assert.match(bullet, /a lane waiting on its own targeted test result runs it in the foreground/, `${file} keeps the lane exception`);
+    assert.match(bullet, /why-do-customer-hub-ch-conductors-sit-waiting-while-shells-r/, `${file} cites the finding`);
+    return bullet;
+  });
+  assert.equal(bullets[0], bullets[1], 'the template and AGENTS.md carry the identical bullet');
+});
+
+test('the conductor template tells the conductor to background shells over about 20 seconds and never sleep-poll in the foreground', () => {
+  const text = readFileSync(join(root, 'agent-templates', 'conductor.md'), 'utf8');
+  assert.match(text, /^- Run any shell command expected to take more than about 20 seconds .*never wait in the foreground with \`sleep\`/m);
 });
 
 test('the AGENTS.md template carries the lint/format fact line and the lint bullet, and neither removed bullet', () => {
@@ -759,13 +779,46 @@ test('stamp-contract --apply-inserts: a project without the lint bullet gets it 
   }
 });
 
+test('stamp-contract: an AGENTS.md with the background bullet under its OLD subagents-only lead is reported would_rename by --apply-inserts (untouched), and --apply replaces it in place once with the shell-command wording; a second --apply writes nothing', () => {
+  const history = JSON.parse(readFileSync(join(root, 'bin', 'contract-history.json'), 'utf8'))[OLD_BACKGROUND_LEAD];
+  const oldBlock = history?.find((b) => b.includes('run_in_background'));
+  assert.ok(oldBlock, 'fixture sanity: a historical block under the old lead, from before the shell-command wording');
+  assert.ok(!oldBlock.includes('foreground `sleep`'), 'fixture sanity: the old block has no sleep rule');
+  const f = sectionFixture('old-background-lead', (agents) => {
+    const lines = agents.split('\n');
+    const at = lines.findIndex((l) => l.startsWith(BACKGROUND_LEAD));
+    assert.notEqual(at, -1, 'fixture sanity: the render carries the new lead');
+    lines[at] = oldBlock;
+    return lines.join('\n');
+  });
+  try {
+    const planted = f.read().agents;
+    const inserts = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(inserts.status, 0, `${inserts.stdout}\n${inserts.stderr}`);
+    assert.match(inserts.stdout, /would_rename {2}- \*\*Start every subagent and every long shell command in the/);
+    assert.equal(f.read().agents, planted, 'the old block is kept byte for byte by the inserts mode');
+
+    const r = runStampContract(f.regDb, ['--apply']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /renamed {2}- \*\*Start every subagent and every long shell command in the/);
+    assert.deepEqual(f.read(), f.complete, 'the old bullet became the current bullet, in place, and nothing else changed');
+    assert.ok(!f.read().agents.includes(OLD_BACKGROUND_LEAD), 'no bullet under the old lead');
+
+    const again = runStampContract(f.regDb, ['--apply']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('stamp-contract --apply-inserts: a project without the background-subagents bullet gets it once, right after the copy-friendly-text bullet, and a second run writes nothing', () => {
   const f = sectionFixture('background-bullet', (agents) => dropBlock(agents, BACKGROUND_LEAD));
   try {
     assert.ok(!f.read().agents.includes(BACKGROUND_LEAD), 'the fixture lacks the bullet');
     const r = runStampContract(f.regDb, ['--apply-inserts']);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /inserted {2}- \*\*Start every subagent in the background\.\*\*/);
+    assert.match(r.stdout, /inserted {2}- \*\*Start every subagent and every long shell command in the/);
     assert.deepEqual(f.read(), f.complete, 'the bullet is in its template position and nothing else changed');
     const lines = f.read().agents.split('\n');
     assert.equal(lines.filter((l) => l.startsWith(BACKGROUND_LEAD)).length, 1, 'inserted once');
