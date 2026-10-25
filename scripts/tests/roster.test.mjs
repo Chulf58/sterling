@@ -304,9 +304,23 @@ test('implementor-hard: registered, the implementor\'s grant and required inputs
   const strip = (fm) => fm.replace(/^name: .*$/m, '').replace(/^description: .*$/m, '');
   assert.equal(strip(fmOf(hard)), strip(fmOf(base)), 'same model/effort tokens, disallowedTools and required_inputs');
   const bodyOf = (text) => text.replace(/^---[\s\S]*?\n---/, '');
-  const extra = '\nYou are the hard-task implementor: you are dispatched instead of the implementor when a change is hard (a mechanism, a schema or a change at many sites), so that you can run on a stronger model. Everything below is the implementor\'s contract, unchanged.\n';
+  const extra = '\nYou are the hard-task implementor: you are dispatched instead of the implementor when a change is hard (a mechanism, a schema or a change at many sites), so that you can run on a stronger model. Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as "likely a migration"). Building an already-ruled design and resuming a hard lane may stay on hard. Everything below is the implementor\'s contract, unchanged.\n';
   assert.equal(bodyOf(hard).split(extra).length, 2, 'the hard-task paragraph is there exactly once');
   assert.equal(bodyOf(hard).replace(extra, ''), bodyOf(base), 'the rest of the body is the implementor\'s, word for word');
+});
+
+// Decision implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause (version 2,
+// user-ruled 2026-10-25, "Add explicit exclusions"): every place that lists when to dispatch
+// implementor-hard also says what is not a reason.
+test('implementor-hard criteria: the conductor template, the delegation skill and the hard agent each carry the not-a-reason sentence', () => {
+  const sentence = 'Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as "likely a migration"). Building an already-ruled design and resuming a hard lane may stay on hard.';
+  const conductor = readFileSync(join(TPL, 'conductor.md'), 'utf8');
+  assert.equal(conductor.split(sentence).length - 1, 1, 'conductor.md carries the sentence once, beside the safety-code line');
+  assert.ok(conductor.includes('finding `how-often-do-conductors-use-implementor-hard-versus-implemen`'), 'conductor.md cites the measuring finding as the justification');
+  assert.ok(readFileSync(join(TPL, 'implementor-hard.md'), 'utf8').includes(sentence), 'implementor-hard.md carries the sentence');
+  const skill = readFileSync(join(TPL, '..', 'skills', 'delegating-to-subagents', 'SKILL.md'), 'utf8');
+  const short = 'Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as "likely a migration"); building an already-ruled design and resuming a hard lane may stay on hard';
+  assert.equal(skill.split(short).length - 1, 2, 'the delegation skill carries the sentence in both its Claude and OpenCode roster paragraphs');
 });
 
 // User ruling 2026-10-22 ("Yes, as stated"): sparring has its own agent, so Overpass

@@ -355,6 +355,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'you name that choice before starting it (decision `sterling-grill-skill-design`).\n',
     after: "you name that choice before starting it (decision `sterling-grill-skill-design`).\n\nGrill again when a finding changes an ask's premise. When research shows the ask cannot be met as the user framed it (the thing is 'by design', the fix 'we have' does not exist, the place to change is elsewhere), the next question restates the user's goal in their words and asks whether it still stands, before any option built on the finding. Every option list leads with a way to keep the user's goal. Before recommending any artifact as a fix, state in the question what changes at runtime once it merges; if the answer is 'nothing', say so. (User-raised 2026-10-24, after a docs-only Overpass PR was offered as the fix and the user's goal that their own effort wins was never asked; decision `grill-again-when-a-finding-changes-an-ask-s-premise-restate`.)\n",
   },
+  {
+    commit: 'sterling/not-a-reason-for-hard',
+    date: '2026-10-25',
+    reason: 'the implementor-hard criteria also say what is not a reason (decision implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause, amended to version 2; user-ruled 2026-10-25, "Add explicit exclusions")',
+    before: 'touching safety code is not by itself a reason. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why, so the split can be re-measured — decision `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`, user-ruled 2026-10-20)',
+    after: 'touching safety code is not by itself a reason. Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as "likely a migration"). Building an already-ruled design and resuming a hard lane may stay on hard. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why, so the split can be re-measured — decision `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`, user-ruled 2026-10-20, exclusions added 2026-10-25 because the misses measured in the Customer Hub projects were probes, a single-site safety refusal and speculation, finding `how-often-do-conductors-use-implementor-hard-versus-implemen`)',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

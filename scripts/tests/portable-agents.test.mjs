@@ -154,7 +154,7 @@ const WRITTEN_AFTER_FENCING = new Set(['sparring.md', 'preflight.md']);
 // is the implementor's template as its own agent, fences included, so its Claude render is pinned to
 // the implementor's pinned baseline with its own name, description and one added paragraph.
 const DERIVED_FROM_IMPLEMENTOR = new Set(['implementor-hard.md']);
-const IMPLEMENTOR_HARD_PARAGRAPH = "You are the hard-task implementor: you are dispatched instead of the implementor when a change is hard (a mechanism, a schema or a change at many sites), so that you can run on a stronger model. Everything below is the implementor's contract, unchanged.";
+const IMPLEMENTOR_HARD_PARAGRAPH = "You are the hard-task implementor: you are dispatched instead of the implementor when a change is hard (a mechanism, a schema or a change at many sites), so that you can run on a stronger model. Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as \"likely a migration\"). Building an already-ruled design and resuming a hard lane may stay on hard. Everything below is the implementor's contract, unchanged.";
 
 // Only the entries Claude Code installs: an OpenCode-only template (plan.md) has no Claude render.
 for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
