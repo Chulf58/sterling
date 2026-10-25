@@ -10,6 +10,7 @@ import { rmSync } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
+import { dirname as dirname2, join as join4, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5662,14 +5663,36 @@ import { spawnSync } from "node:child_process";
 import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join as join3, resolve } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync(resolve(cwd, gitDir));
-  const commonReal = realpathSync(resolve(cwd, commonDir));
-  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
-  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+  const gitDirReal = real(resolve(cwd, gitDir));
+  const commonReal = real(resolve(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
   if (!linkedWorktree) return target;
@@ -5708,14 +5731,27 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
 }
 
 // scripts/hooks/lib/common.mjs
-function readStdin() {
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve2(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots) {
-    input2.cwd = roots.storeRoot;
-    input2.checkout = roots.checkoutRoot;
+  const root = hookProjectRoot(input2.cwd);
+  if (root) {
+    input2.cwd = root;
   } else {
-    input2.checkout = input2.cwd;
+    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+    if (roots && roots.checkoutRoot !== roots.storeRoot) {
+      if (!reportInertWorktree) allow();
+      input2.inertWorktree = roots;
+    }
   }
   return input2;
 }
@@ -5827,9 +5863,9 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 });
 
 // scripts/hooks/lib/delivery.mjs
-import { join as join4, dirname as dirname2 } from "node:path";
+import { join as join5, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
-  return join4(cwd, ".sterling", "transient", "delivery");
+  return join5(cwd, ".sterling", "transient", "delivery");
 }
 function sanitizeSessionId(sessionId) {
   let encoded;
@@ -5852,7 +5888,7 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join4(deliveryDir(cwd), component);
+  return join5(deliveryDir(cwd), component);
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;

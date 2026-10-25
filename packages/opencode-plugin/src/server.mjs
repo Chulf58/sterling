@@ -216,9 +216,13 @@ export function createSterlingServer(deps = {}) {
     const sessionDirs = new Map();
     const lookupLogged = new Map();
 
-    /** The directory session `sessionID` lives in, as { dir }, or { why } when it cannot be read. */
-    async function sessionDirectory(sessionID) {
-      if (sessionDirs.has(sessionID)) return { dir: sessionDirs.get(sessionID) };
+    /**
+     * The directory session `sessionID` lives in, as { dir }, or { why } when it cannot be read.
+     * `fresh` skips the cache (and refreshes it): a session can move, so an identity-sensitive
+     * call (a board claim records the checkout) asks OpenCode every time.
+     */
+    async function sessionDirectory(sessionID, { fresh = false } = {}) {
+      if (!fresh && sessionDirs.has(sessionID)) return { dir: sessionDirs.get(sessionID) };
       let info;
       try {
         if (typeof session?.get !== 'function') throw new Error('ctx.session.get is unavailable');
@@ -282,7 +286,7 @@ export function createSterlingServer(deps = {}) {
     // and guardSessionMove refuses a session_move that would strand a Sterling agent (session-move.mjs).
     /** The checkout root of session `sessionID`'s directory, as { checkout } or { why }. */
     async function checkoutOfSession(sessionID) {
-      const found = await sessionDirectory(sessionID);
+      const found = await sessionDirectory(sessionID, { fresh: true });
       if (found.why) return { why: found.why };
       const checkout = checkoutRoot(found.dir);
       return checkout ? { checkout } : { why: `its directory ${found.dir} is not in a Sterling project` };

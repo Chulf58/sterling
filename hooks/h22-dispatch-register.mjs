@@ -11,7 +11,7 @@ import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
-import { join as join4 } from "node:path";
+import { dirname as dirname2, join as join4, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5678,14 +5678,36 @@ import { spawnSync } from "node:child_process";
 import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join as join3, resolve } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync(resolve(cwd, gitDir));
-  const commonReal = realpathSync(resolve(cwd, commonDir));
-  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
-  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+  const gitDirReal = real(resolve(cwd, gitDir));
+  const commonReal = real(resolve(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
   if (!linkedWorktree) return target;
@@ -5740,14 +5762,27 @@ function realOf(p) {
 }
 
 // scripts/hooks/lib/common.mjs
-function readStdin() {
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve2(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots) {
-    input2.cwd = roots.storeRoot;
-    input2.checkout = roots.checkoutRoot;
+  const root = hookProjectRoot(input2.cwd);
+  if (root) {
+    input2.cwd = root;
   } else {
-    input2.checkout = input2.cwd;
+    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+    if (roots && roots.checkoutRoot !== roots.storeRoot) {
+      if (!reportInertWorktree) allow();
+      input2.inertWorktree = roots;
+    }
   }
   return input2;
 }
@@ -6141,7 +6176,7 @@ function claimedResources(promptText, configuredNames) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync, readFileSync as readFileSync3, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync5, lstatSync, readdirSync as readdirSync2, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join5, resolve as resolve2, dirname as dirname2, isAbsolute } from "node:path";
+import { join as join5, resolve as resolve3, dirname as dirname3, isAbsolute } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
@@ -6345,7 +6380,7 @@ function registerLockRoot() {
   return `/tmp/sterling-locks-${uid}`;
 }
 function registerLockPath(root) {
-  const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
+  const hash = createHash("sha256").update(realpathSync2(resolve3(root))).digest("hex");
   return join5(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
@@ -6363,7 +6398,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -6424,7 +6459,7 @@ async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
   const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname2(lockPath));
+  ensureLockRoot(dirname3(lockPath));
   const db = new DatabaseSync4(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");

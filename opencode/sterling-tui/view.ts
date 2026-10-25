@@ -8,6 +8,7 @@ import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type DashboardState, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from '@sterling/tui/dist/avatars/index.js';
 import { storeBackend } from '../../scripts/hooks/lib/store-backend.mjs';
+import { resolveProjectRoots } from '../../scripts/lib/worktree-root.mjs';
 import { liveChildInRegister } from '../../packages/opencode-plugin/src/dispatch.mjs';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
@@ -389,8 +390,16 @@ export function escapeLeavesView(ui: UiState): boolean {
 /** STERLING_STORE when set; otherwise the nearest <dir>/.sterling/sterling.db
  *  walking up from `start`, where <dir> holds that file or is a Postgres-storage
  *  project. Undefined when there is none. */
+/** The git checkout a dashboard at `dir` serves (a linked worktree's own), or undefined outside a Sterling project. */
+export function checkoutOf(dir: string): string | undefined {
+  return resolveProjectRoots(dir)?.checkoutRoot ?? undefined;
+}
+
 export function findStorePath(start: string, env: Record<string, string | undefined>): string | undefined {
   if (env.STERLING_STORE) return env.STERLING_STORE;
+  // A linked git worktree shows its project's one store, at the main checkout.
+  const roots = resolveProjectRoots(start);
+  if (roots && roots.storeRoot !== roots.checkoutRoot) return join(roots.storeRoot, '.sterling', 'sterling.db');
   let dir = start;
   for (;;) {
     // A Postgres-storage project has a config and no SQLite file. The returned

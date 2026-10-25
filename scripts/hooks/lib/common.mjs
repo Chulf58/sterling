@@ -1,7 +1,7 @@
 // Shared hook plumbing. Hooks import workspace packages at AUTHOR time; the
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
@@ -86,6 +86,27 @@ export function projectRoot(from) {
 }
 
 /**
+ * The project root the Claude Code HOOKS use: the nearest Sterling root above
+ * `from`, by the plain ancestor walk, exactly as before linked-worktree support.
+ * The hooks pass one directory to code that does transient state, git, file checks
+ * and store reads at once, so they are not split into store root and checkout: a
+ * nested worktree (.claude/worktrees/*) still resolves to the main root, and a
+ * worktree outside the main checkout resolves to null, so the hooks stay inert
+ * there (readStdin marks it, and H1 says so once). The OpenCode plugin and the MCP
+ * server split the two roots (projectRoot, checkoutRoot).
+ */
+export function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve(String(from));
+  for (;;) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null; // filesystem root — bounded, never walks forever
+    dir = parent;
+  }
+}
+
+/**
  * The git checkout a session in `from` works in, or null outside a Sterling
  * project. It is projectRoot(from) except in a linked git worktree (outside the
  * main checkout or nested in it), where the store stays at the main checkout and
@@ -118,19 +139,28 @@ export function transientDir(checkout) {
  * unevaluable stay distinct (hooks-suite AC1), so a non-Sterling project is still
  * silently allowed rather than gated against someone else's store.
  */
-export function readStdin() {
+export function readStdin({ reportInertWorktree = false } = {}) {
   const input = JSON.parse(readFileSync(0, 'utf8'));
-  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
-  // input.cwd is the STORE root (store, config, board); input.checkout is the git
-  // checkout whose .sterling/transient this session writes. They differ only in a
-  // linked worktree. Outside a project both stay as given (checkout = cwd).
-  if (roots) {
-    input.cwd = roots.storeRoot;
-    input.checkout = roots.checkoutRoot;
+  const root = hookProjectRoot(input.cwd);
+  if (root) {
+    input.cwd = root;
   } else {
-    input.checkout = input.cwd;
+    // A worktree outside the main checkout of a Sterling project: every hook exits
+    // here, allowing, before it can reach the shared store (loadConfig and openStore
+    // map a worktree to its store root for the OpenCode plugin). H1 asks to see it
+    // instead, and names it once so the gap is not silent (P5).
+    const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+    if (roots && roots.checkoutRoot !== roots.storeRoot) {
+      if (!reportInertWorktree) allow();
+      input.inertWorktree = roots;
+    }
   }
   return input;
+}
+
+/** H1's one line for a Claude Code session in a linked worktree, where the hooks are inert. */
+export function inertWorktreeLine({ storeRoot, checkoutRoot }) {
+  return `STERLING HOOKS INERT: this session runs in the linked git worktree ${checkoutRoot} of the Sterling project at ${storeRoot}. Claude Code's Sterling hooks do not run in a worktree outside the main checkout (no knowledge delivery, no touch register, no settlement), because they cannot yet keep this checkout's transient state apart from the main checkout's. Work from ${storeRoot}, or use OpenCode, whose Sterling plugin supports linked worktrees.`;
 }
 
 /**

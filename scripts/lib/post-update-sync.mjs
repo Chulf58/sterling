@@ -26,6 +26,7 @@ import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { storeRootFor } from './worktree-root.mjs';
 import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
 import { compareSterlingVersions, installHostOf, parseSterlingVersion, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
@@ -221,8 +222,12 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
  * project with .sterling/config.json. Cheap, so callers can test it before any
  * session lookup.
  */
+// `project` is the checkout whose agents and sync marker the sync keeps: a linked
+// worktree has no .sterling/config.json of its own, so "is this a Sterling project"
+// reads the shared config at its store root (storeRootFor), while the steps and the
+// marker stay on the checkout.
 export function postUpdateApplies(root, project) {
-  return Boolean(root) && !samePath(project, root) && isInstalledCopy(root) && existsSync(join(project, '.sterling', 'config.json'));
+  return Boolean(root) && !samePath(project, root) && isInstalledCopy(root) && existsSync(join(storeRootFor(project), '.sterling', 'config.json'));
 }
 
 /**

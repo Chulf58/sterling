@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { join as join10 } from "node:path";
+import { dirname as dirname6, join as join10, resolve as resolve4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -12390,14 +12390,36 @@ import { spawnSync } from "node:child_process";
 import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync4(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync4(resolve3(cwd, gitDir));
-  const commonReal = realpathSync4(resolve3(cwd, commonDir));
-  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
-  return { worktree: realpathSync4(toplevel), mainRoot: dirname5(commonReal) };
+  const gitDirReal = real(resolve3(cwd, gitDir));
+  const commonReal = real(resolve3(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve3(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname5(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
   if (!linkedWorktree) return target;
@@ -12452,14 +12474,27 @@ function realOf(p) {
 }
 
 // scripts/hooks/lib/common.mjs
-function readStdin() {
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve4(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname6(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots) {
-    input2.cwd = roots.storeRoot;
-    input2.checkout = roots.checkoutRoot;
+  const root = hookProjectRoot(input2.cwd);
+  if (root) {
+    input2.cwd = root;
   } else {
-    input2.checkout = input2.cwd;
+    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+    if (roots && roots.checkoutRoot !== roots.storeRoot) {
+      if (!reportInertWorktree) allow();
+      input2.inertWorktree = roots;
+    }
   }
   return input2;
 }
@@ -12635,7 +12670,7 @@ import { join as join13 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join12, resolve as resolve4, dirname as dirname6, isAbsolute } from "node:path";
+import { join as join12, resolve as resolve5, dirname as dirname7, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
 
@@ -13147,7 +13182,7 @@ import { spawn } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirSync6, openSync as openSync3, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync5, writeFileSync as writeFileSync4, appendFileSync } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute2, join as join14, resolve as resolve5, sep } from "node:path";
+import { dirname as dirname8, isAbsolute as isAbsolute2, join as join14, resolve as resolve6, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -13222,10 +13257,10 @@ function workerPaths(root) {
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
-  let dir = dirname7(fileURLToPath(moduleUrl));
+  let dir = dirname8(fileURLToPath(moduleUrl));
   for (let i = 0; i < 5; i++) {
     if (existsSync7(join14(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname7(dir);
+    dir = dirname8(dir);
   }
   return null;
 }
@@ -13430,12 +13465,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync6(dirname7(state), { recursive: true });
+  mkdirSync6(dirname8(state), { recursive: true });
   writeFileSync4(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync6(dirname7(log), { recursive: true });
+  mkdirSync6(dirname8(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -13524,7 +13559,7 @@ function launchWorker(opts) {
     readWorkerPrompt(pluginRoot);
     const runner = join14(pluginRoot, "scripts", "maintenance-worker-run.mjs");
     if (!existsSync7(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync6(dirname7(paths.lock), { recursive: true });
+    mkdirSync6(dirname8(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
@@ -13604,7 +13639,7 @@ import { join as join16 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, existsSync as existsSync8, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
-import { join as join15, dirname as dirname8 } from "node:path";
+import { join as join15, dirname as dirname9 } from "node:path";
 function deliveryDir(cwd) {
   return join15(cwd, ".sterling", "transient", "delivery");
 }
@@ -13711,7 +13746,7 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync7(dirname8(path), { recursive: true });
+  mkdirSync7(dirname9(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync5(tmp, JSON.stringify(guard));
   renameSync4(tmp, path);

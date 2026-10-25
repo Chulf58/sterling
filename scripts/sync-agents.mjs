@@ -21,6 +21,7 @@ import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting,
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { workIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
+import { storeRootFor } from './lib/worktree-root.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -28,6 +29,9 @@ const pluginRoot = resolve(here, '..');
 const args = process.argv.slice(2);
 const targetIdx = args.indexOf('--target');
 const targetDir = targetIdx !== -1 ? resolve(args[targetIdx + 1]) : process.cwd();
+// The config is the project's one shared file: a linked worktree's checkout reads it at
+// the store root (storeRootFor). Agents, settings and the sync marker stay on targetDir.
+const configDir = storeRootFor(targetDir);
 
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 
@@ -37,7 +41,7 @@ const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin',
 // (exit 2) naming the value, and nothing is synced until it is fixed.
 let projectMode;
 try {
-  projectMode = readProjectMode(targetDir);
+  projectMode = readProjectMode(configDir);
 } catch (err) {
   if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
   console.log(`refused_project_mode: ${err.message}; nothing synced`);
@@ -58,7 +62,7 @@ if (identityRefusal) {
 let handoffEnabled;
 let handoffUnmaintained;
 try {
-  ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(targetDir));
+  ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(configDir));
 } catch (err) {
   if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
   console.log(`refused_handoff_setting: ${err.message}; nothing synced`);
@@ -83,7 +87,7 @@ const claudeHost = claudeProbe.installed;
 // refresh resolves {{MODEL}}/{{EFFORT}} to pinned ids (never a leftover token).
 // A config that does not parse or validate is a refusal (exit 2) like the ones
 // above, before anything is written, so /sterling:update relays it.
-const configPath = join(targetDir, '.sterling', 'config.json');
+const configPath = join(configDir, '.sterling', 'config.json');
 const configSource = existsSync(configPath) ? configPath : join(pluginRoot, 'templates', 'default-config.json');
 let config;
 try {
@@ -97,7 +101,7 @@ try {
 // model defaults are added and models.implementor.hard_task is moved into
 // models.implementor-hard. A refusal (the file changed under the write, or is a symlink)
 // stops the sync here, before any rendering or setupOpenCode call, like the refusals above.
-const configMigration = migrateProjectConfig(targetDir);
+const configMigration = migrateProjectConfig(configDir);
 for (const line of configMigration.lines) console.log(line);
 if (configMigration.status === 'refused') {
   console.log('refused_config_migration: .sterling/config.json was not migrated (retired models keys or missing model defaults); rerun /sterling:update once the file is stable; nothing synced');

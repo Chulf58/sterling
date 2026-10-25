@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore } from '@sterling/store';
 import { openDashboard, LOCK_NOTICE_AFTER_MS, type DashboardController, type DashboardOptions } from '../controller.js';
 import { buildDashboardState, TASKS_TAB } from '../state.js';
+import { takeSelectionFile } from '../../../../scripts/hooks/lib/selection-file.mjs';
 
 // GitHub #35 (board 7b1e2e9d): a click built the dashboard three times, wrote
 // the selection on the input path through SQLite's busy timeout, and the 1 Hz
@@ -471,5 +472,23 @@ test('change detection (#129): a lock held past LOCK_NOTICE_AFTER_MS is said on 
     locker.close();
     ctl.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a dashboard serving a linked worktree publishes its selection to that checkout\'s file slot, not the shared store row', async () => {
+  const checkout = mkdtempSync(join(tmpdir(), 'sterling-click-wt-'));
+  const { dir, ctl } = fixture({ deferWrites: true, checkoutRoot: checkout });
+  try {
+    for (let i = 0; i < 3; i++) todo(ctl.store, `item ${i}`);
+    const target = ctl.state(VP).rows[1]!.id;
+    await ctl.handle({ kind: 'click', x: 5, y: lineOf(1) }, VP);
+    ctl.state(VP);
+    assert.equal(ctl.flush(), false);
+    assert.equal(ctl.store.takeSelection(), undefined, 'the store row, which the main checkout\'s prompt takes, stays empty');
+    assert.equal(takeSelectionFile(checkout)?.record_id, target, 'the worktree\'s own slot holds it');
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
   }
 });

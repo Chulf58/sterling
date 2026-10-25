@@ -15,12 +15,13 @@
 // worktree shows up as untracked content of the main checkout and makes every
 // "which checkout am I in" lookup resolve to the wrong one.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { defaultBranch } from './lib/branch-manager.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
+import { ContainmentError, containedPath, existsContained, readContained, writeContained, unlinkContained } from './lib/contained-fs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -34,6 +35,7 @@ export class SessionRefusal extends Error {
 
 const LABEL_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const BRANCH_PREFIX = 'session/';
+const CONFIG_REL = '.sterling/config.json';
 
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, maxBuffer: Infinity });
@@ -108,17 +110,33 @@ export function openSession({ target, name, setup = setupOpenCode, pluginRootDir
   // call: a worktree holding config.json looks like its own Sterling root and the copy
   // goes stale, so it is removed afterwards, also when setup throws. The main checkout's
   // config stays the only one.
+  // Every touch of the worktree's .sterling goes through the containment helper: a repo
+  // that tracks .sterling as a symlink gives the worktree that symlink, and a plain
+  // copy or delete would land in whatever it points at (the main checkout's real config).
+  // A symlink anywhere on that path refuses before anything is copied or run; the worktree
+  // is kept and the message says how to remove it.
   const mainConfig = join(mainRoot, '.sterling', 'config.json');
-  const worktreeConfig = join(path, '.sterling', 'config.json');
+  let copied = null; // the exact text this invocation wrote, or null when it wrote nothing
   let result;
   try {
-    if (existsSync(mainConfig)) {
-      mkdirSync(join(path, '.sterling'), { recursive: true });
-      copyFileSync(mainConfig, worktreeConfig);
+    containedPath(path, '.sterling', 'dir');
+    // A config the worktree already carries (a tracked one) is neither overwritten nor removed.
+    if (!existsContained(path, CONFIG_REL, 'file') && existsSync(mainConfig)) {
+      copied = readFileSync(mainConfig, 'utf8');
+      writeContained(path, CONFIG_REL, copied);
     }
     result = setup({ projectDir: path, pluginRoot: pluginRootDir });
+  } catch (err) {
+    if (err instanceof ContainmentError) {
+      throw new SessionRefusal(`REFUSED: ${err.message}. The worktree ${path} exists but was not set up; run --remove ${label}, then fix the repository's .sterling path (a tracked symlink there is not supported) and open the session again`);
+    }
+    throw err;
   } finally {
-    rmSync(worktreeConfig, { force: true });
+    // Remove only the copy this invocation wrote, and only while it is still that file.
+    if (copied !== null && existsContained(path, CONFIG_REL, 'file')) {
+      if (readContained(path, CONFIG_REL) === copied) unlinkContained(path, CONFIG_REL);
+      else console.error(`open-session: ${path}/${CONFIG_REL} changed during setup, so it was left in place; delete it by hand if it is not wanted`);
+    }
   }
   return { label, branch, path, base, mainRoot, setup: result };
 }

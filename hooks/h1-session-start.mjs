@@ -12718,7 +12718,7 @@ var init_agent_distribution = __esm({
 import { randomUUID as randomUUID8 } from "node:crypto";
 import { readFileSync as readFileSync22, existsSync as existsSync21, mkdirSync as mkdirSync13, readdirSync as readdirSync8, renameSync as renameSync7, statSync as statSync10, writeFileSync as writeFileSync10, rmSync as rmSync8 } from "node:fs";
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { basename as basename3, dirname as dirname14, join as join34 } from "node:path";
+import { basename as basename3, dirname as dirname15, join as join34 } from "node:path";
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync } from "node:fs";
@@ -12740,7 +12740,7 @@ function walkUpPluginRoot(moduleUrl) {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync7 } from "node:fs";
-import { join as join14 } from "node:path";
+import { dirname as dirname9, join as join14, resolve as resolve5 } from "node:path";
 init_dist();
 init_dist2();
 
@@ -13510,14 +13510,36 @@ import { spawnSync } from "node:child_process";
 import { existsSync as existsSync6, realpathSync as realpathSync5, statSync as statSync4 } from "node:fs";
 import { basename as basename2, dirname as dirname8, join as join13, resolve as resolve4 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync5(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync5(resolve4(cwd, gitDir));
-  const commonReal = realpathSync5(resolve4(cwd, commonDir));
-  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
-  return { worktree: realpathSync5(toplevel), mainRoot: dirname8(commonReal) };
+  const gitDirReal = real(resolve4(cwd, gitDir));
+  const commonReal = real(resolve4(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve4(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname8(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
   if (!linkedWorktree) return target;
@@ -13572,16 +13594,32 @@ function realOf(p) {
 }
 
 // scripts/hooks/lib/common.mjs
-function readStdin() {
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve5(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname9(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync7(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots) {
-    input2.cwd = roots.storeRoot;
-    input2.checkout = roots.checkoutRoot;
+  const root = hookProjectRoot(input2.cwd);
+  if (root) {
+    input2.cwd = root;
   } else {
-    input2.checkout = input2.cwd;
+    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+    if (roots && roots.checkoutRoot !== roots.storeRoot) {
+      if (!reportInertWorktree) allow();
+      input2.inertWorktree = roots;
+    }
   }
   return input2;
+}
+function inertWorktreeLine({ storeRoot, checkoutRoot }) {
+  return `STERLING HOOKS INERT: this session runs in the linked git worktree ${checkoutRoot} of the Sterling project at ${storeRoot}. Claude Code's Sterling hooks do not run in a worktree outside the main checkout (no knowledge delivery, no touch register, no settlement), because they cannot yet keep this checkout's transient state apart from the main checkout's. Work from ${storeRoot}, or use OpenCode, whose Sterling plugin supports linked worktrees.`;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -14106,7 +14144,7 @@ function formatResidueLine(entry, paths, { verified = true, reason = "", stopSee
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync10, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync8, lstatSync as lstatSync4, readdirSync as readdirSync3, realpathSync as realpathSync6, chmodSync } from "node:fs";
-import { join as join19, resolve as resolve5, dirname as dirname9, isAbsolute } from "node:path";
+import { join as join19, resolve as resolve6, dirname as dirname10, isAbsolute } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash4 } from "node:crypto";
@@ -14314,7 +14352,7 @@ function registerLockRoot() {
   return `/tmp/sterling-locks-${uid2}`;
 }
 function registerLockPath(root) {
-  const hash = createHash4("sha256").update(realpathSync6(resolve5(root))).digest("hex");
+  const hash = createHash4("sha256").update(realpathSync6(resolve6(root))).digest("hex");
   return join19(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
@@ -14332,7 +14370,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve12) => setTimeout(resolve12, ms));
+  return new Promise((resolve13) => setTimeout(resolve13, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -14393,7 +14431,7 @@ async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs2 = opts.timeoutMs ?? 1e3;
   const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname9(lockPath));
+  ensureLockRoot(dirname10(lockPath));
   const db = new DatabaseSync4(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");
@@ -15191,15 +15229,15 @@ init_dist2();
 // scripts/lib/handoff-projection.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { existsSync as existsSync10 } from "node:fs";
-import { join as join23, resolve as resolve8 } from "node:path";
+import { join as join23, resolve as resolve9 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync6, readFileSync as readFileSync12, readdirSync as readdirSync4, mkdirSync as mkdirSync8, openSync as openSync5, writeSync, closeSync as closeSync5, unlinkSync as unlinkSync2, constants } from "node:fs";
-import { join as join22, resolve as resolve7 } from "node:path";
+import { join as join22, resolve as resolve8 } from "node:path";
 
 // scripts/lib/store-path.mjs
 import { lstatSync as lstatSync5, realpathSync as realpathSync7 } from "node:fs";
-import { join as join21, resolve as resolve6, sep } from "node:path";
+import { join as join21, resolve as resolve7, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -15222,8 +15260,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve6(root);
-  const target = resolve6(rootResolved, ...segments);
+  const rootResolved = resolve7(root);
+  const target = resolve7(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -15343,7 +15381,7 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve7(root);
+  let cursor = resolve8(root);
   for (const [index, part] of segments.entries()) {
     cursor = join22(cursor, part);
     const st = lstatOrNull(cursor);
@@ -15752,12 +15790,12 @@ init_agent_distribution();
 import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypto";
 import { readFileSync as readFileSync15, writeFileSync as writeFileSync6, mkdirSync as mkdirSync10, rmSync as rmSync6, statSync as statSync7, renameSync as renameSync5 } from "node:fs";
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { join as join26, dirname as dirname11 } from "node:path";
+import { join as join26, dirname as dirname12 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname10, join as join25 } from "node:path";
+import { dirname as dirname11, join as join25 } from "node:path";
 var SESSION_EVENTS_REL = join25(".sterling", "transient", "session-events.json");
 
 // scripts/hooks/lib/settlement.mjs
@@ -15837,7 +15875,7 @@ function gitTouches(root, now) {
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   const p = join26(root, GIT_SETTLED_REL);
-  mkdirSync10(dirname11(p), { recursive: true });
+  mkdirSync10(dirname12(p), { recursive: true });
   if (ifAbsent) {
     try {
       writeFileSync6(p, JSON.stringify(snapshot), { flag: "wx" });
@@ -15869,7 +15907,7 @@ import { join as join28 } from "node:path";
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync14, readFileSync as readFileSync16, readdirSync as readdirSync6, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { join as join27, resolve as resolve9, sep as sep2 } from "node:path";
+import { join as join27, resolve as resolve10, sep as sep2 } from "node:path";
 import { createHash as createHash7 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -16176,7 +16214,7 @@ function canonical(p) {
   try {
     return realpathSync8(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve9(p);
+    if (err?.code === "ENOENT") return resolve10(p);
     throw err;
   }
 }
@@ -16201,7 +16239,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir8() } = {}) {
 import { spawn, spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync16, readFileSync as readFileSync17, realpathSync as realpathSync9, statSync as statSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { join as join29, resolve as resolve10 } from "node:path";
+import { join as join29, resolve as resolve11 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
 var SYNC_MARKER_REL = join29(".sterling", "synced-version");
 var HOST_TEXT = {
@@ -16239,7 +16277,7 @@ function sameRealPath(a, b) {
     try {
       return realpathSync9(p);
     } catch {
-      return resolve10(p);
+      return resolve11(p);
     }
   };
   return real(a) === real(b);
@@ -16292,7 +16330,7 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated };
 }
 function postUpdateApplies(root, project) {
-  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync16(join29(project, ".sterling", "config.json"));
+  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync16(join29(storeRootFor(project), ".sterling", "config.json"));
 }
 async function postUpdateSync({ root, project, host = "claude", runStep = runStepSync, env = process.env, home = homedir9() }) {
   const t = hostText(host);
@@ -16406,12 +16444,12 @@ function cloneBranchState(root) {
     if (statSync8(dotGit).isFile()) {
       const pointer = /^gitdir: (.+)$/.exec(readFileSync17(dotGit, "utf8").split(/\r?\n/)[0]);
       if (!pointer) return unreadable(".git: no gitdir line");
-      gitDir = resolve10(root, pointer[1].trim());
+      gitDir = resolve11(root, pointer[1].trim());
       commonDir = gitDir;
       try {
         const common = readFileSync17(join29(gitDir, "commondir"), "utf8").trim();
         if (!common) return unreadable("commondir: empty");
-        commonDir = resolve10(gitDir, common);
+        commonDir = resolve11(gitDir, common);
         if (!statSync8(commonDir).isDirectory()) return unreadable("commondir: not a directory");
       } catch (e) {
         if (e?.code !== "ENOENT" || existsSync16(join29(gitDir, "commondir"))) return unreadable(`commondir: ${errCode(e)}`);
@@ -16516,7 +16554,7 @@ CLONE AGENT SYNC (${t.label}): this project's installed agents were behind the c
 // scripts/lib/update.mjs
 import { closeSync as closeSync6, existsSync as existsSync17, mkdirSync as mkdirSync11, openSync as openSync6, readFileSync as readFileSync18, readdirSync as readdirSync7, readSync as readSync4, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
-import { dirname as dirname12, join as join30 } from "node:path";
+import { dirname as dirname13, join as join30 } from "node:path";
 
 // scripts/lib/project-identity.mjs
 init_dist();
@@ -16650,7 +16688,7 @@ import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync7, existsSync as existsSync18, mkdirSync as mkdirSync12, openSync as openSync7, readFileSync as readFileSync19, renameSync as renameSync6, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
-import { dirname as dirname13, isAbsolute as isAbsolute2, join as join31, resolve as resolve11, sep as sep3 } from "node:path";
+import { dirname as dirname14, isAbsolute as isAbsolute2, join as join31, resolve as resolve12, sep as sep3 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
@@ -17345,9 +17383,15 @@ function computeH1DeadDispatchResidue(cwd, source) {
   }
   return lines;
 }
-var input = readStdin();
+var input = readStdin({ reportInertWorktree: true });
 if (isSpareSession(input.session_id)) {
   exitAfterWrite(`${SPARE_SKIP_LINE}
+`, 0);
+  await new Promise(() => {
+  });
+}
+if (input.inertWorktree) {
+  exitAfterWrite(`${inertWorktreeLine(input.inertWorktree)}
 `, 0);
   await new Promise(() => {
   });
@@ -17571,7 +17615,7 @@ if (issueReportsLine) issueReportsContext = `
 ${issueReportsLine}`;
 var codexContext = "";
 try {
-  const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname14(process.execPath) });
+  const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname15(process.execPath) });
   if (codexLine) codexContext = `
 
 ${codexLine}`;

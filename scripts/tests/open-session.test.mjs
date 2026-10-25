@@ -3,7 +3,7 @@
 // Every test runs in a temp git repo with a temp HOME and OpenCode stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -93,6 +93,43 @@ test('the config copy is removed even when the setup throws', () => {
     assert.throws(() => openSession({ target: f.main, name: 'boom', setup: boom }), /setup exploded/);
     assert.ok(seen, 'the copy was present during setup');
     assert.ok(!existsSync(join(worktreePathFor(f.main, 'boom'), '.sterling', 'config.json')));
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('a repo that tracks .sterling as a symlink is refused loudly and the main checkout config survives', () => {
+  const f = fixture();
+  try {
+    // .sterling in the repo is an absolute directory symlink to a real directory elsewhere
+    const real = join(f.base, 'real-sterling');
+    mkdirSync(real);
+    const realConfig = JSON.stringify({ mode: 'hobby', marker: 'main-config' });
+    writeFileSync(join(real, 'config.json'), realConfig);
+    git(f.main, ['rm', '-r', '-q', '--cached', '.sterling/project.json']);
+    rmSync(join(f.main, '.sterling'), { recursive: true, force: true });
+    symlinkSync(real, join(f.main, '.sterling'));
+    git(f.main, ['add', '-f', '.sterling']);
+    git(f.main, ['commit', '-qm', 'track .sterling as a symlink']);
+    assert.throws(() => openSession({ target: f.main, name: 'sym', setup: () => assert.fail('set up through a symlink') }),
+      (e) => e instanceof SessionRefusal && e.exit === 2 && /symlink/.test(e.message) && /--remove sym/.test(e.message));
+    assert.equal(readFileSync(join(real, 'config.json'), 'utf8'), realConfig, 'the real config is untouched');
+    assert.equal(readFileSync(join(f.main, '.sterling', 'config.json'), 'utf8'), realConfig);
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('a config the worktree already tracks is neither overwritten nor removed', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.main, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', tracked: true }));
+    git(f.main, ['add', '-f', '.sterling/config.json']);
+    git(f.main, ['commit', '-qm', 'track config']);
+    writeFileSync(join(f.main, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', tracked: false }));
+    const r = openSession({ target: f.main, name: 'tracked', setup: f.setup });
+    const kept = JSON.parse(readFileSync(join(r.path, '.sterling', 'config.json'), 'utf8'));
+    assert.equal(kept.tracked, true, "the worktree's own tracked config was left as committed");
   } finally {
     rmSync(f.base, { recursive: true, force: true });
   }

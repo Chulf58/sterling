@@ -12,8 +12,8 @@ import { createSignal, For, Index, Show, untrack } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync15, writeFileSync as writeFileSync7, existsSync as existsSync11 } from "node:fs";
-import { basename as basename4, dirname as dirname8, join as join19 } from "node:path";
+import { readFileSync as readFileSync15, writeFileSync as writeFileSync7, existsSync as existsSync12 } from "node:fs";
+import { basename as basename5, dirname as dirname9, join as join20 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -15015,9 +15015,9 @@ var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_patte
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
 // scripts/lib/opencode-install.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
-import { basename as basename3, dirname as dirname7, isAbsolute, join as join16, resolve as resolve8 } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync11, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, realpathSync as realpathSync6, rmSync as rmSync4, statSync as statSync6, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { basename as basename4, dirname as dirname8, isAbsolute, join as join18, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
@@ -16346,6 +16346,106 @@ return { openCodeCacheKey, openCodeLoadedSterling };`
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync10, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
+import { basename as basename3, dirname as dirname7, join as join17, resolve as resolve8 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync9, readFileSync as readFileSync12 } from "node:fs";
+import { join as join16 } from "node:path";
+var CONFIG_REL3 = join16(".sterling", "config.json");
+var STORE_DB_REL = join16(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync9(join16(dir, CONFIG_REL3)) || existsSync9(join16(dir, STORE_DB_REL)));
+}
+function storeBackend(root) {
+  const dbExists = () => existsSync9(join16(root, STORE_DB_REL));
+  let text;
+  try {
+    text = readFileSync12(join16(root, CONFIG_REL3), "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return "sqlite";
+    return dbExists() ? "sqlite" : "routed";
+  }
+  let storage;
+  try {
+    storage = JSON.parse(text)?.storage;
+  } catch {
+    return dbExists() ? "sqlite" : "routed";
+  }
+  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
+}
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git2 = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync5(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve8(cwd, gitDir));
+  const commonReal = real(resolve8(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve8(commonReal, settings.worktree));
+  else if (basename3(commonReal) === ".git") mainRoot = dirname7(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join17(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync10(join17(linkedWorktree.mainRoot, configRel)) && existsSync10(join17(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync5(join17(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
+  if (!from) return null;
+  let dir = resolve8(String(from));
+  for (; ; ) {
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
+    const parent = dirname7(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
 // scripts/lib/opencode-agents.mjs
 var OPENCODE_RENDERER = "opencode/1";
 var OPENCODE_HEADER_RE = /^<!-- sterling-portable renderer=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -16429,11 +16529,21 @@ var IMPORTS = [
   "import { dirname, join } from 'node:path';",
   "import { pathToFileURL } from 'node:url';"
 ].join("\n");
+var SHIM_PROJECT_SOURCE = `import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
+${resolveLinkedWorktree.toString()}
+function sterlingProjectAt(dir) {
+  if (existsSync(join(dir, '.sterling', 'sterling.db'))) return true;
+  const linked = resolveLinkedWorktree(dir);
+  return Boolean(linked && existsSync(join(linked.mainRoot, '.sterling', 'sterling.db')));
+}
+`;
 function refusal(item, what, remedy) {
   return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
 }
 function git(projectDir2, args) {
-  const r = spawnSync2("git", args, { cwd: projectDir2, encoding: "utf8" });
+  const r = spawnSync3("git", args, { cwd: projectDir2, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd2(projectDir2)}: ${r.error.message}`);
   return r;
 }
@@ -16448,10 +16558,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync12(join16(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync13(join18(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join16(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join18(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -16466,10 +16576,10 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../../scripts/lib/opencode-install.mjs", import.meta.url).href) {
-  const start = dirname7(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname7(dir)) {
-    if (existsSync9(join16(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname7(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname8(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname8(dir)) {
+    if (existsSync11(join18(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname8(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
@@ -16551,19 +16661,19 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join16(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join18(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir2), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join16(projectDir2, rel);
-    const templateContent = readFileSync12(join16(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join18(projectDir2, rel);
+    const templateContent = readFileSync13(join18(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync9(path) ? readFileSync12(path, "utf8") : null;
+    const raw = existsSync11(path) ? readFileSync13(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -16599,7 +16709,7 @@ function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models =
   return rows;
 }
 function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync9(join16(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync11(join18(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
@@ -16607,7 +16717,7 @@ function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model
   return { rows: ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync9(join16(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync11(join18(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
@@ -16618,7 +16728,7 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
-      mkdirSync7(dirname7(w.path), { recursive: true });
+      mkdirSync7(dirname8(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
     }
@@ -16644,41 +16754,18 @@ function restoreFullAgentFiles(writes, fs = {}) {
   if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
 }
 
-// scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync10, readFileSync as readFileSync13 } from "node:fs";
-import { join as join17 } from "node:path";
-var CONFIG_REL3 = join17(".sterling", "config.json");
-var STORE_DB_REL = join17(".sterling", "sterling.db");
-function storeBackend(root) {
-  const dbExists = () => existsSync10(join17(root, STORE_DB_REL));
-  let text;
-  try {
-    text = readFileSync13(join17(root, CONFIG_REL3), "utf8");
-  } catch (e) {
-    if (e?.code === "ENOENT") return "sqlite";
-    return dbExists() ? "sqlite" : "routed";
-  }
-  let storage;
-  try {
-    storage = JSON.parse(text)?.storage;
-  } catch {
-    return dbExists() ? "sqlite" : "routed";
-  }
-  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
-}
-
 // scripts/hooks/lib/selection-file.mjs
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, renameSync as renameSync4, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join18(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join19(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync8(join18(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync8(join19(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
   writeFileSync6(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync4(tmp, path);
@@ -16689,9 +16776,10 @@ var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 var LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 function openDashboard(storePath, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join19(dirname8(storePath), "config.json");
-  const projectRoot = dirname8(dirname8(storePath));
-  const agentsDir = join19(projectRoot, ".claude", "agents");
+  const configPath2 = join20(dirname9(storePath), "config.json");
+  const projectRoot = dirname9(dirname9(storePath));
+  const agentsDir = join20(projectRoot, ".claude", "agents");
+  const selectionCheckout = options.checkoutRoot && options.checkoutRoot !== projectRoot ? options.checkoutRoot : void 0;
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -16725,7 +16813,7 @@ function openDashboard(storePath, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename4(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename5(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -16828,8 +16916,8 @@ function openDashboard(storePath, options = {}) {
     let failed = false;
     for (const e of batch) {
       try {
-        if (e.type === "select" && routed)
-          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
+        if (e.type === "select" && (routed || selectionCheckout))
+          writeSelectionFile(selectionCheckout ?? projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
         else
           runEffects(writeStore, [e]);
       } catch (err) {
@@ -16870,7 +16958,7 @@ function openDashboard(storePath, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync15(join19(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync15(join20(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -17008,7 +17096,7 @@ function openDashboard(storePath, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync11(join19(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync12(join20(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -17103,8 +17191,8 @@ function openDashboard(storePath, options = {}) {
       }
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join19(agentsDir, `${name}.md`);
-        if (!existsSync11(p))
+        const p = join20(agentsDir, `${name}.md`);
+        if (!existsSync12(p))
           continue;
         const content = readFileSync15(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -19746,24 +19834,24 @@ function frameAt(tick2, phase, running) {
 
 // opencode/sterling-tui/pane.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync12 } from "node:fs";
-import { basename as basename5, dirname as dirname9, isAbsolute as isAbsolute2, join as join20, relative, resolve as resolve9, sep as sep3 } from "node:path";
+import { existsSync as existsSync13 } from "node:fs";
+import { basename as basename6, dirname as dirname10, isAbsolute as isAbsolute2, join as join21, relative, resolve as resolve10, sep as sep3 } from "node:path";
 var PANE_TITLE = "Sterling side pane";
 var EXEC_TIMEOUT_MS = 15e3;
 function isWithin(dir, root) {
-  const rel = relative(resolve9(root), resolve9(dir));
+  const rel = relative(resolve10(root), resolve10(dir));
   return rel === "" || rel !== ".." && !rel.startsWith(`..${sep3}`) && !isAbsolute2(rel);
 }
 function launcherRoot(dir, storePath, exists) {
-  if (exists(join20(dir, "sterling-launch.sh"))) return dir;
-  const storeRoot = storePath && basename5(dirname9(storePath)) === ".sterling" ? dirname9(dirname9(storePath)) : void 0;
-  return storeRoot && isWithin(dir, storeRoot) && exists(join20(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
+  if (exists(join21(dir, "sterling-launch.sh"))) return dir;
+  const storeRoot = storePath && basename6(dirname10(storePath)) === ".sterling" ? dirname10(dirname10(storePath)) : void 0;
+  return storeRoot && isWithin(dir, storeRoot) && exists(join21(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
 }
 async function reopenPane(root, deps) {
   if (!deps.env.TMUX) {
     return { title: PANE_TITLE, variant: "warning", message: "Not inside tmux; start OpenCode with the Sterling launcher to get a side pane." };
   }
-  const script = join20(root, "sterling-launch.sh");
+  const script = join21(root, "sterling-launch.sh");
   if (!deps.exists(script)) {
     return { title: PANE_TITLE, variant: "warning", message: `No sterling-launch.sh in ${root}; run /sterling:init.` };
   }
@@ -19779,15 +19867,15 @@ async function reopenPane(root, deps) {
 }
 var realPaneDeps = {
   env: process.env,
-  exists: existsSync12,
-  exec: (file, args, options) => new Promise((resolve11, reject) => {
-    execFile(file, args, options, (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve11({ stdout, stderr }));
+  exists: existsSync13,
+  exec: (file, args, options) => new Promise((resolve12, reject) => {
+    execFile(file, args, options, (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve12({ stdout, stderr }));
   })
 };
 
 // opencode/sterling-tui/view.ts
-import { existsSync as existsSync14 } from "node:fs";
-import { dirname as dirname11, join as join22 } from "node:path";
+import { existsSync as existsSync15 } from "node:fs";
+import { dirname as dirname12, join as join23 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -19917,8 +20005,8 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync8, rmSync as rmSync6, rmdirSync, renameSync as renameSync5, existsSync as existsSync13, lstatSync as lstatSync7, readdirSync as readdirSync5, realpathSync as realpathSync6, chmodSync as chmodSync2 } from "node:fs";
-import { join as join21, resolve as resolve10, dirname as dirname10, isAbsolute as isAbsolute3 } from "node:path";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync8, rmSync as rmSync6, rmdirSync, renameSync as renameSync5, existsSync as existsSync14, lstatSync as lstatSync7, readdirSync as readdirSync5, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
+import { join as join22, resolve as resolve11, dirname as dirname11, isAbsolute as isAbsolute3 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash4 } from "node:crypto";
 
@@ -20031,7 +20119,7 @@ function render2(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join21(root, ".sterling", "transient", "dispatch-register.json");
+  return join22(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -20053,7 +20141,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync13(p)) return { availability: "absent", arr: [] };
+  if (!existsSync14(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync16(p, "utf8");
@@ -20087,7 +20175,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join21(root, ".sterling", "transient", "dispatch-state");
+  return join22(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -20231,7 +20319,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync7(join21(dir, to));
+    lstatSync7(join22(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -20241,7 +20329,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync5(join21(dir, from), join21(dir, to));
+    renameSync5(join22(dir, from), join22(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -20291,7 +20379,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join21(dir, name));
+    const classified = classifyRecordFile(join22(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -20437,7 +20525,7 @@ function contextText(tokens, model, limit) {
 }
 function isActiveChild(start, env, running) {
   const storePath = findStorePath(start, env);
-  const root = storePath ? dirname11(dirname11(storePath)) : start;
+  const root = storePath ? dirname12(dirname12(storePath)) : start;
   return (id) => running(id) || liveChildInRegister(root, id);
 }
 function readSubagents(src) {
@@ -20551,13 +20639,18 @@ function escapeLeavesView(ui) {
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
   return true;
 }
+function checkoutOf(dir) {
+  return resolveProjectRoots(dir)?.checkoutRoot ?? void 0;
+}
 function findStorePath(start, env) {
   if (env.STERLING_STORE) return env.STERLING_STORE;
+  const roots = resolveProjectRoots(start);
+  if (roots && roots.storeRoot !== roots.checkoutRoot) return join23(roots.storeRoot, ".sterling", "sterling.db");
   let dir = start;
   for (; ; ) {
-    const candidate = join22(dir, ".sterling", "sterling.db");
-    if (existsSync14(candidate) || existsSync14(join22(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
-    const parent = dirname11(dir);
+    const candidate = join23(dir, ".sterling", "sterling.db");
+    if (existsSync15(candidate) || existsSync15(join23(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
+    const parent = dirname12(dir);
     if (parent === dir) return void 0;
     dir = parent;
   }
@@ -20579,7 +20672,7 @@ var projectDir = process.cwd();
 function controller() {
   if (dashboard?.ok) return dashboard;
   const storePath = findStorePath(projectDir, process.env);
-  dashboard = storePath ? guarded("Sterling store", () => openDashboard(storePath, { host: "opencode" })) : { ok: false, error: `no .sterling/sterling.db at or above ${projectDir}` };
+  dashboard = storePath ? guarded("Sterling store", () => openDashboard(storePath, { host: "opencode", checkoutRoot: checkoutOf(projectDir) })) : { ok: false, error: `no .sterling/sterling.db at or above ${projectDir}` };
   return dashboard;
 }
 function clip2(text, width) {

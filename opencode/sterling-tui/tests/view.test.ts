@@ -103,7 +103,7 @@ test('escapeLeavesView: Esc leaves only when no help, edit, picker or search is 
 
 test("the OpenCode dashboard opens its controller with host 'opencode', which offers the Overpass rows", () => {
   const src = readFileSync(new URL('../tui.tsx', import.meta.url), 'utf8');
-  assert.match(src, /openDashboard\(storePath, \{ host: 'opencode' \}\)/);
+  assert.match(src, /openDashboard\(storePath, \{ host: 'opencode', checkoutRoot: checkoutOf\(projectDir\) \}\)/);
 });
 
 test('both dashboard functions are on in OpenCode: no flag gate is left (the former ruling sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin (not in the current store), DASHBOARD FUNCTIONS)', () => {

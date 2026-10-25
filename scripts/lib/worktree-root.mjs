@@ -8,20 +8,48 @@ import { isSterlingRoot } from '../hooks/lib/store-backend.mjs';
 // <cwd>/.sterling, reports "not an initialized project" there. Callers that can
 // work from a worktree ask this first and pass the returned mainRoot to
 // openProject; every other caller keeps resolveProject's behaviour unchanged.
-// A linked worktree is one whose `--git-dir` differs from its `--git-common-dir`;
-// the main checkout is the parent of the common dir. Returns
-// { worktree, mainRoot } (real paths) for a linked worktree, or null for the
-// main checkout, a non-git directory, git failing, and a bare-repo main (whose
-// common dir is not `<checkout>/.git`, so there is no main checkout to name).
+// A linked worktree is one whose `--git-dir` differs from its `--git-common-dir`.
+// Its main checkout is found from the common dir: <main>/.git for an ordinary
+// repo, and core.worktree of the common dir for a submodule (whose common dir is
+// <super>/.git/modules/<name>). Returns { worktree, mainRoot } (real paths) for a
+// linked worktree, or null for a main checkout, a non-git directory, git failing,
+// and a BARE main repo (core.bare true, or no core.worktree outside a .git dir),
+// which has no main checkout to name.
+//
+// SELF-CONTAINED: it uses only spawnSync, realpathSync, resolve, basename and
+// dirname, because the generated OpenCode server shim inlines its source
+// (opencode-install.mjs renderServerShim) and must stay dependency-light.
 export function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync('git', ['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 30_000 });
+  const git = (args, at) => spawnSync('git', args, { cwd: at, encoding: 'utf8', timeout: 30_000 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null; // a path git named that is not there: no worktree to report
+    }
+  };
+  const r = git(['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split('\n').map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync(resolve(cwd, gitDir));
-  const commonReal = realpathSync(resolve(cwd, commonDir));
-  if (gitDirReal === commonReal || basename(commonReal) !== '.git') return null;
-  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+  const gitDirReal = real(resolve(cwd, gitDir));
+  const commonReal = real(resolve(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(['--git-dir', commonReal, 'config', '--get-regexp', '^core\\.(bare|worktree)$'], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split('\n')) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === 'true') return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve(commonReal, settings.worktree));
+  else if (basename(commonReal) === '.git') mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 
 // The directory that holds a script's .sterling/ (config, store, PR-loop marker)

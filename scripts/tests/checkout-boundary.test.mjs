@@ -11,9 +11,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { resolveProjectRoots, storeRootFor } from '../lib/worktree-root.mjs';
+import { resolveLinkedWorktree, resolveProjectRoots, storeRootFor } from '../lib/worktree-root.mjs';
 import { checkoutRoot, loadConfig, projectRoot } from '../hooks/lib/common.mjs';
-import { applyClaimIdentity, claimToolOf } from '../../packages/opencode-plugin/src/claim-identity.mjs';
+import { applyClaimIdentity, claimToolOf, classifyTool } from '../../packages/opencode-plugin/src/claim-identity.mjs';
+import { renderServerShim } from '../lib/opencode-install.mjs';
+import { createPrLoopNotice } from '../../packages/opencode-plugin/src/pr-loop.mjs';
+import { armPrLoop } from '../lib/work-pr.mjs';
+import { writeSelectionFile } from '../hooks/lib/selection-file.mjs';
+import { postUpdateApplies } from '../lib/post-update-sync.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // Spawned git must not see a host session (anti_pattern test-spawning-host-detecting-script-must-clear-opencode-env).
@@ -175,7 +180,6 @@ test('the plugin writes a worktree session\'s transient state into the worktree 
 test('claim identity: the plugin fills the real session and checkout into claim tools and refuses another session', async () => {
   assert.equal(claimToolOf('sterling_board_claim'), 'board_claim');
   assert.equal(claimToolOf('sterling_sterling__board_takeover'), 'board_takeover');
-  assert.equal(claimToolOf('board_claim'), null, 'only the Sterling server\'s tools');
   assert.equal(claimToolOf('sterling_board_get'), null);
   const checkoutOfSession = async () => ({ checkout: outside });
   const claim = { tool: 'sterling_board_claim', sessionID: 'ses_real', input: { id: 'i1', checkout: '/somewhere/else' } };
@@ -207,18 +211,52 @@ test('the plugin\'s execute.before fills the claim from the session\'s own direc
   }
 });
 
-test('the hook stdin normalisation gives cwd = store root and checkout = worktree', () => {
-  const probe = `import { readStdin } from ${JSON.stringify(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'common.mjs')).href)}; const i = readStdin(); process.stdout.write(JSON.stringify({ cwd: i.cwd, checkout: i.checkout }));`;
-  const run = (cwd) => {
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { input: JSON.stringify({ cwd }), encoding: 'utf8', env });
+test('Claude Code hooks: readStdin keeps the old walk; a worktree outside the main checkout is marked inert', () => {
+  const probe = `import { readStdin } from ${JSON.stringify(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'common.mjs')).href)}; const i = readStdin(JSON.parse(process.argv[1])); process.stdout.write(JSON.stringify({ cwd: i.cwd, inert: i.inertWorktree ?? null }));`;
+  const run = (cwd, opts = { reportInertWorktree: true }) => {
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe, JSON.stringify(opts)], { input: JSON.stringify({ cwd }), encoding: 'utf8', env });
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
   };
-  assert.deepEqual(run(join(outside, 'src')), { cwd: main, checkout: outside });
-  assert.deepEqual(run(join(main, 'src')), { cwd: main, checkout: main });
+  assert.deepEqual(run(join(outside, 'src')), { cwd: join(outside, 'src'), inert: { storeRoot: main, checkoutRoot: outside } });
+  const plainRead = spawnSync(process.execPath, ['--input-type=module', '-e', probe, '{}'], { input: JSON.stringify({ cwd: outside }), encoding: 'utf8', env });
+  assert.equal(plainRead.status, 0, plainRead.stderr);
+  assert.equal(plainRead.stdout, '', 'every other hook allows and exits inside readStdin, before touching anything');
+  assert.deepEqual(run(join(main, 'src')), { cwd: main, inert: null });
+  assert.deepEqual(run(nested), { cwd: main, inert: null }, 'a nested worktree resolves to the main root, as before this branch');
   const none = join(base, 'not-a-project');
   mkdirSync(none, { recursive: true });
-  assert.deepEqual(run(none), { cwd: none, checkout: none }, 'outside a project both stay as given');
+  assert.deepEqual(run(none), { cwd: none, inert: null });
+});
+
+/** Runs a BUNDLED hook (hooks/<name>) with `input` on stdin. */
+function runHook(name, input) {
+  return spawnSync(process.execPath, [join(repo, 'hooks', name)], { input: JSON.stringify(input), encoding: 'utf8', env });
+}
+
+test('bundled H16 and H7 are inert in a worktree outside the main checkout, and H1 says so once', () => {
+  const eventsMain = join(main, '.sterling', 'transient', 'session-events.json');
+  const touchesMain = join(main, '.sterling', 'transient', 'touches.json');
+  rmSync(join(main, '.sterling', 'transient'), { recursive: true, force: true });
+  rmSync(join(outside, '.sterling', 'transient'), { recursive: true, force: true });
+  const h16 = (cwd) => runHook('h16-event-register.mjs', { cwd, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'q' }, tool_response: {} });
+  const h7 = (cwd, file) => runHook('h7-file-touch.mjs', { cwd, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: file, old_string: 'a', new_string: 'b' }, tool_response: {} });
+  let r = h16(outside);
+  assert.equal(r.status, 0, r.stderr);
+  r = h7(outside, join(outside, 'src', 'b.mjs'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(eventsMain), false, 'H16 from the worktree wrote nothing under main');
+  assert.equal(existsSync(touchesMain), false, 'H7 from the worktree wrote nothing under main');
+  assert.equal(existsSync(join(outside, '.sterling', 'transient')), false, 'nor anything in the worktree');
+  // Control: the same calls in the main checkout do write, so the inert result is not a broken probe.
+  assert.equal(h16(main).status, 0);
+  assert.equal(h7(main, join(main, 'src', 'a.mjs')).status, 0);
+  assert.ok(existsSync(eventsMain), 'H16 writes in the main checkout');
+  assert.ok(existsSync(touchesMain), 'H7 writes in the main checkout');
+  const h1 = runHook('h1-session-start.mjs', { cwd: outside, session_id: 's-wt', source: 'startup', hook_event_name: 'SessionStart' });
+  assert.equal(h1.status, 0, h1.stderr);
+  assert.match(h1.stdout, /STERLING HOOKS INERT: this session runs in the linked git worktree/);
+  assert.equal(h1.stdout.trim().split('\n').length, 1, 'one line');
 });
 
 test('a worktree session\'s settlement baseline is its own checkout\'s HEAD', () => {
@@ -232,4 +270,131 @@ test('a worktree session\'s settlement baseline is its own checkout\'s HEAD', ()
     assert.equal(JSON.parse(readFileSync(join(outside, GIT_SETTLED_REL), 'utf8')).sha, head);
     assert.equal(existsSync(join(main, GIT_SETTLED_REL)), false);
   });
+});
+
+test('the generated OpenCode server shim loads Sterling in a linked worktree and nothing outside a project', async () => {
+  const dir = join(base, 'shim');
+  mkdirSync(dir, { recursive: true });
+  const shimPath = join(dir, 'sterling.js');
+  writeFileSync(shimPath, renderServerShim(repo, false, shimPath));
+  const shim = (await import(`${pathToFileURL(shimPath).href}?t=${Date.now()}`)).default;
+  const wt = stubCtx(outside, { ses_1: {} });
+  const cleanup = await shim.setup(wt);
+  try {
+    assert.equal(typeof wt.hooks.permission.evaluate, 'function', 'the plugin loaded and registered its store guard in the worktree');
+    assert.equal(typeof wt.hooks.tool['execute.before'], 'function');
+  } finally {
+    await cleanup?.();
+  }
+  const away = stubCtx(foreignWt, {});
+  assert.equal(await shim.setup(away), undefined);
+  assert.deepEqual(away.hooks.permission, {}, 'a worktree of a non-Sterling repo loads nothing');
+});
+
+test('the PR-loop notice reads the work mode and the owed loop at the store root and publishes to the checkout', () => {
+  const cfg = join(main, '.sterling', 'config.json');
+  const before = readFileSync(cfg, 'utf8');
+  writeFileSync(cfg, JSON.stringify({ project_name: 'boundary-fixture', mode: 'work' }));
+  try {
+    armPrLoop(main, { pr_url: 'https://github.com/o/r/pull/7', pr_number: 7, repo: 'o/r', head_sha: 'a'.repeat(40) });
+    rmSync(join(outside, '.sterling', 'transient', 'opencode-notices.json'), { force: true });
+    createPrLoopNotice({ pluginRoot: repo })(outside);
+    const notices = JSON.parse(readFileSync(join(outside, '.sterling', 'transient', 'opencode-notices.json'), 'utf8'));
+    assert.ok(notices.some((n) => /7/.test(n.text) && /review/i.test(n.text)), JSON.stringify(notices));
+    assert.equal(existsSync(join(main, '.sterling', 'transient', 'opencode-notices.json')) && JSON.parse(readFileSync(join(main, '.sterling', 'transient', 'opencode-notices.json'), 'utf8')).some((n) => /pull\/7|#7/.test(n.text)), false);
+  } finally {
+    writeFileSync(cfg, before);
+    rmSync(join(main, '.sterling', 'transient', 'pr-loops'), { recursive: true, force: true });
+    rmSync(join(main, '.sterling', 'transient', 'pr-loop.json'), { force: true });
+  }
+});
+
+test('a worktree prompt takes only its own checkout\'s selection, never the shared store row', async () => {
+  const store = new SterlingStore(join(main, '.sterling', 'sterling.db'));
+  store.writeSelection('decision', 'main-selection-id', '2026-10-25T12:00:00.000Z');
+  store.close();
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, env: {}, configure: async () => {} });
+  const ctx = stubCtx(outside, { ses_1: {} });
+  const cleanup = await plugin.setup(ctx);
+  try {
+    const p1 = { sessionID: 'ses_1', messageID: 'm1', prompt: { text: 'hi' }, delivery: 'immediate' };
+    await ctx.hooks.session.prompt(p1);
+    assert.doesNotMatch(p1.prompt.text, /main-selection-id/, 'the main checkout\'s selection stays for the main checkout');
+    writeSelectionFile(outside, 'decision', 'wt-selection-id', '2026-10-25T12:00:00.000Z');
+    const p2 = { sessionID: 'ses_1', messageID: 'm2', prompt: { text: 'hi' }, delivery: 'immediate' };
+    await ctx.hooks.session.prompt(p2);
+    assert.match(p2.prompt.text, /wt-selection-id/);
+  } finally {
+    await cleanup?.();
+  }
+  const again = new SterlingStore(join(main, '.sterling', 'sterling.db'));
+  try {
+    assert.equal(again.takeSelection()?.record_id, 'main-selection-id', 'still there for the main checkout');
+  } finally {
+    again.close();
+  }
+});
+
+test('post-update sync applies in a linked worktree: the shared config decides, the checkout keeps the sync', () => {
+  const copy = join(base, 'installed-copy');
+  mkdirSync(copy, { recursive: true }); // no .git: an installed copy (installed-copy.mjs)
+  assert.equal(postUpdateApplies(copy, outside), true);
+  assert.equal(postUpdateApplies(copy, main), true);
+  assert.equal(postUpdateApplies(copy, foreignWt), false);
+});
+
+test('a claim after the session moves records the new checkout, not the cached one', async () => {
+  const sessions = { ses_m: { location: { directory: main } } };
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, env: {}, configure: async () => {} });
+  const ctx = stubCtx(main, sessions);
+  const cleanup = await plugin.setup(ctx);
+  try {
+    const first = { tool: 'mcp__sterling__board_claim', sessionID: 'ses_m', input: { id: 'i1' } };
+    await ctx.hooks.tool['execute.before'](first);
+    assert.equal(first.input.checkout, main);
+    sessions.ses_m.location = { directory: outside };
+    const second = { tool: 'mcp__sterling__board_claim', sessionID: 'ses_m', input: { id: 'i1' } };
+    await ctx.hooks.tool['execute.before'](second);
+    assert.equal(second.input.checkout, outside);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test('claim tools are recognised by their Sterling suffix under any prefix; an unknown Sterling board tool is refused', async () => {
+  for (const t of ['mcp__sterling__board_claim', 'sterling_board_claim', 'acme-gw_board_claim', 'board_claim']) assert.equal(claimToolOf(t), 'board_claim', t);
+  assert.equal(claimToolOf('mcp__sterling__board_get'), null);
+  assert.equal(claimToolOf('github_board_list'), null);
+  assert.deepEqual(classifyTool('sterling_board_frobnicate'), { unknown: true });
+  await assert.rejects(applyClaimIdentity({ tool: 'mcp__sterling__board_frobnicate', sessionID: 's', input: {} }, { checkoutOfSession: async () => ({ checkout: main }) }), /does not know/);
+  const call = { tool: 'acme-gw_board_takeover', sessionID: 's', input: { id: 'i' } };
+  await applyClaimIdentity(call, { checkoutOfSession: async () => ({ checkout: main }) });
+  assert.deepEqual(call.input, { id: 'i', session: 's', checkout: main });
+});
+
+test('a linked worktree of a Sterling git submodule resolves to the submodule checkout; a bare-repo worktree does not', () => {
+  const src = join(base, 'subsrc');
+  mkdirSync(src);
+  writeFileSync(join(src, 'f'), 'f\n');
+  writeFileSync(join(src, '.gitignore'), '.sterling/\n');
+  git(src, ['init', '-q']);
+  git(src, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', '-A']);
+  git(src, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 's']);
+  const sup = join(base, 'super');
+  mkdirSync(sup);
+  git(sup, ['init', '-q']);
+  git(sup, ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', src, 'sub']);
+  const sub = join(sup, 'sub');
+  mkdirSync(join(sub, '.sterling'), { recursive: true });
+  writeFileSync(join(sub, '.sterling', 'config.json'), '{}');
+  const subWt = join(base, 'sub-wt');
+  git(sub, ['worktree', 'add', '-q', '-b', 'sw', subWt]);
+  assert.deepEqual(resolveLinkedWorktree(subWt), { worktree: subWt, mainRoot: sub });
+  assert.deepEqual(resolveProjectRoots(subWt), { storeRoot: sub, checkoutRoot: subWt });
+  assert.equal(resolveLinkedWorktree(sub), null, 'the submodule checkout itself is not a linked worktree');
+  const bare = join(base, 'bare.git');
+  git(base, ['clone', '-q', '--bare', main, bare]);
+  const bareWt = join(base, 'bare-wt');
+  git(bare, ['worktree', 'add', '-q', bareWt, 'outside-branch']);
+  assert.equal(resolveLinkedWorktree(bareWt), null, 'a bare main repo has no main checkout');
 });

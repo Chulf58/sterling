@@ -19,7 +19,7 @@ import { openDashboard, type DashboardController } from '@sterling/tui/dist/cont
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
 import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
 import { launcherRoot, realPaneDeps, reopenPane } from './pane.ts';
-import { SIDEBAR_WIDTH, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, isActiveChild, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
+import { SIDEBAR_WIDTH, checkoutOf, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, isActiveChild, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
 
 const ROUTE = 'sterling';
 /** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
@@ -82,7 +82,7 @@ function controller(): Guarded<DashboardController> {
   if (dashboard?.ok) return dashboard;
   const storePath = findStorePath(projectDir, process.env);
   dashboard = storePath
-    ? guarded('Sterling store', () => openDashboard(storePath, { host: 'opencode' }))
+    ? guarded('Sterling store', () => openDashboard(storePath, { host: 'opencode', checkoutRoot: checkoutOf(projectDir) }))
     : { ok: false, error: `no .sterling/sterling.db at or above ${projectDir}` };
   return dashboard;
 }

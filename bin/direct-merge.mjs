@@ -11905,7 +11905,7 @@ var init_dist2 = __esm({
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { existsSync as existsSync10, readFileSync as readFileSync13, realpathSync as realpathSync5 } from "node:fs";
-import { join as join19, resolve as resolve7 } from "node:path";
+import { join as join19, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -12399,14 +12399,36 @@ function isSterlingRoot(dir) {
 
 // scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const git3 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync3(resolve4(cwd, gitDir));
-  const commonReal = realpathSync3(resolve4(cwd, commonDir));
-  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
-  return { worktree: realpathSync3(toplevel), mainRoot: dirname5(commonReal) };
+  const gitDirReal = real(resolve4(cwd, gitDir));
+  const commonReal = real(resolve4(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve4(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname5(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 function resolveStoreRoot(target2, linkedWorktree2 = resolveLinkedWorktree(target2)) {
   if (!linkedWorktree2) return target2;
@@ -13033,7 +13055,7 @@ var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { readFileSync as readFileSync10, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
-import { join as join15, dirname as dirname8 } from "node:path";
+import { join as join15, dirname as dirname9 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/working-tree.mjs
@@ -13042,7 +13064,7 @@ import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync9, existsSync as existsSync7 } from "node:fs";
-import { join as join12 } from "node:path";
+import { dirname as dirname7, join as join12, resolve as resolve6 } from "node:path";
 init_dist();
 init_dist2();
 
@@ -13184,7 +13206,7 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
 
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname7, join as join14 } from "node:path";
+import { dirname as dirname8, join as join14 } from "node:path";
 var SESSION_EVENTS_REL = join14(".sterling", "transient", "session-events.json");
 
 // scripts/hooks/lib/settlement.mjs
@@ -13376,7 +13398,7 @@ function isVersionOnlyBetweenCommits(root, baseSha, tipSha, path) {
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync5 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join16, resolve as resolve6 } from "node:path";
+import { join as join16, resolve as resolve7 } from "node:path";
 var RELEASE_PACKAGE = "@chulf58/sterling";
 var RELEASE_BRANCH = "opencode-release";
 var BUILD_CLASS_SCRIPTS = ["postinstall", "build", "preinstall", "install", "prepack", "prepare"];
@@ -13449,7 +13471,7 @@ function buildReleaseTree(target2, headSha, pkgText) {
   }
 }
 function rerunCommand(target2, ref) {
-  return `node ${quote(join16(resolve6(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve6(target2))} --ref ${quote(ref)}`;
+  return `node ${quote(join16(resolve7(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve7(target2))} --ref ${quote(ref)}`;
 }
 function releaseVersion({ target: target2, into: into2, headSha, version, pkgText, remoteGit, log, prefix }) {
   const tag = `v${version}`;
@@ -13569,7 +13591,7 @@ init_dist2();
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { existsSync as existsSync8, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { delimiter, dirname as dirname9, join as join17 } from "node:path";
+import { delimiter, dirname as dirname10, join as join17 } from "node:path";
 function gh(cwd, args, timeoutMs2 = 12e4) {
   return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
@@ -13898,7 +13920,7 @@ var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join17(root, PR_LOOP_REL);
 var prLoopFile = (root, prNumber) => join17(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
-  mkdirSync6(dirname9(file), { recursive: true });
+  mkdirSync6(dirname10(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync3(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync2(tmp, file);
@@ -13926,7 +13948,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   return state;
 }
 function writeExclusive(file, value, { beforePublish = null } = {}) {
-  mkdirSync6(dirname9(file), { recursive: true });
+  mkdirSync6(dirname10(file), { recursive: true });
   const tmp = `${file}.excl-${process.pid}`;
   writeFileSync3(tmp, JSON.stringify(value, null, 2) + "\n");
   try {
@@ -14212,9 +14234,9 @@ Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
 if (!linkedWorktree && !existsSync10(join19(target, CONFIG_REL4))) {
   const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
-  if (gitDir && commonDir && realpathSync5(resolve7(target, gitDir)) !== realpathSync5(resolve7(target, commonDir))) {
+  if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve7(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join19(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join19(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
