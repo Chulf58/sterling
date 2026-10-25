@@ -658,7 +658,7 @@ export const DRAIN_VERBS = {
 // the user-only fields it must not (each with the verb its refusal uses).
 export const TODO_SYSTEM_SOURCE = 'system';
 export const TODO_SYSTEM_REQUIRES = ['system_reason'] as const;
-export const TODO_USER_ONLY_FIELDS = { blocked_by: 'orders', needs: 'marks' } as const;
+export const TODO_USER_ONLY_FIELDS = { blocked_by: 'orders', needs: 'marks', claim: 'marks' } as const;
 
 /**
  * A board item handed from one project to a registered sibling (GitHub issue
@@ -692,6 +692,39 @@ const sentHandoffShape = z.object({
   milestone: z.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional(),
 });
 export const todoHandoffSchema = z.discriminatedUnion('role', [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+
+/**
+ * A board task claim (decision
+ * board-task-claims-for-parallel-sessions-claim-generation-ren): which
+ * session holds the task, from which checkout, under which claim generation.
+ * Server-written only, by board_claim / board_reaffirm / board_release /
+ * board_takeover through the store's claim methods, each under the write lock;
+ * board_update cannot set it and the store's updateTodo carries the stored
+ * claim forward whatever the caller's merged body says. `generation` changes
+ * on every new claim and every takeover, never on a renewal, so a holder whose
+ * task was taken over is refused when it later renews, releases or closes.
+ * `taken_over_from` names the previous holder after a takeover.
+ */
+export const todoClaimSchema = z
+  .object({
+    holder_session: z.string().min(1),
+    checkout: z.string().min(1),
+    generation: z.number().int().positive(),
+    claimed_at: z.string().datetime(),
+    renewed_at: z.string().datetime(),
+    taken_over_from: z
+      .object({
+        holder_session: z.string().min(1),
+        checkout: z.string().min(1),
+        generation: z.number().int().positive(),
+        renewed_at: z.string().datetime(),
+        at: z.string().datetime(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type TodoClaim = z.infer<typeof todoClaimSchema>;
 
 /**
  * The same handoff shape for READING another project's row or one's own
@@ -898,6 +931,8 @@ export const todoSchema = base
     needs_set_at: z.string().datetime().optional(),
     // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
     handoff: todoHandoffSchema.optional(),
+    // Which session works on this task now (see todoClaimSchema). User items only.
+    claim: todoClaimSchema.optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);

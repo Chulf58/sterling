@@ -434,7 +434,7 @@ export function createSterlingServer(
   // knowledge_* write (the article-oversize warning), where a busy error must
   // not be labelled safe to re-send. Both tools read, then make one updateTodo,
   // which is one BEGIN IMMEDIATE transaction (issue #60).
-  const SINGLE_WRITE_BOARD_TOOLS: ReadonlySet<string> = new Set(['board_update', 'board_edit']);
+  const SINGLE_WRITE_BOARD_TOOLS: ReadonlySet<string> = new Set(['board_update', 'board_edit', 'board_claim', 'board_reaffirm', 'board_release', 'board_takeover']);
   const mapBusy = (name: string, e: unknown): unknown =>
     e instanceof StoreBusyError ? busyRefusal(name, e, SINGLE_WRITE_BOARD_TOOLS.has(name)) : e;
   const registerTool = server.registerTool.bind(server);
@@ -820,7 +820,7 @@ export function createSterlingServer(
     'board_query',
     {
       description:
-        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as `name (id8)`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:\"system\" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.",
+        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as `name (id8)`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), claim_state on a claimed item (held, expired = check owner, or unreadable, with holder_session, checkout, generation and minutes_since_renewal; absent means nobody holds it; also on digest rows, not on headline rows), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:\"system\" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.",
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         objective: z.string().optional(),
@@ -881,17 +881,80 @@ export function createSterlingServer(
         blocked_by: z.array(z.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
         needs: z.union([z.enum(BOARD_NEEDS), z.literal('')]).optional(),
         needs_reason: z.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
+        session: z.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
-    ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection))
+    ({ id, projection, session, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch, session !== undefined ? { session } : {}), projection))
+  );
+
+  // Board task claims (decision board-task-claims-for-parallel-sessions-claim-generation-ren):
+  // parallel sessions never start the same task, and a claim nobody renews
+  // shows as 'check owner' and can be taken over by any session.
+  const CLAIM_LEASE = "config board_claims.lease_minutes (default 60)";
+  server.registerTool(
+    'board_claim',
+    {
+      description:
+        `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_update calls that pass your session, and through board_reaffirm; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
+      inputSchema: strict({
+        id: z.string().describe(ID_LADDER),
+        session: z.string().describe('your session id'),
+        checkout: z.string().describe('the checkout (worktree path or name) the work runs in'),
+      }),
+    },
+    ({ id, session, checkout }) => json(tools.boardClaim(id, session, checkout))
+  );
+
+  server.registerTool(
+    'board_reaffirm',
+    {
+      description:
+        `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
+      inputSchema: strict({
+        id: z.string().describe(ID_LADDER),
+        session: z.string().describe('your session id'),
+        generation: z.number().int().positive().describe('the claim generation board_claim or board_takeover returned'),
+      }),
+    },
+    ({ id, session, generation }) => json(tools.boardReaffirm(id, session, generation))
+  );
+
+  server.registerTool(
+    'board_release',
+    {
+      description:
+        'Give up your claim on a board task without closing it, so another session can claim it. Refused, with nothing written, when the item is no longer held by your session at that generation (the refusal says where the task moved). Returns {id, slug?, label?, claim_state} with claim_state none.',
+      inputSchema: strict({
+        id: z.string().describe(ID_LADDER),
+        session: z.string().describe('your session id'),
+        generation: z.number().int().positive().describe('the claim generation you hold'),
+      }),
+    },
+    ({ id, session, generation }) => json(tools.boardRelease(id, session, generation))
+  );
+
+  server.registerTool(
+    'board_takeover',
+    {
+      description:
+        "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm, board_release, and board_update naming its session are refused and told the task moved (board_remove does not check the claim). Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
+      inputSchema: strict({
+        id: z.string().describe(ID_LADDER),
+        session: z.string().describe('your session id'),
+        checkout: z.string().describe('the checkout (worktree path or name) the work runs in'),
+        expected_holder: z.string().describe('the holder_session you read on the claim'),
+        expected_generation: z.number().int().positive().describe('the claim generation you read'),
+      }),
+    },
+    ({ id, session, checkout, expected_holder, expected_generation }) => json(tools.boardTakeover(id, session, checkout, expected_holder, expected_generation))
   );
 
   server.registerTool(
     'board_get',
     {
       description:
-        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
+        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. A claimed item returns claim_state {state: held, expired (check owner) or unreadable, holder_session, checkout, generation, claimed_at, renewed_at, minutes_since_renewal, taken_over_from?}; absent means nobody holds it. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
       inputSchema: strict({
         id: z.string().describe(ID_LADDER),
         target_project: z.string().describe(FOREIGN_BOARD_READ).optional(),

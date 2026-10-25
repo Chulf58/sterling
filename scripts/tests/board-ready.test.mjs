@@ -556,3 +556,138 @@ test('renderBoardReadiness: a capped WAITING ON OTHERS list discloses the oldest
     p.cleanup();
   }
 });
+
+// Board task claims (decision board-task-claims-for-parallel-sessions-claim-generation-ren):
+// a claimed item is never READY; it is listed under IN PROGRESS with its holder,
+// checkout and age, and an expired claim is flagged 'check owner'.
+test('claims: claimed items leave READY for IN PROGRESS; an expired claim is flagged check owner', () => {
+  const p = project();
+  try {
+    const free = mk(p.store, { text: 'Free task' });
+    const mine = mk(p.store, { text: 'Held by this session' });
+    const theirs = mk(p.store, { text: 'Held by another session' });
+    const stale = mk(p.store, { text: 'Forgotten claim' });
+    const t0 = Date.parse('2026-10-25T09:00:00.000Z');
+    const iso = (m) => new Date(t0 + m * 60_000).toISOString();
+    p.store.claimTodo(mine.id, { session: 'me', checkout: 'main', now: iso(50) });
+    p.store.claimTodo(theirs.id, { session: 'other', checkout: 'wt-other', now: iso(40) });
+    p.store.claimTodo(stale.id, { session: 'gone', checkout: 'wt-gone', now: iso(0) });
+    const now = t0 + 70 * 60_000;
+    const readiness = p.store.boardReadiness(undefined, { now, leaseMinutes: 60 });
+    const g = lib.boardGroups(readiness);
+    assert.deepEqual(g.ready.map((r) => r.id), [free.id], 'only the unclaimed item is READY');
+    assert.deepEqual(new Set(g.inProgress.map((r) => r.id)), new Set([mine.id, theirs.id, stale.id]));
+
+    const text = lib.renderBoardReadiness({ readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, session: 'me', lease: { value: 60 } });
+    const lines = text.split('\n');
+    assert.ok(lines.includes('IN PROGRESS (3, claimed; not READY):'), text);
+    assert.ok(lines.includes(`- ${h('Held by this session', mine)} — session me (this session) in main, renewed 20m ago`), text);
+    assert.ok(lines.includes(`- ${h('Held by another session', theirs)} — session other in wt-other, renewed 30m ago`), text);
+    const gen = p.store.get(stale.id).claim.generation;
+    assert.ok(
+      lines.includes(`- ${h('Forgotten claim', stale)} — ⚠ check owner: session gone in wt-gone, no renewal for 70m (any session may take it over: board_takeover expected_holder gone, expected_generation ${gen})`),
+      text
+    );
+    assert.match(lines[0], /IN PROGRESS items are claimed by a session/);
+    const readyAt = lines.indexOf('READY (1):');
+    assert.ok(readyAt > 0 && lines[readyAt + 1] === `- ${h('Free task', free)}`, text);
+
+    // Only claims: the block still renders, and an unreadable lease is stated, never silent.
+    const onlyClaims = lib.renderBoardReadiness({ readiness: readiness.filter((r) => r.claim), live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: { error: 'Expected number' } });
+    assert.match(onlyClaims, /CLAIM LEASE UNREADABLE \(board_claims\.lease_minutes: Expected number\): claims are judged at the 60-minute default/);
+    assert.deepEqual(lib.claimLease({}), { value: 60 }, 'only an absent key takes the default');
+    assert.deepEqual(lib.claimLease(undefined), { value: 60 });
+    for (const bad of [null, 'x', { lease_minutes: 'x' }, { lease_minutes: 0 }]) {
+      assert.ok(lib.claimLease({ board_claims: bad }).error, `board_claims ${JSON.stringify(bad)} is unreadable, not the default`);
+    }
+    // The disclosure shows whenever the block renders, claimed items or not.
+    const nullLease = lib.claimLease({ board_claims: null });
+    const noClaims = lib.renderBoardReadiness({ readiness: readiness.filter((r) => !r.claim), live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: nullLease });
+    assert.match(noClaims, /CLAIM LEASE UNREADABLE \(board_claims\.lease_minutes: .+\)/);
+    assert.doesNotMatch(lib.renderBoardReadiness({ readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: { value: 60 } }), /CLAIM LEASE UNREADABLE/);
+
+    // H20's ready line never offers a claimed item.
+    const notice = lib.boardReadyNotice(readiness, '', { availability: 'ok', count: 0, descriptions: [] }, { value: 5 });
+    assert.ok(notice.line.includes(h('Free task', free)) && !notice.line.includes('Held by') && !notice.line.includes('Forgotten'), notice.line);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H1 end to end: a claimed item is listed under IN PROGRESS, not READY, using the configured lease', () => {
+  const p = project({ board_claims: { lease_minutes: 5 } });
+  try {
+    const claimed = mk(p.store, { text: 'Claimed elsewhere' });
+    const free = mk(p.store, { text: 'Still free' });
+    p.store.claimTodo(claimed.id, { session: 'other-sess', checkout: 'wt-x', now: new Date(Date.now() - 10 * 60_000).toISOString() });
+    p.store.close();
+    const res = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+      input: JSON.stringify({ session_id: 'sess-claims', cwd: p.dir, hook_event_name: 'SessionStart', source: 'startup' }),
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PROJECT_DIR: p.dir },
+      timeout: 120_000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const ctx = JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(ctx.includes(`READY (1):\n- ${h('Still free', free)}`), ctx.slice(0, 3000));
+    assert.ok(ctx.includes('IN PROGRESS (1, claimed; not READY):'), ctx.slice(0, 3000));
+    assert.ok(ctx.includes(`- ${h('Claimed elsewhere', claimed)} — ⚠ check owner: session other-sess in wt-x, no renewal for 10m`), 'the 5-minute lease from config judged the 10-minute-old claim expired');
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+  }
+});
+
+// A whole-config failure is never the 60-minute default (anti_pattern
+// config-derived-posture-line-collapses-absent-into-unusable): the loader's
+// unreadable flag reaches claimLease, and a non-object config is unreadable.
+test('claims: a config that fails to load, or is not an object, discloses the lease as unreadable; only an absent config defaults', async () => {
+  const { readProjectConfig } = await import(pathToFileURL(join(root, 'scripts', 'hooks', 'lib', 'operating-state.mjs')).href);
+  const leaseFor = (text) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-lease-'));
+    try {
+      mkdirSync(join(dir, '.sterling'), { recursive: true });
+      if (text !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), text);
+      const { config, configUnreadable } = readProjectConfig(dir);
+      return lib.claimLease(config, configUnreadable);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  assert.deepEqual(leaseFor(undefined), { value: 60 }, 'no config file: the default');
+  assert.deepEqual(leaseFor('{}'), { value: 60 }, 'no board_claims key: the default');
+  assert.deepEqual(leaseFor('{"board_claims":{"lease_minutes":15}}'), { value: 15 });
+  // A file holding JSON null is not listed: readProjectConfig returns null with the flag off
+  // for it, the same as for a missing file, so it reads as absent (a loader gap, not this lib's).
+  for (const text of ['{ not json', '[]', 'false', '0', '"text"']) {
+    assert.ok(leaseFor(text).error, `config.json ${text} is unreadable, not the default`);
+  }
+  // Called without the loader flag, a non-object config is still refused.
+  for (const bad of [[], false, 0, 'x']) assert.ok(lib.claimLease(bad).error, `config ${JSON.stringify(bad)}`);
+  const text = lib.renderBoardReadiness({
+    readiness: [{ id: randomUUID(), name: 'One (00000000)', updated_at: '2026-10-25T09:00:00.000Z', file_keys: [], blockers: [], blockers_open: [], unblocks: [], state: 'ready' }],
+    live: { availability: 'ok', count: 0 },
+    ceiling: { value: 5 },
+    lease: leaseFor('[]'),
+  });
+  assert.match(text, /CLAIM LEASE UNREADABLE \(board_claims\.lease_minutes: \.sterling\/config\.json could not be read\)/);
+});
+
+test('H1 end to end: a config.json that is not an object shows CLAIM LEASE UNREADABLE', () => {
+  const p = project();
+  try {
+    mk(p.store, { text: 'Any ready item' });
+    p.store.close();
+    writeFileSync(join(p.dir, '.sterling', 'config.json'), '[]');
+    const res = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+      input: JSON.stringify({ session_id: 'sess-lease', cwd: p.dir, hook_event_name: 'SessionStart', source: 'startup' }),
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PROJECT_DIR: p.dir },
+      timeout: 120_000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const ctx = JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /CLAIM LEASE UNREADABLE \(board_claims\.lease_minutes: \.sterling\/config\.json could not be read\)/, ctx.slice(0, 3000));
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+  }
+});

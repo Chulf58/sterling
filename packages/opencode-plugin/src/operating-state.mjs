@@ -24,13 +24,13 @@ import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
  * the next turn. `pluginRoot` is the resolved Sterling root, or null when it could
  * not be resolved (the MACHINE ROLE line is then not stated). `opener` opens a
  * mounted domain store for its description (the plugin's openStore). Returns the
- * lines and the config the undeclared-source scan reads.
+ * lines, the config the undeclared-source scan reads and the loader's unreadable flag.
  */
 export function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig(root);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
   const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), overpassLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
-  return { lines, config };
+  return { lines, config, configUnreadable };
 }
 
 /**

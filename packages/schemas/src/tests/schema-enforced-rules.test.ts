@@ -172,7 +172,11 @@ test('todo source: the conditions name the fields the validator requires and ref
   const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
   // needs_reason and needs_set_at go only with needs, so they leave with it.
   const withNeeds = [...userOnly, 'needs_reason', 'needs_set_at'];
-  const samples: Rec = { blocked_by: ['another-item'], needs: 'user' };
+  const samples: Rec = {
+    blocked_by: ['another-item'],
+    needs: 'user',
+    claim: { holder_session: 's1', checkout: 'main', generation: 1, claimed_at: '2026-10-25T09:00:00.000Z', renewed_at: '2026-10-25T09:00:00.000Z' },
+  };
   const plain = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, ...withNeeds]);
 
   const requiring = sources.filter((source) => !accepts('todo', { ...plain, source }));
