@@ -15,8 +15,6 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 
-export const PR_ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
-
 function gh(cwd, args, timeoutMs = 120_000) {
   return spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
 }
@@ -158,24 +156,22 @@ export function localBranchRefusal(cwd, branch) {
  * for any difference in how GitHub counts. */
 export const PR_BODY_MAX_CHARS = 60_000;
 
-/** `text` plus the attribution line, cut to PR_BODY_MAX_CHARS with a visible
- * note naming where the full text is (the commit messages of `range`). */
+/** `text`, cut to PR_BODY_MAX_CHARS with a visible note naming where the full
+ * text is (the commit messages of `range`). */
 function capPrBody(text, range) {
-  const full = [text, PR_ATTRIBUTION].filter(Boolean).join('\n\n');
-  if (full.length <= PR_BODY_MAX_CHARS) return full;
+  if (text.length <= PR_BODY_MAX_CHARS) return text;
   const note = `\n\n---\n**PR body truncated by /sterling:merge:** GitHub accepts at most 65536 characters, and the commit messages come to ${text.length}. The full text is in the commit messages: \`git log ${range}\``;
-  const tail = `\n\n${PR_ATTRIBUTION}`;
-  let keep = PR_BODY_MAX_CHARS - note.length - tail.length;
+  let keep = PR_BODY_MAX_CHARS - note.length;
   const code = text.charCodeAt(keep - 1);
   if (code >= 0xd800 && code <= 0xdbff) keep -= 1; // never split a surrogate pair
-  return `${text.slice(0, keep)}${note}${tail}`;
+  return `${text.slice(0, keep)}${note}`;
 }
 
 /** Title and body from the branch's own commits, oldest first. One commit:
  * its subject and body. Several: the branch name as title and every commit's
- * subject and body in the body (gh's own --fill semantics). The body always
- * ends with the PR attribution line, and is cut to PR_BODY_MAX_CHARS with a
- * truncation note when the commit messages are longer. Returns null when the
+ * subject and body in the body (gh's own --fill semantics). The body is cut to
+ * PR_BODY_MAX_CHARS with a truncation note when the commit messages are
+ * longer. Returns null when the
  * branch has no commits beyond the base. */
 export function prTextFromCommits(cwd, mergeBase, branchTip, branch) {
   const log = spawnSync('git', ['log', '--no-merges', '--reverse', '--format=%s%x1f%b%x1e', `${mergeBase}..${branchTip}`], {
@@ -777,7 +773,7 @@ function readCheckRollup(pull) {
  * answer does not say), its state (OPEN, CLOSED, MERGED), merged flag, current
  * head SHA (headRefOid), its last 100 reviews and EVERY review thread (paged),
  * as { merge_state_status, review_decision, check_rollup, check_rollup_error,
- * pr_state, merged, head_sha, reviews: [{id, state, login, bot, commit}],
+ * pr_state, merged, head_sha, reviews: [{id, state, login, bot, commit, body}],
  * threads: [{id, resolved, outdated, path, url, comment_ids}] }. A review's
  * login is GraphQL's, which names a Bot without the REST '[bot]' suffix.
  * `repo` is 'host/owner/repo'. */
@@ -788,7 +784,7 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
   let state = null;
   for (;;) {
     const page = after ? `, after:"${after}"` : '';
-    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state body author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query, deadline)?.repository?.pullRequest;
     if (
       !pull ||
@@ -803,7 +799,7 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
     }
     if (!state) {
       const rollup = readCheckRollup(pull);
-      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === 'Bot', commit: r?.commit?.oid ?? null }));
+      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === 'Bot', commit: r?.commit?.oid ?? null, body: typeof r?.body === 'string' ? r.body : '' }));
       state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {

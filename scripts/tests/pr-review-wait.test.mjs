@@ -1236,7 +1236,7 @@ const thread = (id, over = {}) => ({ id, isResolved: false, isOutdated: false, p
 // Every page also carries what the settle reads since GitHub issues #152 and
 // #154: the PR state, merged flag, current head and a completed Copilot review
 // of that head (GraphQL names the bot without the REST '[bot]' suffix).
-const gqlReview = (id, commit = HEAD, { login = 'copilot-pull-request-reviewer', typename = 'Bot', state = 'COMMENTED' } = {}) => ({ databaseId: id, state, author: { __typename: typename, login }, commit: { oid: commit } });
+const gqlReview = (id, commit = HEAD, { login = 'copilot-pull-request-reviewer', typename = 'Bot', state = 'COMMENTED', body = '' } = {}) => ({ databaseId: id, state, body, author: { __typename: typename, login }, commit: { oid: commit } });
 const PR_FIELDS = { state: 'OPEN', merged: false, headRefOid: HEAD, reviews: { nodes: [gqlReview(100)] } };
 const mergePage = (status, nodes = [], over = {}) => ({ ...PR_FIELDS, mergeStateStatus: status, reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
 const putMerge = (f, pages) => writeFileSync(join(f.state, 'merge_pages.json'), JSON.stringify(pages));
@@ -1301,6 +1301,70 @@ test('--settle clean: auto_merge is true by default (no config, no key) on a mer
       assert.equal(r.out.auto_merge_on_clean, true, `switch on for ${JSON.stringify(cfg)}`);
       assert.equal(r.out.auto_merge, true);
       assert.equal(r.out.head_sha, HEAD);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+// GitHub issue #204: a newest Copilot review whose body lists previously missed
+// findings is open work with no thread: the clean settle refuses, no override.
+const SETTLE_MISSED_BODY = '## Pull request overview\n\nSome overview.\n\n### Previously missed (1)\n\n- `src/a.mjs:10` the guard never runs on re-settle\n';
+const SETTLE_MISSED_UNPARSED_BODY = '## Pull request overview\n\n### Previously missed (2)\n\nSee the earlier threads.\n';
+
+test('issue #204: --settle clean refuses when the newest Copilot review body lists previously missed findings, even with every thread resolved', () => {
+  for (const [label, body, unparsed] of [['a listed finding', SETTLE_MISSED_BODY, false], ['an unparsed section', SETTLE_MISSED_UNPARSED_BODY, true]]) {
+    const f = makeFixture();
+    try {
+      arm(f);
+      const before = readFileSync(loopPath(f), 'utf8');
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], { reviews: { nodes: [gqlReview(100, HEAD, { body })] } })]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      assert.equal(r.code, 1, `${label}: ${oneLine(r.stdout + r.stderr)}`);
+      assert.equal(r.out.status, 'blocked', label);
+      assert.notEqual(r.out.auto_merge, true, `${label}: never auto-merge`);
+      assert.match(r.out.error, /previously missed findings/, label);
+      assert.match(r.out.error, /NOT clean/, label);
+      assert.equal(r.out.previously_missed_unparsed, unparsed, label);
+      if (!unparsed) assert.deepEqual(r.out.previously_missed, ['`src/a.mjs:10` the guard never runs on re-settle'], label);
+      assert.match(r.stderr, /previously missed findings/, `${label}: loud on stderr too`);
+      assert.equal(readFileSync(loopPath(f), 'utf8'), before, `${label}: the loop stays owed`);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('issue #204: a re-settle on the settled head refuses too when the newest review lists previously missed findings', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNSTABLE', [], { reviews: { nodes: [gqlReview(100)] }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] } })]);
+    const first = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
+    assert.equal(first.code, 0, oneLine(first.stdout + first.stderr));
+    const settled = readFileSync(loopPath(f), 'utf8');
+
+    putMerge(f, [mergePage('CLEAN', [], { reviews: { nodes: [gqlReview(100, HEAD, { body: SETTLE_MISSED_BODY })] } })]);
+    const again = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(again.code, 1, oneLine(again.stdout + again.stderr));
+    assert.equal(again.out.status, 'blocked');
+    assert.notEqual(again.out.auto_merge, true);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), settled, 'a refused re-settle writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('issue #204 control: a newest Copilot review with an empty or overview-only body still settles clean with auto_merge true', () => {
+  for (const body of ['', '## Pull request overview\n\nLooks fine, no findings.\n']) {
+    const f = makeFixture();
+    try {
+      arm(f);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], { reviews: { nodes: [gqlReview(100, HEAD, { body })] } })]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+      assert.equal(r.out.status, 'clean');
+      assert.equal(r.out.auto_merge, true);
     } finally {
       f.cleanup();
     }

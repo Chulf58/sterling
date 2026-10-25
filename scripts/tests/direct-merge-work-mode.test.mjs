@@ -24,7 +24,6 @@ import { parseOriginRepo } from '../lib/work-pr.mjs';
 import { evaluatePrLoop } from '../hooks/lib/pr-loop-duty.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
 
 let SterlingStore;
 before(async () => {
@@ -292,7 +291,8 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
       assert.ok(body.includes(piece), `the body carries every commit subject and body — missing ${piece}`);
     }
     assert.ok(body.indexOf('test: pin sprocket count') < body.indexOf('feat: widget sprockets'), 'commits listed oldest first');
-    assert.ok(body.trimEnd().endsWith(ATTRIBUTION), 'the body ends with the PR attribution line');
+    assert.ok(!body.includes('Generated with'), 'the body carries no attribution line');
+    assert.ok(body.trimEnd().endsWith('Adds sprockets to the widget.'), 'the body ends with the last commit\'s own text');
   } finally {
     p.cleanup();
   }
@@ -600,7 +600,9 @@ test('work (issue #159): a commit body over GitHub\'s 65536-character limit is t
     assert.ok(body.startsWith('line 0: '), 'the start of the message is kept');
     assert.match(body, /PR body truncated by \/sterling:merge/);
     assert.match(body, /git log [0-9a-f]{12}\.\.feat\/sprockets/, 'the note names where the full text is');
-    assert.ok(body.trimEnd().endsWith(ATTRIBUTION), 'the attribution line survives the cut');
+    assert.ok(!body.includes('Generated with'), 'the truncated body carries no attribution line');
+    assert.ok(body.length >= 59_000, `the cut keeps the body close to the limit (${body.length} characters)`);
+    assert.match(body.trimEnd(), /`git log [0-9a-f]{12}\.\.feat\/sprockets`$/, 'the body ends with the truncation note');
   } finally {
     p.cleanup();
   }

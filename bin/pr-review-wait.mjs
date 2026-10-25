@@ -204,14 +204,14 @@ function fetchPrMergeState(cwd, repo, number, { deadline: deadline2 = null } = {
   let state = null;
   for (; ; ) {
     const page = after ? `, after:"${after}"` : "";
-    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state body author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query, deadline2)?.repository?.pullRequest;
     if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes) || typeof pull.state !== "string" || typeof pull.merged !== "boolean" || typeof pull.headRefOid !== "string" || !Array.isArray(pull.reviews?.nodes)) {
       throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads/state/merged/headRefOid/reviews for ${repo}#${number}`);
     }
     if (!state) {
       const rollup = readCheckRollup(pull);
-      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === "Bot", commit: r?.commit?.oid ?? null }));
+      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === "Bot", commit: r?.commit?.oid ?? null, body: typeof r?.body === "string" ? r.body : "" }));
       state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
@@ -466,6 +466,13 @@ if (argv.includes("--settle")) {
           throw blocked(
             `the PR head ${state.head_sha} is not the head Copilot last reviewed (${reviewedHead ?? "no completed Copilot review on the PR"}), so its newest commits are unreviewed and the loop is NOT clean: run the wait with --request-copilot, disposition that review, then settle again; nothing settled`,
             { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha }
+          );
+        }
+        const missed = parsePreviouslyMissed(last.body);
+        if (missed.items.length || missed.unparsed) {
+          throw blocked(
+            `the newest Copilot review (${last.id}) lists previously missed findings${missed.unparsed ? " that could not be read in full" : ""}, so the loop is NOT clean: disposition each finding and push the fix so Copilot reviews again, then settle again; nothing settled`,
+            { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, previously_missed: missed.items, previously_missed_unparsed: missed.unparsed }
           );
         }
         if (bounded && Date.now() > deadline2) {

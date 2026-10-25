@@ -129,7 +129,9 @@
 // issue #154: a review-fix push moves the head after arming); armed_head_sha
 // and reviewed_head_sha (the commit of Copilot's newest completed review) are
 // printed beside it, and a head Copilot's last review did not cover refuses
-// the clean settle (status 'blocked'). A MERGED PR settles clean at once with
+// the clean settle (status 'blocked'), and so does a newest Copilot review whose
+// body lists previously missed findings (GitHub issue #204; no override, a
+// fresh review after the fix push gets past it). A MERGED PR settles clean at once with
 // already_merged true and auto_merge false (GitHub issue #152); a CLOSED one is
 // blocked. A PENDING or EXPECTED rollup with nothing else blocking is read
 // again every --checks-interval seconds (default 30) for up to
@@ -357,6 +359,16 @@ if (argv.includes('--settle')) {
           throw blocked(
             `the PR head ${state.head_sha} is not the head Copilot last reviewed (${reviewedHead ?? 'no completed Copilot review on the PR'}), so its newest commits are unreviewed and the loop is NOT clean: run the wait with --request-copilot, disposition that review, then settle again; nothing settled`,
             { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha }
+          );
+        }
+        // GitHub issue #204: a review body that lists previously missed findings
+        // is open work even when no thread is: refused, no override. A fresh
+        // Copilot review after the fix push is the way past it.
+        const missed = parsePreviouslyMissed(last.body);
+        if (missed.items.length || missed.unparsed) {
+          throw blocked(
+            `the newest Copilot review (${last.id}) lists previously missed findings${missed.unparsed ? ' that could not be read in full' : ''}, so the loop is NOT clean: disposition each finding and push the fix so Copilot reviews again, then settle again; nothing settled`,
+            { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, previously_missed: missed.items, previously_missed_unparsed: missed.unparsed }
           );
         }
         if (bounded && Date.now() > deadline) {
