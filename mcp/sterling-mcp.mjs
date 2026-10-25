@@ -32405,6 +32405,7 @@ var SterlingTools = class _SterlingTools {
   now;
   newId;
   repoRoot;
+  checkoutRoot;
   domains;
   registryPath;
   foreignBoardRead;
@@ -32416,6 +32417,7 @@ var SterlingTools = class _SterlingTools {
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
     this.newId = deps.newId ?? randomUUID5;
     this.repoRoot = deps.repoRoot;
+    this.checkoutRoot = deps.checkoutRoot ?? deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
   }
   /** Every mounted domain with its description (null when its store has none),
@@ -32682,11 +32684,11 @@ var SterlingTools = class _SterlingTools {
   treeRootFor(record2) {
     const name = record2.working_tree;
     if (!name)
-      return { root: this.repoRoot, unresolved: false };
+      return { root: this.checkoutRoot, unresolved: false };
     const mapped = this.config.working_trees?.[name];
     if (!mapped) {
       if (!this.declaresForeignTree(name))
-        return { root: this.repoRoot, unresolved: false };
+        return { root: this.checkoutRoot, unresolved: false };
       return { root: void 0, unresolved: true };
     }
     if (isAbsolutePathAnyHost(mapped))
@@ -33316,7 +33318,7 @@ var SterlingTools = class _SterlingTools {
    *  baseline. The attestation does NOT share it — it collects its own evidence
    *  through ./attestation-proof.ts, whose whole claim is about a buffer it read
    *  itself, not about a pathname. */
-  hashFile(rel, root = this.repoRoot) {
+  hashFile(rel, root = this.checkoutRoot) {
     if (!root)
       return void 0;
     try {
@@ -33336,7 +33338,7 @@ var SterlingTools = class _SterlingTools {
    * established on the next create/reconcile; H7 covers every governed edit
    * meanwhile. An unreadable file also abstains (no fabricated flag).
    */
-  contentChanged(rel, baselines, root = this.repoRoot) {
+  contentChanged(rel, baselines, root = this.checkoutRoot) {
     const baseline = baselines?.[rel];
     if (baseline === void 0)
       return false;
@@ -34376,7 +34378,7 @@ var SterlingTools = class _SterlingTools {
         const tree = this.treeRootFor(record2);
         if (tree.unresolved)
           return { ...record2, verify_before_use: true };
-        const treeRoot = tree.root ?? this.repoRoot;
+        const treeRoot = tree.root ?? this.checkoutRoot ?? this.repoRoot;
         const drifts = [];
         const parkedFiles = [];
         let liveBytes = 0;
@@ -36465,7 +36467,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     if (article.state !== "wired_in" && article.state !== "active" && article.state !== "built")
       return [];
     const entries = (article.files ?? []).filter((f) => f.entry);
-    const root = this.treeRootFor(article).root ?? this.repoRoot;
+    const root = this.treeRootFor(article).root ?? this.checkoutRoot;
     const reachability = root ? new EntryReachability(root) : void 0;
     return entries.flatMap((f) => {
       const why = reachability ? reachability.unjudgedReason(f.path, f.role ?? "") : "its working tree could not be resolved, so reachability was not checked";
@@ -38085,7 +38087,7 @@ ${JSON.stringify(entry)}
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join14(this.repoRoot, ".sterling", "transient", "session-events.json");
+    const eventsPath = join14(this.checkoutRoot ?? this.repoRoot, ".sterling", "transient", "session-events.json");
     const at = this.now();
     appendSessionEventsAt(eventsPath, entries.map((e) => ({ ...e, at })));
     return { at };
@@ -38419,12 +38421,12 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       if (!MEASURED_AT_HEAD_RE.test(candidate)) {
         throw new Error(`board_add: measured_at_head '${candidate}' is refused for its shape \u2014 a full 40-character lowercase hex SHA is required, abbreviations are not accepted \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
       }
-      if (!this.shaResolves(candidate, this.repoRoot)) {
+      if (!this.shaResolves(candidate, this.checkoutRoot)) {
         throw new Error(`board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
       }
       stampedHead = candidate;
     } else {
-      const head = this.currentHeadSha(this.repoRoot);
+      const head = this.currentHeadSha(this.checkoutRoot);
       stampedHead = head !== void 0 && MEASURED_AT_HEAD_RE.test(head) ? head : void 0;
     }
     const res = this.knowledgeCreate(
@@ -38828,7 +38830,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (scanTruncated) {
       notes.push(`the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total \u2014 and PAGING IS BOUNDED BY THAT SAME CEILING EITHER WAY: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue), and cursor paging is equally bounded \u2014 a cursor whose position lies past the scanned window cannot resume into rows the scan never saw either`);
     }
-    const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    const { status: provenance, warnings } = this.computeProvenance(records, this.checkoutRoot);
     const { status: reconcile_provenance, annotations: reconcileNotes } = this.reconcileTruthAtRead(records);
     if (reconcile_provenance === "checked:budget_truncated") {
       notes.push(`the reconcile_needed drift re-check hit its per-call BUDGET on this page and was TRUNCATED \u2014 the items it could not finish say 'unavailable:budget' themselves and must be treated as OPEN; narrow the page (cap/offset, or system_reason) to re-check them`);
@@ -38954,11 +38956,11 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       if (!MEASURED_AT_HEAD_RE.test(candidate)) {
         throw new Error(`board_update: measured_at_head '${candidate}' is refused for its shape \u2014 a full 40-character lowercase hex SHA is required, abbreviations are not accepted \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
       }
-      if (!this.shaResolves(candidate, this.repoRoot)) {
+      if (!this.shaResolves(candidate, this.checkoutRoot)) {
         throw new Error(`board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
       }
     } else if ("text" in patch || "file_keys" in patch) {
-      const head = this.currentHeadSha(this.repoRoot);
+      const head = this.currentHeadSha(this.checkoutRoot);
       if (head && MEASURED_AT_HEAD_RE.test(head))
         patch = { ...patch, measured_at_head: head };
     }
@@ -40792,7 +40794,8 @@ function createSterlingServer(target, opts = {}) {
     process.stderr.write(missingDomainWarning(m) + "\n");
   for (const d of store.unreadableDomains)
     process.stderr.write(unreadableDomainWarning(d) + "\n");
-  const tools = new SterlingTools({ store, config: config2, repoRoot, domains: mountedDomainSurface(store) });
+  const checkoutRoot2 = typeof target === "string" ? void 0 : target.checkoutRoot;
+  const tools = new SterlingTools({ store, config: config2, repoRoot, checkoutRoot: checkoutRoot2, domains: mountedDomainSurface(store) });
   const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
   if (ledgerRemoval)
     process.stderr.write(ledgerRemoval + "\n");
@@ -41384,6 +41387,11 @@ if (projectArg === void 0 === (storeArg === void 0) || !(projectArg ?? storeArg)
   process.exit(2);
 }
 var flagName = projectArg !== void 0 ? "--project" : "--store";
+var checkoutArg = valueOf("--checkout");
+if (checkoutArg !== void 0 && (projectArg === void 0 || checkoutArg === "" || checkoutArg.includes("${"))) {
+  console.error("sterling-mcp: --checkout needs --project and an expanded directory path");
+  process.exit(2);
+}
 var workerPolicyArg = valueOf("--worker-policy");
 var workerTokenArg = valueOf("--worker-token");
 if (workerPolicyArg === void 0 !== (workerTokenArg === void 0) || workerPolicyArg === "" || workerTokenArg === "") {
@@ -41401,10 +41409,11 @@ if (pathArg.includes("${")) {
   process.exit(2);
 }
 var projectRoot = projectArg !== void 0 ? resolve6(projectArg) : void 0;
+var checkoutRoot = checkoutArg !== void 0 ? resolve6(checkoutArg) : projectRoot;
 var storePath = projectRoot !== void 0 ? join16(projectRoot, ".sterling", "sterling.db") : resolve6(pathArg);
 var created;
 try {
-  created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath, { workerPolicy });
+  created = createSterlingServer(projectRoot !== void 0 ? { projectRoot, checkoutRoot } : storePath, { workerPolicy });
 } catch (e) {
   const err = e;
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
@@ -41435,6 +41444,7 @@ if (projectRoot !== void 0) {
   }
 }
 export {
+  checkoutRoot,
   projectRoot,
   storePath
 };

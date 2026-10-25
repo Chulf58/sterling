@@ -6,12 +6,12 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync2, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
-import { dirname, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
+import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5673,22 +5673,120 @@ function isSterlingRoot(dir) {
   return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join3, resolve } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve(cwd, gitDir));
+  const commonReal = real(resolve(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join3(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join3(linkedWorktree.mainRoot, configRel)) && existsSync2(join3(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join3(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
-function readStdin() {
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+// scripts/hooks/lib/common.mjs
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve2(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const root = projectRoot(input2.cwd);
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input2.inertWorktree = roots;
+    return input2;
+  }
+  const root = hookProjectRoot(input2.cwd);
   if (root) input2.cwd = root;
   return input2;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -5797,8 +5895,8 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 function loadConfig(cwd) {
-  const p = join3(cwd, ".sterling", "config.json");
-  return existsSync2(p) ? JSON.parse(readFileSync2(p, "utf8")) : null;
+  const p = join4(storeRootFor(cwd), ".sterling", "config.json");
+  return existsSync3(p) ? JSON.parse(readFileSync2(p, "utf8")) : null;
 }
 function repoRel(toolPath, cwd) {
   if (!toolPath) return null;
@@ -5878,17 +5976,17 @@ function parseSterlingDelivery(text) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync2, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync3(flat)) return flat;
+  if (existsSync4(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync3(candidate)) return candidate;
+      if (existsSync4(candidate)) return candidate;
     }
   } catch {
   }
@@ -6007,7 +6105,7 @@ function isReviewerClass(type) {
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 function pathOwnedBy(entry, path, isFile = false) {
   if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
   return path === entry || !isFile && path.startsWith(`${entry}/`);
@@ -6021,7 +6119,7 @@ function probeDirtyPaths(projectDir, files, fileEntries = []) {
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
   try {
-    r = spawnSync("git", ["--no-optional-locks", "status", "--porcelain", "-z", "-uall", "--", ...declared], {
+    r = spawnSync2("git", ["--no-optional-locks", "status", "--porcelain", "-z", "-uall", "--", ...declared], {
       cwd: projectDir,
       encoding: "utf8",
       timeout: 1e4
@@ -6079,8 +6177,8 @@ function claimedResources(promptText, configuredNames) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync3, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync4, lstatSync, readdirSync as readdirSync2, realpathSync, chmodSync } from "node:fs";
-import { join as join4, resolve as resolve2, dirname as dirname2, isAbsolute } from "node:path";
+import { mkdirSync, readFileSync as readFileSync3, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync5, lstatSync, readdirSync as readdirSync2, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join5, resolve as resolve3, dirname as dirname3, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
@@ -6202,10 +6300,10 @@ function render(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join4(root, ".sterling", "transient", "dispatch-register.json");
+  return join5(root, ".sterling", "transient", "dispatch-register.json");
 }
 function legacyRegisterLockDir(root) {
-  return join4(root, ".sterling", "transient", "dispatch-register.lock");
+  return join5(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -6227,7 +6325,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync4(p)) return { availability: "absent", arr: [] };
+  if (!existsSync5(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync3(p, "utf8");
@@ -6244,7 +6342,7 @@ function readRawArray(root) {
   return { availability: "ok", arr: parsed };
 }
 function writeRawArrayAtomic(root, arr) {
-  const dir = join4(root, ".sterling", "transient");
+  const dir = join5(root, ".sterling", "transient");
   mkdirSync(dir, { recursive: true });
   const p = registerPath(root);
   const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
@@ -6273,10 +6371,10 @@ function currentUid() {
 function registerLockRoot() {
   const uid = currentUid();
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (typeof xdg === "string" && isAbsolute(xdg)) {
+  if (typeof xdg === "string" && isAbsolute2(xdg)) {
     try {
       const st = lstatSync(xdg);
-      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join4(xdg, "sterling-locks");
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join5(xdg, "sterling-locks");
     } catch (e) {
       if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
     }
@@ -6284,8 +6382,8 @@ function registerLockRoot() {
   return `/tmp/sterling-locks-${uid}`;
 }
 function registerLockPath(root) {
-  const hash = createHash("sha256").update(realpathSync(resolve2(root))).digest("hex");
-  return join4(registerLockRoot(), `${hash}.db`);
+  const hash = createHash("sha256").update(realpathSync2(resolve3(root))).digest("hex");
+  return join5(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
   mkdirSync(dir, { recursive: true, mode: 448 });
@@ -6302,7 +6400,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -6322,7 +6420,7 @@ function isPidAlive(pid) {
 }
 function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync3(join4(legacy, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync3(join5(legacy, "owner.json"), "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
     throw e;
@@ -6363,7 +6461,7 @@ async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
   const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname2(lockPath));
+  ensureLockRoot(dirname3(lockPath));
   const db = new DatabaseSync4(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");
@@ -6459,7 +6557,7 @@ function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }
 function dispatchStateDir(root) {
-  return join4(root, ".sterling", "transient", "dispatch-state");
+  return join5(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -6627,8 +6725,8 @@ function writeRecordAtomic(root, fileName, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = join4(dir, fileName);
-  const tmp = join4(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
+  const file = join5(dir, fileName);
+  const tmp = join5(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
   writeFileSync(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
   renameSync(tmp, file);
 }
@@ -6642,7 +6740,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync(join4(dir, to));
+    lstatSync(join5(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -6652,7 +6750,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync(join4(dir, from), join4(dir, to));
+    renameSync(join5(dir, from), join5(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -6679,7 +6777,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join4(dir, name));
+  const classified = classifyRecordFile(join5(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -6746,7 +6844,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join4(dir, name));
+    const classified = classifyRecordFile(join5(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -7374,7 +7472,7 @@ function regularFileEntries(files, cwd) {
   for (const f of files) {
     let st;
     try {
-      st = statSync2(join5(cwd, f), { throwIfNoEntry: false });
+      st = statSync3(join6(cwd, f), { throwIfNoEntry: false });
     } catch (err) {
       if (err?.code === "ENOTDIR") continue;
       warnNonBlocking(`H22: could not stat territory entry '${f}' (${err?.code ?? err?.message ?? err}); it keeps the directory prefix match`);
@@ -7394,7 +7492,7 @@ function postTerritory(prompt, cwd) {
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync5(sidecarPath)) return { ok: false };
+  if (!existsSync6(sidecarPath)) return { ok: false };
   let meta;
   try {
     meta = JSON.parse(readFileSync4(sidecarPath, "utf8"));
@@ -7476,8 +7574,8 @@ async function endTaskStoppedDispatch(input2, lines) {
 }
 var input = readStdin();
 try {
-  if (!existsSync5(`${input.cwd}/.sterling/config.json`)) allow();
-  mkdirSync2(join5(input.cwd, ".sterling", "transient"), { recursive: true });
+  if (!existsSync6(`${input.cwd}/.sterling/config.json`)) allow();
+  mkdirSync2(join6(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
   const KNOWN_EVENTS = /* @__PURE__ */ new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop"]);

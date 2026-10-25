@@ -10,6 +10,7 @@
 // out": a system prompt that changed every turn re-wrote the whole conversation to the
 // provider's prompt cache; finding why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn).
 import { join } from 'node:path';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 import { SUPPORTED_SCHEMA_VERSION, registryPath, resolveSentHandoffs } from '@sterling/store';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
@@ -95,7 +96,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
-    const dbPath = join(root, '.sterling', 'sterling.db');
+    const dbPath = join(storeRootFor(root), '.sterling', 'sterling.db');
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
@@ -163,7 +164,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       try {
         const store = openStore(join(root, '.sterling', 'sterling.db'));
         try {
-          state = readMaintenanceState(store, root);
+          state = readMaintenanceState(store, storeRootFor(root));
         } finally {
           store.close();
         }
@@ -399,7 +400,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
         registrySeen.set(root, sessionID);
         try {
-          const refreshed = refreshRegistryRow(root, { config: state.config, at: now() });
+          const refreshed = refreshRegistryRow(storeRootFor(root), { config: state.config, at: now() });
           if (refreshed?.notice) {
             holdLine(`${root}\0registry-name`, refreshed.notice);
             logLine(root, `context: ${refreshed.notice}`);

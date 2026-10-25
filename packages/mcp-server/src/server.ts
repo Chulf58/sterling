@@ -340,10 +340,13 @@ function openStoreArg(storePath: string): { store: MountedStores; config: Sterli
  * and announced as before. The local .sterling/ directory under the project root
  * stays the anchor for markers, ledgers and locks in both modes. On Postgres the
  * returned `store` is held (holdRoutedStores): when its connection closes, the
- * next call opens a new one.
+ * next call opens a new one. `checkoutRoot` (--checkout) is the git checkout the
+ * session works in: in a linked worktree it differs from projectRoot and carries
+ * HEAD, file checks and the session-event register (SterlingTools checkoutRoot);
+ * absent, it is the project root.
  */
 export function createSterlingServer(
-  target: string | { projectRoot: string },
+  target: string | { projectRoot: string; checkoutRoot?: string },
   opts: { workerPolicy?: WorkerPolicyArgs } = {}
 ): { server: McpServer; store: MountedStores; tools: SterlingTools; toolWrappers: readonly string[] } {
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
@@ -362,7 +365,8 @@ export function createSterlingServer(
   // A mounted domain that fails the mount-time read check never fails boot
   // either: reads skip it, and it is announced the same way.
   for (const d of store.unreadableDomains) process.stderr.write(unreadableDomainWarning(d) + '\n');
-  const tools = new SterlingTools({ store, config, repoRoot, domains: mountedDomainSurface(store) });
+  const checkoutRoot = typeof target === 'string' ? undefined : target.checkoutRoot;
+  const tools = new SterlingTools({ store, config, repoRoot, checkoutRoot, domains: mountedDomainSurface(store) });
   // Server start is the one moment expired domain-write ledger files of other
   // processes are removed (the rule is at removeExpiredDomainWriteLedgers). A
   // file that could not be removed is announced once here and never fails boot.

@@ -7,6 +7,7 @@
 // Each line function returns the bare text, or '' when nothing is stated.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
 import {
   BACKOFF_MS,
   BATCH_MAX_WAIT_MS,
@@ -225,7 +226,7 @@ function stateUnknownReason(e) {
 function readProjectConfig(cwd) {
   let raw;
   try {
-    raw = readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8');
+    raw = readFileSync(join(storeRootFor(cwd), '.sterling', 'config.json'), 'utf8');
   } catch (e) {
     if (e?.code === 'ENOENT') return null; // no config file: the defaults, worker enabled
     throw Object.assign(new Error('config.json unreadable'), { stableReason: `config.json unreadable: ${typeof e?.code === 'string' ? e.code : 'read error'}` });

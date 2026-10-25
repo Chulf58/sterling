@@ -11909,7 +11909,7 @@ import { join as join19, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync5, existsSync as existsSync4, mkdtempSync, rmSync as rmSync3 } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync5, mkdtempSync, rmSync as rmSync3 } from "node:fs";
 init_dist();
 init_dist2();
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -12383,28 +12383,7 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
-// scripts/lib/worktree-root.mjs
-import { spawnSync } from "node:child_process";
-import { existsSync as existsSync3, realpathSync as realpathSync3 } from "node:fs";
-import { basename as basename2, dirname as dirname5, join as join8, resolve as resolve4 } from "node:path";
-function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync3(resolve4(cwd, gitDir));
-  const commonReal = realpathSync3(resolve4(cwd, commonDir));
-  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
-  return { worktree: realpathSync3(toplevel), mainRoot: dirname5(commonReal) };
-}
-function resolveStoreRoot(target2, linkedWorktree2 = resolveLinkedWorktree(target2)) {
-  if (!linkedWorktree2) return target2;
-  const configRel = join8(".sterling", "config.json");
-  const worktreeOnlyConfig = !existsSync3(join8(linkedWorktree2.mainRoot, configRel)) && existsSync3(join8(linkedWorktree2.worktree, configRel));
-  return worktreeOnlyConfig ? linkedWorktree2.worktree : linkedWorktree2.mainRoot;
-}
-
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
 }
@@ -12434,6 +12413,107 @@ function arg(name, argv = process.argv.slice(2)) {
   }
   return found.length ? found[0] : void 0;
 }
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync4, realpathSync as realpathSync3, statSync as statSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve4 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync3, readFileSync as readFileSync5 } from "node:fs";
+import { join as join8 } from "node:path";
+var CONFIG_REL3 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync3(join8(dir, CONFIG_REL3)) || existsSync3(join8(dir, STORE_DB_REL)));
+}
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git3 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve4(cwd, gitDir));
+  const commonReal = real(resolve4(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve4(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname5(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target2, linkedWorktree2 = resolveLinkedWorktree(target2)) {
+  if (!linkedWorktree2) return target2;
+  const configRel = join9(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync4(join9(linkedWorktree2.mainRoot, configRel)) && existsSync4(join9(linkedWorktree2.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree2.worktree : linkedWorktree2.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync4(join9(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
+  if (!from) return null;
+  let dir = resolve4(String(from));
+  for (; ; ) {
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot2 = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot2)) return { storeRoot: storeRoot2, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
+    const parent = dirname5(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve4(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot2 = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot2) ? storeRoot2 : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync3(p);
+  } catch {
+    return p;
+  }
+}
+
+// scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
@@ -12456,10 +12536,10 @@ function resolveProject(cwd) {
     fail(named(e));
   }
   if (route?.storage === "postgres") return { storage: "postgres", dbPath, config: route.config };
-  if (!existsSync4(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
+  if (!existsSync5(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
   let config;
   try {
-    config = route ? route.config : parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync5(configPath, "utf8")) : {});
+    config = route ? route.config : parseConfig(existsSync5(configPath) ? JSON.parse(readFileSync6(configPath, "utf8")) : {});
   } catch (e) {
     fail(`malformed .sterling/config.json \u2014 failing loud, never half-applying (P5): ${e.message}`);
   }
@@ -12609,12 +12689,12 @@ function sweepMergedBranches({ cwd, into: into2 }) {
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { dirname as dirname6, join as join10 } from "node:path";
+import { dirname as dirname6, join as join11 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync6, readdirSync, realpathSync as realpathSync4 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync7, readdirSync, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join9, resolve as resolve5, sep as sep2 } from "node:path";
+import { join as join10, resolve as resolve5, sep as sep2 } from "node:path";
 import { createHash as createHash2 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -12791,7 +12871,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync5, readFileSync6, readdirSync, join9, homedir4);
+)(existsSync6, readFileSync7, readdirSync, join10, homedir4);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -12866,12 +12946,12 @@ var loaded = new Function(
   "homedir",
   `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
 return { openCodeCacheKey, openCodeLoadedSterling };`
-)(createHash2, existsSync5, readFileSync6, readdirSync, join9, homedir4);
+)(createHash2, existsSync6, readFileSync7, readdirSync, join10, homedir4);
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync4, readFileSync as readFileSync7, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync4, readFileSync as readFileSync8, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -12971,14 +13051,14 @@ function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   };
 }
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
-var UPDATE_MARKER_RELATIVE_PATH = join10(".sterling", "update-complete.json");
-var DOMAIN_MAP_PENDING_REL = join10(".sterling", "domain-map-pending");
+var UPDATE_MARKER_RELATIVE_PATH = join11(".sterling", "update-complete.json");
+var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync4, renameSync } from "node:fs";
-init_dist2();
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
 import { join as join15, dirname as dirname9 } from "node:path";
+init_dist2();
 
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
@@ -12986,32 +13066,16 @@ import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync9, existsSync as existsSync7 } from "node:fs";
-import { dirname as dirname7, join as join12, resolve as resolve6 } from "node:path";
+import { dirname as dirname7, isAbsolute, join as join12, relative, resolve as resolve6 } from "node:path";
 init_dist();
 init_dist2();
 
 // scripts/hooks/lib/broker-client.mjs
 init_dist();
 
-// scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync8 } from "node:fs";
-import { join as join11 } from "node:path";
-var CONFIG_REL3 = join11(".sterling", "config.json");
-var STORE_DB_REL = join11(".sterling", "sterling.db");
-function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync6(join11(dir, CONFIG_REL3)) || existsSync6(join11(dir, STORE_DB_REL)));
-}
-
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
-  if (!from) return null;
-  let dir = resolve6(String(from));
-  for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
-    const parent = dirname7(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  return resolveProjectRoots(from, isSterlingRoot)?.storeRoot ?? null;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -13120,7 +13184,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 function loadConfig(cwd) {
-  const p = join12(cwd, ".sterling", "config.json");
+  const p = join12(storeRootFor(cwd), ".sterling", "config.json");
   return existsSync7(p) ? JSON.parse(readFileSync9(p, "utf8")) : null;
 }
 
@@ -13164,7 +13228,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync10(join15(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync10(join15(storeRootFor(root), ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);

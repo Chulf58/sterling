@@ -4380,23 +4380,23 @@ var require_core = __commonJS({
       return this;
     };
     Promise2.callback = function(fn) {
-      return new Promise2((resolve10, reject) => {
+      return new Promise2((resolve11, reject) => {
         fn((error, arg) => {
           if (error) {
             reject(error);
           } else {
-            resolve10(arg);
+            resolve11(arg);
           }
         });
       });
     };
     Promise2.callbackAll = function(fn) {
-      return new Promise2((resolve10, reject) => {
+      return new Promise2((resolve11, reject) => {
         fn((error, ...args) => {
           if (error) {
             reject(error);
           } else {
-            resolve10(args);
+            resolve11(args);
           }
         });
       });
@@ -4449,19 +4449,19 @@ var require_core = __commonJS({
       setTimeout(() => this.resolve(value), timeout);
     };
     Promise2.resolveTimeout = Promise2.fulfillTimeout = function(timeout, value) {
-      return new Promise2((resolve10) => setTimeout(() => resolve10(value), timeout));
+      return new Promise2((resolve11) => setTimeout(() => resolve11(value), timeout));
     };
     Promise2.prototype.rejectTimeout = function(timeout, error) {
       setTimeout(() => this.reject(error), timeout);
     };
     Promise2.rejectTimeout = function(timeout, error) {
-      return new Promise2((resolve10, reject) => setTimeout(() => reject(error), timeout));
+      return new Promise2((resolve11, reject) => setTimeout(() => reject(error), timeout));
     };
     Promise2.resolveNextTick = Promise2.fulfillNextTick = function(value) {
-      return new Promise2((resolve10) => nextTick(() => resolve10(value)));
+      return new Promise2((resolve11) => nextTick(() => resolve11(value)));
     };
     Promise2.rejectNextTick = function(error) {
-      return new Promise2((resolve10, reject) => nextTick(() => reject(error)));
+      return new Promise2((resolve11, reject) => nextTick(() => reject(error)));
     };
     Promise2.dormant = function(fn) {
       var promise = new Promise2();
@@ -4482,10 +4482,10 @@ var require_core = __commonJS({
       if (thenable instanceof Promise2) {
         return thenable;
       }
-      return new Promise2((resolve10, reject) => {
+      return new Promise2((resolve11, reject) => {
         thenable.then(
           (value) => {
-            resolve10(value);
+            resolve11(value);
           },
           (error) => {
             reject(error);
@@ -4580,10 +4580,10 @@ var require_core = __commonJS({
         window.requestAnimationFrame(() => this.reject(error));
       };
       Promise2.resolveAtAnimationFrame = function(value) {
-        return new Promise2((resolve10) => window.requestAnimationFrame(() => resolve10(value)));
+        return new Promise2((resolve11) => window.requestAnimationFrame(() => resolve11(value)));
       };
       Promise2.rejectAtAnimationFrame = function(error) {
-        return new Promise2((resolve10, reject) => window.requestAnimationFrame(() => reject(error)));
+        return new Promise2((resolve11, reject) => window.requestAnimationFrame(() => reject(error)));
       };
     }
   }
@@ -5039,11 +5039,11 @@ var require_wrapper = __commonJS({
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
-      return new Promise2((resolve10, reject) => {
+      return new Promise2((resolve11, reject) => {
         if (typeof asyncFnOrPromise === "function") {
           asyncFnOrPromise = asyncFnOrPromise();
         }
-        Promise2.resolve(asyncFnOrPromise).then(resolve10, reject);
+        Promise2.resolve(asyncFnOrPromise).then(resolve11, reject);
         setTimeout(() => reject(new Error("Timeout")), timeout);
       });
     };
@@ -5065,13 +5065,13 @@ var require_wrapper = __commonJS({
       return oneTry();
     };
     Promise2.onceEvent = (emitter, eventName) => {
-      return new Promise2((resolve10) => emitter.once(eventName, resolve10));
+      return new Promise2((resolve11) => emitter.once(eventName, resolve11));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve10) => emitter.once(eventName, (...args) => resolve10(args)));
+      return new Promise2((resolve11) => emitter.once(eventName, (...args) => resolve11(args)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
-      return new Promise2((resolve10, reject) => {
+      return new Promise2((resolve11, reject) => {
         var altRejects;
         var resolve_ = (...args) => {
           emitter.removeListener("error", reject_);
@@ -5080,7 +5080,7 @@ var require_wrapper = __commonJS({
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve10(_internalAllArgs ? args : args[0]);
+          resolve11(_internalAllArgs ? args : args[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5128,7 +5128,7 @@ var require_decorators = __commonJS({
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args) => {
-          return new Promise2((resolve10, reject) => {
+          return new Promise2((resolve11, reject) => {
             nodeAsyncFn.call(thisBinding, ...args, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
@@ -5136,14 +5136,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve10(cbArgs);
+                resolve11(cbArgs);
               }
             });
           });
         };
       }
       return function(...args) {
-        return new Promise2((resolve10, reject) => {
+        return new Promise2((resolve11, reject) => {
           nodeAsyncFn.call(this, ...args, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
@@ -5151,7 +5151,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve10(cbArgs);
+              resolve11(cbArgs);
             }
           });
         });
@@ -5160,7 +5160,7 @@ var require_decorators = __commonJS({
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args) => {
-          return new Promise2((resolve10, reject) => {
+          return new Promise2((resolve11, reject) => {
             nodeAsyncFn.call(thisBinding, ...args, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
@@ -5168,14 +5168,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve10(cbArg);
+                resolve11(cbArg);
               }
             });
           });
         };
       }
       return function(...args) {
-        return new Promise2((resolve10, reject) => {
+        return new Promise2((resolve11, reject) => {
           nodeAsyncFn.call(this, ...args, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
@@ -5183,7 +5183,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve10(cbArg);
+              resolve11(cbArg);
             }
           });
         });
@@ -5876,9 +5876,9 @@ var require_misc3 = __commonJS({
           listener(exitCode, timeout);
           return Promise2.dummy;
         }
-        return new Promise2((resolve10) => {
+        return new Promise2((resolve11) => {
           listener(exitCode, timeout, () => {
-            resolve10();
+            resolve11();
           });
         });
       };
@@ -5886,11 +5886,11 @@ var require_misc3 = __commonJS({
       setTimeout(() => process.exit(exitCode), timeout);
     };
     Promise2.resolveSafeTimeout = function(timeout, value) {
-      return new Promise2((resolve10) => {
+      return new Promise2((resolve11) => {
         setTimeout(() => {
           setTimeout(() => {
             setTimeout(() => {
-              setTimeout(() => resolve10(value), 0);
+              setTimeout(() => resolve11(value), 0);
             }, timeout / 2);
           }, timeout / 2);
         }, 0);
@@ -6065,7 +6065,7 @@ var require_detectTerminal = __commonJS({
     };
     function getParentProcess(pid) {
       var parentPid, appName;
-      return new Promise2((resolve10, reject) => {
+      return new Promise2((resolve11, reject) => {
         exec("ps -h -o ppid -p " + pid, (error, stdout) => {
           if (error) {
             reject(error);
@@ -6082,7 +6082,7 @@ var require_detectTerminal = __commonJS({
               return;
             }
             appName = stdout_.trim();
-            resolve10({ pid: parentPid, appName });
+            resolve11({ pid: parentPid, appName });
           });
         });
       });
@@ -8013,7 +8013,7 @@ var require_xterm2 = __commonJS({
       }
     };
     var handler = {};
-    handler.mouseX11Protocol = function(basename5, buffer) {
+    handler.mouseX11Protocol = function(basename6, buffer) {
       var code = buffer[0];
       var result = {
         data: {
@@ -8024,25 +8024,25 @@ var require_xterm2 = __commonJS({
       };
       if (code & 32) {
         if (code & 64) {
-          result.name = basename5 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+          result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
         } else {
           switch (code & 3) {
             case 0:
-              result.name = basename5 + "_LEFT_BUTTON_PRESSED";
+              result.name = basename6 + "_LEFT_BUTTON_PRESSED";
               break;
             case 1:
-              result.name = basename5 + "_MIDDLE_BUTTON_PRESSED";
+              result.name = basename6 + "_MIDDLE_BUTTON_PRESSED";
               break;
             case 2:
-              result.name = basename5 + "_RIGHT_BUTTON_PRESSED";
+              result.name = basename6 + "_RIGHT_BUTTON_PRESSED";
               break;
             case 3:
-              result.name = basename5 + "_BUTTON_RELEASED";
+              result.name = basename6 + "_BUTTON_RELEASED";
               break;
           }
         }
       } else if (code & 64) {
-        result.name = basename5 + "_MOTION";
+        result.name = basename6 + "_MOTION";
       }
       result.eaten = 3;
       result.data.code = code;
@@ -8050,7 +8050,7 @@ var require_xterm2 = __commonJS({
       result.data.y = buffer[2] - 32;
       return result;
     };
-    handler.mouseSGRProtocol = function(basename5, buffer) {
+    handler.mouseSGRProtocol = function(basename6, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^(-?[0-9]*);?([0-9]*);?([0-9]*)(M|m)/);
       if (!matches || matches[3].length === 0) {
@@ -8076,7 +8076,7 @@ var require_xterm2 = __commonJS({
       if (code & 32) {
         switch (code & 3) {
           case 0:
-            result.name = basename5 + "_DRAG";
+            result.name = basename6 + "_DRAG";
             result.data.left = true;
             result.data.right = false;
             result.data.xFrom = this.state.button.left.x;
@@ -8085,7 +8085,7 @@ var require_xterm2 = __commonJS({
           // Doesn't seem to exist, middle drag does not discriminate from motion
           //case 1 :
           case 2:
-            result.name = basename5 + "_DRAG";
+            result.name = basename6 + "_DRAG";
             result.data.left = false;
             result.data.right = true;
             result.data.xFrom = this.state.button.right.x;
@@ -8093,27 +8093,27 @@ var require_xterm2 = __commonJS({
             break;
           case 3:
           default:
-            result.name = basename5 + "_MOTION";
+            result.name = basename6 + "_MOTION";
             break;
         }
       } else if (code & 64) {
-        result.name = basename5 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename5 + "_LEFT_BUTTON";
+            result.name = basename6 + "_LEFT_BUTTON";
             this.state.button.left = pressed ? result.data : null;
             break;
           case 1:
-            result.name = basename5 + "_MIDDLE_BUTTON";
+            result.name = basename6 + "_MIDDLE_BUTTON";
             this.state.button.middle = pressed ? result.data : null;
             break;
           case 2:
-            result.name = basename5 + "_RIGHT_BUTTON";
+            result.name = basename6 + "_RIGHT_BUTTON";
             this.state.button.right = pressed ? result.data : null;
             break;
           case 3:
-            result.name = basename5 + "_OTHER_BUTTON";
+            result.name = basename6 + "_OTHER_BUTTON";
             this.state.button.other = pressed ? result.data : null;
             break;
         }
@@ -8122,7 +8122,7 @@ var require_xterm2 = __commonJS({
       result.data.code = code;
       return result;
     };
-    handler.cursorLocation = function(basename5, paramString) {
+    handler.cursorLocation = function(basename6, paramString) {
       var params = paramString.split(";");
       return {
         name: "CURSOR_LOCATION",
@@ -8132,7 +8132,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.colorRegister = function(basename5, paramString) {
+    handler.colorRegister = function(basename6, paramString) {
       var matches = paramString.match(/^([0-9]*);rgb:([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8147,7 +8147,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.screenSize = function(basename5, paramString) {
+    handler.screenSize = function(basename6, paramString) {
       var params = paramString.split(";"), width = parseInt(params[1], 10), height = parseInt(params[0], 10), resized = this.root.width !== width || this.root.height !== height;
       this.root.width = width;
       this.root.height = height;
@@ -8160,7 +8160,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.clipboard = function(basename5, paramString) {
+    handler.clipboard = function(basename6, paramString) {
       var matches = paramString.match(/^([cps][0-7]*);(.*)/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8173,14 +8173,14 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.xtgettcap = function(basename5, paramString) {
-      console.log("handler.xtgettcap: ", basename5, paramString);
+    handler.xtgettcap = function(basename6, paramString) {
+      console.log("handler.xtgettcap: ", basename6, paramString);
       var matches = paramString.match(/^([0-9a-fA-F]*)=([0-9a-fA-F]*)/);
       if (!matches) {
         return {
           name: "TERMINFO",
           data: {
-            valid: basename5 !== "XTGETTCAP_INVALID",
+            valid: basename6 !== "XTGETTCAP_INVALID",
             key: Buffer.from(paramString, "hex").toString(),
             error: "Not found"
           }
@@ -8189,14 +8189,14 @@ var require_xterm2 = __commonJS({
       return {
         name: "TERMINFO",
         data: {
-          valid: basename5 !== "XTGETTCAP_INVALID",
+          valid: basename6 !== "XTGETTCAP_INVALID",
           key: Buffer.from(matches[1], "hex").toString(),
           value: Buffer.from(matches[2], "hex").toString()
         }
       };
     };
-    handler.terminalUnitId = function(basename5, paramString) {
-      console.log("handler.terminalUnitId: ", basename5, paramString);
+    handler.terminalUnitId = function(basename6, paramString) {
+      console.log("handler.terminalUnitId: ", basename6, paramString);
       return {
         name: "TERMINAL_UNIT_ID",
         data: {
@@ -8868,7 +8868,7 @@ var require_konsole2 = __commonJS({
     });
     var keymap = Object.create(xterm.keymap);
     var handler = Object.create(xterm.handler);
-    handler.mouseSGRProtocol = function mouseSGRProtocol(basename5, buffer) {
+    handler.mouseSGRProtocol = function mouseSGRProtocol(basename6, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^([0-9]*);([0-9]*);([0-9]*)(.)/);
       code = parseInt(matches[1], 10);
@@ -8884,34 +8884,34 @@ var require_konsole2 = __commonJS({
       result.data.y = parseInt(matches[3], 10);
       result.eaten = matches[0].length;
       if (code & 32) {
-        result.name = basename5 + "_MOTION";
+        result.name = basename6 + "_MOTION";
       } else if (code & 64) {
-        result.name = basename5 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename5 + "_LEFT_BUTTON";
+            result.name = basename6 + "_LEFT_BUTTON";
             if (this.state.button.left === pressed) {
               result.disable = true;
             }
             this.state.button.left = pressed;
             break;
           case 1:
-            result.name = basename5 + "_MIDDLE_BUTTON";
+            result.name = basename6 + "_MIDDLE_BUTTON";
             if (this.state.button.middle === pressed) {
               result.disable = true;
             }
             this.state.button.middle = pressed;
             break;
           case 2:
-            result.name = basename5 + "_RIGHT_BUTTON";
+            result.name = basename6 + "_RIGHT_BUTTON";
             if (this.state.button.right === pressed) {
               result.disable = true;
             }
             this.state.button.right = pressed;
             break;
           case 3:
-            result.name = basename5 + "_OTHER_BUTTON";
+            result.name = basename6 + "_OTHER_BUTTON";
             if (this.state.button.other === pressed) {
               result.disable = true;
             }
@@ -9601,13 +9601,13 @@ var require_NextGenEvents = __commonJS({
       return this.addListener(eventName, fn, options);
     };
     NextGenEvents.prototype.waitFor = function(eventName) {
-      return new Promise((resolve10) => {
-        this.addListener(eventName, (firstArg) => resolve10(firstArg), { once: true });
+      return new Promise((resolve11) => {
+        this.addListener(eventName, (firstArg) => resolve11(firstArg), { once: true });
       });
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
-      return new Promise((resolve10) => {
-        this.addListener(eventName, (...args) => resolve10(args), { once: true });
+      return new Promise((resolve11) => {
+        this.addListener(eventName, (...args) => resolve11(args), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9751,8 +9751,8 @@ var require_NextGenEvents = __commonJS({
       return NextGenEvents.emitEvent(event2);
     };
     NextGenEvents.prototype.waitForEmit = function(...args) {
-      return new Promise((resolve10) => {
-        this.emit(...args, (interrupt) => resolve10(interrupt));
+      return new Promise((resolve11) => {
+        this.emit(...args, (interrupt) => resolve11(interrupt));
       });
     };
     NextGenEvents.createEvent = function(emitter, ...args) {
@@ -10119,13 +10119,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForFirst = function(emitters, eventName) {
-      return new Promise((resolve10) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve10(firstArg));
+      return new Promise((resolve11) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve11(firstArg));
       });
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
-      return new Promise((resolve10) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args) => resolve10(args));
+      return new Promise((resolve11) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args) => resolve11(args));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10155,13 +10155,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForLast = function(emitters, eventName) {
-      return new Promise((resolve10) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve10(firstArg));
+      return new Promise((resolve11) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve11(firstArg));
       });
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
-      return new Promise((resolve10) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args) => resolve10(args));
+      return new Promise((resolve11) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args) => resolve11(args));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10210,8 +10210,8 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForEmit = function(emitters, ...args) {
-      return new Promise((resolve10) => {
-        NextGenEvents.groupEmit(emitters, ...args, (interrupt) => resolve10(interrupt));
+      return new Promise((resolve11) => {
+        NextGenEvents.groupEmit(emitters, ...args, (interrupt) => resolve11(interrupt));
       });
     };
     NextGenEvents.groupDefineStates = function(emitters, ...args) {
@@ -39068,12 +39068,12 @@ var require_termkit_no_lazy_require = __commonJS({
 
 // packages/tui/dist/main.js
 import { appendFileSync, mkdirSync as mkdirSync12 } from "node:fs";
-import { dirname as dirname12, join as join23 } from "node:path";
+import { dirname as dirname13, join as join24 } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, existsSync as existsSync12 } from "node:fs";
-import { basename as basename4, dirname as dirname9, join as join20 } from "node:path";
+import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, existsSync as existsSync13 } from "node:fs";
+import { basename as basename5, dirname as dirname10, join as join21 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -54261,9 +54261,9 @@ var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_patte
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
 // scripts/lib/opencode-install.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { basename as basename3, dirname as dirname8, isAbsolute, join as join17, resolve as resolve8 } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync14, readdirSync as readdirSync5, realpathSync as realpathSync6, rmSync as rmSync4, statSync as statSync6, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { basename as basename4, dirname as dirname9, isAbsolute, join as join19, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
@@ -55592,6 +55592,68 @@ return { openCodeCacheKey, openCodeLoadedSterling };`
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync11, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
+import { basename as basename3, dirname as dirname8, join as join18, resolve as resolve8 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync10, readFileSync as readFileSync13 } from "node:fs";
+import { join as join17 } from "node:path";
+var CONFIG_REL3 = join17(".sterling", "config.json");
+var STORE_DB_REL = join17(".sterling", "sterling.db");
+function storeBackend(root) {
+  const dbExists = () => existsSync10(join17(root, STORE_DB_REL));
+  let text;
+  try {
+    text = readFileSync13(join17(root, CONFIG_REL3), "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return "sqlite";
+    return dbExists() ? "sqlite" : "routed";
+  }
+  let storage;
+  try {
+    storage = JSON.parse(text)?.storage;
+  } catch {
+    return dbExists() ? "sqlite" : "routed";
+  }
+  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
+}
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git2 = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync5(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve8(cwd, gitDir));
+  const commonReal = real(resolve8(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve8(commonReal, settings.worktree));
+  else if (basename3(commonReal) === ".git") mainRoot = dirname8(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+
 // scripts/lib/opencode-agents.mjs
 var OPENCODE_RENDERER = "opencode/1";
 var OPENCODE_HEADER_RE = /^<!-- sterling-portable renderer=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -55675,11 +55737,21 @@ var IMPORTS = [
   "import { dirname, join } from 'node:path';",
   "import { pathToFileURL } from 'node:url';"
 ].join("\n");
+var SHIM_PROJECT_SOURCE = `import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
+${resolveLinkedWorktree.toString()}
+function sterlingProjectAt(dir) {
+  if (existsSync(join(dir, '.sterling', 'sterling.db'))) return true;
+  const linked = resolveLinkedWorktree(dir);
+  return Boolean(linked && existsSync(join(linked.mainRoot, '.sterling', 'sterling.db')));
+}
+`;
 function refusal(item, what, remedy) {
   return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
 }
 function git(projectDir, args) {
-  const r = spawnSync2("git", args, { cwd: projectDir, encoding: "utf8" });
+  const r = spawnSync3("git", args, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd2(projectDir)}: ${r.error.message}`);
   return r;
 }
@@ -55694,10 +55766,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync13(join17(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync14(join19(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join17(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join19(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -55712,10 +55784,10 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
-  const start = dirname8(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname8(dir)) {
-    if (existsSync10(join17(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname8(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname9(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname9(dir)) {
+    if (existsSync12(join19(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname9(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
@@ -55797,19 +55869,19 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join17(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join19(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join17(projectDir, rel);
-    const templateContent = readFileSync13(join17(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join19(projectDir, rel);
+    const templateContent = readFileSync14(join19(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync10(path) ? readFileSync13(path, "utf8") : null;
+    const raw = existsSync12(path) ? readFileSync14(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -55845,7 +55917,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync10(join17(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync12(join19(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -55853,7 +55925,7 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeMod
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync10(join17(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync12(join19(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -55864,7 +55936,7 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
-      mkdirSync8(dirname8(w.path), { recursive: true });
+      mkdirSync8(dirname9(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
     }
@@ -55890,41 +55962,18 @@ function restoreFullAgentFiles(writes, fs = {}) {
   if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
 }
 
-// scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync11, readFileSync as readFileSync14 } from "node:fs";
-import { join as join18 } from "node:path";
-var CONFIG_REL3 = join18(".sterling", "config.json");
-var STORE_DB_REL = join18(".sterling", "sterling.db");
-function storeBackend(root) {
-  const dbExists = () => existsSync11(join18(root, STORE_DB_REL));
-  let text;
-  try {
-    text = readFileSync14(join18(root, CONFIG_REL3), "utf8");
-  } catch (e) {
-    if (e?.code === "ENOENT") return "sqlite";
-    return dbExists() ? "sqlite" : "routed";
-  }
-  let storage;
-  try {
-    storage = JSON.parse(text)?.storage;
-  } catch {
-    return dbExists() ? "sqlite" : "routed";
-  }
-  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
-}
-
 // scripts/hooks/lib/selection-file.mjs
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, renameSync as renameSync5, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host2 = hostname2()) {
   const safeHost = String(host2).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join19(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join20(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync9(join19(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync9(join20(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
   writeFileSync7(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync5(tmp, path);
@@ -55935,9 +55984,10 @@ var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 var LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join20(dirname9(storePath2), "config.json");
-  const projectRoot = dirname9(dirname9(storePath2));
-  const agentsDir = join20(projectRoot, ".claude", "agents");
+  const configPath2 = join21(dirname10(storePath2), "config.json");
+  const projectRoot = dirname10(dirname10(storePath2));
+  const agentsDir = join21(projectRoot, ".claude", "agents");
+  const selectionCheckout = options.checkoutRoot && options.checkoutRoot !== projectRoot ? options.checkoutRoot : void 0;
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -55971,7 +56021,7 @@ function openDashboard(storePath2, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename4(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename5(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -56074,8 +56124,8 @@ function openDashboard(storePath2, options = {}) {
     let failed = false;
     for (const e of batch) {
       try {
-        if (e.type === "select" && routed)
-          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
+        if (e.type === "select" && (routed || selectionCheckout))
+          writeSelectionFile(selectionCheckout ?? projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
         else
           runEffects(writeStore, [e]);
       } catch (err) {
@@ -56116,7 +56166,7 @@ function openDashboard(storePath2, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync16(join20(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync16(join21(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -56254,7 +56304,7 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync12(join20(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync13(join21(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -56349,8 +56399,8 @@ function openDashboard(storePath2, options = {}) {
       }
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join20(agentsDir, `${name}.md`);
-        if (!existsSync12(p))
+        const p = join21(agentsDir, `${name}.md`);
+        if (!existsSync13(p))
           continue;
         const content = readFileSync16(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -57260,17 +57310,17 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync15, readFileSync as readFileSync18, readdirSync as readdirSync8, statSync as statSync7 } from "node:fs";
+import { existsSync as existsSync16, readFileSync as readFileSync18, readdirSync as readdirSync8, statSync as statSync8 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { join as join22 } from "node:path";
+import { join as join23 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync9, rmSync as rmSync6, rmdirSync, renameSync as renameSync6, existsSync as existsSync13, lstatSync as lstatSync7, readdirSync as readdirSync6, realpathSync as realpathSync6, chmodSync as chmodSync2 } from "node:fs";
-import { join as join21, resolve as resolve9, dirname as dirname10, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync9, rmSync as rmSync6, rmdirSync, renameSync as renameSync6, existsSync as existsSync14, lstatSync as lstatSync7, readdirSync as readdirSync6, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
+import { join as join22, resolve as resolve10, dirname as dirname11, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash4 } from "node:crypto";
 function registerPath(root) {
-  return join21(root, ".sterling", "transient", "dispatch-register.json");
+  return join22(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -57292,7 +57342,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync13(p)) return { availability: "absent", arr: [] };
+  if (!existsSync14(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync17(p, "utf8");
@@ -57325,7 +57375,7 @@ var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join21(root, ".sterling", "transient", "dispatch-state");
+  return join22(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
@@ -57333,24 +57383,24 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync, existsSync as existsSync14, statSync as statSync6, readdirSync as readdirSync7 } from "node:fs";
+import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync, existsSync as existsSync15, statSync as statSync7, readdirSync as readdirSync7 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync14(flat)) return flat;
+  if (existsSync15(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync7(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync14(candidate)) return candidate;
+      if (existsSync15(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync14(path)) return null;
+  if (!existsSync15(path)) return null;
   const fd = openSync4(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -57384,7 +57434,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync6(path).size > TAIL_BYTES;
+  const exhausted = statSync7(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
@@ -59760,7 +59810,7 @@ function roundOf(e) {
 }
 function readCurrentSessionId(projectRoot) {
   try {
-    const parsed = JSON.parse(readFileSync18(join22(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync18(join23(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
     return typeof parsed?.session_id === "string" && parsed.session_id ? parsed.session_id : null;
   } catch {
     return null;
@@ -59820,7 +59870,7 @@ function transcriptState(projectRoot, sessionId, agentId, now, claudeConfigDir) 
   try {
     if (endsOnHandback(path))
       return "finished";
-    return now - statSync7(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? "fresh" : "quiet";
+    return now - statSync8(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? "fresh" : "quiet";
   } catch {
     return "quiet";
   }
@@ -59846,13 +59896,13 @@ function lastTurnEntry(tail) {
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join22(dir, `live-${key}.json`);
+  let file = join23(dir, `live-${key}.json`);
   try {
-    if (!existsSync15(file)) {
+    if (!existsSync16(file)) {
       const done = readdirSync8(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join22(dir, done);
+      file = join23(dir, done);
     }
     const rec = JSON.parse(readFileSync18(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
@@ -59862,7 +59912,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync18(join22(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync18(join23(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -59872,7 +59922,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync18(join22(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync18(join23(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -59880,9 +59930,9 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join22(claudeConfigDir, "projects");
+  const projects = join23(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync15(join22(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync16(join23(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -59893,10 +59943,10 @@ function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join22(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join23(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join22(homedir7(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join23(homedir7(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -59921,7 +59971,7 @@ function displayModel(ref) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync18(join22(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync18(join23(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -59929,14 +59979,14 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync18(join22(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync18(join23(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
   }
 }
 function defaultOpenCodeDbPath(env = process.env) {
-  return join22(env.XDG_DATA_HOME || join22(homedir7(), ".local", "share"), "opencode", "opencode.db");
+  return join23(env.XDG_DATA_HOME || join23(homedir7(), ".local", "share"), "opencode", "opencode.db");
 }
 function isOpenCodeSessionId(agentId) {
   return /^ses_[0-9A-Za-z]+$/.test(agentId);
@@ -59944,7 +59994,7 @@ function isOpenCodeSessionId(agentId) {
 var CATALOG_KEY = "models-dev:catalog";
 var OPENCODE_DB_BUSY_MS = 50;
 function openOpenCodeDb(path) {
-  if (!existsSync15(path))
+  if (!existsSync16(path))
     throw new Error(`no OpenCode database at ${path}`);
   return openForeignDbReadOnly(path, OPENCODE_DB_BUSY_MS);
 }
@@ -60049,7 +60099,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
       return { model: null, pct: null, tokens: null };
     let stamp;
     try {
-      const st = statSync7(path);
+      const st = statSync8(path);
       stamp = `${st.size}:${st.mtimeMs}`;
     } catch {
       return { model: null, pct: null, tokens: null };
@@ -60273,7 +60323,7 @@ function composeCards(view, width, maxHeight, tick, neonEdge) {
 
 // packages/tui/dist/lock.js
 import { mkdirSync as mkdirSync11, readFileSync as readFileSync19, rmSync as rmSync7, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname11 } from "node:path";
+import { dirname as dirname12 } from "node:path";
 function pidIsAlive2(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
     return false;
@@ -60299,7 +60349,7 @@ function ownerStillHolds(storedToken, currentToken) {
   return storedToken === currentToken;
 }
 function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = procStartTime2) {
-  mkdirSync11(dirname11(lockPath2), { recursive: true });
+  mkdirSync11(dirname12(lockPath2), { recursive: true });
   const token = startTimeOf(pid);
   const content = token ? `${pid} ${token}` : String(pid);
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -60381,18 +60431,18 @@ try {
   console.error(`sterling-tui: ${err.message}`);
   process.exit(2);
 }
-var lockPath = join23(dirname12(storePath), "transient", "tui.lock");
+var lockPath = join24(dirname13(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
 var profileEnv = process.env.STERLING_TUI_PROFILE;
-var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join23(dirname12(storePath), "transient", "tui-profile.log") : profileEnv;
-var github = createGithubPoller({ root: dirname12(dirname12(storePath)) });
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join24(dirname13(storePath), "transient", "tui-profile.log") : profileEnv;
+var github = createGithubPoller({ root: dirname13(dirname13(storePath)) });
 var ctl = openLaunchDashboard(launch, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
-  mkdirSync12(dirname12(profilePath), { recursive: true });
+  mkdirSync12(dirname13(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
 }
 function profiled(kind, work, extra = () => ({})) {
@@ -60408,7 +60458,7 @@ function profiled(kind, work, extra = () => ({})) {
 }
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
-var subagents = createSubagentTracker(dirname12(dirname12(storePath)), { host });
+var subagents = createSubagentTracker(dirname13(dirname13(storePath)), { host });
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {

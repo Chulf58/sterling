@@ -5774,7 +5774,7 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
 }
@@ -5820,6 +5820,13 @@ function hasFlag(name, argv = process.argv.slice(2)) {
   }
   return count === 1;
 }
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join3 } from "node:path";
+var CONFIG_REL = join3(".sterling", "config.json");
+var STORE_DB_REL = join3(".sterling", "sterling.db");
+
+// scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
@@ -5828,8 +5835,8 @@ function fail(message, code = 1) {
 // scripts/hooks/lib/session-events.mjs
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname, join as join3 } from "node:path";
-var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
+import { dirname, join as join4 } from "node:path";
+var SESSION_EVENTS_REL = join4(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath2, newEvents, lockOptions) {
   mkdirSync(dirname(eventsPath2), { recursive: true });
   withSessionEventsLock(

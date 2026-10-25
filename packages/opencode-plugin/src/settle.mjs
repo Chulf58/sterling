@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 import { parseConfig } from '@sterling/schemas';
 import { gitIgnored, loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { agentRole } from './agent-name.mjs';
@@ -141,7 +142,8 @@ export function settleDuties(store, root, git, at, { opener } = {}) {
   const records = openDutyRecords(store, config, {
     ...(opener ? { opener } : {}),
     onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`),
-    root,
+    // The domain-write ledgers are the MCP server's, written under the store root.
+    root: storeRootFor(root),
     onLedgerUnreadable: (error, file) => ledgerErrors.push(`${file} (${error})`),
   });
   try {
@@ -319,7 +321,8 @@ export function createSettle({ openStore, now, launchWorkerFor }) {
     } finally {
       store?.close();
     }
-    launchWorkerFor(root, at);
+    // One maintenance worker per store: it runs, logs and reports at the store root.
+    launchWorkerFor(storeRootFor(root), at);
   }
 
   return settle;

@@ -383,6 +383,8 @@ export const BIN_ENTRIES = {
   'move-store': 'scripts/move-store.mjs',
   // the no_capture no-server fallback the MCP server's session-event refusal names
   'no-capture': 'scripts/no-capture.mjs',
+  // the parallel-session worktree opener commands/session.md runs in any consumer project
+  'open-session': 'scripts/open-session.mjs',
   'plan-lock': 'scripts/plan-lock.mjs',
   'pr-review-wait': 'scripts/pr-review-wait.mjs',
   // files a scrubbed Sterling defect report as a GitHub issue from a consumer project

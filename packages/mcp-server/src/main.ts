@@ -1,4 +1,4 @@
-// stdio entry point: sterling-mcp --project <project root>
+// stdio entry point: sterling-mcp --project <project root> [--checkout <git checkout>]
 // (hobby back-compat: sterling-mcp --store <path-to-sterling.db>)
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,14 @@ if ((projectArg === undefined) === (storeArg === undefined) || !(projectArg ?? s
   process.exit(2);
 }
 const flagName = projectArg !== undefined ? '--project' : '--store';
+// --checkout <dir>: the git checkout the session works in, given by the OpenCode
+// plugin for a linked worktree (its store stays at --project). It needs --project
+// and a value; absent, the checkout is the project root.
+const checkoutArg = valueOf('--checkout');
+if (checkoutArg !== undefined && (projectArg === undefined || checkoutArg === '' || checkoutArg.includes('${'))) {
+  console.error('sterling-mcp: --checkout needs --project and an expanded directory path');
+  process.exit(2);
+}
 // Worker mode (GitHub #56): the maintenance worker's per-run MCP config passes
 // both flags; the server then refuses every mutation the policy file does not
 // allow. One without the other, an empty value, or a relative policy path
@@ -74,6 +82,7 @@ if (pathArg.includes('${')) {
 // the runtime marker, ledgers and locks live beside it in both modes, whether
 // or not a SQLite file exists there (Postgres storage has none).
 export const projectRoot = projectArg !== undefined ? resolve(projectArg) : undefined;
+export const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : projectRoot;
 export const storePath = projectRoot !== undefined ? join(projectRoot, '.sterling', 'sterling.db') : resolve(pathArg);
 
 // The stores open first, so a refused boot (a Postgres store that is missing
@@ -82,7 +91,7 @@ export const storePath = projectRoot !== undefined ? join(projectRoot, '.sterlin
 // the runtime marker. The error is printed by name and the process exits 1.
 let created: ReturnType<typeof createSterlingServer>;
 try {
-  created = createSterlingServer(projectRoot !== undefined ? { projectRoot } : storePath, { workerPolicy });
+  created = createSterlingServer(projectRoot !== undefined ? { projectRoot, checkoutRoot } : storePath, { workerPolicy });
 } catch (e) {
   // The class name: ProjectModeError and ProjectIdentityError keep name 'Error'.
   const err = e as Error;

@@ -6,13 +6,13 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h19-knowledge-delivery.mjs
-import { statSync as statSync4 } from "node:fs";
-import { join as join14 } from "node:path";
+import { statSync as statSync5 } from "node:fs";
+import { join as join15 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync4 } from "node:fs";
-import { dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
-import { spawnSync } from "node:child_process";
+import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
+import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -12390,22 +12390,120 @@ function storeBackend(root) {
   return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync4(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve3(cwd, gitDir));
+  const commonReal = real(resolve3(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve3(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname5(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join9(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync4(join9(linkedWorktree.mainRoot, configRel)) && existsSync4(join9(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync4(join9(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve3(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname5(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
-function readStdin() {
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve3(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync4(p);
+  } catch {
+    return p;
+  }
+}
+
+// scripts/hooks/lib/common.mjs
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve4(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname6(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const root = projectRoot(input2.cwd);
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input2.inertWorktree = roots;
+    return input2;
+  }
+  const root = hookProjectRoot(input2.cwd);
   if (root) input2.cwd = root;
   return input2;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -12514,13 +12612,13 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 function loadConfig(cwd) {
-  const p = join9(cwd, ".sterling", "config.json");
-  return existsSync4(p) ? JSON.parse(readFileSync6(p, "utf8")) : null;
+  const p = join10(storeRootFor(cwd), ".sterling", "config.json");
+  return existsSync5(p) ? JSON.parse(readFileSync6(p, "utf8")) : null;
 }
 function gitIgnored(paths, cwd) {
   const list = (paths ?? []).filter(Boolean);
   if (!list.length) return /* @__PURE__ */ new Set();
-  const res = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+  const res = spawnSync2("git", ["check-ignore", "-z", "--stdin"], {
     cwd,
     input: list.join("\0") + "\0",
     encoding: "utf8",
@@ -12529,13 +12627,14 @@ function gitIgnored(paths, cwd) {
   if (res.status !== 0 && res.status !== 1) return null;
   return new Set((res.stdout || "").split("\0").filter(Boolean));
 }
-function openStore(cwd) {
+function openStore(dir) {
+  const cwd = storeRootFor(dir);
   if (storeBackend(cwd) === "routed") {
     const route = resolveStoreRoute(cwd);
     if (route?.storage === "postgres") return openRoutedForHook(cwd).store;
   }
-  const p = join9(cwd, ".sterling", "sterling.db");
-  return existsSync4(p) ? new SterlingStore(p) : null;
+  const p = join10(cwd, ".sterling", "sterling.db");
+  return existsSync5(p) ? new SterlingStore(p) : null;
 }
 function namedError(e) {
   const name = e?.constructor?.name && e.constructor.name !== "Object" ? e.constructor.name : e?.name ?? "Error";
@@ -12566,14 +12665,14 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/working-tree.mjs
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
   const mapped = typeof raw === "string" && raw ? raw : void 0;
-  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join10(root, mapped);
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join11(root, mapped);
   return !sameLocationAnyHost(location, root);
 }
 function workingTreesAt(root) {
@@ -12586,11 +12685,11 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
 import { readFileSync as readFileSync8 } from "node:fs";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join11, resolve as resolve4, dirname as dirname6, isAbsolute } from "node:path";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { join as join12, resolve as resolve5, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
 
@@ -12712,7 +12811,7 @@ function deliveryPolicyNotice(policy) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join11(root, ".sterling", "transient", "dispatch-register.json");
+  return join12(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -12734,7 +12833,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync5(p)) return { availability: "absent", arr: [] };
+  if (!existsSync6(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync7(p, "utf8");
@@ -12768,7 +12867,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join11(root, ".sterling", "transient", "dispatch-state");
+  return join12(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -12912,7 +13011,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync4(join11(dir, to));
+    lstatSync4(join12(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -12922,7 +13021,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join11(dir, from), join11(dir, to));
+    renameSync2(join12(dir, from), join12(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -12940,7 +13039,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join11(dir, name));
+  const classified = classifyRecordFile(join12(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -13015,7 +13114,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join11(dir, name));
+    const classified = classifyRecordFile(join12(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -13086,7 +13185,7 @@ function hazardLaneMode(input2, root) {
     if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
     const type = laneAgentType(input2, root);
     if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
-    const tools = frontmatterTools(readFileSync8(join12(root, ".claude", "agents", `${type}.md`), "utf8"));
+    const tools = frontmatterTools(readFileSync8(join13(root, ".claude", "agents", `${type}.md`), "utf8"));
     if (!tools) return "whole";
     return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
   } catch {
@@ -13095,15 +13194,15 @@ function hazardLaneMode(input2, root) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, existsSync as existsSync6, renameSync as renameSync3, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { join as join13, dirname as dirname7 } from "node:path";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, existsSync as existsSync7, renameSync as renameSync3, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { join as join14, dirname as dirname8 } from "node:path";
 function deliveryDir(cwd) {
-  return join13(cwd, ".sterling", "transient", "delivery");
+  return join14(cwd, ".sterling", "transient", "delivery");
 }
 function claimLegacyInjectionRungNotice(cwd, rawRung) {
   if (rawRung === "read") return null;
-  const transient = join13(cwd, ".sterling", "transient");
-  const marker = join13(transient, "legacy-injection-rung-noticed");
+  const transient = join14(cwd, ".sterling", "transient");
+  const marker = join14(transient, "legacy-injection-rung-noticed");
   mkdirSync6(transient, { recursive: true });
   try {
     const fd = openSync3(marker, "wx");
@@ -13136,11 +13235,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join13(deliveryDir(cwd), component);
+  return join14(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join13(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join14(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -13179,7 +13278,7 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync6(path)) return emptyDeliveryGuard();
+    if (!existsSync7(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync9(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
@@ -13191,7 +13290,7 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync6(dirname7(path), { recursive: true });
+  mkdirSync6(dirname8(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync4(tmp, JSON.stringify(guard));
   renameSync3(tmp, path);
@@ -13978,7 +14077,7 @@ function main(input2) {
     let suspectBlock = null;
     let mtimeMs = null;
     try {
-      mtimeMs = statSync4(join14(input2.cwd, rel)).mtimeMs;
+      mtimeMs = statSync5(join15(input2.cwd, rel)).mtimeMs;
     } catch (e) {
       if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
     }
