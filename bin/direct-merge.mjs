@@ -13243,7 +13243,6 @@ init_dist2();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { existsSync as existsSync8, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { delimiter, dirname as dirname10, join as join17 } from "node:path";
-var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args, timeoutMs2 = 12e4) {
   return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
@@ -13330,19 +13329,15 @@ function localBranchRefusal(cwd, branch2) {
 }
 var PR_BODY_MAX_CHARS = 6e4;
 function capPrBody(text, range) {
-  const full = [text, PR_ATTRIBUTION].filter(Boolean).join("\n\n");
-  if (full.length <= PR_BODY_MAX_CHARS) return full;
+  if (text.length <= PR_BODY_MAX_CHARS) return text;
   const note = `
 
 ---
 **PR body truncated by /sterling:merge:** GitHub accepts at most 65536 characters, and the commit messages come to ${text.length}. The full text is in the commit messages: \`git log ${range}\``;
-  const tail = `
-
-${PR_ATTRIBUTION}`;
-  let keep = PR_BODY_MAX_CHARS - note.length - tail.length;
+  let keep = PR_BODY_MAX_CHARS - note.length;
   const code = text.charCodeAt(keep - 1);
   if (code >= 55296 && code <= 56319) keep -= 1;
-  return `${text.slice(0, keep)}${note}${tail}`;
+  return `${text.slice(0, keep)}${note}`;
 }
 function prTextFromCommits(cwd, mergeBase2, branchTip2, branch2) {
   const log = spawnSync7("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {

@@ -15,8 +15,6 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 
-export const PR_ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
-
 function gh(cwd, args, timeoutMs = 120_000) {
   return spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
 }
@@ -158,24 +156,22 @@ export function localBranchRefusal(cwd, branch) {
  * for any difference in how GitHub counts. */
 export const PR_BODY_MAX_CHARS = 60_000;
 
-/** `text` plus the attribution line, cut to PR_BODY_MAX_CHARS with a visible
- * note naming where the full text is (the commit messages of `range`). */
+/** `text`, cut to PR_BODY_MAX_CHARS with a visible note naming where the full
+ * text is (the commit messages of `range`). */
 function capPrBody(text, range) {
-  const full = [text, PR_ATTRIBUTION].filter(Boolean).join('\n\n');
-  if (full.length <= PR_BODY_MAX_CHARS) return full;
+  if (text.length <= PR_BODY_MAX_CHARS) return text;
   const note = `\n\n---\n**PR body truncated by /sterling:merge:** GitHub accepts at most 65536 characters, and the commit messages come to ${text.length}. The full text is in the commit messages: \`git log ${range}\``;
-  const tail = `\n\n${PR_ATTRIBUTION}`;
-  let keep = PR_BODY_MAX_CHARS - note.length - tail.length;
+  let keep = PR_BODY_MAX_CHARS - note.length;
   const code = text.charCodeAt(keep - 1);
   if (code >= 0xd800 && code <= 0xdbff) keep -= 1; // never split a surrogate pair
-  return `${text.slice(0, keep)}${note}${tail}`;
+  return `${text.slice(0, keep)}${note}`;
 }
 
 /** Title and body from the branch's own commits, oldest first. One commit:
  * its subject and body. Several: the branch name as title and every commit's
- * subject and body in the body (gh's own --fill semantics). The body always
- * ends with the PR attribution line, and is cut to PR_BODY_MAX_CHARS with a
- * truncation note when the commit messages are longer. Returns null when the
+ * subject and body in the body (gh's own --fill semantics). The body is cut to
+ * PR_BODY_MAX_CHARS with a truncation note when the commit messages are
+ * longer. Returns null when the
  * branch has no commits beyond the base. */
 export function prTextFromCommits(cwd, mergeBase, branchTip, branch) {
   const log = spawnSync('git', ['log', '--no-merges', '--reverse', '--format=%s%x1f%b%x1e', `${mergeBase}..${branchTip}`], {
@@ -819,6 +815,28 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
 }
 
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** One review's body, by its database id, through the REST reviews endpoint.
+ * Kept out of fetchPrMergeState on purpose: that query is repeated for every
+ * thread page, and 100 reviews' bodies together can overflow gh's output
+ * buffer (ENOBUFS), which would stop a PR with no findings from settling. A
+ * failed read, invalid JSON or a body that is not a string throws; it is never
+ * read as empty. `repo` is 'host/owner/repo'. */
+export function fetchReviewBody(cwd, repo, number, reviewId, { deadline = null } = {}) {
+  const { host, owner, name } = splitRepo(repo);
+  const path = `repos/${owner}/${name}/pulls/${number}/reviews/${reviewId}`;
+  const r = gh(cwd, ['api', '--hostname', host, path], callTimeoutMs(deadline));
+  if (deadline !== null && r.error?.code === 'ETIMEDOUT' && Date.now() >= deadline) throw new DeadlineReachedError();
+  if (r.error || r.status !== 0) throw new Error(`gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
+  let review;
+  try {
+    review = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Error(`gh api ${path} returned invalid JSON (${e.message}): ${String(r.stdout).slice(0, 200)}`);
+  }
+  if (typeof review?.body !== 'string') throw new Error(`gh api ${path} returned no review body (got ${JSON.stringify(review?.body)})`);
+  return review.body;
+}
 
 /** fetchPrMergeState, read again ONCE after `retryDelayMs` when GitHub answers
  * UNKNOWN: it computes mergeability lazily, so a first read right after a push

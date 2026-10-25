@@ -2572,6 +2572,15 @@ test('[prompt] a rename-only reconcile drift is a factual refresh the worker clo
   assert.match(prompt, /When you are unsure otherwise, it is NOT PAID\./);
 });
 
+test('[prompt] the worker checks every file the target article owns, not only the item file_keys, before it calls a reconcile item paid or writes "unchanged" (GitHub #206)', () => {
+  const prompt = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'maintenance-worker-prompt.md'), 'utf8');
+  assert.match(prompt, /OWNED FILES BEYOND file_keys: the DIFFS section shows only the item's file_keys, and a history entry re-baselines every file the article owns/);
+  assert.match(prompt, /Before you call a reconcile_needed item paid, or write "unchanged" or "the rest is unchanged" in a history entry, list every `files` path of the target/);
+  assert.match(prompt, /for each owned path outside the item's file_keys Read it and check the article still describes it/);
+  assert.match(prompt, /The comment-only PAID standard holds only when every owned file you can see changed no behaviour/);
+  assert.match(prompt, /if you cannot tell whether it changed, hand the item off with the file named in the reason/);
+});
+
 test('[history] ten large path diffs at the default cap all appear within it: none is left out, long ones fall back to a one-line summary', () => {
   const big = (n) => Array.from({ length: 200 }, (_, i) => `export const line${i} = ${n};`).join('\n') + '\n';
   const keys = Array.from({ length: 10 }, (_, i) => `src/p${i}.mjs`);
