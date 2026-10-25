@@ -13985,51 +13985,7 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
-// scripts/lib/worktree-root.mjs
-import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
-import { basename as basename2, dirname as dirname6, join as join10, resolve as resolve4 } from "node:path";
-
-// scripts/hooks/lib/store-backend.mjs
-import { join as join9 } from "node:path";
-var CONFIG_REL2 = join9(".sterling", "config.json");
-var STORE_DB_REL = join9(".sterling", "sterling.db");
-
-// scripts/lib/worktree-root.mjs
-function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
-  const real2 = (p) => {
-    try {
-      return realpathSync4(p);
-    } catch {
-      return null;
-    }
-  };
-  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = real2(resolve4(cwd, gitDir));
-  const commonReal = real2(resolve4(cwd, commonDir));
-  const worktree = real2(toplevel);
-  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
-  const settings = {};
-  if (!core.error && core.status === 0) {
-    for (const line of core.stdout.split("\n")) {
-      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
-      if (m) settings[m[1]] = m[2];
-    }
-  }
-  if (settings.bare === "true") return null;
-  let mainRoot = null;
-  if (settings.worktree) mainRoot = real2(resolve4(commonReal, settings.worktree));
-  else if (basename2(commonReal) === ".git") mainRoot = dirname6(commonReal);
-  if (!mainRoot || mainRoot === worktree) return null;
-  return { worktree, mainRoot };
-}
-
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name4) {
   return name4.startsWith("-") ? name4 : `--${name4}`;
 }
@@ -14075,6 +14031,52 @@ function hasFlag(name4, argv = process.argv.slice(2)) {
   }
   return count === 1;
 }
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname6, join as join10, resolve as resolve4 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join9 } from "node:path";
+var CONFIG_REL2 = join9(".sterling", "config.json");
+var STORE_DB_REL = join9(".sterling", "sterling.db");
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real2 = (p) => {
+    try {
+      return realpathSync4(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real2(resolve4(cwd, gitDir));
+  const commonReal = real2(resolve4(cwd, commonDir));
+  const worktree = real2(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real2(resolve4(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname6(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+
+// scripts/lib/project.mjs
 function argAll(name4, argv = process.argv.slice(2)) {
   const out = [];
   for (let i = 0; i < argv.length; i++) if (argv[i] === name4 && argv[i + 1]) out.push(argv[++i]);

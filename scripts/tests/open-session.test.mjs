@@ -227,6 +227,38 @@ test('CLI: refuses with exit 2 and a message on an existing worktree, rejects ba
   }
 });
 
+test('CLI: --name=alpha is accepted, repeated flags and empty values are refused', () => {
+  const f = fixture();
+  try {
+    const env = cleanEnv({ HOME: f.home, STERLING_OPENCODE_SETUP_DISABLE: '1' });
+    const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env, cwd: f.main });
+    const eq = run(['--name=alpha']);
+    assert.match(eq.stdout, /created worktree: .*alpha/, eq.stderr);
+    assert.ok(existsSync(worktreePathFor(f.main, 'alpha')), '--name=alpha made the worktree named alpha');
+    const dupRemove = run(['--remove', 'alpha', '--remove=alpha']);
+    assert.equal(dupRemove.status, 1);
+    assert.match(dupRemove.stderr, /--remove: given more than once/);
+    assert.ok(existsSync(worktreePathFor(f.main, 'alpha')), 'a refused duplicate removed nothing');
+    const dupName = run(['--name', 'a', '--name', 'b']);
+    assert.equal(dupName.status, 1);
+    assert.match(dupName.stderr, /--name: given more than once/);
+    const empty = run(['--name=']);
+    assert.equal(empty.status, 1);
+    assert.match(empty.stderr, /--name requires a value/);
+    const bare = run(['--name']);
+    assert.equal(bare.status, 1);
+    assert.match(bare.stderr, /--name requires a value/);
+    const stray = run(['alpha']);
+    assert.equal(stray.status, 1);
+    assert.match(stray.stderr, /unexpected argument 'alpha'/);
+    const rm = run(['--remove=alpha']);
+    assert.equal(rm.status, 0, rm.stderr);
+    assert.ok(!existsSync(worktreePathFor(f.main, 'alpha')));
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
 test('CLI: an OpenCode setup that did not run leaves the worktree, exits 2 and says so; --remove retires it', () => {
   const f = fixture();
   try {

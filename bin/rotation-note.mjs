@@ -5975,6 +5975,37 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
+// scripts/lib/cli-args.mjs
+function normalizeFlag(name) {
+  return name.startsWith("-") ? name : `--${name}`;
+}
+var FLAG_SHAPED_VALUE = /^-{1,2}[A-Za-z]/;
+function occurrences(flag, argv) {
+  const eq = `${flag}=`;
+  const found = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === flag) {
+      const next = argv[i + 1];
+      if (next !== void 0 && FLAG_SHAPED_VALUE.test(next)) {
+        throw new Error(`${flag}: the value '${next}' looks like another flag \u2014 refusing to read it as ${flag}'s value`);
+      }
+      found.push(next);
+    } else if (tok.startsWith(eq)) {
+      found.push(tok.slice(eq.length));
+    }
+  }
+  return found;
+}
+function arg(name, argv = process.argv.slice(2)) {
+  const flag = normalizeFlag(name);
+  const found = occurrences(flag, argv);
+  if (found.length > 1) {
+    throw new Error(`${flag}: given more than once (${found.length} occurrences) \u2014 refusing rather than silently taking the first or last value`);
+  }
+  return found.length ? found[0] : void 0;
+}
+
 // scripts/lib/worktree-root.mjs
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync3, realpathSync as realpathSync3, statSync } from "node:fs";
@@ -6047,35 +6078,6 @@ function realOf(p) {
 }
 
 // scripts/lib/project.mjs
-function normalizeFlag(name) {
-  return name.startsWith("-") ? name : `--${name}`;
-}
-var FLAG_SHAPED_VALUE = /^-{1,2}[A-Za-z]/;
-function occurrences(flag, argv) {
-  const eq = `${flag}=`;
-  const found = [];
-  for (let i = 0; i < argv.length; i++) {
-    const tok = argv[i];
-    if (tok === flag) {
-      const next = argv[i + 1];
-      if (next !== void 0 && FLAG_SHAPED_VALUE.test(next)) {
-        throw new Error(`${flag}: the value '${next}' looks like another flag \u2014 refusing to read it as ${flag}'s value`);
-      }
-      found.push(next);
-    } else if (tok.startsWith(eq)) {
-      found.push(tok.slice(eq.length));
-    }
-  }
-  return found;
-}
-function arg(name, argv = process.argv.slice(2)) {
-  const flag = normalizeFlag(name);
-  const found = occurrences(flag, argv);
-  if (found.length > 1) {
-    throw new Error(`${flag}: given more than once (${found.length} occurrences) \u2014 refusing rather than silently taking the first or last value`);
-  }
-  return found.length ? found[0] : void 0;
-}
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);

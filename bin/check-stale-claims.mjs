@@ -6223,12 +6223,7 @@ init_dist();
 // packages/store/dist/broker-runtime.js
 init_dist();
 
-// scripts/hooks/lib/store-backend.mjs
-import { join as join2 } from "node:path";
-var CONFIG_REL = join2(".sterling", "config.json");
-var STORE_DB_REL = join2(".sterling", "sterling.db");
-
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name4) {
   return name4.startsWith("-") ? name4 : `--${name4}`;
 }
@@ -6258,6 +6253,13 @@ function arg(name4, argv = process.argv.slice(2)) {
   }
   return found.length ? found[0] : void 0;
 }
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+
+// scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);

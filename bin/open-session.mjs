@@ -5029,9 +5029,9 @@ var ZodEffects = class extends ZodType {
     const { status, ctx } = this._processInputParams(input);
     const effect = this._def.effect || null;
     const checkCtx = {
-      addIssue: (arg) => {
-        addIssueToContext(ctx, arg);
-        if (arg.fatal) {
+      addIssue: (arg2) => {
+        addIssueToContext(ctx, arg2);
+        if (arg2.fatal) {
           status.abort();
         } else {
           status.dirty();
@@ -5496,14 +5496,14 @@ var ostring = () => stringType().optional();
 var onumber = () => numberType().optional();
 var oboolean = () => booleanType().optional();
 var coerce = {
-  string: ((arg) => ZodString.create({ ...arg, coerce: true })),
-  number: ((arg) => ZodNumber.create({ ...arg, coerce: true })),
-  boolean: ((arg) => ZodBoolean.create({
-    ...arg,
+  string: ((arg2) => ZodString.create({ ...arg2, coerce: true })),
+  number: ((arg2) => ZodNumber.create({ ...arg2, coerce: true })),
+  boolean: ((arg2) => ZodBoolean.create({
+    ...arg2,
     coerce: true
   })),
-  bigint: ((arg) => ZodBigInt.create({ ...arg, coerce: true })),
-  date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
+  bigint: ((arg2) => ZodBigInt.create({ ...arg2, coerce: true })),
+  date: ((arg2) => ZodDate.create({ ...arg2, coerce: true }))
 };
 var NEVER = INVALID;
 
@@ -8671,6 +8671,53 @@ function defaultBranch(cwd) {
   throw new Error("branch-manager: cannot determine the default branch (no origin/HEAD, no main, no master) \u2014 pass --into");
 }
 
+// scripts/lib/cli-args.mjs
+function normalizeFlag(name) {
+  return name.startsWith("-") ? name : `--${name}`;
+}
+var FLAG_SHAPED_VALUE = /^-{1,2}[A-Za-z]/;
+function occurrences(flag, argv) {
+  const eq = `${flag}=`;
+  const found = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === flag) {
+      const next = argv[i + 1];
+      if (next !== void 0 && FLAG_SHAPED_VALUE.test(next)) {
+        throw new Error(`${flag}: the value '${next}' looks like another flag \u2014 refusing to read it as ${flag}'s value`);
+      }
+      found.push(next);
+    } else if (tok.startsWith(eq)) {
+      found.push(tok.slice(eq.length));
+    }
+  }
+  return found;
+}
+function presenceCount(flag, argv) {
+  const eq = `${flag}=`;
+  let count = 0;
+  for (const tok of argv) {
+    if (tok === flag || tok.startsWith(eq)) count++;
+  }
+  return count;
+}
+function arg(name, argv = process.argv.slice(2)) {
+  const flag = normalizeFlag(name);
+  const found = occurrences(flag, argv);
+  if (found.length > 1) {
+    throw new Error(`${flag}: given more than once (${found.length} occurrences) \u2014 refusing rather than silently taking the first or last value`);
+  }
+  return found.length ? found[0] : void 0;
+}
+function hasFlag(name, argv = process.argv.slice(2)) {
+  const flag = normalizeFlag(name);
+  const count = presenceCount(flag, argv);
+  if (count > 1) {
+    throw new Error(`${flag}: given more than once (${count} occurrences) \u2014 refusing rather than silently taking the first or last value`);
+  }
+  return count === 1;
+}
+
 // scripts/open-session.mjs
 var here = dirname4(fileURLToPath2(new URL("../scripts/open-session.mjs", import.meta.url).href));
 var pluginRoot = resolve7(here, "..");
@@ -8786,15 +8833,29 @@ usage: open-session.mjs [--target <project>] [--name <label>]
   process.exit(1);
 }
 function parseArgs(argv) {
-  const opts = { target: process.cwd(), name: void 0, remove: void 0 };
+  const known = ["--target", "--name", "--remove"];
   for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (!["--target", "--name", "--remove"].includes(flag)) usage(`unrecognized argument '${flag}'`);
-    const value = argv[++i];
-    if (!value || value.startsWith("--")) usage(`${flag} requires a value`);
-    if (flag === "--target") opts.target = resolve7(value);
-    else if (flag === "--name") opts.name = value;
-    else opts.remove = value;
+    const tok = argv[i];
+    if (!tok.startsWith("--")) usage(`unexpected argument '${tok}'`);
+    const flag = tok.split("=")[0];
+    if (!known.includes(flag)) usage(`unrecognized argument '${tok}'`);
+    if (!tok.includes("=")) i++;
+  }
+  const opts = { target: process.cwd(), name: void 0, remove: void 0 };
+  try {
+    for (const flag of known) {
+      const value = arg(flag, argv);
+      if (value === void 0) {
+        if (hasFlag(flag, argv)) usage(`${flag} requires a value`);
+        continue;
+      }
+      if (value === "") usage(`${flag} requires a value`);
+      if (flag === "--target") opts.target = resolve7(value);
+      else if (flag === "--name") opts.name = value;
+      else opts.remove = value;
+    }
+  } catch (err) {
+    usage(err.message);
   }
   if (opts.remove !== void 0 && opts.name !== void 0) usage("--remove and --name cannot be combined");
   return opts;

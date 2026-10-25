@@ -3577,9 +3577,9 @@ var ZodEffects = class extends ZodType {
     const { status, ctx } = this._processInputParams(input);
     const effect = this._def.effect || null;
     const checkCtx = {
-      addIssue: (arg) => {
-        addIssueToContext(ctx, arg);
-        if (arg.fatal) {
+      addIssue: (arg2) => {
+        addIssueToContext(ctx, arg2);
+        if (arg2.fatal) {
           status.abort();
         } else {
           status.dirty();
@@ -4044,14 +4044,14 @@ var ostring = () => stringType().optional();
 var onumber = () => numberType().optional();
 var oboolean = () => booleanType().optional();
 var coerce = {
-  string: ((arg) => ZodString.create({ ...arg, coerce: true })),
-  number: ((arg) => ZodNumber.create({ ...arg, coerce: true })),
-  boolean: ((arg) => ZodBoolean.create({
-    ...arg,
+  string: ((arg2) => ZodString.create({ ...arg2, coerce: true })),
+  number: ((arg2) => ZodNumber.create({ ...arg2, coerce: true })),
+  boolean: ((arg2) => ZodBoolean.create({
+    ...arg2,
     coerce: true
   })),
-  bigint: ((arg) => ZodBigInt.create({ ...arg, coerce: true })),
-  date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
+  bigint: ((arg2) => ZodBigInt.create({ ...arg2, coerce: true })),
+  date: ((arg2) => ZodDate.create({ ...arg2, coerce: true }))
 };
 var NEVER = INVALID;
 

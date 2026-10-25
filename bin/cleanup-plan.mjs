@@ -12026,12 +12026,7 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
-// scripts/hooks/lib/store-backend.mjs
-import { join as join8 } from "node:path";
-var CONFIG_REL2 = join8(".sterling", "config.json");
-var STORE_DB_REL = join8(".sterling", "sterling.db");
-
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
 }
@@ -12061,6 +12056,13 @@ function arg(name, argv = process.argv.slice(2)) {
   }
   return found.length ? found[0] : void 0;
 }
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+
+// scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);

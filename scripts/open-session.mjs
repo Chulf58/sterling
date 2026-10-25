@@ -20,6 +20,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { defaultBranch } from './lib/branch-manager.mjs';
+import { arg, hasFlag } from './lib/cli-args.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
 import { ContainmentError, containedPath, existsContained, readContained, writeContained, unlinkContained } from './lib/contained-fs.mjs';
 
@@ -170,15 +171,31 @@ function usage(msg) {
 }
 
 function parseArgs(argv) {
-  const opts = { target: process.cwd(), name: undefined, remove: undefined };
+  // Exact-token parsing (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser):
+  // `--flag value` and `--flag=value` both work, a repeated flag is refused, never last-wins.
+  const known = ['--target', '--name', '--remove'];
   for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (!['--target', '--name', '--remove'].includes(flag)) usage(`unrecognized argument '${flag}'`);
-    const value = argv[++i];
-    if (!value || value.startsWith('--')) usage(`${flag} requires a value`);
-    if (flag === '--target') opts.target = resolve(value);
-    else if (flag === '--name') opts.name = value;
-    else opts.remove = value;
+    const tok = argv[i];
+    if (!tok.startsWith('--')) usage(`unexpected argument '${tok}'`);
+    const flag = tok.split('=')[0];
+    if (!known.includes(flag)) usage(`unrecognized argument '${tok}'`);
+    if (!tok.includes('=')) i++; // the split-form value, checked by arg() below
+  }
+  const opts = { target: process.cwd(), name: undefined, remove: undefined };
+  try {
+    for (const flag of known) {
+      const value = arg(flag, argv);
+      if (value === undefined) {
+        if (hasFlag(flag, argv)) usage(`${flag} requires a value`);
+        continue;
+      }
+      if (value === '') usage(`${flag} requires a value`);
+      if (flag === '--target') opts.target = resolve(value);
+      else if (flag === '--name') opts.name = value;
+      else opts.remove = value;
+    }
+  } catch (err) {
+    usage(err.message);
   }
   if (opts.remove !== undefined && opts.name !== undefined) usage('--remove and --name cannot be combined');
   return opts;

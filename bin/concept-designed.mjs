@@ -5649,12 +5649,7 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
-// scripts/hooks/lib/store-backend.mjs
-import { join as join2 } from "node:path";
-var CONFIG_REL = join2(".sterling", "config.json");
-var STORE_DB_REL = join2(".sterling", "sterling.db");
-
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
 }
@@ -5684,6 +5679,13 @@ function arg(name, argv = process.argv.slice(2)) {
   }
   return found.length ? found[0] : void 0;
 }
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+
+// scripts/lib/project.mjs
 function argAll(name, argv = process.argv.slice(2)) {
   const out = [];
   for (let i = 0; i < argv.length; i++) if (argv[i] === name && argv[i + 1]) out.push(argv[++i]);
