@@ -5349,7 +5349,10 @@ function addModelDefaults(raw) {
   if (raw.models !== void 0 && !isPlainObject(raw.models))
     return none;
   const schemaDefaults = configSchema.shape.models.parse({});
-  const defaults = { ...schemaDefaults, implementor: { ...schemaDefaults.implementor, hard_task: ADDED_IMPLEMENTOR_HARD_TASK } };
+  const defaults = {
+    ...schemaDefaults,
+    implementor: { ...schemaDefaults.implementor, hard_task: { ...ADDED_IMPLEMENTOR_HARD_TASK, effort: schemaDefaults["implementor-hard"].effort } }
+  };
   const models = { ...raw.models ?? {} };
   const added = [];
   for (const [role, field] of MODEL_DEFAULT_FIELDS) {
@@ -5358,8 +5361,9 @@ function addModelDefaults(raw) {
       models[role] = defaults[role];
       added.push({ role, field: "entry", value: defaults[role] });
     } else if (isPlainObject(entry) && !Object.prototype.hasOwnProperty.call(entry, field)) {
-      models[role] = { ...entry, [field]: defaults[role][field] };
-      added.push({ role, field, value: defaults[role][field] });
+      const value = field === "hard_task" ? ADDED_IMPLEMENTOR_HARD_TASK : defaults[role][field];
+      models[role] = { ...entry, [field]: value };
+      added.push({ role, field, value });
     }
   }
   const config = { ...raw, ...added.length ? { models } : {}, applied_config_migrations: [...applied ?? [], MODEL_DEFAULTS_MIGRATION_ID] };
@@ -5678,7 +5682,9 @@ var init_config = __esm({
         // model). Live entries written before them get them once, visibly, from
         // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
         // config").
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        // The plain implementor runs at medium (user-ruled 2026-10-25, "Trial medium, then
+        // measure"; decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2).
+        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         // implementor-hard is the sterling/implementor-hard agent (decision
         // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
         // lane, with its own Overpass tier and System tab row. It replaces

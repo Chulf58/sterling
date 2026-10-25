@@ -84,7 +84,7 @@ test('Overpass off: the agent rows are exactly the pre-Overpass rows, whatever t
 test('Overpass on: each role row reads its tier with (Overpass), the saved model dimmed beneath; defaults show without a roles block', () => {
   const rows = rowTexts(snapshot({ overpass: on() }));
   assert.deepEqual(rows, [
-    '› Implementor: agentic-auto (Overpass) high (default)',
+    '› Implementor: agentic-auto (Overpass) medium (default)',
     '    saved: claude-opus-5-5 medium',
     '    saved OpenCode: openai/gpt-6-terra',
     '  Scout: agentic-auto (Overpass) high (default)',
@@ -151,7 +151,7 @@ test('tier and effort edit: ENTER, pick a tier, pick an effort commits ONE overp
     assert.deepEqual(r3.ui.selector, { key: 'implementor', stage: 'role_effort', highlight: 0, tier: 'agentic-premium-max' });
     const efforts = buildSystemTab(snap, r3.ui, 120).rows[0].lines.filter((l) => l.kind === 'option').map((l) => l.text.replace('›', '').trim());
     // Changed 2026-10-24: the 'default' option names what default means for this role (implementor: high).
-    assert.deepEqual(efforts, ['effort default (high)', 'effort low', 'effort medium', 'effort high', 'effort xhigh', 'effort max']);
+    assert.deepEqual(efforts, ['effort default (medium)', 'effort low', 'effort medium', 'effort high', 'effort xhigh', 'effort max']);
     let ui = r3.ui;
     for (let i = 0; i < 3; i++) ui = reduce(store, ui, key('DOWN'), undefined, undefined, snap).ui;
     const r4 = reduce(store, ui, key('ENTER'), undefined, undefined, snap);
@@ -347,7 +347,7 @@ test('controller: Overpass on shows the tier rows from config; the picker commit
     assert.match(ctl.ui().notice ?? '', /^Overpass tier for 'implementor' set to agentic-premium-max with no effort override/);
     // Changed 2026-10-24: with the config's effort cleared the row shows the role default; the written config above
     // proves the default itself is never written into config.json.
-    assert.equal(first(), '› Implementor: agentic-premium-max (Overpass) high (default)');
+    assert.equal(first(), '› Implementor: agentic-premium-max (Overpass) medium (default)');
   } finally {
     ctl.close();
     rmSync(dir, { recursive: true, force: true });
@@ -437,7 +437,7 @@ test('implementor-hard row: model and effort with Overpass off, its own tier wit
   ]);
   assert.deepEqual(rowTexts(hardSnap({ overpass: on({ implementor: { tier: 'agentic-high' }, 'implementor-hard': { tier: 'agentic-premium-max', effort: 'xhigh' } }) })), [
     // Changed 2026-10-24: the implementor's tier-only entry shows its default effort, marked '(default)'.
-    '› Implementor: agentic-high (Overpass) high (default)',
+    '› Implementor: agentic-high (Overpass) medium (default)',
     '    saved: claude-sonnet-5-5 high',
     '  Implementor-hard: agentic-premium-max (Overpass) xhigh',
     '    saved: claude-opus-5-5 high',
@@ -446,7 +446,7 @@ test('implementor-hard row: model and effort with Overpass off, its own tier wit
   ]);
   // Changed 2026-10-24: the default tiers now show with each role's default effort, marked '(default)'.
   assert.equal(rowTexts(hardSnap({ overpass: on() }))[2], '  Implementor-hard: agentic-premium (Overpass) xhigh (default)', 'its default tier is agentic-premium, its default effort xhigh');
-  assert.equal(rowTexts(hardSnap({ overpass: on() }))[0], '› Implementor: agentic-auto (Overpass) high (default)', 'the implementor default is agentic-auto at high');
+  assert.equal(rowTexts(hardSnap({ overpass: on() }))[0], '› Implementor: agentic-auto (Overpass) medium (default)', 'the implementor default is agentic-auto at medium');
   const { store, cleanup } = storeFixture();
   try {
     const r = reduce(store, st({ cursor: 1 }), key('ENTER'), undefined, undefined, hardSnap({ overpass: on() }));

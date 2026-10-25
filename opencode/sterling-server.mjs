@@ -5683,7 +5683,9 @@ var init_config = __esm({
         // model). Live entries written before them get them once, visibly, from
         // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
         // config").
-        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+        // The plain implementor runs at medium (user-ruled 2026-10-25, "Trial medium, then
+        // measure"; decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2).
+        implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         // implementor-hard is the sterling/implementor-hard agent (decision
         // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
         // lane, with its own Overpass tier and System tab row. It replaces
@@ -6045,7 +6047,7 @@ var init_config = __esm({
       "maintenance-worker": "agentic-auto"
     };
     DEFAULT_OVERPASS_ROLE_EFFORTS = {
-      implementor: "high",
+      implementor: "medium",
       "implementor-hard": "xhigh",
       scout: "high",
       librarian: "high",
