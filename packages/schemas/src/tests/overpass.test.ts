@@ -46,10 +46,11 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
     provider: 'overpass',
     conductorModel: 'overpass/agentic-conductor',
     laneModel: 'overpass/agentic-high',
+    // Changed 2026-10-25 (same decision, v2, "Trial medium, then measure"): the plain implementor's default effort is medium.
     // Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): the
     // roles with a default effort now carry it; reviewer and researcher carry none.
     roles: {
-      implementor: { model: 'overpass/agentic-auto', effort: 'high' },
+      implementor: { model: 'overpass/agentic-auto', effort: 'medium' },
       'implementor-hard': { model: 'overpass/agentic-premium', effort: 'xhigh' },
       researcher: { model: 'overpass/agentic-high' },
       scout: { model: 'overpass/agentic-auto', effort: 'high' },
@@ -169,7 +170,7 @@ test('overpass: a non-boolean conductor_bypass throws, naming the key and the va
 // gives each role's default effort too (title and expectations), not "no effort".
 test('overpass roles: unset gives the per-role default tier and default effort (implementor, scout, librarian, preflight and maintenance-worker auto, implementor-hard premium, sparring premium-max, researcher and reviewer high)', () => {
   const expected = {
-    implementor: { model: 'overpass/agentic-auto', effort: 'high' },
+    implementor: { model: 'overpass/agentic-auto', effort: 'medium' },
     'implementor-hard': { model: 'overpass/agentic-premium', effort: 'xhigh' },
     researcher: { model: 'overpass/agentic-high' },
     scout: { model: 'overpass/agentic-auto', effort: 'high' },
@@ -201,8 +202,8 @@ test('overpass roles: a tier and an effort apply to that role only, under the co
   assert.deepEqual(r.roles.reviewer, { model: 'overpass-agentic/agentic-max', effort: 'xhigh' });
   assert.deepEqual(r.roles.scout, { model: 'overpass-agentic/agentic-auto', effort: 'low' });
   // Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): a role
-  // with no effort set now takes its default effort, high for the implementor.
-  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-auto', effort: 'high' });
+  // with no effort set now takes its default effort, medium for the implementor.
+  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-auto', effort: 'medium' });
   assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan keeps the default lane model');
 });
 
@@ -224,8 +225,8 @@ test('overpass roles: implementor-hard defaults to agentic-premium, the implemen
   assert.equal(DEFAULT_OVERPASS_ROLE_TIERS.implementor, 'agentic-auto');
   const r = resolveOverpass(on({ roles: { 'implementor-hard': { tier: 'agentic-premium-max', effort: 'xhigh' } } }), { host: 'opencode' });
   assert.deepEqual(r.roles['implementor-hard'], { model: 'overpass/agentic-premium-max', effort: 'xhigh' });
-  // Changed 2026-10-24: the implementor's default effort (high) now rides with its own tier.
-  assert.deepEqual(r.roles.implementor, { model: 'overpass/agentic-auto', effort: 'high' }, 'the implementor keeps its own tier and default effort');
+  // Changed 2026-10-24: the implementor's default effort (medium) now rides with its own tier.
+  assert.deepEqual(r.roles.implementor, { model: 'overpass/agentic-auto', effort: 'medium' }, 'the implementor keeps its own tier and default effort');
   const s = resolveOverpass(on({ roles: { implementor: { tier: 'agentic-high' } } }), { host: 'opencode' });
   // Changed 2026-10-24: implementor-hard's default effort (xhigh) now rides with its own tier.
   assert.deepEqual(s.roles['implementor-hard'], { model: 'overpass/agentic-premium', effort: 'xhigh' }, 'an implementor tier does not move implementor-hard');
@@ -237,7 +238,7 @@ test('overpass roles: a role with no effort set takes its default effort; review
   const r = resolveOverpass(on({}), { host: 'opencode' });
   const efforts = Object.fromEntries(OVERPASS_ROLES.map((role) => [role, r.roles[role].effort]));
   assert.deepEqual(efforts, {
-    implementor: 'high',
+    implementor: 'medium',
     'implementor-hard': 'xhigh',
     researcher: undefined,
     scout: 'high',

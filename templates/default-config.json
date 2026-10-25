@@ -8,7 +8,7 @@
   },
   "applied_config_migrations": ["model-defaults-2026-10-23", "implementor-hard-2026-10-23", "overpass-defaults-2026-10-23"],
   "models": {
-    "implementor": { "model": "claude-sonnet-5-5", "effort": "high" },
+    "implementor": { "model": "claude-sonnet-5-5", "effort": "medium" },
     "implementor-hard": { "model": "claude-opus-5-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5-5", "effort": "low" },

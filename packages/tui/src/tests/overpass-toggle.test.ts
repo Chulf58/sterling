@@ -305,7 +305,7 @@ test('override labels: a saved OpenCode override reads as a dimmed saved OpenCod
   const effective = buildSystemTab(withOverride({ overpass: view({ enabled: true, effective: true }) }), st({ tab: SYS_TAB }), 200).rows[0].lines;
   // Changed 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): the title shows the
   // implementor's default effort, marked '(default)'.
-  assert.deepEqual(effective.map((l) => l.text), ['› Implementor: agentic-auto (Overpass) high (default)', '    saved: claude-opus-5-5 medium', '    saved OpenCode: openai/gpt-6-terra']);
+  assert.deepEqual(effective.map((l) => l.text), ['› Implementor: agentic-auto (Overpass) medium (default)', '    saved: claude-opus-5-5 medium', '    saved OpenCode: openai/gpt-6-terra']);
   assert.deepEqual(effective.slice(1).map((l) => l.kind), ['meta', 'meta'], 'both saved lines are dimmed');
   assert.doesNotMatch(effective.map((l) => l.text).join('\n'), /inactive/);
   for (const snap of [
