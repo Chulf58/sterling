@@ -910,6 +910,11 @@ const MODEL_DEFAULT_FIELDS: ReadonlyArray<readonly [string, 'opencode_model' | '
 // default no longer carries it (models.implementor-hard replaced it), and
 // moveImplementorHardTask, which runs after this one, moves it into that key.
 const ADDED_IMPLEMENTOR_HARD_TASK = { model: 'claude-opus-5-5' };
+// When the implementor has no entry at all, the whole default entry is written, and its hard_task
+// carries the implementor-hard default effort explicitly: moveImplementorHardTask gives an
+// effort-less hard_task the implementor's effort, which is now medium, so a seeded hard lane
+// must not inherit it. An existing implementor entry's effort is a configured legacy value, so
+// the hard_task added next to it stays effort-less and keeps inheriting it.
 
 export interface ModelDefaultAdd {
   role: string;
@@ -936,7 +941,10 @@ export function addModelDefaults(raw: unknown): ModelDefaultsMigration {
   if ((applied ?? []).includes(MODEL_DEFAULTS_MIGRATION_ID)) return none;
   if (raw.models !== undefined && !isPlainObject(raw.models)) return none;
   const schemaDefaults = configSchema.shape.models.parse({}) as Record<string, Record<string, unknown>>;
-  const defaults: Record<string, Record<string, unknown>> = { ...schemaDefaults, implementor: { ...schemaDefaults.implementor, hard_task: ADDED_IMPLEMENTOR_HARD_TASK } };
+  const defaults: Record<string, Record<string, unknown>> = {
+    ...schemaDefaults,
+    implementor: { ...schemaDefaults.implementor, hard_task: { ...ADDED_IMPLEMENTOR_HARD_TASK, effort: schemaDefaults['implementor-hard'].effort } },
+  };
   const models: Record<string, unknown> = { ...(raw.models ?? {}) };
   const added: ModelDefaultAdd[] = [];
   for (const [role, field] of MODEL_DEFAULT_FIELDS) {
@@ -945,8 +953,9 @@ export function addModelDefaults(raw: unknown): ModelDefaultsMigration {
       models[role] = defaults[role];
       added.push({ role, field: 'entry', value: defaults[role] });
     } else if (isPlainObject(entry) && !Object.prototype.hasOwnProperty.call(entry, field)) {
-      models[role] = { ...entry, [field]: defaults[role][field] };
-      added.push({ role, field, value: defaults[role][field] });
+      const value = field === 'hard_task' ? ADDED_IMPLEMENTOR_HARD_TASK : defaults[role][field];
+      models[role] = { ...entry, [field]: value };
+      added.push({ role, field, value });
     }
   }
   const config = { ...raw, ...(added.length ? { models } : {}), applied_config_migrations: [...(applied ?? []), MODEL_DEFAULTS_MIGRATION_ID] };

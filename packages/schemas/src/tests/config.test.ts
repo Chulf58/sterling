@@ -745,6 +745,25 @@ test('addModelDefaults: adds only what is absent, once, and records the migratio
   assert.equal(addModelDefaults({ models: 'x' }).changed, false, 'a malformed models block is left to the parse gate');
 });
 
+// Regression (review of the implementor-medium change): the add -> move chain on a config with no
+// models block seeded implementor at the new medium default with an effort-less hard_task, and the
+// move then gave implementor-hard that medium. It must come out at its own default (high).
+test('addModelDefaults then moveImplementorHardTask: an absent models block leaves implementor-hard at its own default effort', async () => {
+  const { addModelDefaults } = await import('../config.js');
+  const chained = moveImplementorHardTask(addModelDefaults({}).config);
+  const models = parseConfig(chained.config).models;
+  assert.deepEqual(models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
+  assert.deepEqual(models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'the plain implementor takes its new default');
+});
+
+test('addModelDefaults then moveImplementorHardTask: an explicit legacy implementor effort and hard_task effort are preserved', async () => {
+  const { addModelDefaults } = await import('../config.js');
+  const inheriting = moveImplementorHardTask(addModelDefaults({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'medium' } } }).config);
+  assert.equal(parseConfig(inheriting.config).models['implementor-hard'].effort, 'medium', 'a configured implementor effort is still what an effort-less hard lane inherits');
+  const explicit = moveImplementorHardTask(addModelDefaults({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-5-5', effort: 'xhigh' } } } }).config);
+  assert.equal(parseConfig(explicit.config).models['implementor-hard'].effort, 'xhigh', 'an explicit hard_task effort wins');
+});
+
 // Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: the pure move of
 // models.implementor.hard_task into models.implementor-hard, once per file.
 test('moveImplementorHardTask: moves the hard_task, records its id once, and leaves a non-object config alone', () => {
