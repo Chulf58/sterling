@@ -881,7 +881,7 @@ export function createSterlingServer(
         blocked_by: z.array(z.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
         needs: z.union([z.enum(BOARD_NEEDS), z.literal('')]).optional(),
         needs_reason: z.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
-        session: z.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). It never sets or changes the claim").optional(),
+        session: z.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -938,7 +938,7 @@ export function createSterlingServer(
     'board_takeover',
     {
       description:
-        "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm or board_release is refused and told the task moved. Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
+        "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm, board_release, and board_update naming its session are refused and told the task moved (board_remove does not check the claim). Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
       inputSchema: strict({
         id: z.string().describe(ID_LADDER),
         session: z.string().describe('your session id'),

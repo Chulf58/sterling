@@ -13,11 +13,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, boardClaimView, boardReadinessOf } from '../index.js';
+import { ClaimMovedError, SterlingStore, boardClaimView, boardReadinessOf } from '../index.js';
 
 const T0 = '2026-10-25T09:00:00.000Z';
 const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
-type Claimed = { id: string; version: number; updated_at: string; claim?: Record<string, unknown> & { generation: number; holder_session: string; renewed_at: string } };
+type Claimed = { id: string; version: number; updated_at: string; text?: string; claim?: Record<string, unknown> & { generation: number; holder_session: string; renewed_at: string } };
 
 function todo(source: 'user' | 'system' = 'user') {
   return {
@@ -145,7 +145,14 @@ test('a claim by another session is refused even when expired; takeover bumps th
     const moved = /the task moved — session 'new' in checkout 'main' holds it now at claim generation \d+, taken over from you at .*Nothing was written/;
     assert.throws(() => a.reaffirmClaim(item.id, { session: 'old', generation: g1, now: at(91) }), moved);
     assert.throws(() => a.releaseClaim(item.id, { session: 'old', generation: g1, now: at(91) }), moved);
-    assert.equal(a.renewClaimIfDue(item.id, { session: 'old', leaseMinutes: 60, now: at(200) }).renewed, false, 'task work by the old holder renews nothing');
+    // Task work by the displaced holder is refused and told where the task went, never a silent no-op.
+    const versionBefore = get(a, item.id).version;
+    assert.throws(() => a.renewClaimIfDue(item.id, { session: 'old', leaseMinutes: 60, now: at(200) }), (e: Error) => e instanceof ClaimMovedError && moved.test(e.message));
+    assert.throws(
+      () => a.updateTodo(item.id, { ...get(a, item.id), text: 'old holder edit' }, {}, { session: 'old', leaseMinutes: 60, now: at(200) }),
+      (e: Error) => e instanceof ClaimMovedError && /^board_update: the task moved — session 'new'/.test(e.message)
+    );
+    assert.equal(get(a, item.id).version, versionBefore, 'neither refusal wrote anything');
     assert.equal(get(a, item.id).claim!.holder_session, 'new');
 
     // The new holder: a stale generation is refused, the right one releases.
@@ -181,14 +188,17 @@ test('renewal by task work is coalesced: no write inside a quarter of the lease,
     a.claimTodo(item.id, { session: 's1', checkout: 'main', now: at(0) });
     const v0 = get(a, item.id).version;
     for (const m of [1, 5, 10, 14]) {
-      assert.equal(a.renewClaimIfDue(item.id, { session: 's1', leaseMinutes: 60, now: at(m) }).renewed, false, `minute ${m}`);
+      assert.deepEqual(a.renewClaimIfDue(item.id, { session: 's1', leaseMinutes: 60, now: at(m) }), { renewed: false, reason: 'not_due' }, `minute ${m}`);
     }
     assert.equal(get(a, item.id).version, v0, 'no version (and so no archived body) per call inside lease/4');
     assert.equal(a.renewClaimIfDue(item.id, { session: 's1', leaseMinutes: 60, now: at(15) }).renewed, true);
     assert.equal(get(a, item.id).version, v0 + 1);
     assert.equal(get(a, item.id).claim!.renewed_at, at(15));
-    assert.equal(a.renewClaimIfDue(item.id, { session: 's1', leaseMinutes: 60, now: at(20) }).renewed, false);
-    assert.equal(a.renewClaimIfDue(randomUUID(), { session: 's1', leaseMinutes: 60 }).renewed, false, 'an unknown id renews nothing');
+    assert.deepEqual(a.renewClaimIfDue(item.id, { session: 's1', leaseMinutes: 60, now: at(20) }), { renewed: false, reason: 'not_due' });
+    assert.throws(() => a.renewClaimIfDue(item.id, { session: 'stranger', leaseMinutes: 60, now: at(40) }), /renew: the task moved — session 's1' in checkout 'main' holds it now at claim generation \d+, claimed at /);
+    assert.throws(() => a.renewClaimIfDue(randomUUID(), { session: 's1', leaseMinutes: 60 }), /renew: no record/, 'an unknown id is refused, not a quiet no-op');
+    const unclaimed = a.create(todo()) as unknown as Claimed;
+    assert.deepEqual(a.renewClaimIfDue(unclaimed.id, { session: 's1', leaseMinutes: 60 }), { renewed: false, reason: 'no_claim' });
   } finally {
     close();
   }
@@ -211,8 +221,14 @@ test('updateTodo cannot set, drop or revert a claim; a holder renewal rides insi
     assert.equal(early.claim!.renewed_at, at(0), 'inside lease/4 the edit does not renew');
     const late = a.updateTodo(item.id, { ...get(a, item.id), text: 'late edit' }, {}, { session: 's1', leaseMinutes: 60, now: at(30) }) as unknown as Claimed;
     assert.equal(late.claim!.renewed_at, at(30), 'the holder editing its item renews the claim in the same write');
-    const other = a.updateTodo(item.id, { ...get(a, item.id), text: 'by another' }, {}, { session: 's2', leaseMinutes: 60, now: at(59) }) as unknown as Claimed;
-    assert.equal(other.claim!.renewed_at, at(30), 'an edit by another session renews nothing');
+    assert.throws(
+      () => a.updateTodo(item.id, { ...get(a, item.id), text: 'by another' }, {}, { session: 's2', leaseMinutes: 60, now: at(59) }),
+      /board_update: the task moved — session 's1' in checkout 'main' holds it now/,
+      'an edit naming another session is refused, nothing written'
+    );
+    assert.equal(get(a, item.id).text, 'late edit');
+    const plain = a.updateTodo(item.id, { ...get(a, item.id), text: 'edit naming no session' }) as unknown as Claimed;
+    assert.equal(plain.claim!.renewed_at, at(30), 'an edit naming no session keeps the claim and renews nothing');
   } finally {
     close();
   }
@@ -224,6 +240,27 @@ test('claims go on user board tasks only', () => {
     const sys = a.create(todo('system')) as unknown as Claimed;
     assert.throws(() => a.claimTodo(sys.id, { session: 's1', checkout: 'main' }), /maintenance-queue item; only source:'user' board tasks are claimed/);
     assert.equal(get(a, sys.id).claim, undefined);
+  } finally {
+    close();
+  }
+});
+
+test('generic in-place writes cannot restore a displaced holder: A to B takeover, then a body write naming A again', () => {
+  const { a, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    const gA = (a.claimTodo(item.id, { session: 'A', checkout: 'wt-a', now: at(0) }) as unknown as Claimed).claim!;
+    a.takeoverClaim(item.id, { session: 'B', checkout: 'wt-b', expected_holder: 'A', expected_generation: gA.generation, now: at(70) });
+    const takenBy = get(a, item.id).claim;
+    // updateRecord (knowledge_update's store path) with A's old claim in the patch: the stored claim stays B's.
+    const afterUpdate = a.updateRecord(item.id, { ...get(a, item.id), text: 'restore attempt', claim: gA }) as unknown as Claimed;
+    assert.deepEqual(afterUpdate.claim, takenBy, 'a generic update carries the stored claim forward');
+    // A dropped claim is put back too.
+    const { claim: _c, ...noClaim } = get(a, item.id) as unknown as Record<string, unknown>;
+    assert.deepEqual((a.updateRecord(item.id, { ...noClaim, text: 'drop attempt' }) as unknown as Claimed).claim, takenBy);
+    // A's release with its old generation is still refused.
+    assert.throws(() => a.releaseClaim(item.id, { session: 'A', generation: gA.generation, now: at(71) }), /the task moved — session 'B'/);
+    assert.equal(get(a, item.id).claim!.holder_session, 'B');
   } finally {
     close();
   }

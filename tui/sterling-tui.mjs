@@ -48276,6 +48276,9 @@ function boardClaimView(claim, now, leaseMinutes) {
 }
 var ClaimRenewalNotDue = class extends Error {
 };
+var ClaimMovedError = class extends Error {
+  name = "ClaimMovedError";
+};
 function boardReadinessOf(targets, live, openBlocker, opts = {}) {
   const now = opts.now ?? Date.now();
   const lease = opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES;
@@ -49177,6 +49180,13 @@ var SterlingStore = class _SterlingStore {
         }
       }
       const candidate = buildPatch(current);
+      if (current.type === "todo" && !internal.claimWrite) {
+        const stored2 = current.claim;
+        if (stored2 === void 0)
+          delete candidate.claim;
+        else
+          candidate.claim = stored2;
+      }
       candidate.id = id;
       candidate.type = current.type;
       candidate.created_at = current.created_at;
@@ -50150,9 +50160,12 @@ var SterlingStore = class _SterlingStore {
         delete out.claim;
         return out;
       }
+      if (claimRenewal && stored.holder_session !== claimRenewal.session) {
+        throw _SterlingStore.claimMoved("board_update", claimRenewal.session, void 0, stored);
+      }
       out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
       return out;
-    }, opts);
+    }, opts, { claimWrite: true });
   }
   /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
   static claimRenewalDue(claim, r) {
@@ -50184,7 +50197,7 @@ var SterlingStore = class _SterlingStore {
       else
         delete out.claim;
       return out;
-    }, {}, { activityAt: now });
+    }, {}, { activityAt: now, claimWrite: true });
   }
   /** The refusal an old holder gets: where the task is now, so it can stop or coordinate. */
   static claimMoved(op, session, generation, claim) {
@@ -50192,10 +50205,10 @@ var SterlingStore = class _SterlingStore {
       return new Error(`${op}: the task has no claim now (it was released, or never claimed). Nothing was written; claim it with board_claim if you still work on it.`);
     }
     if (claim.holder_session !== session) {
-      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : "";
-      return new Error(`${op}: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. Nothing was written; stop work on it, or coordinate with that session.`);
+      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : `, claimed at ${claim.claimed_at}`;
+      return new ClaimMovedError(`${op}: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. Nothing was written; stop work on it, or coordinate with that session.`);
     }
-    return new Error(`${op}: stale claim generation ${generation} \u2014 your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
+    return new Error(`${op}: stale claim generation ${String(generation)} \u2014 your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
   }
   /** The next claim generation: above both the previous claim's and the record's version, so it never repeats on one item. */
   static nextGeneration(claim, current) {
@@ -50268,30 +50281,48 @@ var SterlingStore = class _SterlingStore {
   }
   /**
    * Renewal by task work: bump renewed_at when `session` holds the claim and
-   * the last renewal is older than a quarter of the lease, else write nothing.
-   * Every write archives a version, so renewing on every event would grow the
-   * history by one row per event; at most four renewals per lease keep a
-   * worked claim from ever expiring. Returns whether it wrote. board_update
-   * folds the same rule into its own write (updateTodo's claimRenewal); the
-   * dispatch and commit callers arrive in a later slice.
+   * the last renewal is older than a quarter of the lease. Every write
+   * archives a version, so renewing on every event would grow the history by
+   * one row per event; at most four renewals per lease keep a worked claim
+   * from ever expiring. Returns {renewed:true}, or {renewed:false} with the
+   * reason: 'not_due' (the holder renewed within the quarter lease; read
+   * without the lock, since nothing is written) or 'no_claim'. Task work by a
+   * session that does not hold the item's claim is REFUSED with a
+   * ClaimMovedError naming the holder, checkout and generation, confirmed
+   * under the write lock. board_update folds the same rule into its own write
+   * (updateTodo's claimRenewal); the dispatch and commit callers arrive in a
+   * later slice.
    */
   renewClaimIfDue(id, r) {
     const read = this.get(id);
-    if (!read || read.type !== "todo" || !read.claim || !_SterlingStore.claimRenewalDue(read.claim, r))
-      return { renewed: false };
+    if (!read)
+      throw new Error(`renew: no record '${id}'`);
+    if (read.type !== "todo" || !read.claim)
+      return { renewed: false, reason: "no_claim" };
+    if (read.claim.holder_session === r.session && !_SterlingStore.claimRenewalDue(read.claim, r))
+      return { renewed: false, reason: "not_due" };
     const now = r.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    let outcome = { renewed: true };
     try {
       this.claimWrite("renew", id, now, (claim) => {
-        if (!claim || !_SterlingStore.claimRenewalDue(claim, { ...r, now }))
+        if (!claim) {
+          outcome = { renewed: false, reason: "no_claim" };
           throw new ClaimRenewalNotDue();
+        }
+        if (claim.holder_session !== r.session)
+          throw _SterlingStore.claimMoved("renew", r.session, void 0, claim);
+        if (!_SterlingStore.claimRenewalDue(claim, { ...r, now })) {
+          outcome = { renewed: false, reason: "not_due" };
+          throw new ClaimRenewalNotDue();
+        }
         return { ...claim, renewed_at: now };
       });
     } catch (e) {
       if (e instanceof ClaimRenewalNotDue)
-        return { renewed: false };
+        return outcome;
       throw e;
     }
-    return { renewed: true };
+    return outcome;
   }
   /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a

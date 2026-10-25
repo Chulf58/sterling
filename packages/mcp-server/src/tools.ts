@@ -91,14 +91,23 @@ export const BOARD_READINESS_STATES = ['ready', 'research', 'waiting', 'blocked'
  * other READY items sharing a file_keys path. `overlaps` comes from
  * boardWriteOverlaps over the WHOLE ready set, never one page.
  */
-function readinessFields(r: BoardItemReadiness, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with' | 'claim_state'> {
+function readinessFields(r: BoardItemReadiness, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with'> {
   const shares = r.state === 'ready' ? overlaps.get(r.id) : undefined;
   return {
     readiness: r.state,
     ...(r.blockers_open.length ? { blockers_open: r.blockers_open } : {}),
     ...(shares?.length ? { shares_write_path_with: shares } : {}),
-    ...(r.claim ? { claim_state: r.claim } : {}),
   };
+}
+
+/**
+ * claim_state for one returned row, judged from THAT row's own stored claim,
+ * never from a second board read, so the record a caller sees and the
+ * claim_state beside it can never disagree. Absent when the row has no claim.
+ */
+export function claimStateOf(row: { claim?: unknown }, opts: BoardReadinessOptions): Pick<BoardDerivedFields, 'claim_state'> {
+  const view = boardClaimView(row.claim, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+  return view ? { claim_state: view } : {};
 }
 
 /** board_add target_project's receipt: both ends of a cross-project handoff (GitHub issue #105). */
@@ -1500,6 +1509,12 @@ export const WRITE_REFUSED_FIELDS: readonly string[] = [
   // `needs` changes value, removed with it. A caller-set value would fake how
   // long an outside party has been waited on.
   'needs_set_at',
+  // A board task's claim (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren): written only
+  // by board_claim / board_reaffirm / board_release / board_takeover; a generic
+  // write could otherwise restore a displaced holder. The store also carries
+  // the stored claim forward on every other in-place write.
+  'claim',
 ];
 
 /**
@@ -10668,6 +10683,7 @@ export class SterlingTools {
       readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })),
       { registryPath: this.registryPath ?? registryPath() }
     );
+    const rows = new Map(users.map((u) => [u.id, u as unknown as { claim?: unknown }]));
     for (const r of readiness) {
       const status = statuses.get(r.id);
       out.set(r.id, {
@@ -10675,6 +10691,7 @@ export class SterlingTools {
         ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
         ...readinessFields(r, overlaps),
         ...(status ? { handoff_status: status } : {}),
+        ...claimStateOf(rows.get(r.id) ?? {}, claimOpts),
       });
     }
     return out;
@@ -11770,7 +11787,8 @@ export class SterlingTools {
     return this.claimReceipt(record, {
       notice:
         `taken over from session '${holder}' (generation ${expected_generation}${wasState === 'held' ? ', which was still within its lease' : ''}); ` +
-        `that session's later renew, release or close of this task is refused, and its running processes were not stopped`,
+        `that session's later board_reaffirm, board_release and board_update naming its session are refused and told the task moved; ` +
+        `board_remove does not check the claim, so it can still close the item; its running processes were not stopped`,
     });
   }
 
@@ -11878,14 +11896,15 @@ export class SterlingTools {
       // A claim is read off the row itself, so it is stated even when the
       // blocker-dependent fields cannot be.
       for (const row of page) {
-        const view = boardClaimView(row.claim, claimOpts.now ?? Date.now(), claimOpts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
-        if (view) out.set(String(row.id), { claim_state: view });
+        const claim = claimStateOf(row, claimOpts);
+        if (claim.claim_state) out.set(String(row.id), claim);
       }
       return out;
     }
     type Input = Parameters<typeof boardReadinessOf>[0][number];
     const holder = (slug: string) => read.slugHolders.get(slug);
     const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], holder, claimOpts);
+    const byRow = new Map(page.map((row) => [String(row.id), row as { claim?: unknown }]));
     const whole = boardReadinessOf(read.items as unknown as Input[], read.items as unknown as Input[], holder, claimOpts);
     const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
     for (const r of readiness) {
@@ -11894,6 +11913,7 @@ export class SterlingTools {
         ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
         ...readinessFields(r, overlaps),
         ...(r.state === 'delegated' ? { handoff_status: FOREIGN_UNAVAILABLE } : {}),
+        ...claimStateOf(byRow.get(r.id) ?? {}, claimOpts),
       });
     }
     return out;

@@ -51,7 +51,10 @@ export function boardGroups(readiness) {
 
 /** board_claims.lease_minutes with the schema's own default; {error} when the configured value is invalid. */
 export function claimLease(config) {
-  const parsed = configSchema.shape.board_claims.safeParse(config?.board_claims ?? {});
+  // Only an ABSENT key takes the default: null or any other bad value is
+  // reported as unreadable, never read as "not set".
+  const raw = config?.board_claims;
+  const parsed = configSchema.shape.board_claims.safeParse(raw === undefined ? {} : raw);
   if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
   return { value: parsed.data.lease_minutes };
 }
@@ -151,8 +154,9 @@ export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GRO
     `READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill); WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed. ` +
     `Items marked ⚠ share a write path: their implementation lanes run one at a time.` +
     (g.inProgress.length
-      ? ` IN PROGRESS items are claimed by a session (board_claim) and are never started here; one marked check owner has had no renewal for the claim lease${lease?.error ? ` (board_claims.lease_minutes unreadable: ${lease.error}; judged at the ${DEFAULT_CLAIM_LEASE_MINUTES}-minute default)` : ''}, so any session may take it over with board_takeover.`
-      : '');
+      ? ` IN PROGRESS items are claimed by a session (board_claim) and are never started here; one marked check owner has had no renewal for the claim lease, so any session may take it over with board_takeover.`
+      : '') +
+    (lease?.error ? ` CLAIM LEASE UNREADABLE (board_claims.lease_minutes: ${lease.error}): claims are judged at the ${DEFAULT_CLAIM_LEASE_MINUTES}-minute default, which may not be this project's setting.` : '');
   const lines = [
     header,
     ...groupLines('READY ({n})', g.ready, cap, (r) => {

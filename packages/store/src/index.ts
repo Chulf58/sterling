@@ -711,6 +711,11 @@ export interface ClaimRenewal {
 /** Raised inside a renewal's write when, under the lock, the renewal is no longer due; the write rolls back. */
 class ClaimRenewalNotDue extends Error {}
 
+/** The refusal a session gets when it acts on a task another session's claim holds: it names the holder, checkout and generation. */
+export class ClaimMovedError extends Error {
+  override name = 'ClaimMovedError';
+}
+
 /** When readiness judges claims: `now` in epoch ms and the lease in minutes. */
 export interface BoardReadinessOptions {
   now?: number;
@@ -2485,7 +2490,7 @@ export class SterlingStore {
     id: string,
     buildPatch: (current: DurableRecord) => Record<string, unknown>,
     opts: RecordWriteOptions,
-    internal: { allowRetired?: boolean; activityAt?: string; suppressReconcilePrune?: boolean } = {}
+    internal: { allowRetired?: boolean; activityAt?: string; suppressReconcilePrune?: boolean; claimWrite?: boolean } = {}
   ): DurableRecord {
     this.assertWritable(op);
     let served!: DurableRecord;
@@ -2530,6 +2535,17 @@ export class SterlingStore {
       }
 
       const candidate = buildPatch(current);
+      // A todo's claim is server-owned (decision
+      // board-task-claims-for-parallel-sessions-claim-generation-ren): every
+      // in-place write except the claim operations themselves carries the
+      // stored claim forward, read here under the write lock, so no generic
+      // write (knowledge_update/edit/append/array_remove, a file-key rename,
+      // a feature_link rewrite) can set, drop or restore one.
+      if (current.type === 'todo' && !internal.claimWrite) {
+        const stored = (current as unknown as { claim?: unknown }).claim;
+        if (stored === undefined) delete candidate.claim;
+        else candidate.claim = stored;
+      }
       // Identity is server-owned: pin it to the stored record rather than
       // trusting a caller's (possibly stale) copy.
       candidate.id = id;
@@ -3934,10 +3950,17 @@ export class SterlingStore {
           delete out.claim;
           return out;
         }
+        // Task work by a session that does not hold the claim is refused and
+        // told where the task is (the decision: an old holder's later renew is
+        // refused and it is told the task moved). Nothing is written.
+        if (claimRenewal && stored.holder_session !== claimRenewal.session) {
+          throw SterlingStore.claimMoved('board_update', claimRenewal.session, undefined, stored);
+        }
         out.claim = claimRenewal && SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? new Date().toISOString() } : stored;
         return out;
       },
-      opts
+      opts,
+      { claimWrite: true }
     );
   }
 
@@ -3972,23 +3995,23 @@ export class SterlingStore {
         return out;
       },
       {},
-      { activityAt: now }
+      { activityAt: now, claimWrite: true }
     );
   }
 
   /** The refusal an old holder gets: where the task is now, so it can stop or coordinate. */
-  private static claimMoved(op: string, session: string, generation: number, claim: TodoClaim | undefined): Error {
+  private static claimMoved(op: string, session: string, generation: number | undefined, claim: TodoClaim | undefined): Error {
     if (!claim) {
       return new Error(`${op}: the task has no claim now (it was released, or never claimed). Nothing was written; claim it with board_claim if you still work on it.`);
     }
     if (claim.holder_session !== session) {
-      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : '';
-      return new Error(
+      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : `, claimed at ${claim.claimed_at}`;
+      return new ClaimMovedError(
         `${op}: the task moved — session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. ` +
           `Nothing was written; stop work on it, or coordinate with that session.`
       );
     }
-    return new Error(`${op}: stale claim generation ${generation} — your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
+    return new Error(`${op}: stale claim generation ${String(generation)} — your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
   }
 
   /** The next claim generation: above both the previous claim's and the record's version, so it never repeats on one item. */
@@ -4072,27 +4095,43 @@ export class SterlingStore {
 
   /**
    * Renewal by task work: bump renewed_at when `session` holds the claim and
-   * the last renewal is older than a quarter of the lease, else write nothing.
-   * Every write archives a version, so renewing on every event would grow the
-   * history by one row per event; at most four renewals per lease keep a
-   * worked claim from ever expiring. Returns whether it wrote. board_update
-   * folds the same rule into its own write (updateTodo's claimRenewal); the
-   * dispatch and commit callers arrive in a later slice.
+   * the last renewal is older than a quarter of the lease. Every write
+   * archives a version, so renewing on every event would grow the history by
+   * one row per event; at most four renewals per lease keep a worked claim
+   * from ever expiring. Returns {renewed:true}, or {renewed:false} with the
+   * reason: 'not_due' (the holder renewed within the quarter lease; read
+   * without the lock, since nothing is written) or 'no_claim'. Task work by a
+   * session that does not hold the item's claim is REFUSED with a
+   * ClaimMovedError naming the holder, checkout and generation, confirmed
+   * under the write lock. board_update folds the same rule into its own write
+   * (updateTodo's claimRenewal); the dispatch and commit callers arrive in a
+   * later slice.
    */
-  renewClaimIfDue(id: string, r: ClaimRenewal): { renewed: boolean } {
+  renewClaimIfDue(id: string, r: ClaimRenewal): { renewed: true } | { renewed: false; reason: 'not_due' | 'no_claim' } {
     const read = this.get(id) as unknown as { type?: string; claim?: TodoClaim } | undefined;
-    if (!read || read.type !== 'todo' || !read.claim || !SterlingStore.claimRenewalDue(read.claim, r)) return { renewed: false };
+    if (!read) throw new Error(`renew: no record '${id}'`);
+    if (read.type !== 'todo' || !read.claim) return { renewed: false, reason: 'no_claim' };
+    if (read.claim.holder_session === r.session && !SterlingStore.claimRenewalDue(read.claim, r)) return { renewed: false, reason: 'not_due' };
     const now = r.now ?? new Date().toISOString();
+    let outcome: { renewed: true } | { renewed: false; reason: 'not_due' | 'no_claim' } = { renewed: true };
     try {
       this.claimWrite('renew', id, now, (claim) => {
-        if (!claim || !SterlingStore.claimRenewalDue(claim, { ...r, now })) throw new ClaimRenewalNotDue();
+        if (!claim) {
+          outcome = { renewed: false, reason: 'no_claim' };
+          throw new ClaimRenewalNotDue();
+        }
+        if (claim.holder_session !== r.session) throw SterlingStore.claimMoved('renew', r.session, undefined, claim);
+        if (!SterlingStore.claimRenewalDue(claim, { ...r, now })) {
+          outcome = { renewed: false, reason: 'not_due' };
+          throw new ClaimRenewalNotDue();
+        }
         return { ...claim, renewed_at: now };
       });
     } catch (e) {
-      if (e instanceof ClaimRenewalNotDue) return { renewed: false };
+      if (e instanceof ClaimRenewalNotDue) return outcome;
       throw e;
     }
-    return { renewed: true };
+    return outcome;
   }
 
   /**

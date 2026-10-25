@@ -594,9 +594,17 @@ test('claims: claimed items leave READY for IN PROGRESS; an expired claim is fla
 
     // Only claims: the block still renders, and an unreadable lease is stated, never silent.
     const onlyClaims = lib.renderBoardReadiness({ readiness: readiness.filter((r) => r.claim), live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: { error: 'Expected number' } });
-    assert.match(onlyClaims, /board_claims\.lease_minutes unreadable: Expected number; judged at the 60-minute default/);
-    assert.deepEqual(lib.claimLease({ board_claims: { lease_minutes: 'x' } }).error !== undefined, true);
-    assert.deepEqual(lib.claimLease({}), { value: 60 });
+    assert.match(onlyClaims, /CLAIM LEASE UNREADABLE \(board_claims\.lease_minutes: Expected number\): claims are judged at the 60-minute default/);
+    assert.deepEqual(lib.claimLease({}), { value: 60 }, 'only an absent key takes the default');
+    assert.deepEqual(lib.claimLease(undefined), { value: 60 });
+    for (const bad of [null, 'x', { lease_minutes: 'x' }, { lease_minutes: 0 }]) {
+      assert.ok(lib.claimLease({ board_claims: bad }).error, `board_claims ${JSON.stringify(bad)} is unreadable, not the default`);
+    }
+    // The disclosure shows whenever the block renders, claimed items or not.
+    const nullLease = lib.claimLease({ board_claims: null });
+    const noClaims = lib.renderBoardReadiness({ readiness: readiness.filter((r) => !r.claim), live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: nullLease });
+    assert.match(noClaims, /CLAIM LEASE UNREADABLE \(board_claims\.lease_minutes: .+\)/);
+    assert.doesNotMatch(lib.renderBoardReadiness({ readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: { value: 60 } }), /CLAIM LEASE UNREADABLE/);
 
     // H20's ready line never offers a claimed item.
     const notice = lib.boardReadyNotice(readiness, '', { availability: 'ok', count: 0, descriptions: [] }, { value: 5 });

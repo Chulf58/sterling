@@ -103,8 +103,13 @@ test('board_update renews the caller-holder claim inside its own write, at most 
     h.tools.boardUpdate(item.id, { priority: 'high' }, { session: 'sess-A' });
     assert.equal(renewedAt(), T0, 'inside lease/4: no renewal');
     h.clock.now = at(20);
-    h.tools.boardUpdate(item.id, { priority: 'low' }, { session: 'sess-B' });
-    assert.equal(renewedAt(), T0, 'an edit by a non-holder renews nothing');
+    assert.throws(
+      () => h.tools.boardUpdate(item.id, { priority: 'low' }, { session: 'sess-B' }),
+      /board_update: the task moved — session 'sess-A' in checkout 'main' holds it now/,
+      'an edit naming a session that does not hold the claim is refused, nothing written'
+    );
+    assert.equal((h.store.get(item.id) as unknown as { priority: string }).priority, 'high');
+    assert.equal(renewedAt(), T0);
     h.tools.boardUpdate(item.id, { priority: 'normal' });
     assert.equal(renewedAt(), T0, 'an edit naming no session renews nothing');
     const before = (h.store.get(item.id) as unknown as { version: number }).version;
@@ -172,6 +177,50 @@ test('a cross-project read (target_project) shows the other board claim state', 
     const rows = h.tools.foreignBoardQuery({ target_project: 'beta' }).records as Loose[];
     assert.equal((rows[0].claim_state as ClaimState).state, 'expired');
     assert.equal((rows[0].claim_state as ClaimState).checkout, 'beta-main');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('generic knowledge writes cannot set or restore a claim: A to B takeover, then knowledge_update naming A is refused', () => {
+  const h = harness(60);
+  try {
+    const item = addItem(h.tools, 'Takeover then restore attempt\nsee packages/store/src/index.ts');
+    const gA = (h.tools.boardClaim(item.id, 'sess-A', 'wt-a') as { claim_state: ClaimState }).claim_state.generation!;
+    h.clock.now = at(70);
+    h.tools.boardTakeover(item.id, 'sess-B', 'wt-b', 'sess-A', gA);
+    const storedA = { holder_session: 'sess-A', checkout: 'wt-a', generation: gA, claimed_at: T0, renewed_at: T0 };
+    assert.throws(() => h.tools.knowledgeUpdate(item.id, { claim: storedA }), /'claim' is SERVER-OWNED/);
+    assert.throws(() => h.tools.knowledgeEdit(item.id, 'claim', 'sess-B', 'sess-A'), /'claim' is SERVER-OWNED/);
+    assert.throws(() => h.tools.boardRelease(item.id, 'sess-A', gA), /the task moved — session 'sess-B' in checkout 'wt-b'/);
+    assert.throws(() => h.tools.boardUpdate(item.id, { priority: 'high' }, { session: 'sess-A' }), /board_update: the task moved — session 'sess-B'.*taken over from you at/);
+    h.tools.knowledgeUpdate(item.id, { text: 'Takeover then restore attempt\nsee packages/store/src/index.ts, reworded' });
+    assert.equal(claimOf(h.tools, item.id)?.holder_session, 'sess-B', 'an unrelated generic write keeps the claim');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('claim_state is judged from the returned row, never from a second board read', () => {
+  const h = harness(60);
+  try {
+    const item = addItem(h.tools, 'Row and claim agree\nsee packages/store/src/index.ts');
+    const gA = (h.tools.boardClaim(item.id, 'sess-A', 'main') as { claim_state: ClaimState }).claim_state.generation!;
+    // A takeover lands between the row read and the readiness read (as from another session).
+    const handle = h.store as unknown as { boardReadiness: (...a: unknown[]) => unknown };
+    const original = handle.boardReadiness.bind(h.store);
+    let fired = false;
+    handle.boardReadiness = (...args: unknown[]) => {
+      if (!fired) {
+        fired = true;
+        h.store.takeoverClaim(item.id, { session: 'sess-B', checkout: 'wt-b', expected_holder: 'sess-A', expected_generation: gA, now: T0 });
+      }
+      return original(...args);
+    };
+    const got = h.tools.boardGet(item.id) as unknown as { claim: { holder_session: string }; claim_state: ClaimState };
+    assert.ok(fired, 'the takeover ran between the two reads');
+    assert.equal(got.claim.holder_session, 'sess-A', 'the row was read before the takeover');
+    assert.equal(got.claim_state.holder_session, got.claim.holder_session, 'claim_state agrees with the record it sits beside');
   } finally {
     h.cleanup();
   }

@@ -23726,6 +23726,9 @@ function boardClaimView(claim, now, leaseMinutes) {
 }
 var ClaimRenewalNotDue = class extends Error {
 };
+var ClaimMovedError = class extends Error {
+  name = "ClaimMovedError";
+};
 function boardReadinessOf(targets, live, openBlocker, opts = {}) {
   const now = opts.now ?? Date.now();
   const lease = opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES;
@@ -24628,6 +24631,13 @@ var SterlingStore = class _SterlingStore {
         }
       }
       const candidate = buildPatch(current);
+      if (current.type === "todo" && !internal.claimWrite) {
+        const stored2 = current.claim;
+        if (stored2 === void 0)
+          delete candidate.claim;
+        else
+          candidate.claim = stored2;
+      }
       candidate.id = id;
       candidate.type = current.type;
       candidate.created_at = current.created_at;
@@ -25601,9 +25611,12 @@ var SterlingStore = class _SterlingStore {
         delete out.claim;
         return out;
       }
+      if (claimRenewal && stored.holder_session !== claimRenewal.session) {
+        throw _SterlingStore.claimMoved("board_update", claimRenewal.session, void 0, stored);
+      }
       out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
       return out;
-    }, opts);
+    }, opts, { claimWrite: true });
   }
   /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
   static claimRenewalDue(claim, r) {
@@ -25635,7 +25648,7 @@ var SterlingStore = class _SterlingStore {
       else
         delete out.claim;
       return out;
-    }, {}, { activityAt: now });
+    }, {}, { activityAt: now, claimWrite: true });
   }
   /** The refusal an old holder gets: where the task is now, so it can stop or coordinate. */
   static claimMoved(op, session, generation, claim) {
@@ -25643,10 +25656,10 @@ var SterlingStore = class _SterlingStore {
       return new Error(`${op}: the task has no claim now (it was released, or never claimed). Nothing was written; claim it with board_claim if you still work on it.`);
     }
     if (claim.holder_session !== session) {
-      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : "";
-      return new Error(`${op}: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. Nothing was written; stop work on it, or coordinate with that session.`);
+      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : `, claimed at ${claim.claimed_at}`;
+      return new ClaimMovedError(`${op}: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. Nothing was written; stop work on it, or coordinate with that session.`);
     }
-    return new Error(`${op}: stale claim generation ${generation} \u2014 your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
+    return new Error(`${op}: stale claim generation ${String(generation)} \u2014 your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
   }
   /** The next claim generation: above both the previous claim's and the record's version, so it never repeats on one item. */
   static nextGeneration(claim, current) {
@@ -25719,30 +25732,48 @@ var SterlingStore = class _SterlingStore {
   }
   /**
    * Renewal by task work: bump renewed_at when `session` holds the claim and
-   * the last renewal is older than a quarter of the lease, else write nothing.
-   * Every write archives a version, so renewing on every event would grow the
-   * history by one row per event; at most four renewals per lease keep a
-   * worked claim from ever expiring. Returns whether it wrote. board_update
-   * folds the same rule into its own write (updateTodo's claimRenewal); the
-   * dispatch and commit callers arrive in a later slice.
+   * the last renewal is older than a quarter of the lease. Every write
+   * archives a version, so renewing on every event would grow the history by
+   * one row per event; at most four renewals per lease keep a worked claim
+   * from ever expiring. Returns {renewed:true}, or {renewed:false} with the
+   * reason: 'not_due' (the holder renewed within the quarter lease; read
+   * without the lock, since nothing is written) or 'no_claim'. Task work by a
+   * session that does not hold the item's claim is REFUSED with a
+   * ClaimMovedError naming the holder, checkout and generation, confirmed
+   * under the write lock. board_update folds the same rule into its own write
+   * (updateTodo's claimRenewal); the dispatch and commit callers arrive in a
+   * later slice.
    */
   renewClaimIfDue(id, r) {
     const read = this.get(id);
-    if (!read || read.type !== "todo" || !read.claim || !_SterlingStore.claimRenewalDue(read.claim, r))
-      return { renewed: false };
+    if (!read)
+      throw new Error(`renew: no record '${id}'`);
+    if (read.type !== "todo" || !read.claim)
+      return { renewed: false, reason: "no_claim" };
+    if (read.claim.holder_session === r.session && !_SterlingStore.claimRenewalDue(read.claim, r))
+      return { renewed: false, reason: "not_due" };
     const now = r.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    let outcome = { renewed: true };
     try {
       this.claimWrite("renew", id, now, (claim) => {
-        if (!claim || !_SterlingStore.claimRenewalDue(claim, { ...r, now }))
+        if (!claim) {
+          outcome = { renewed: false, reason: "no_claim" };
           throw new ClaimRenewalNotDue();
+        }
+        if (claim.holder_session !== r.session)
+          throw _SterlingStore.claimMoved("renew", r.session, void 0, claim);
+        if (!_SterlingStore.claimRenewalDue(claim, { ...r, now })) {
+          outcome = { renewed: false, reason: "not_due" };
+          throw new ClaimRenewalNotDue();
+        }
         return { ...claim, renewed_at: now };
       });
     } catch (e) {
       if (e instanceof ClaimRenewalNotDue)
-        return { renewed: false };
+        return outcome;
       throw e;
     }
-    return { renewed: true };
+    return outcome;
   }
   /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
@@ -31964,9 +31995,12 @@ function readinessFields(r, overlaps) {
   return {
     readiness: r.state,
     ...r.blockers_open.length ? { blockers_open: r.blockers_open } : {},
-    ...shares?.length ? { shares_write_path_with: shares } : {},
-    ...r.claim ? { claim_state: r.claim } : {}
+    ...shares?.length ? { shares_write_path_with: shares } : {}
   };
+}
+function claimStateOf(row, opts) {
+  const view = boardClaimView(row.claim, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+  return view ? { claim_state: view } : {};
 }
 var BOARD_TEXT_CLIP = 240;
 var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "needs_reason", "needs_set_at", "updated_at"];
@@ -32126,7 +32160,13 @@ var WRITE_REFUSED_FIELDS = [
   // A board item's wait clock (GitHub issue #175): stamped by the server when
   // `needs` changes value, removed with it. A caller-set value would fake how
   // long an outside party has been waited on.
-  "needs_set_at"
+  "needs_set_at",
+  // A board task's claim (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren): written only
+  // by board_claim / board_reaffirm / board_release / board_takeover; a generic
+  // write could otherwise restore a displaced holder. The store also carries
+  // the stored claim forward on every other in-place write.
+  "claim"
 ];
 var SERVER_OWNED_FIELDS = [...WRITE_REFUSED_FIELDS, "version"];
 var CREATE_DEFAULTED_FIELDS = ["author", "links", "scope", "stack_tags"];
@@ -38201,13 +38241,15 @@ ${JSON.stringify(entry)}
     const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...missing.length ? this.store.boardReadiness(missing, claimOpts) : []];
     const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
     const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { registryPath: this.registryPath ?? registryPath() });
+    const rows = new Map(users.map((u) => [u.id, u]));
     for (const r of readiness) {
       const status = statuses.get(r.id);
       out.set(r.id, {
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
         ...r.unblocks.length ? { unblocks: r.unblocks } : {},
         ...readinessFields(r, overlaps),
-        ...status ? { handoff_status: status } : {}
+        ...status ? { handoff_status: status } : {},
+        ...claimStateOf(rows.get(r.id) ?? {}, claimOpts)
       });
     }
     return out;
@@ -38959,7 +39001,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const wasState = boardClaimView(before, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES)?.state;
     const record2 = this.store.takeoverClaim(item.id, { session: s2, checkout: c, expected_holder: holder, expected_generation, now: this.now() });
     return this.claimReceipt(record2, {
-      notice: `taken over from session '${holder}' (generation ${expected_generation}${wasState === "held" ? ", which was still within its lease" : ""}); that session's later renew, release or close of this task is refused, and its running processes were not stopped`
+      notice: `taken over from session '${holder}' (generation ${expected_generation}${wasState === "held" ? ", which was still within its lease" : ""}); that session's later board_reaffirm, board_release and board_update naming its session are refused and told the task moved; board_remove does not check the claim, so it can still close the item; its running processes were not stopped`
     });
   }
   /**
@@ -39042,14 +39084,15 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const out = /* @__PURE__ */ new Map();
     if (read.truncated) {
       for (const row of page) {
-        const view = boardClaimView(row.claim, claimOpts.now ?? Date.now(), claimOpts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
-        if (view)
-          out.set(String(row.id), { claim_state: view });
+        const claim = claimStateOf(row, claimOpts);
+        if (claim.claim_state)
+          out.set(String(row.id), claim);
       }
       return out;
     }
     const holder = (slug) => read.slugHolders.get(slug);
     const readiness = boardReadinessOf(page, read.items, holder, claimOpts);
+    const byRow = new Map(page.map((row) => [String(row.id), row]));
     const whole = boardReadinessOf(read.items, read.items, holder, claimOpts);
     const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
     for (const r of readiness) {
@@ -39057,7 +39100,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
         ...r.unblocks.length ? { unblocks: r.unblocks } : {},
         ...readinessFields(r, overlaps),
-        ...r.state === "delegated" ? { handoff_status: FOREIGN_UNAVAILABLE } : {}
+        ...r.state === "delegated" ? { handoff_status: FOREIGN_UNAVAILABLE } : {},
+        ...claimStateOf(byRow.get(r.id) ?? {}, claimOpts)
       });
     }
     return out;
@@ -40993,7 +41037,7 @@ function createSterlingServer(target, opts = {}) {
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
       needs_reason: external_exports.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
-      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). It never sets or changes the claim").optional(),
+      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, session, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch, session !== void 0 ? { session } : {}), projection)));
@@ -41023,7 +41067,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, session, generation }) => json(tools.boardRelease(id, session, generation)));
   server.registerTool("board_takeover", {
-    description: "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm or board_release is refused and told the task moved. Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
+    description: "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm, board_release, and board_update naming its session are refused and told the task moved (board_remove does not check the claim). Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       session: external_exports.string().describe("your session id"),
