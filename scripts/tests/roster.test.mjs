@@ -203,6 +203,8 @@ const STORE_WRITE_TOOLS = [
   'knowledge_update', 'knowledge_append', 'knowledge_edit', 'knowledge_line_ref_fix', 'knowledge_array_remove', 'knowledge_promote',
   'knowledge_move',
   'knowledge_link', 'board_add', 'board_remove', 'board_update', 'board_edit', 'maintenance_remove',
+  // Board task claims (decision board-task-claims-for-parallel-sessions-claim-generation-ren).
+  'board_claim', 'board_reaffirm', 'board_release', 'board_takeover',
   'config_set', 'no_capture', 'concept_designed', 'capture_pending', 'domain_describe',
 ];
 // Every registered Sterling tool is classified READ or WRITE, so a newly

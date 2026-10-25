@@ -4567,7 +4567,7 @@ var SYSTEM_REASONS = [
 ];
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
-var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks", claim: "marks" };
 var HANDOFF_MILESTONE_MAX = 80;
 var receivedHandoffShape = external_exports.object({
   role: external_exports.literal("received"),
@@ -4588,6 +4588,20 @@ var sentHandoffShape = external_exports.object({
   milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
 });
 var todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+var todoClaimSchema = external_exports.object({
+  holder_session: external_exports.string().min(1),
+  checkout: external_exports.string().min(1),
+  generation: external_exports.number().int().positive(),
+  claimed_at: external_exports.string().datetime(),
+  renewed_at: external_exports.string().datetime(),
+  taken_over_from: external_exports.object({
+    holder_session: external_exports.string().min(1),
+    checkout: external_exports.string().min(1),
+    generation: external_exports.number().int().positive(),
+    renewed_at: external_exports.string().datetime(),
+    at: external_exports.string().datetime()
+  }).strict().optional()
+}).strict();
 var todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
 var handoffClosureSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
@@ -4706,7 +4720,9 @@ var todoSchema = base.extend({
   // which any unrelated edit resets.
   needs_set_at: external_exports.string().datetime().optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
-  handoff: todoHandoffSchema.optional()
+  handoff: todoHandoffSchema.optional(),
+  // Which session works on this task now (see todoClaimSchema). User items only.
+  claim: todoClaimSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -5021,6 +5037,13 @@ var configSchema = external_exports.object({
   // 677f1639/299d853a stand). Absent → shipped default 5.
   delegation: external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
+  // Board task claims (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren): a claim not
+  // renewed by task work or board_reaffirm for lease_minutes shows as 'check
+  // owner', is kept out of READY and may be taken over by any session.
+  board_claims: external_exports.object({
+    lease_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents; max never

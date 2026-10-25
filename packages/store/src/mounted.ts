@@ -635,8 +635,8 @@ export class MountedStores {
 
   /** Board readiness is project-local like the board itself, so the project
    *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
-  boardReadiness(items?: readonly DurableRecord[]): BoardItemReadiness[] {
-    return this.project.boardReadiness(items);
+  boardReadiness(...args: Parameters<SterlingStore['boardReadiness']>): BoardItemReadiness[] {
+    return this.project.boardReadiness(...args);
   }
 
   private storeFor(scope: string): SterlingStore {
@@ -982,6 +982,27 @@ export class MountedStores {
    *  routes the same way as supersede/remove for consistency rather than assuming. */
   updateTodo(...args: Parameters<SterlingStore['updateTodo']>): ReturnType<SterlingStore['updateTodo']> {
     return this.mutatingStoreHolding('updateTodo', args[0]).updateTodo(...args);
+  }
+
+  // Board task claims: routed to the store holding the item, like updateTodo.
+  claimTodo(...args: Parameters<SterlingStore['claimTodo']>): ReturnType<SterlingStore['claimTodo']> {
+    return this.mutatingStoreHolding('claimTodo', args[0]).claimTodo(...args);
+  }
+
+  reaffirmClaim(...args: Parameters<SterlingStore['reaffirmClaim']>): ReturnType<SterlingStore['reaffirmClaim']> {
+    return this.mutatingStoreHolding('reaffirmClaim', args[0]).reaffirmClaim(...args);
+  }
+
+  releaseClaim(...args: Parameters<SterlingStore['releaseClaim']>): ReturnType<SterlingStore['releaseClaim']> {
+    return this.mutatingStoreHolding('releaseClaim', args[0]).releaseClaim(...args);
+  }
+
+  takeoverClaim(...args: Parameters<SterlingStore['takeoverClaim']>): ReturnType<SterlingStore['takeoverClaim']> {
+    return this.mutatingStoreHolding('takeoverClaim', args[0]).takeoverClaim(...args);
+  }
+
+  renewClaimIfDue(...args: Parameters<SterlingStore['renewClaimIfDue']>): ReturnType<SterlingStore['renewClaimIfDue']> {
+    return this.mutatingStoreHolding('renewClaimIfDue', args[0]).renewClaimIfDue(...args);
   }
 
   /** Typed link edge, added on the source record in its holding store. The TARGET

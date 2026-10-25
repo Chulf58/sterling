@@ -484,6 +484,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: 'mcp__plugin_sterling_sterling__knowledge_promote, mcp__sterling__knowledge_link',
     after: 'mcp__plugin_sterling_sterling__knowledge_promote, mcp__sterling__knowledge_move, mcp__plugin_sterling_sterling__knowledge_move, mcp__sterling__knowledge_link',
   },
+  {
+    commit: 'e55db816',
+    date: '2026-10-25',
+    reason: 'new MCP tools board_claim, board_reaffirm, board_release and board_takeover (decision board-task-claims-for-parallel-sessions-claim-generation-ren) are denied to the implementor under both prefixes; claim writes are store writes and stay the conductor\'s, like board_update',
+    before: 'mcp__plugin_sterling_sterling__board_edit, mcp__sterling__maintenance_remove',
+    after: 'mcp__plugin_sterling_sterling__board_edit, mcp__sterling__board_claim, mcp__plugin_sterling_sterling__board_claim, mcp__sterling__board_reaffirm, mcp__plugin_sterling_sterling__board_reaffirm, mcp__sterling__board_release, mcp__plugin_sterling_sterling__board_release, mcp__sterling__board_takeover, mcp__plugin_sterling_sterling__board_takeover, mcp__sterling__maintenance_remove',
+  },
 ];
 
 export const LIBRARIAN_WORDING_EDITS = [

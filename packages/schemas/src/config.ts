@@ -241,6 +241,15 @@ export const configSchema = z.object({
       max_concurrent: z.number().int().positive().default(5),
     })
     .default({}),
+  // Board task claims (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren): a claim not
+  // renewed by task work or board_reaffirm for lease_minutes shows as 'check
+  // owner', is kept out of READY and may be taken over by any session.
+  board_claims: z
+    .object({
+      lease_minutes: z.number().int().positive().default(60),
+    })
+    .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents; max never
   // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
