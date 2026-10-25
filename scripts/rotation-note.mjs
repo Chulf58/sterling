@@ -18,6 +18,7 @@ import { OPENCODE_DEAD_LANE_CHECK } from './hooks/lib/rotation-restore.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { storeRootFor } from './lib/worktree-root.mjs';
+import { openStore } from './hooks/lib/common.mjs';
 
 // Local wrappers preserve this script's existing exit code (2) and message
 // prefix while delegating all real parsing to the ONE shared, exact-token
@@ -255,6 +256,41 @@ const planPath = (() => {
   }
 })();
 
+// CLAIMED ITEMS (board 05fbab98; decision
+// board-task-claims-for-parallel-sessions-claim-generation-ren): the board items this
+// session holds a claim on, as NARRATIVE for whoever reads the note. The hand-over to the
+// next session reads the board itself (store.adoptClaims, run by the OpenCode plugin's
+// restore, or board_adopt by hand), never this list, so a lost or stale note costs only
+// the narrative. null when the session id is unknown or the board cannot be read; the
+// reason is printed below, never a silent empty list. OpenCode only: the plugin there
+// fills real session ids into claims and runs the hand-over; a Claude Code note keeps
+// its pinned shape (scripts/tests/rotation-note-host.test.mjs GOLDEN).
+let claimedItems = null;
+let claimedUnread = null;
+if (host !== 'opencode') {
+  claimedUnread = 'not recorded on Claude Code';
+} else if (!sessionId) {
+  claimedUnread = 'no session id';
+} else {
+  try {
+    const store = openStore(cwd);
+    if (!store) {
+      claimedUnread = 'no project store';
+    } else {
+      try {
+        claimedItems = store
+          .boardReadiness()
+          .filter((r) => r.claim?.holder_session === sessionId)
+          .map((r) => ({ id: r.id, name: r.name, generation: r.claim.generation, checkout: r.claim.checkout }));
+      } finally {
+        store.close();
+      }
+    }
+  } catch (e) {
+    claimedUnread = e?.message ?? String(e);
+  }
+}
+
 const note = {
   plan_path: planPath,
   next_slice: nextSlice,
@@ -270,6 +306,7 @@ const note = {
   commits_ahead: commitsAhead,
   live_dispatches: liveDispatches,
   uncertain_dispatches: uncertainDispatches,
+  ...(host === 'opencode' ? { claimed_items: claimedItems } : {}),
   reason,
   at: new Date().toISOString(),
 };
@@ -289,6 +326,13 @@ process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +
     `lanes: ${lanes.length}\n` +
+    (host !== 'opencode'
+      ? ''
+      : claimedItems === null
+      ? `claimed_items: unknown (${claimedUnread}) — the next session still finds this session's claims on the board\n`
+      : claimedItems.length
+        ? `claimed_items: ${claimedItems.length} (${claimedItems.map((c) => c.name).join(', ')}) — they stay claimed by this session until the next session adopts them (the OpenCode plugin does it when it restores this note; by hand: board_adopt from_session '${sessionId}')\n`
+        : '') +
     (sessionId ? `session_id: ${sessionId}\n` : `session_id: unavailable (${host === 'opencode' ? 'OPENCODE_SESSION_ID' : 'CLAUDE_CODE_SESSION_ID'} unset or not id-shaped) — the restore cannot name the session to resume\n`) +
     (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? '?'}\n` : 'anchored: no git (drift disclosure unavailable)\n') +
     (note.commits_ahead !== null

@@ -955,6 +955,20 @@ export function createSterlingServer(
   );
 
   server.registerTool(
+    'board_adopt',
+    {
+      description:
+        "Adopt the board claims an earlier session held in this checkout, typically after a new session (/new) replaced it. Every user board item whose claim names from_session as holder and this checkout moves to your session with a new generation and taken_over_from; each item is compare-and-set against the holder and generation read, so one another session took in between is refused and listed as moved. A claim from_session holds in ANOTHER checkout is refused and listed (that session may be live there; use board_takeover). Repeatable: running it again adopts nothing new and lists items already adopted from that session under already. Name from_session only for a session you know has ended; its later board_reaffirm, board_release and board_update naming its session are refused. Returns {from_session, adopted[], already[], refused[{reason, why}], notice}.",
+      inputSchema: strict({
+        from_session: z.string().describe('the earlier session whose claims to adopt (the rotation note session_id, or the holder_session named in the session-start notice)'),
+        session: z.string().describe('your session id'),
+        checkout: z.string().describe('the checkout (worktree path or name) the work runs in'),
+      }),
+    },
+    ({ from_session, session, checkout }) => json(tools.boardAdopt(from_session, session, checkout))
+  );
+
+  server.registerTool(
     'board_get',
     {
       description:

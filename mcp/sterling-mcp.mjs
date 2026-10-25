@@ -21631,6 +21631,10 @@ var MountedStores = class {
   renewClaimIfDue(...args2) {
     return this.mutatingStoreHolding("renewClaimIfDue", args2[0]).renewClaimIfDue(...args2);
   }
+  /** Claim hand-over scans the board, which is project-local, so the project store answers it. */
+  adoptClaims(...args2) {
+    return this.mutatingProject("adoptClaims").adoptClaims(...args2);
+  }
   /** Typed link edge, added on the source record in its holding store. The TARGET
    *  is resolved across ALL mounted stores (cross-store get, like get()) before
    *  delegating: cross-store edges are a legitimate shape — promotion itself writes
@@ -23729,6 +23733,13 @@ var ClaimRenewalNotDue = class extends Error {
 var ClaimMovedError = class extends Error {
   name = "ClaimMovedError";
 };
+var ClaimAdoptRefused = class extends Error {
+  claim;
+  constructor(claim) {
+    super("claim moved before adoption");
+    this.claim = claim;
+  }
+};
 function boardReadinessOf(targets, live, openBlocker, opts = {}) {
   const now = opts.now ?? Date.now();
   const lease = opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES;
@@ -25801,6 +25812,73 @@ var SterlingStore = class _SterlingStore {
       throw e;
     }
     return outcome;
+  }
+  /**
+   * Claim hand-over across a new session (decision
+   * board-task-claims-for-parallel-sessions-claim-generation-ren: "Claims hand
+   * over across /new from the board (generation-checked, repeatable)"). Every
+   * user board item whose claim names `from_session` as holder and
+   * `checkout` as its checkout moves to `session`: a new generation,
+   * renewed now, and the displaced holder in taken_over_from. Each item is
+   * its own compare-and-set write under the write lock against the holder and
+   * generation this call read, so a claim that moved in between (another
+   * session's takeover, a release) is reported as refused and left alone.
+   * A claim of `from_session` in another checkout is refused without a
+   * write: that session may be live there, and board_takeover is the
+   * explicit way to take it. Repeatable: a second run finds nothing held by
+   * `from_session` and lists the items it already moved under `already`.
+   * NOT guaranteed: that `from_session` has ended (the store cannot know; the
+   * caller names it), and all-or-nothing (a failure mid-way leaves the items
+   * moved so far adopted; running it again finishes the rest).
+   */
+  adoptClaims(req) {
+    if (req.from_session === req.session) {
+      throw new Error(`board_adopt: from_session '${req.from_session}' is your own session; there is nothing to adopt. Nothing was written.`);
+    }
+    const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    const out = { adopted: [], already: [], refused: [] };
+    const scanned = this.readTx(() => {
+      const total = this.count({ types: ["todo"], source: "user" });
+      return total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+    });
+    for (const item of scanned) {
+      const claim = item.claim;
+      if (!claim)
+        continue;
+      if (claim.holder_session === req.session && claim.taken_over_from?.holder_session === req.from_session) {
+        out.already.push({ id: item.id, generation: claim.generation });
+        continue;
+      }
+      if (claim.holder_session !== req.from_session)
+        continue;
+      if (claim.checkout !== req.checkout) {
+        out.refused.push({ id: item.id, reason: "other_checkout", holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation });
+        continue;
+      }
+      try {
+        const record2 = this.claimWrite("board_adopt", item.id, now, (current, body) => {
+          if (!current || current.holder_session !== claim.holder_session || current.generation !== claim.generation || current.checkout !== req.checkout) {
+            throw new ClaimAdoptRefused(current);
+          }
+          return {
+            holder_session: req.session,
+            checkout: req.checkout,
+            generation: _SterlingStore.nextGeneration(current, body),
+            claimed_at: now,
+            renewed_at: now,
+            taken_over_from: { holder_session: current.holder_session, checkout: current.checkout, generation: current.generation, renewed_at: current.renewed_at, at: now }
+          };
+        });
+        const moved = record2.claim;
+        out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
+      } catch (e) {
+        if (!(e instanceof ClaimAdoptRefused))
+          throw e;
+        const held = e.claim;
+        out.refused.push(held ? { id: item.id, reason: "moved", holder_session: held.holder_session, checkout: held.checkout, generation: held.generation } : { id: item.id, reason: "released" });
+      }
+    }
+    return out;
   }
   /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
@@ -39047,6 +39125,31 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     });
   }
   /**
+   * board_adopt (decision board-task-claims-for-parallel-sessions-claim-generation-ren:
+   * claims hand over across /new from the board, generation-checked and
+   * repeatable): every board item `from_session` holds in `checkout` moves to
+   * `session`. The store checks holder and generation per item under the
+   * write lock; a claim in another checkout, or one that moved since the scan,
+   * is refused and listed, never taken.
+   */
+  boardAdopt(from_session, session, checkout) {
+    const s2 = _SterlingTools.requireClaimText("board_adopt", "session", session);
+    const c = _SterlingTools.requireClaimText("board_adopt", "checkout", checkout);
+    const from = _SterlingTools.requireClaimText("board_adopt", "from_session", from_session);
+    const result = this.store.adoptClaims({ session: s2, checkout: c, from_session: from, now: this.now() });
+    const named2 = (id) => {
+      const r = this.store.get(id);
+      const label = r ? boardDisplayLabel(r.text, r.slug) : void 0;
+      return { id, ...r?.slug ? { slug: r.slug } : {}, ...label ? { label } : {} };
+    };
+    const refusedWhy = (r) => r.reason === "other_checkout" ? `held by '${r.holder_session}' in checkout '${r.checkout}', not this one; that session may still be live there, so take it over with board_takeover (expected_holder '${r.holder_session}', expected_generation ${r.generation}) if you mean to` : r.reason === "moved" ? `moved before it could be adopted: session '${r.holder_session}' in checkout '${r.checkout}' holds it at generation ${r.generation}` : "released before it could be adopted; claim it with board_claim if you work on it";
+    const adopted = result.adopted.map((a) => ({ ...named2(a.id), generation: a.generation, from_generation: a.from_generation }));
+    const already = result.already.map((a) => ({ ...named2(a.id), generation: a.generation }));
+    const refused = result.refused.map((r) => ({ ...named2(r.id), reason: r.reason, why: refusedWhy(r) }));
+    const notice = adopted.length + already.length + refused.length === 0 ? `no board item is claimed by session '${from}'; nothing was written` : `adopted ${adopted.length} claim(s) from session '${from}' (new generations; its later board_reaffirm, board_release and board_update naming its session are refused)` + (already.length ? `; ${already.length} already yours from an earlier adoption` : "") + (refused.length ? `; ${refused.length} refused and left alone (see refused[].why)` : "");
+    return { from_session: from, adopted, already, refused, notice };
+  }
+  /**
    * board_get(id) — the full, untruncated board/queue item (board e725979c):
    * board_query/maintenance_query's projection:'digest' clips text at
    * DIGEST_CLIP, and until now there was no escape hatch back to the whole
@@ -41120,6 +41223,14 @@ function createSterlingServer(target, opts = {}) {
       expected_generation: external_exports.number().int().positive().describe("the claim generation you read")
     })
   }, ({ id, session, checkout, expected_holder, expected_generation }) => json(tools.boardTakeover(id, session, checkout, expected_holder, expected_generation)));
+  server.registerTool("board_adopt", {
+    description: "Adopt the board claims an earlier session held in this checkout, typically after a new session (/new) replaced it. Every user board item whose claim names from_session as holder and this checkout moves to your session with a new generation and taken_over_from; each item is compare-and-set against the holder and generation read, so one another session took in between is refused and listed as moved. A claim from_session holds in ANOTHER checkout is refused and listed (that session may be live there; use board_takeover). Repeatable: running it again adopts nothing new and lists items already adopted from that session under already. Name from_session only for a session you know has ended; its later board_reaffirm, board_release and board_update naming its session are refused. Returns {from_session, adopted[], already[], refused[{reason, why}], notice}.",
+    inputSchema: strict({
+      from_session: external_exports.string().describe("the earlier session whose claims to adopt (the rotation note session_id, or the holder_session named in the session-start notice)"),
+      session: external_exports.string().describe("your session id"),
+      checkout: external_exports.string().describe("the checkout (worktree path or name) the work runs in")
+    })
+  }, ({ from_session, session, checkout }) => json(tools.boardAdopt(from_session, session, checkout)));
   server.registerTool("board_get", {
     description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. A claimed item returns claim_state {state: held, expired (check owner) or unreadable, holder_session, checkout, generation, claimed_at, renewed_at, minutes_since_renewal, taken_over_from?}; absent means nobody holds it. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
     inputSchema: strict({

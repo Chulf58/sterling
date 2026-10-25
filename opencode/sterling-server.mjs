@@ -8270,6 +8270,10 @@ var init_mounted = __esm({
       renewClaimIfDue(...args) {
         return this.mutatingStoreHolding("renewClaimIfDue", args[0]).renewClaimIfDue(...args);
       }
+      /** Claim hand-over scans the board, which is project-local, so the project store answers it. */
+      adoptClaims(...args) {
+        return this.mutatingProject("adoptClaims").adoptClaims(...args);
+      }
       /** Typed link edge, added on the source record in its holding store. The TARGET
        *  is resolved across ALL mounted stores (cross-store get, like get()) before
        *  delegating: cross-store edges are a legitimate shape — promotion itself writes
@@ -10287,7 +10291,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, ClaimMovedError, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, ClaimMovedError, ClaimAdoptRefused, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -10429,6 +10433,13 @@ var init_dist2 = __esm({
     };
     ClaimMovedError = class extends Error {
       name = "ClaimMovedError";
+    };
+    ClaimAdoptRefused = class extends Error {
+      claim;
+      constructor(claim) {
+        super("claim moved before adoption");
+        this.claim = claim;
+      }
     };
     DAY_MS = 864e5;
     PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
@@ -12272,6 +12283,73 @@ var init_dist2 = __esm({
           throw e;
         }
         return outcome;
+      }
+      /**
+       * Claim hand-over across a new session (decision
+       * board-task-claims-for-parallel-sessions-claim-generation-ren: "Claims hand
+       * over across /new from the board (generation-checked, repeatable)"). Every
+       * user board item whose claim names `from_session` as holder and
+       * `checkout` as its checkout moves to `session`: a new generation,
+       * renewed now, and the displaced holder in taken_over_from. Each item is
+       * its own compare-and-set write under the write lock against the holder and
+       * generation this call read, so a claim that moved in between (another
+       * session's takeover, a release) is reported as refused and left alone.
+       * A claim of `from_session` in another checkout is refused without a
+       * write: that session may be live there, and board_takeover is the
+       * explicit way to take it. Repeatable: a second run finds nothing held by
+       * `from_session` and lists the items it already moved under `already`.
+       * NOT guaranteed: that `from_session` has ended (the store cannot know; the
+       * caller names it), and all-or-nothing (a failure mid-way leaves the items
+       * moved so far adopted; running it again finishes the rest).
+       */
+      adoptClaims(req) {
+        if (req.from_session === req.session) {
+          throw new Error(`board_adopt: from_session '${req.from_session}' is your own session; there is nothing to adopt. Nothing was written.`);
+        }
+        const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        const out = { adopted: [], already: [], refused: [] };
+        const scanned = this.readTx(() => {
+          const total = this.count({ types: ["todo"], source: "user" });
+          return total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+        });
+        for (const item of scanned) {
+          const claim = item.claim;
+          if (!claim)
+            continue;
+          if (claim.holder_session === req.session && claim.taken_over_from?.holder_session === req.from_session) {
+            out.already.push({ id: item.id, generation: claim.generation });
+            continue;
+          }
+          if (claim.holder_session !== req.from_session)
+            continue;
+          if (claim.checkout !== req.checkout) {
+            out.refused.push({ id: item.id, reason: "other_checkout", holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation });
+            continue;
+          }
+          try {
+            const record = this.claimWrite("board_adopt", item.id, now, (current, body) => {
+              if (!current || current.holder_session !== claim.holder_session || current.generation !== claim.generation || current.checkout !== req.checkout) {
+                throw new ClaimAdoptRefused(current);
+              }
+              return {
+                holder_session: req.session,
+                checkout: req.checkout,
+                generation: _SterlingStore.nextGeneration(current, body),
+                claimed_at: now,
+                renewed_at: now,
+                taken_over_from: { holder_session: current.holder_session, checkout: current.checkout, generation: current.generation, renewed_at: current.renewed_at, at: now }
+              };
+            });
+            const moved = record.claim;
+            out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
+          } catch (e) {
+            if (!(e instanceof ClaimAdoptRefused))
+              throw e;
+            const held = e.claim;
+            out.refused.push(held ? { id: item.id, reason: "moved", holder_session: held.holder_session, checkout: held.checkout, generation: held.generation } : { id: item.id, reason: "released" });
+          }
+        }
+        return out;
       }
       /**
        * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
@@ -24984,6 +25062,37 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
   return { resolve: resolve18, disclose, markDisclosed };
 }
 
+// packages/opencode-plugin/src/claim-handover.mjs
+function itemName(entry) {
+  const id8 = String(entry.id).slice(0, 8);
+  return entry.label ? `${entry.label} (${id8})` : id8;
+}
+function adoptionText(result, from) {
+  const parts = [];
+  if (result.adopted.length) parts.push(`adopted ${result.adopted.length}: ${result.adopted.map(itemName).join(", ")}`);
+  if (result.already.length) parts.push(`already yours from an earlier hand-over: ${result.already.map(itemName).join(", ")}`);
+  if (result.refused.length) {
+    const why = (r) => r.reason === "other_checkout" ? `held in checkout '${r.checkout}', not this one (that session may be live there; board_takeover takes it)` : r.reason === "moved" ? `moved before the hand-over: session '${r.holder_session}' holds it at generation ${r.generation}` : "released before the hand-over";
+    parts.push(`left alone ${result.refused.length}: ${result.refused.map((r) => `${itemName(r)}, ${why(r)}`).join("; ")}`);
+  }
+  if (!parts.length) return "";
+  return `BOARD CLAIMS HANDED OVER from session '${from}' (the rotation note's session) to this session: ${parts.join(". ")}.`;
+}
+function orphanClaimsText(readiness, { checkout, session }) {
+  const byHolder = /* @__PURE__ */ new Map();
+  for (const r of readiness ?? []) {
+    const c = r.claim;
+    if (!c || c.state === "unreadable" || c.checkout !== checkout || c.holder_session === session) continue;
+    if (!byHolder.has(c.holder_session)) byHolder.set(c.holder_session, []);
+    byHolder.get(c.holder_session).push(`${r.name ?? String(r.id).slice(0, 8)} at generation ${c.generation}${c.state === "expired" ? ", check owner" : ""}`);
+  }
+  if (!byHolder.size) return "";
+  const lines = [...byHolder].map(([holder, items]) => `- session '${holder}': ${items.join("; ")}. Adopt with board_adopt from_session '${holder}'.`);
+  return `CLAIMS HELD BY AN EARLIER SESSION IN THIS CHECKOUT (nothing was adopted for you):
+${lines.join("\n")}
+If that session has ended (a /new whose hand-over did not run, or a crash), adopt them; if it is still running in this checkout, leave them.`;
+}
+
 // scripts/hooks/lib/registry-refresh.mjs
 init_dist();
 init_dist2();
@@ -25252,7 +25361,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       return void 0;
     }
   }
-  function boardBlock(root, config, sessionID, configUnreadable = false) {
+  function boardHit(root, config, configUnreadable = false) {
     let hit = boardCache.get(root);
     if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
       try {
@@ -25273,6 +25382,10 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       }
       boardCache.set(root, hit);
     }
+    return hit;
+  }
+  function boardBlock(root, config, sessionID, configUnreadable = false) {
+    const hit = boardHit(root, config, configUnreadable);
     if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
       const live = liveLanes(root, sessionID);
@@ -25286,6 +25399,11 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       const text = `BOARD READINESS UNAVAILABLE (${errText2(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
       return { text, sig: text };
     }
+  }
+  function orphanBlock(root, config, sessionID, configUnreadable = false) {
+    const hit = boardHit(root, config, configUnreadable);
+    if (!hit.readiness) return "";
+    return orphanClaimsText(hit.readiness, { checkout: root, session: sessionID });
   }
   function laneLine(root, config, sessionID) {
     try {
@@ -25388,6 +25506,9 @@ ${opencodeHostTail(pluginRoot)}`;
       }
     }
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
+    if (kind === "root" && !inWorkerChild(env)) {
+      out.push({ key: "claim-orphans", text: orphanBlock(root, state.config, sessionID, state.configUnreadable), cleared: "CLAIMS HELD BY AN EARLIER SESSION: none in this checkout now; the list shown earlier no longer applies." });
+    }
     if (kind === "root" && !inWorkerChild(env)) {
       for (const [key, text] of [...heldLines]) {
         if (!key.startsWith(`${root}\0`)) continue;
@@ -25660,7 +25781,7 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
 // packages/opencode-plugin/src/restore.mjs
 import { statSync as statSync10 } from "node:fs";
 import { join as join44 } from "node:path";
-function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, env = process.env }) {
+function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, adoptClaims, env = process.env }) {
   const restored = /* @__PURE__ */ new Map();
   const malformedNoted = /* @__PURE__ */ new Set();
   return async function rotationRestore(root, sessionID) {
@@ -25701,8 +25822,17 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
       addNotice(root, `Sterling: a rotation note is waiting but could not be checked against this session (${errText2(e)}); it was left in place. See ${LOG_REL}.`, now());
       return "";
     }
+    let handover = "";
+    if (adoptClaims && typeof note.session_id === "string" && note.session_id) {
+      try {
+        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
+      } catch (e) {
+        logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText2(e)}`);
+        handover = `BOARD CLAIM HAND-OVER FAILED (${errText2(e)}): the claims session '${note.session_id}' held in this checkout were not adopted; adopt them with board_adopt from_session '${note.session_id}'.`;
+      }
+    }
     const consumed = consumeRotationNote(root);
-    if (!consumed) return "";
+    if (!consumed) return handover;
     let planLock = null;
     let planLockMalformed = false;
     try {
@@ -25714,12 +25844,16 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
       logLine(root, `rotation restore: plan lock unreadable: ${errText2(e)}`);
     }
     try {
-      const text = renderRestore(consumed, { cwd: root, host: "opencode", planLock, planLockMalformed }).replace(/^\n+/, "");
+      const rendered = renderRestore(consumed, { cwd: root, host: "opencode", planLock, planLockMalformed }).replace(/^\n+/, "");
+      const text = handover ? `${rendered}
+
+${handover}` : rendered;
       restored.set(sessionID, text);
       return text;
     } catch (e) {
       logLine(root, `rotation restore: render failed after the note was consumed: ${errText2(e)}`);
-      return "";
+      if (handover) restored.set(sessionID, handover);
+      return handover;
     }
   };
 }
@@ -27516,11 +27650,12 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
 }
 
 // packages/opencode-plugin/src/server.mjs
+init_dist();
 import { realpathSync as realpathSync11 } from "node:fs";
 import { basename as basename7, dirname as dirname23, join as join54, resolve as resolve17 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
-var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_update"]);
+var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update"]);
 var OTHER_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_add", "board_edit", "board_get", "board_query", "board_remove"]);
 function classifyTool(tool) {
   const name = sterlingToolName(tool);
@@ -27550,7 +27685,7 @@ async function applyClaimIdentity(input, { checkoutOfSession }) {
     throw refusal3(`Sterling refused ${name}: it names session '${String(args.session)}', but this call comes from session ${real}. A session can claim, renew or release only as itself; call again with session '${real}', or leave session out and Sterling fills it in.`);
   }
   args.session = real;
-  if (name !== "board_claim" && name !== "board_takeover") return;
+  if (name !== "board_claim" && name !== "board_takeover" && name !== "board_adopt") return;
   const found = await checkoutOfSession(real);
   if (!found?.checkout) {
     throw refusal3(`Sterling refused ${name}: the checkout of session ${real} could not be read (${found?.why ?? "no reason given"}), and a claim records the real checkout, never the one a caller names.`);
@@ -27641,7 +27776,23 @@ function createSterlingServer(deps = {}) {
       if (info?.id !== sessionID || typeof dir !== "string" || !dir) return { why: `session.get gave no location.directory for session ${sessionID}` };
       return { dir: remember(sessionDirs, sessionID, dir) };
     }
-    const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
+    function adoptClaims(root, { from, to }) {
+      const store = openStore(join54(root, ".sterling", "sterling.db"));
+      let result;
+      try {
+        result = store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() });
+        const label = (e) => {
+          const r = store.get(e.id);
+          return { ...e, ...r ? { label: boardDisplayLabel(r.text, r.slug) } : {} };
+        };
+        result = { adopted: result.adopted.map(label), already: result.already.map(label), refused: result.refused.map(label) };
+      } finally {
+        store.close();
+      }
+      if (result.adopted.length) resetStatus(root);
+      return result;
+    }
+    const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, adoptClaims, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });

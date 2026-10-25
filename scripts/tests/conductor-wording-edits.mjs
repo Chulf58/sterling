@@ -491,6 +491,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: 'mcp__plugin_sterling_sterling__board_edit, mcp__sterling__maintenance_remove',
     after: 'mcp__plugin_sterling_sterling__board_edit, mcp__sterling__board_claim, mcp__plugin_sterling_sterling__board_claim, mcp__sterling__board_reaffirm, mcp__plugin_sterling_sterling__board_reaffirm, mcp__sterling__board_release, mcp__plugin_sterling_sterling__board_release, mcp__sterling__board_takeover, mcp__plugin_sterling_sterling__board_takeover, mcp__sterling__maintenance_remove',
   },
+  {
+    commit: 'board 05fbab98',
+    date: '2026-10-25',
+    reason: 'new MCP tool board_adopt (claims hand over across /new, decision board-task-claims-for-parallel-sessions-claim-generation-ren) is denied to the implementor under both prefixes; claim writes are store writes and stay the conductor\'s',
+    before: 'mcp__plugin_sterling_sterling__board_takeover, mcp__sterling__maintenance_remove',
+    after: 'mcp__plugin_sterling_sterling__board_takeover, mcp__sterling__board_adopt, mcp__plugin_sterling_sterling__board_adopt, mcp__sterling__maintenance_remove',
+  },
 ];
 
 export const LIBRARIAN_WORDING_EDITS = [

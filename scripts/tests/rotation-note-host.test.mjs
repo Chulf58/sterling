@@ -171,3 +171,34 @@ test('OPENCODE=1 with an unusable OPENCODE_SESSION_ID does not displace a valid 
   assert.equal(got.stdout, GOLDEN['claude-session'].stdout);
   assert.deepEqual(got.note, GOLDEN['claude-session'].note);
 });
+
+// Claim hand-over (board 05fbab98): on OpenCode the note names the board items the
+// session holds, as narrative only; the hand-over reads the board, not this list.
+test('OpenCode: the note lists the items this session claims (narrative), and a board with none records an empty list', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rotation-note-claims-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{}');
+    const s = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const base = { type: 'todo', created_at: '2026-10-25T09:00:00.000Z', updated_at: '2026-10-25T09:00:00.000Z', author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], source: 'user' };
+    const mine = s.create({ ...base, id: '11111111-1111-4111-8111-111111111111', text: 'My claimed task' });
+    const theirs = s.create({ ...base, id: '22222222-2222-4222-8222-222222222222', text: 'Their task' });
+    s.claimTodo(mine.id, { session: 'ses_rot', checkout: dir });
+    s.claimTodo(theirs.id, { session: 'ses_other', checkout: dir });
+    s.close();
+    const env = { ...process.env };
+    delete env.CLAUDE_CODE_SESSION_ID;
+    const r = spawnSync(process.execPath, [SCRIPT, '--next-slice', 'the next slice'], { cwd: dir, encoding: 'utf8', env: { ...env, OPENCODE: '1', OPENCODE_SESSION_ID: 'ses_rot' } });
+    assert.equal(r.status, 0, r.stderr);
+    const note = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), 'utf8'));
+    assert.deepEqual(note.claimed_items.map((c) => [c.id, c.name, c.checkout]), [[mine.id, 'My claimed task (11111111)', dir]]);
+    assert.match(r.stdout, /claimed_items: 1 \(My claimed task \(11111111\)\) — they stay claimed by this session until the next session adopts them .*board_adopt from_session 'ses_rot'/);
+
+    const none = spawnSync(process.execPath, [SCRIPT, '--next-slice', 'the next slice'], { cwd: dir, encoding: 'utf8', env: { ...env, OPENCODE: '1', OPENCODE_SESSION_ID: 'ses_idle' } });
+    assert.equal(none.status, 0, none.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), 'utf8')).claimed_items, []);
+    assert.doesNotMatch(none.stdout, /claimed_items/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
