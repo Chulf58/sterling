@@ -1598,3 +1598,151 @@ test('conductor session: prompt A held in an earlier handler, B arrives and reco
     p.cleanup();
   }
 });
+
+// Claim hand-over across /new (board 05fbab98; decision
+// board-task-claims-for-parallel-sessions-claim-generation-ren): the restore adopts the
+// rotation note session's claims in this checkout before it consumes the note; a root
+// session's context lists claims another session holds in this checkout, naming board_adopt.
+const claimedProject = async (holders) => {
+  const p = makeProject();
+  const { checkoutRoot } = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'common.mjs')).href);
+  const checkout = checkoutRoot(p.dir);
+  const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+  const ids = [];
+  try {
+    for (const [text, session, where] of holders) {
+      const item = s.create({ ...envelope('todo'), text, source: 'user' });
+      s.claimTodo(item.id, { session, checkout: where ?? checkout, now: NOW });
+      ids.push(item.id);
+    }
+  } finally {
+    s.close();
+  }
+  const holderOf = (id) => {
+    const r = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+    try {
+      return r.get(id).claim?.holder_session;
+    } finally {
+      r.close();
+    }
+  };
+  return { p, checkout, ids, holderOf };
+};
+
+test('claim hand-over: the restore adopts the note session\'s claims in this checkout before consuming the note; no orphan notice follows', async () => {
+  const { p, ids, holderOf } = await claimedProject([['Rotated task', 'ses_old'], ['Elsewhere task', 'ses_old', '/some/other/worktree']]);
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /BOARD CLAIMS HANDED OVER from session 'ses_old' \(the rotation note's session\) to this session: adopted 1: Rotated task \(/);
+    assert.match(text, /left alone 1: Elsewhere task \([0-9a-f]{8}\), held in checkout '\/some\/other\/worktree', not this one/);
+    assert.equal(holderOf(ids[0]), 'ses_new');
+    assert.equal(holderOf(ids[1]), 'ses_old', 'a claim in another checkout is never adopted');
+    assert.equal(noteExists(p.dir), false, 'the note is consumed after the hand-over');
+    assert.doesNotMatch(text, /CLAIMS HELD BY AN EARLIER SESSION/, 'the board is read after the hand-over, so the adopted claim is not an orphan');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('claim hand-over: a lost or already-consumed note leaves the claims with the old session and the next root session is told to adopt them', async () => {
+  const { p, ids, holderOf } = await claimedProject([['Orphaned task', 'ses_old'], ['My own task', 'ses_new'], ['Other worktree task', 'ses_far', '/some/other/worktree']]);
+  try {
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /CLAIMS HELD BY AN EARLIER SESSION IN THIS CHECKOUT \(nothing was adopted for you\):\n- session 'ses_old': Orphaned task \([0-9a-f]{8}\) at generation \d+, check owner\. Adopt with board_adopt from_session 'ses_old'\./);
+    assert.doesNotMatch(text, /My own task \([0-9a-f]{8}\) at generation|session 'ses_far'/, 'own claims and claims in another checkout are not listed');
+    assert.equal(holderOf(ids[0]), 'ses_old', 'nothing is adopted by guess');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('claim hand-over: a crash after the transfer (note still there) re-runs as a no-op; a failed adoption is said loudly and the orphan notice remains', async () => {
+  const { p, ids, checkout, holderOf } = await claimedProject([['Twice handed', 'ses_old']]);
+  try {
+    const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+    s.adoptClaims({ session: 'ses_new', checkout, from_session: 'ses_old', now: NOW });
+    s.close();
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /already yours from an earlier hand-over: Twice handed \(/);
+    assert.equal(holderOf(ids[0]), 'ses_new');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+
+  const failing = await claimedProject([['Stuck task', 'ses_old']]);
+  try {
+    writeNote(failing.p.dir);
+    const openStore = (dbPath) => Object.assign(new SterlingStore(dbPath), { adoptClaims: () => { throw new Error('simulated busy store'); } });
+    const { ctx, cleanup } = await setupPlugin(failing.p.dir, { openStore }, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /BOARD CLAIM HAND-OVER FAILED \(simulated busy store\): it may have stopped part-way, and which claims moved is not known\. Claims session 'ses_old' still holds in this checkout are listed under CLAIMS HELD BY AN EARLIER SESSION; finish with board_adopt from_session 'ses_old' \(safe to repeat\)\./);
+    assert.match(text, /ROTATION-SLICE-42/, 'the restore itself still arrives');
+    assert.match(text, /- session 'ses_old': Stuck task/);
+    assert.match(readFileSync(join(failing.p.dir, server.LOG_REL), 'utf8'), /claim hand-over from ses_old failed: simulated busy store/);
+    assert.equal(failing.holderOf(failing.ids[0]), 'ses_old');
+    await cleanup?.();
+  } finally {
+    failing.p.cleanup();
+  }
+});
+
+test('claim hand-over: a project with no claims gets no hand-over line and no orphan notice', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /ROTATION-SLICE-42/);
+    assert.doesNotMatch(text, /BOARD CLAIM|CLAIMS HELD BY AN EARLIER SESSION/);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('claim hand-over: a store failing after the first transfer reports the partial hand-over, and the orphan notice re-reads who still holds what', async () => {
+  const { p, ids, holderOf } = await claimedProject([['First task', 'ses_old'], ['Second task', 'ses_old']]);
+  try {
+    writeNote(p.dir);
+    // The adoption's second write fails, after its first transfer committed.
+    const openStore = (dbPath) => {
+      const s = new SterlingStore(dbPath);
+      const adopt = s.adoptClaims.bind(s);
+      s.adoptClaims = (req) => {
+        const tx = s.tx;
+        let writes = 0;
+        s.tx = (fn) => {
+          if (++writes === 2) throw new Error('simulated busy store');
+          return tx.call(s, fn);
+        };
+        try {
+          return adopt(req);
+        } finally {
+          s.tx = tx;
+        }
+      };
+      return s;
+    };
+    const { ctx, cleanup } = await setupPlugin(p.dir, { openStore }, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    const moved = ids.filter((id) => holderOf(id) === 'ses_new');
+    const stuck = ids.filter((id) => holderOf(id) === 'ses_old');
+    assert.equal(moved.length, 1, 'the first transfer committed');
+    assert.equal(stuck.length, 1);
+    assert.match(text, new RegExp(`BOARD CLAIM HAND-OVER FAILED \\(simulated busy store\\): it stopped part-way: adopted 1 \\((First|Second) task \\(${moved[0].slice(0, 8)}\\)\\) before the failure; those stay adopted\\.`));
+    const orphans = text.slice(text.indexOf('CLAIMS HELD BY AN EARLIER SESSION IN THIS CHECKOUT'));
+    assert.match(orphans, new RegExp(`- session 'ses_old': (First|Second) task \\(${stuck[0].slice(0, 8)}\\)`));
+    assert.doesNotMatch(orphans.split('\n').slice(0, 3).join('\n'), new RegExp(moved[0].slice(0, 8)), 'the board cache was dropped, so the moved item is not listed as orphaned');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});

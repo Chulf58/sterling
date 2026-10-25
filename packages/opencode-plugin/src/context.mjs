@@ -28,6 +28,7 @@ import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 import { sessionKind } from './dispatch.mjs';
 import { inWorkerChild } from './worker.mjs';
+import { orphanClaimsText } from './claim-handover.mjs';
 import { refreshRegistryRow } from '../../../scripts/hooks/lib/registry-refresh.mjs';
 import { planLockSection } from '../../../scripts/hooks/lib/plan-lock-section.mjs';
 
@@ -220,16 +221,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     }
   }
 
-  /**
-   * H1's READY / READY FOR RESEARCH / WAITING ON YOU block (decision
-   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start;
-   * full-parity ruling the former ruling 'sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code' (not in the current store)), from the same shared lib and the store's one
-   * readiness function. onPrompt delivers it again whenever it changed, which
-   * covers what H20's mid-session line does on Claude Code at the next prompt.
-   */
-  function boardBlock(root, config, sessionID, configUnreadable = false) {
-    // The cache holds the readiness read per ROOT; the live-lane count is per
-    // SESSION, so it is computed on every call and never cached with the text.
+  /** The board readiness read for `root`, cached for STATUS_TTL_MS: { at, readiness, handoffStatus } or { at, unavailable }. */
+  function boardHit(root, config, configUnreadable = false) {
     let hit = boardCache.get(root);
     if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
       try {
@@ -250,6 +243,20 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       }
       boardCache.set(root, hit);
     }
+    return hit;
+  }
+
+  /**
+   * H1's READY / READY FOR RESEARCH / WAITING ON YOU block (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start;
+   * full-parity ruling the former ruling 'sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code' (not in the current store)), from the same shared lib and the store's one
+   * readiness function. onPrompt delivers it again whenever it changed, which
+   * covers what H20's mid-session line does on Claude Code at the next prompt.
+   */
+  function boardBlock(root, config, sessionID, configUnreadable = false) {
+    // The cache holds the readiness read per ROOT; the live-lane count is per
+    // SESSION, so it is computed on every call and never cached with the text.
+    const hit = boardHit(root, config, configUnreadable);
     if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
       const live = liveLanes(root, sessionID);
@@ -269,6 +276,16 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       const text = `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
       return { text, sig: text };
     }
+  }
+
+  /**
+   * The orphan-claim notice (claim-handover.mjs) from the cached board readiness of
+   * `root`; '' when the board is unreadable, which the board block reports.
+   */
+  function orphanBlock(root, config, sessionID, configUnreadable = false) {
+    const hit = boardHit(root, config, configUnreadable);
+    if (!hit.readiness) return '';
+    return orphanClaimsText(hit.readiness, { checkout: root, session: sessionID });
   }
 
   /**
@@ -420,6 +437,13 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       }
     }
     out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });
+    // Claims in this checkout held by another session, named with board_adopt; never adopted
+    // by guess. After the restore, whose claim hand-over drops the board cache, so a claim it
+    // just adopted is read as moved (the board block above may show it under the old holder
+    // once; it is re-read and re-sent on the next prompt).
+    if (kind === 'root' && !inWorkerChild(env)) {
+      out.push({ key: 'claim-orphans', text: orphanBlock(root, state.config, sessionID, state.configUnreadable), cleared: 'CLAIMS HELD BY AN EARLIER SESSION: none in this checkout now; the list shown earlier no longer applies.' });
+    }
     // Held one-shot lines are claimed here, synchronously after the last await, so two
     // overlapping calls cannot both select one. dueText puts a claim back (`restore`)
     // when the append does not happen.

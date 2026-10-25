@@ -196,6 +196,12 @@ test('claim identity: the plugin fills the real session and checkout into claim 
   await applyClaimIdentity(update, { checkoutOfSession });
   assert.deepEqual(update.input, { id: 'i1', patch: {} }, 'a board_update naming no session is left alone');
   await assert.rejects(applyClaimIdentity({ tool: 'sterling_board_update', sessionID: 'ses_real', input: { id: 'i1', session: 'ses_old' } }, { checkoutOfSession }), /names session 'ses_old'/);
+  // board_adopt (board 05fbab98): the adopting session and its checkout are the real ones; from_session is the caller's to name.
+  assert.equal(claimToolOf('sterling_board_adopt'), 'board_adopt');
+  const adopt = { tool: 'sterling_board_adopt', sessionID: 'ses_real', input: { from_session: 'ses_old', checkout: '/somewhere/else' } };
+  await applyClaimIdentity(adopt, { checkoutOfSession });
+  assert.deepEqual(adopt.input, { from_session: 'ses_old', session: 'ses_real', checkout: outside });
+  await assert.rejects(applyClaimIdentity({ tool: 'sterling_board_adopt', sessionID: 'ses_real', input: { from_session: 'ses_old', session: 'ses_old' } }, { checkoutOfSession }), /names session 'ses_old'/);
 });
 
 test('the plugin\'s execute.before fills the claim from the session\'s own directory', async () => {

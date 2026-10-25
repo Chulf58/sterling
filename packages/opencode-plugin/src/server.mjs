@@ -86,6 +86,7 @@ import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
 import { createConductorSessionRecorder, takePromptSeq } from './conductor-session.mjs';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { boardDisplayLabel } from '@sterling/schemas';
 import { checkoutRoot } from '../../../scripts/hooks/lib/common.mjs';
 import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 import { applyClaimIdentity } from './claim-identity.mjs';
@@ -235,7 +236,37 @@ export function createSterlingServer(deps = {}) {
       return { dir: remember(sessionDirs, sessionID, dir) };
     }
 
-    const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
+    /**
+     * The claim hand-over the rotation restore runs (claim-handover.mjs): session `from`'s
+     * claims in checkout `root` move to session `to` through store.adoptClaims, each entry
+     * labelled for the restore line. A failure part-way (the store's ClaimAdoptionIncomplete)
+     * is rethrown with its labelled `partial`, since the items moved so far stay moved. The
+     * board cache is dropped whatever happened, so the next board block and the orphan
+     * notice re-read who holds each claim.
+     */
+    function adoptClaims(root, { from, to }) {
+      try {
+        const store = openStore(join(root, '.sterling', 'sterling.db'));
+        try {
+          const label = (e) => {
+            const r = store.get(e.id);
+            return { ...e, ...(r ? { label: boardDisplayLabel(r.text, r.slug) } : {}) };
+          };
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          try {
+            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+          } catch (e) {
+            if (e?.partial) e.partial = labelled(e.partial);
+            throw e;
+          }
+        } finally {
+          store.close();
+        }
+      } finally {
+        resetStatus(root);
+      }
+    }
+    const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, adoptClaims, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
     // Each session's STERLING-DELIVERY policy, shared by child staging and the tool-time deliveries (delivery-policy.mjs).
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
