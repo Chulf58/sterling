@@ -8,6 +8,7 @@
 // separator. Builtins, sibling libs and @sterling/store only: hooks bundle this module.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
 import { MAINTENANCE_WORKER_ROLE, resolveOverpass } from '@sterling/schemas';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
@@ -218,7 +219,7 @@ export function storageLine({ config, configUnreadable, root }) {
   // routing will do, checks the file itself and keeps the null-content case UNKNOWN.
   // Storage-specific on purpose: the other lines keep their accepted behaviour for it
   // (pinned in h1-tdd-posture-line.test.mjs).
-  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync(join(root, '.sterling', 'config.json'));
+  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync(join(storeRootFor(root), '.sterling', 'config.json'));
   if (configUnreadable || presentButNull) {
     return (
       'Storage: UNKNOWN — the project config could not be read, so config.storage could not be determined. ' +

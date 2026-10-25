@@ -7,7 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/handoff-projection.mjs
-import { dirname as dirname5, join as join10, resolve as resolve6 } from "node:path";
+import { dirname as dirname5, join as join11, resolve as resolve6 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -3577,9 +3577,9 @@ var ZodEffects = class extends ZodType {
     const { status, ctx } = this._processInputParams(input);
     const effect = this._def.effect || null;
     const checkCtx = {
-      addIssue: (arg) => {
-        addIssueToContext(ctx, arg);
-        if (arg.fatal) {
+      addIssue: (arg2) => {
+        addIssueToContext(ctx, arg2);
+        if (arg2.fatal) {
           status.abort();
         } else {
           status.dirty();
@@ -4044,14 +4044,14 @@ var ostring = () => stringType().optional();
 var onumber = () => numberType().optional();
 var oboolean = () => booleanType().optional();
 var coerce = {
-  string: ((arg) => ZodString.create({ ...arg, coerce: true })),
-  number: ((arg) => ZodNumber.create({ ...arg, coerce: true })),
-  boolean: ((arg) => ZodBoolean.create({
-    ...arg,
+  string: ((arg2) => ZodString.create({ ...arg2, coerce: true })),
+  number: ((arg2) => ZodNumber.create({ ...arg2, coerce: true })),
+  boolean: ((arg2) => ZodBoolean.create({
+    ...arg2,
     coerce: true
   })),
-  bigint: ((arg) => ZodBigInt.create({ ...arg, coerce: true })),
-  date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
+  bigint: ((arg2) => ZodBigInt.create({ ...arg2, coerce: true })),
+  date: ((arg2) => ZodDate.create({ ...arg2, coerce: true }))
 };
 var NEVER = INVALID;
 
@@ -12023,6 +12023,11 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
@@ -12072,7 +12077,7 @@ function openProject(cwd = process.cwd()) {
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync4, readFileSync as readFileSync6, readdirSync, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
-import { join as join8, resolve as resolve4 } from "node:path";
+import { join as join9, resolve as resolve4 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
     super(message);
@@ -12092,7 +12097,7 @@ function containedPath(root, rel, leaf) {
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
   let cursor = resolve4(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join8(cursor, part);
+    cursor = join9(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -12145,7 +12150,7 @@ function unlinkContained(root, rel) {
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync4 } from "node:fs";
-import { join as join9, resolve as resolve5 } from "node:path";
+import { join as join10, resolve as resolve5 } from "node:path";
 
 // scripts/lib/sterling-source-tree.mjs
 var MANIFEST = ".claude-plugin/plugin.json";
@@ -12161,13 +12166,13 @@ function isSterlingClone(root, pluginRoot2) {
   if (fwd2(resolve5(root)) === fwd2(resolve5(process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot2))) return true;
   return isSterlingSourceTree(root);
 }
-var CONFIG_REL2 = ".sterling/config.json";
+var CONFIG_REL3 = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
-  const where = `${fwd2(resolve5(root))}/${CONFIG_REL2}`;
-  if (!existsContained(root, CONFIG_REL2, "file")) return { where, parsed: void 0 };
+  const where = `${fwd2(resolve5(root))}/${CONFIG_REL3}`;
+  if (!existsContained(root, CONFIG_REL3, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, CONFIG_REL2));
+    parsed = JSON.parse(readContained(root, CONFIG_REL3));
   } catch (err) {
     throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
@@ -12201,7 +12206,7 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
   if (!existsSync4(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync4(join9(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync4(join10(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -12229,7 +12234,7 @@ function handoffFilesOnDisk(root) {
   }
   return found;
 }
-function handoffSettingOf(parsed, root, where = CONFIG_REL2) {
+function handoffSettingOf(parsed, root, where = CONFIG_REL3) {
   const block = parsed?.handoff;
   if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
@@ -12511,7 +12516,7 @@ if (!handoffEnabled) {
   refuse(`${HANDOFF_OFF_DETAIL}. Turn Handoff files on in the TUI System tab to produce these exports.`, STANDING);
 }
 if (!storePresent) {
-  refuse(`no Sterling store at ${fwd3(join10(target, ".sterling", "sterling.db"))} \u2014 run /sterling:init in that project first.`);
+  refuse(`no Sterling store at ${fwd3(join11(target, ".sterling", "sterling.db"))} \u2014 run /sterling:init in that project first.`);
 }
 var { store, config } = openProject(target);
 var records;

@@ -6,12 +6,12 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h31-plan-lock.mjs
-import { spawnSync } from "node:child_process";
-import { basename } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
-import { dirname, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
+import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5659,22 +5659,104 @@ function isSterlingRoot(dir) {
   return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join3, resolve } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve(cwd, gitDir));
+  const commonReal = real(resolve(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join3(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join3(linkedWorktree.mainRoot, configRel)) && existsSync2(join3(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join3(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
-function readStdin() {
+
+// scripts/hooks/lib/common.mjs
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve2(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function readStdin({ reportInertWorktree = false } = {}) {
   const input = JSON.parse(readFileSync2(0, "utf8"));
-  const root = projectRoot(input.cwd);
+  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input.inertWorktree = roots;
+    return input;
+  }
+  const root = hookProjectRoot(input.cwd);
   if (root) input.cwd = root;
   return input;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -5786,7 +5868,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
@@ -5802,7 +5884,7 @@ function isSterlingProject(cwd) {
   return isSterlingRoot(cwd);
 }
 function sterlingDirOf(cwd) {
-  return join4(cwd, ".sterling");
+  return join5(cwd, ".sterling");
 }
 function sanitizeForContext(value, max) {
   if (typeof value !== "string") return "";
@@ -5901,7 +5983,7 @@ function invalidReason(l) {
   return null;
 }
 function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join4(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
   if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
   const raw = read.text;
   let parsed;
@@ -5917,15 +5999,15 @@ function readLock(sterlingDir) {
 }
 function writeAtomicExclusive(dir, name, text) {
   mkdirSync(dir, { recursive: true });
-  const tmp = join4(dir, `.tmp-${name}-${randomUUID()}`);
+  const tmp = join5(dir, `.tmp-${name}-${randomUUID()}`);
   writeFileSync(tmp, text, { flag: "wx", mode: 384 });
-  renameSync(tmp, join4(dir, name));
+  renameSync(tmp, join5(dir, name));
 }
 function writeLock(sterlingDir, lock) {
   writeAtomicExclusive(sterlingDir, LOCK_FILE, JSON.stringify(lock, null, 2) + "\n");
 }
 function writeMarker(sterlingDir, name, body) {
-  writeAtomicExclusive(join4(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
+  writeAtomicExclusive(join5(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
 }
 
 // scripts/hooks/h31-plan-lock.mjs
@@ -5968,7 +6050,7 @@ try {
   const previous = priorRead.lock ?? null;
   const git = (args) => {
     try {
-      const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
       return r.status === 0 ? (r.stdout ?? "").trim() || null : null;
     } catch {
       return null;
@@ -5978,7 +6060,7 @@ try {
   const lock = {
     schema_version: 1,
     plan_path: rawPath,
-    title: extractTitle(planText, basename(rawPath)),
+    title: extractTitle(planText, basename2(rawPath)),
     approved_at: (/* @__PURE__ */ new Date()).toISOString(),
     // TWO HASHES, TWO QUESTIONS. approved_sha256 hashes the APPROVED TEXT (what
     // the user said yes to); file_sha256_at_approval hashes the FILE BYTES at

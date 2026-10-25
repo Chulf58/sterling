@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/plan-lock.mjs
-import { existsSync as existsSync2, lstatSync as lstatSync2, readdirSync, realpathSync as realpathSync2, rmSync } from "node:fs";
-import { basename, isAbsolute, join as join5, relative, resolve as resolve2, sep as sep2 } from "node:path";
+import { existsSync as existsSync3, lstatSync as lstatSync2, readdirSync, realpathSync as realpathSync3, rmSync } from "node:fs";
+import { basename as basename2, isAbsolute, join as join6, relative, resolve as resolve3, sep as sep2 } from "node:path";
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash, randomUUID } from "node:crypto";
@@ -5942,7 +5942,7 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
 }
@@ -5988,6 +5988,79 @@ function hasFlag(name, argv2 = process.argv.slice(2)) {
   }
   return count === 1;
 }
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync as realpathSync2, statSync } from "node:fs";
+import { basename, dirname, join as join5, resolve as resolve2 } from "node:path";
+function resolveLinkedWorktree(cwd2 = process.cwd()) {
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync2(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd2);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve2(cwd2, gitDir));
+  const commonReal = real(resolve2(cwd2, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd2);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve2(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join5(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join5(linkedWorktree.mainRoot, configRel)) && existsSync2(join5(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join5(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve2(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync2(p);
+  } catch {
+    return p;
+  }
+}
+
+// scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
@@ -6013,7 +6086,7 @@ function refuse(message) {
   fail(`plan-lock: ${message}`, 2);
 }
 var cwd = process.cwd();
-if (!isSterlingProject(cwd)) {
+if (!isSterlingProject(storeRootFor(cwd))) {
   refuse(`${cwd} is not an initialized Sterling project (no .sterling/sterling.db) \u2014 run from the project root`);
 }
 var sterlingDir = sterlingDirOf(cwd);
@@ -6145,12 +6218,12 @@ function inside(parent, child) {
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep2}`) && !isAbsolute(rel);
 }
 function pendingPlanPath() {
-  const plansDir = join5(cwd, ".sterling", "plans");
+  const plansDir = join6(cwd, ".sterling", "plans");
   let realProject;
   let realPlans;
   try {
-    realProject = realpathSync2(cwd);
-    realPlans = realpathSync2(plansDir);
+    realProject = realpathSync3(cwd);
+    realPlans = realpathSync3(plansDir);
   } catch (e) {
     refuse(`no plans directory at ${plansDir} (${e && e.code || e}) \u2014 write the plan there first. Nothing was changed`);
   }
@@ -6164,7 +6237,7 @@ function pendingPlanPath() {
   if (entries.length === 0) refuse(`no *.md plan in ${plansDir} \u2014 write the plan there first. Nothing was changed`);
   let dated;
   try {
-    dated = entries.map((d) => ({ name: d.name, mtime: lstatSync2(join5(realPlans, d.name)).mtimeMs }));
+    dated = entries.map((d) => ({ name: d.name, mtime: lstatSync2(join6(realPlans, d.name)).mtimeMs }));
   } catch (e) {
     refuse(`could not read the modification times in ${plansDir} (${e && e.message || e}). Nothing was changed`);
   }
@@ -6178,11 +6251,11 @@ function pendingPlanPath() {
   }
   let real;
   try {
-    real = realpathSync2(join5(realPlans, newest.name));
+    real = realpathSync3(join6(realPlans, newest.name));
   } catch (e) {
-    refuse(`${join5(plansDir, newest.name)} could not be resolved (${e && e.code || e}) \u2014 a dangling link is not a plan. Nothing was changed`);
+    refuse(`${join6(plansDir, newest.name)} could not be resolved (${e && e.code || e}) \u2014 a dangling link is not a plan. Nothing was changed`);
   }
-  if (!inside(realPlans, real)) refuse(`${join5(plansDir, newest.name)} resolves to ${real}, outside ${plansDir} \u2014 refusing to bind it. Nothing was changed`);
+  if (!inside(realPlans, real)) refuse(`${join6(plansDir, newest.name)} resolves to ${real}, outside ${plansDir} \u2014 refusing to bind it. Nothing was changed`);
   return real;
 }
 var planPath;
@@ -6191,9 +6264,9 @@ if (verb === "bind-pending") {
 } else {
   const planArg = arg2("plan");
   if (!planArg) refuse("--plan requires a path to the plan file");
-  planPath = resolve2(cwd, planArg);
+  planPath = resolve3(cwd, planArg);
 }
-if (!existsSync2(planPath)) refuse(`no plan file at ${planPath}`);
+if (!existsSync3(planPath)) refuse(`no plan file at ${planPath}`);
 var planRead = readPlanFileBounded(planPath);
 if (planRead.unreadable) refuse(`the plan file at ${planPath} ${planRead.unreadable} \u2014 nothing was changed`);
 var planBytes = planRead.bytes;
@@ -6213,7 +6286,7 @@ var lock = {
   schema_version: 1,
   // RAW AND VERBATIM, like H31's: the recorded path must open on disk.
   plan_path: planPath,
-  title: extractTitle(planBytes.toString("utf8"), basename(planPath)),
+  title: extractTitle(planBytes.toString("utf8"), basename2(planPath)),
   approved_at: (/* @__PURE__ */ new Date()).toISOString(),
   // A manual lock has no approved TEXT distinct from the file, so both hashes
   // are the file's — and text_file_mismatch is false by construction.

@@ -26,7 +26,8 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderOpenCodeFullText } from '../../../scripts/lib/agent-fences.mjs';
-import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { checkoutRoot, projectRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { MCP_SERVER_NAME } from './mcp-name.mjs';
 import { sterlingRoot as defaultSterlingRoot } from './layer.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
@@ -128,12 +129,16 @@ export function renderRegistrations(root) {
   return { commands, skills, failures };
 }
 
-/** The `sterling` local MCP entry for the Sterling copy at `root`, serving the project's stores (--project routes by config.storage). */
-export function mcpEntry(root, project) {
-  return {
-    type: 'local',
-    command: ['node', '--disable-warning=ExperimentalWarning', join(root, 'mcp', 'sterling-mcp.mjs'), '--project', project],
-  };
+/**
+ * The `sterling` local MCP entry for the Sterling copy at `root`, serving the project's
+ * stores (--project routes by config.storage). `checkout`, when it differs from
+ * `project` (a linked worktree), is passed as --checkout: the server's HEAD, file checks
+ * and session-event register are that checkout's.
+ */
+export function mcpEntry(root, project, checkout = project) {
+  const command = ['node', '--disable-warning=ExperimentalWarning', join(root, 'mcp', 'sterling-mcp.mjs'), '--project', project];
+  if (checkout && checkout !== project) command.push('--checkout', checkout);
+  return { type: 'local', command };
 }
 
 /** The text a command puts into the session: its body, plus the arguments as Claude Code appends them. */
@@ -190,11 +195,13 @@ export function createConfigHandler(deps = {}) {
   return async function configure(ctx) {
     const project = projectRoot(ctx?.location?.directory);
     if (!project) throw new Error('configure ran outside a Sterling project');
+    // Log and notices are the checkout's, like every other plugin handler's (server.mjs rootOf).
+    const checkout = checkoutRoot(ctx?.location?.directory) ?? project;
     const root = deps.sterlingRoot ?? defaultSterlingRoot();
     const { commands, skills, failures } = renderRegistrations(root);
     for (const f of failures) {
-      logLine(project, `config: ${f.kind} ${f.name} not registered: ${f.error}`);
-      addNotice(project, `Sterling plugin: the ${f.kind} ${f.kind === 'command' ? `/${f.name}` : f.name} is not registered on OpenCode (${f.error}). See ${LOG_REL}.`, now());
+      logLine(checkout, `config: ${f.kind} ${f.name} not registered: ${f.error}`);
+      addNotice(checkout, `Sterling plugin: the ${f.kind} ${f.kind === 'command' ? `/${f.name}` : f.name} is not registered on OpenCode (${f.error}). See ${LOG_REL}.`, now());
     }
 
     await registerCommands(ctx, commands);
@@ -217,15 +224,15 @@ export function createConfigHandler(deps = {}) {
     // Precedence: this copy's entry replaces a `sterling` entry from the project
     // config (decision sterling-opencode-plugin-injects-its-own-mcp-entry: the entry
     // follows the code that is actually loaded). A replaced entry that differed is logged once.
-    const want = mcpEntry(root, project);
+    const want = mcpEntry(root, project, checkout);
     let replacedLogged = false;
     await ctx.mcp.transform((editor) => {
-      const existing = editor.get('sterling');
+      const existing = editor.get(MCP_SERVER_NAME);
       if (existing && !replacedLogged && JSON.stringify(existing.command) !== JSON.stringify(want.command)) {
         replacedLogged = true;
-        logLine(project, `config: the sterling MCP entry from the project config (${JSON.stringify(existing)}) is replaced by this copy's (${JSON.stringify(want)})`);
+        logLine(checkout, `config: the sterling MCP entry from the project config (${JSON.stringify(existing)}) is replaced by this copy's (${JSON.stringify(want)})`);
       }
-      editor.set('sterling', { ...want, command: [...want.command] });
+      editor.set(MCP_SERVER_NAME, { ...want, command: [...want.command] });
     });
   };
 }

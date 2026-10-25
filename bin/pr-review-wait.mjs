@@ -4,33 +4,62 @@ import { createRequire as __cr } from "node:module"; const require = __cr(import
 // scripts/pr-review-wait.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
-import { join as join3, resolve as resolve2 } from "node:path";
+import { join as join4, resolve as resolve2 } from "node:path";
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join2, resolve } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { join } from "node:path";
+var CONFIG_REL = join(".sterling", "config.json");
+var STORE_DB_REL = join(".sterling", "sterling.db");
+
+// scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync(resolve(cwd, gitDir));
-  const commonReal = realpathSync(resolve(cwd, commonDir));
-  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
-  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+  const gitDirReal = real(resolve(cwd, gitDir));
+  const commonReal = real(resolve(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
 }
 function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target2)) {
   if (!linkedWorktree) return target2;
-  const configRel = join(".sterling", "config.json");
-  const worktreeOnlyConfig = !existsSync(join(linkedWorktree.mainRoot, configRel)) && existsSync(join(linkedWorktree.worktree, configRel));
+  const configRel = join2(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync(join2(linkedWorktree.mainRoot, configRel)) && existsSync(join2(linkedWorktree.worktree, configRel));
   return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
 }
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync2, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { delimiter, dirname as dirname2, join as join2 } from "node:path";
+import { delimiter, dirname as dirname2, join as join3 } from "node:path";
 function gh(cwd, args, timeoutMs = 12e4) {
   return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
@@ -65,8 +94,8 @@ function parseOriginRepo(url) {
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
-var prLoopPath = (root) => join2(root, PR_LOOP_REL);
-var prLoopFile = (root, prNumber2) => join2(root, PR_LOOPS_DIR_REL, `${prNumber2}.json`);
+var prLoopPath = (root) => join3(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber2) => join3(root, PR_LOOPS_DIR_REL, `${prNumber2}.json`);
 var prLoopFileRel = (prNumber2) => `${PR_LOOPS_DIR_REL}/${prNumber2}.json`;
 function writeAtomic(file, value) {
   mkdirSync(dirname2(file), { recursive: true });
@@ -115,9 +144,9 @@ var MAX_LOOPS_NAMED = 5;
 var MAX_LOOP_ERROR_CHARS = 200;
 function listPrLoopFilesForDiagnostic(root) {
   const files = [];
-  const dir = join2(root, PR_LOOPS_DIR_REL);
+  const dir = join3(root, PR_LOOPS_DIR_REL);
   if (existsSync2(dir)) {
-    for (const name2 of readdirSync(dir).sort()) if (/^\d+\.json$/.test(name2)) files.push([join2(dir, name2), prLoopFileRel(name2.slice(0, -5))]);
+    for (const name2 of readdirSync(dir).sort()) if (/^\d+\.json$/.test(name2)) files.push([join3(dir, name2), prLoopFileRel(name2.slice(0, -5))]);
   }
   if (existsSync2(prLoopPath(root))) files.push([prLoopPath(root), PR_LOOP_REL]);
   return files.map(([file, rel]) => {
@@ -350,7 +379,7 @@ function finish(status, extra = {}) {
 }
 var error = (message) => finish("error", { review: null, comments: [], error: message });
 function readPinnedLogins() {
-  const file = join3(storeRoot, ".sterling", "config.json");
+  const file = join4(storeRoot, ".sterling", "config.json");
   if (!existsSync3(file)) return [];
   let cfg;
   try {
@@ -404,7 +433,7 @@ function retryDelayMs() {
   return n * 1e3;
 }
 function readAutoMergeOnClean() {
-  const file = join3(storeRoot, ".sterling", "config.json");
+  const file = join4(storeRoot, ".sterling", "config.json");
   if (!existsSync3(file)) return autoMergeOnCleanOf(void 0);
   let cfg;
   try {

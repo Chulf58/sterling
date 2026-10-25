@@ -5717,7 +5717,7 @@ __export(node_exports, {
 });
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { readFileSync as readFileSync2, readdirSync, statSync, existsSync } from "node:fs";
-import { join as join3, relative, dirname } from "node:path";
+import { join as join4, relative, dirname } from "node:path";
 function runTests({ cwd, scope = [] }) {
   const remapped = buildAndRemapTsScope(cwd, scope);
   if (remapped.buildOutput != null) {
@@ -5751,8 +5751,8 @@ function buildAndRemapTsScope(cwd, scope) {
     if (pkgDir) pkgDirs.add(pkgDir);
   }
   for (const pkgDir of pkgDirs) {
-    const tsc = join3(cwd, "node_modules", "typescript", "bin", "tsc");
-    const build = spawnSync2(process.execPath, [tsc, "-p", join3(pkgDir, "tsconfig.json")], { cwd, encoding: "utf8", timeout: 12e4 });
+    const tsc = join4(cwd, "node_modules", "typescript", "bin", "tsc");
+    const build = spawnSync2(process.execPath, [tsc, "-p", join4(pkgDir, "tsconfig.json")], { cwd, encoding: "utf8", timeout: 12e4 });
     if (build.error) return { scope, buildOutput: String(build.error) };
     if (build.status !== 0) return { scope, buildOutput: `${build.stdout ?? ""}
 ${build.stderr ?? ""}` };
@@ -5768,12 +5768,12 @@ ${build.stderr ?? ""}` };
 function findPackageDir(cwd, file) {
   let dir = dirname(file);
   while (dir && dir !== "." && dir !== "/") {
-    if (existsSync(join3(cwd, dir, "tsconfig.json"))) return dir;
+    if (existsSync(join4(cwd, dir, "tsconfig.json"))) return dir;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return existsSync(join3(cwd, "tsconfig.json")) ? "." : null;
+  return existsSync(join4(cwd, "tsconfig.json")) ? "." : null;
 }
 function staticWiring({ cwd, scope = [] }) {
   const scopeSet = new Set(scope.map((p) => p.replace(/\\/g, "/")));
@@ -5781,7 +5781,7 @@ function staticWiring({ cwd, scope = [] }) {
   const exportsByFile = [];
   for (const file of allFiles) {
     if (!scopeSet.has(file)) continue;
-    const content = readFileSync2(join3(cwd, file), "utf8");
+    const content = readFileSync2(join4(cwd, file), "utf8");
     const names = /* @__PURE__ */ new Set();
     for (const m of content.matchAll(/export\s+(?:async\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) {
       names.add(m[1]);
@@ -5805,7 +5805,7 @@ function staticWiring({ cwd, scope = [] }) {
       let testRef = false;
       for (const other of allFiles) {
         if (other === file) continue;
-        if (!re.test(readFileSync2(join3(cwd, other), "utf8"))) continue;
+        if (!re.test(readFileSync2(join4(cwd, other), "utf8"))) continue;
         if (isTest2(other)) testRef = true;
         else {
           nonTestRef = true;
@@ -5819,7 +5819,7 @@ function staticWiring({ cwd, scope = [] }) {
 }
 function walkSources(cwd, dir = cwd, out = []) {
   for (const entry of readdirSync(dir)) {
-    const full = join3(dir, entry);
+    const full = join4(dir, entry);
     const stat = statSync(full);
     if (stat.isDirectory()) {
       if (!SKIP_DIRS.has(entry)) walkSources(cwd, full, out);
@@ -5910,7 +5910,7 @@ __export(pester_exports, {
 });
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname as dirname2, join as join4 } from "node:path";
+import { dirname as dirname2, join as join5 } from "node:path";
 function powershellExe() {
   if (psExe) return psExe;
   const probe = spawnSync3("pwsh", ["-NoProfile", "-Command", "exit 0"], { encoding: "utf8" });
@@ -5952,7 +5952,7 @@ var init_pester = __esm({
     capabilities3 = { mutation: false, static_wiring: false };
     testPathGlobs3 = ["**/*.Tests.ps1", "tests/**/*.ps1"];
     runCommands3 = { test: "Invoke-Pester" };
-    RUNNER = join4(dirname2(fileURLToPath(new URL("../scripts/adapters/pester.mjs", import.meta.url).href)), "run-pester.ps1");
+    RUNNER = join5(dirname2(fileURLToPath(new URL("../scripts/adapters/pester.mjs", import.meta.url).href)), "run-pester.ps1");
     START = "@@PESTER_JSON_START@@";
     END = "@@PESTER_JSON_END@@";
   }
@@ -5981,7 +5981,7 @@ __export(resolve_exports, {
 });
 import { readFileSync as readFileSync3 } from "node:fs";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { dirname as dirname3, join as join6 } from "node:path";
 function importAdapterModule(module) {
   if (typeof module !== "string" || !module.endsWith(".mjs")) {
     throw new Error(`adapter registry: module ${JSON.stringify(module)} must be a .mjs file`);
@@ -5989,7 +5989,7 @@ function importAdapterModule(module) {
   return globImport_mjs(`./${module.slice(0, -".mjs".length)}.mjs`);
 }
 function loadAdapterRegistry(dir = here) {
-  const registry = JSON.parse(readFileSync3(join5(dir, "registry.json"), "utf8"));
+  const registry = JSON.parse(readFileSync3(join6(dir, "registry.json"), "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.adapters)) {
     throw new Error("adapter registry: unsupported shape (expected {version: 1, adapters: []})");
   }
@@ -6053,7 +6053,7 @@ var init_resolve = __esm({
 
 // scripts/check-stale-claims.mjs
 import { readFileSync as readFileSync4, existsSync as existsSync2 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 import { spawnSync as spawnSync4 } from "node:child_process";
 
 // scripts/lib/project.mjs
@@ -6223,7 +6223,7 @@ init_dist();
 // packages/store/dist/broker-runtime.js
 init_dist();
 
-// scripts/lib/project.mjs
+// scripts/lib/cli-args.mjs
 function normalizeFlag(name4) {
   return name4.startsWith("-") ? name4 : `--${name4}`;
 }
@@ -6253,6 +6253,13 @@ function arg(name4, argv = process.argv.slice(2)) {
   }
   return found.length ? found[0] : void 0;
 }
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+
+// scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
@@ -6261,7 +6268,7 @@ function fail(message, code = 1) {
 // scripts/lib/diff-json.mjs
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 function git(cwd, args) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 6e4, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) {
@@ -6296,7 +6303,7 @@ function textLines(text) {
   return lines;
 }
 function captureUntracked(cwd, path, fileMode) {
-  const abs = join2(cwd, path);
+  const abs = join3(cwd, path);
   let st;
   try {
     st = lstatSync(abs);
@@ -6532,7 +6539,7 @@ try {
   fail(`check-stale-claims: could not build the diff against '${base2}': ${e?.message ?? e}`, 3);
 }
 function declaredToolchainNames(dir) {
-  const configPath = join6(dir, ".sterling", "config.json");
+  const configPath = join7(dir, ".sterling", "config.json");
   if (!existsSync2(configPath)) return [];
   try {
     const parsed = JSON.parse(readFileSync4(configPath, "utf8"));
@@ -6571,7 +6578,7 @@ var { findings, symbols_added, skipped } = scanStaleClaims({
   capability: !!adapter?.capabilities?.static_wiring,
   readFile: (p) => {
     try {
-      return readFileSync4(join6(target, p), "utf8");
+      return readFileSync4(join7(target, p), "utf8");
     } catch {
       return null;
     }

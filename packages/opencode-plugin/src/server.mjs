@@ -85,8 +85,10 @@ import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
 import { createConductorSessionRecorder, takePromptSeq } from './conductor-session.mjs';
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { checkoutRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
+import { applyClaimIdentity } from './claim-identity.mjs';
 
 export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, createProjectStores, liveDispatch, openProjectStore };
 export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
@@ -139,11 +141,24 @@ function sameDirectory(a, b) {
  * the post-update sync run once per project per process, whichever location reaches
  * the project first.
  */
+/** `dbPath` with a linked worktree's <checkout>/.sterling/sterling.db mapped to the store root's. */
+function storeDbPath(dbPath) {
+  if (typeof dbPath !== 'string' || basename(dbPath) !== 'sterling.db' || basename(dirname(dbPath)) !== '.sterling') return dbPath;
+  const root = dirname(dirname(dbPath));
+  const store = storeRootFor(root);
+  return store === root ? dbPath : join(store, '.sterling', 'sterling.db');
+}
+
 export function createSterlingServer(deps = {}) {
   // On Postgres storage the project stores hold one routed store per project for the
   // process's life (store.mjs); a location's cleanup closes its project's.
   const projectStores = deps.openStore ? null : (deps.projectStores ?? createProjectStores());
-  const openStore = deps.openStore ?? projectStores.open;
+  // Every handler's root is its location's CHECKOUT (checkoutRoot): its transient state,
+  // log, notices, git and files are the checkout's. The store and config are the
+  // project's one shared set, so a <checkout>/.sterling/sterling.db path opens the store
+  // root's (storeRootFor; the same path for any project that is not a linked worktree).
+  const baseOpenStore = deps.openStore ?? projectStores.open;
+  const openStore = (dbPath) => baseOpenStore(storeDbPath(dbPath));
   const now = deps.now ?? (() => new Date().toISOString());
   const env = deps.env ?? process.env;
   // Process-wide, keyed by project root: the roots whose startup sweep ran, and whose post-update sync started.
@@ -192,16 +207,22 @@ export function createSterlingServer(deps = {}) {
     let chain = Promise.resolve();
     // Each session's parentID, shared by the context handler and the settlement gate (bounded, bounded.mjs).
     const parents = new Map();
-    const rootOf = () => projectRoot(directory);
+    // The checkout this location works in (a linked worktree's own, else the project root);
+    // store and config readers map it to the store root (storeRootFor).
+    const rootOf = () => checkoutRoot(directory);
     // Each session's directory (session.get -> location.directory), and the sessions whose
     // failed lookup is already logged; both bounded (bounded.mjs). A failure is not cached,
     // so the next execution end of that session looks it up again.
     const sessionDirs = new Map();
     const lookupLogged = new Map();
 
-    /** The directory session `sessionID` lives in, as { dir }, or { why } when it cannot be read. */
-    async function sessionDirectory(sessionID) {
-      if (sessionDirs.has(sessionID)) return { dir: sessionDirs.get(sessionID) };
+    /**
+     * The directory session `sessionID` lives in, as { dir }, or { why } when it cannot be read.
+     * `fresh` skips the cache (and refreshes it): a session can move, so an identity-sensitive
+     * call (a board claim records the checkout) asks OpenCode every time.
+     */
+    async function sessionDirectory(sessionID, { fresh = false } = {}) {
+      if (!fresh && sessionDirs.has(sessionID)) return { dir: sessionDirs.get(sessionID) };
       let info;
       try {
         if (typeof session?.get !== 'function') throw new Error('ctx.session.get is unavailable');
@@ -263,8 +284,17 @@ export function createSterlingServer(deps = {}) {
     // Every handler is fenced, so none of them throws, with two exceptions: axis.onBefore
     // refuses a subagent call by throwing when the Overpass setting cannot be read (axis.mjs),
     // and guardSessionMove refuses a session_move that would strand a Sterling agent (session-move.mjs).
+    /** The checkout root of session `sessionID`'s directory, as { checkout } or { why }. */
+    async function checkoutOfSession(sessionID) {
+      const found = await sessionDirectory(sessionID, { fresh: true });
+      if (found.why) return { why: found.why };
+      const checkout = checkoutRoot(found.dir);
+      return checkout ? { checkout } : { why: `its directory ${found.dir} is not in a Sterling project` };
+    }
     async function onBefore(input) {
       await guardSessionMove(input);
+      // Not fenced: a refused claim call throws, which refuses the tool call (claim-identity.mjs).
+      await applyClaimIdentity(input, { checkoutOfSession });
       await delivery.onBefore(input);
       await axis.onBefore(input);
       if (input?.tool === 'subagent') laneDispatches.noteDispatch(input.sessionID, input.id, input.input);
@@ -515,7 +545,7 @@ export function createSterlingServer(deps = {}) {
         // The root found at bind, plus the one found now: a project renamed or
         // removed since bind has no root now but may still hold a store, and one
         // initialized since bind has a root only now.
-        for (const held of new Set([root, rootOf()])) if (held) projectStores?.release(held);
+        for (const held of new Set([root, rootOf()])) if (held) projectStores?.release(storeRootFor(held));
       };
     }
 

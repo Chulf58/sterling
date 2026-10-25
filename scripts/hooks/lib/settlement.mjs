@@ -44,6 +44,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
 // THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), shared with
 // enqueueSystemTodo's own fold-to-union in packages/store — a pure function,
 // safe to pull in here despite the "no mcp-server at runtime" constraint
@@ -179,7 +180,7 @@ export function contentChangedAgainstBaseline(root, rel, baselines) {
  */
 export function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync(join(root, '.sterling', 'config.json'), 'utf8');
+    const raw = readFileSync(join(storeRootFor(root), '.sterling', 'config.json'), 'utf8');
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);

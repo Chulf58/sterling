@@ -103,7 +103,7 @@ test('escapeLeavesView: Esc leaves only when no help, edit, picker or search is 
 
 test("the OpenCode dashboard opens its controller with host 'opencode', which offers the Overpass rows", () => {
   const src = readFileSync(new URL('../tui.tsx', import.meta.url), 'utf8');
-  assert.match(src, /openDashboard\(storePath, \{ host: 'opencode' \}\)/);
+  assert.match(src, /openDashboard\(storePath, \{ host: 'opencode', checkoutRoot: checkoutOf\(projectDir\) \}\)/);
 });
 
 test('both dashboard functions are on in OpenCode: no flag gate is left (the former ruling sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin (not in the current store), DASHBOARD FUNCTIONS)', () => {
@@ -406,4 +406,34 @@ test('full view: the notice row is drawn in the warning colour, the footer muted
   assert.deepEqual(blank, { text: '' });
   assert.equal(paintedFg(blank!, colours), undefined, 'a blank row takes the default colour');
   assert.equal(paintedFg({ text: 'x', warn: true }, { muted: '#808080' }), undefined, 'a theme without a warning colour falls back to the default text colour, never muted');
+});
+
+test('subagents: in a linked worktree the dispatch register is the worktree checkout\'s, not the main checkout\'s', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { realpathSync } = await import('node:fs');
+  const reg = await import('../../../scripts/lib/dispatch-register.mjs');
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'sterling-oc-wt-active-')));
+  const git = (cwd: string, args: string[]) => assert.equal(spawnSync('git', args, { cwd, encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`);
+  try {
+    const main = join(base, 'main');
+    mkdirSync(join(main, '.sterling'), { recursive: true });
+    writeFileSync(join(main, '.sterling', 'config.json'), '{}');
+    new SterlingStore(join(main, '.sterling', 'sterling.db')).close();
+    writeFileSync(join(main, '.gitignore'), '.sterling/\n');
+    git(main, ['init', '-q']);
+    git(main, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', '-A']);
+    git(main, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'm']);
+    const wt = join(base, 'wt');
+    git(main, ['worktree', 'add', '-q', '-b', 'wt', wt]);
+    const entry = (id: string) => ({ agent_id: id, agent_type: 'implementor', session_id: ROOT, files: [], tool_use_id: null, at: new Date().toISOString() });
+    await reg.registerStart(wt, entry(kid(1)));
+    await reg.registerStart(main, entry(kid(3)));
+    const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT }, { id: kid(3), parentID: ROOT }];
+    const active = (start: string) => readSubagents(source({ sessions, isRunning: view.isActiveChild(start, {}, () => false) })).filter((r) => r.status === 'active').map((r) => r.id);
+    assert.deepEqual(active(wt), [kid(1)], 'the worktree session sees its own lane, not the main checkout\'s');
+    assert.deepEqual(active(main), [kid(3)]);
+    assert.equal(view.findStorePath(wt, {}), join(main, '.sterling', 'sterling.db'), 'while the database is the shared one');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

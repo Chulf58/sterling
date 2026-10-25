@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync,
 import { spawnSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
-import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError } from './lib/common.mjs';
+import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError, inertWorktreeLine } from './lib/common.mjs';
 import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
 import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 import { planLockSection } from './lib/plan-lock-section.mjs';
@@ -201,7 +201,7 @@ function computeH1DeadDispatchResidue(cwd, source) {
   return lines;
 }
 
-const input = readStdin();
+const input = readStdin({ reportInertWorktree: true });
 
 // DAEMON SPARE GUARD (decision `h1-skips-a-claude-code-daemon-spare-session`).
 // Claude Code's background supervisor keeps an idle spare session beside the
@@ -215,6 +215,13 @@ const input = readStdin();
 if (isSpareSession(input.session_id)) {
   exitAfterWrite(`${SPARE_SKIP_LINE}\n`, 0);
   // exitAfterWrite exits from the write callback; nothing below may run meanwhile.
+  await new Promise(() => {});
+}
+
+// A linked worktree outside the main checkout: every hook is inert there
+// (common.mjs hookProjectRoot), and this is the one line that says so.
+if (input.inertWorktree) {
+  exitAfterWrite(`${inertWorktreeLine(input.inertWorktree)}\n`, 0);
   await new Promise(() => {});
 }
 

@@ -11,13 +11,19 @@ import { join } from 'node:path';
 import { evaluatePrLoops, prLoopNext, prLoopOwedText, prLoopReminderText } from '../../../scripts/hooks/lib/pr-loop-duty.mjs';
 import { sterlingRoot } from './layer.mjs';
 import { addNotice } from './notices.mjs';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 
-/** Returns `notify(root)`; `pluginRoot` (the Sterling copy that holds bin/pr-review-wait.mjs) defaults to the resolved root. */
+/**
+ * Returns `notify(root)`. `root` is the location's checkout: the project mode and the
+ * PR-loop markers are read at its store root (direct-merge and pr-review-wait keep them
+ * there), and the notices go to the checkout, where this session reads them.
+ * `pluginRoot` (the Sterling copy that holds bin/pr-review-wait.mjs) defaults to the resolved root.
+ */
 export function createPrLoopNotice({ now, pluginRoot } = {}) {
   const stamp = now ?? (() => new Date().toISOString());
   const announced = new Set();
   return function notify(root) {
-    const { states, degraded } = evaluatePrLoops(root);
+    const { states, degraded } = evaluatePrLoops(storeRootFor(root));
     const at = stamp();
     if (degraded) addNotice(root, degraded, at);
     // One notice per owed PR (GitHub issue #104): concurrent PRs each keep their own loop.

@@ -31,6 +31,10 @@ import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mj
 export type DisableableEffect = 'model_swap' | 'opencode_model' | 'select';
 
 export interface DashboardOptions {
+  /** The git checkout the dashboard serves, when it is a linked worktree of the
+   *  store's project: its selection goes to that checkout's file slot
+   *  (selection-file.mjs), never the shared store's one selection row. */
+  checkoutRoot?: string;
   disabledEffects?: Partial<Record<DisableableEffect, string | null>>;
   /** Hold store writes (the selection, a board edit) until the host calls
    *  flush(), so they run after the frame is drawn. Default false: handle()
@@ -124,6 +128,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // the dashboard happens to be launched from the project directory.
   const projectRoot = dirname(dirname(storePath));
   const agentsDir = join(projectRoot, '.claude', 'agents');
+  const selectionCheckout = options.checkoutRoot && options.checkoutRoot !== projectRoot ? options.checkoutRoot : undefined;
 
   /** `git rev-parse HEAD` rooted at the project that owns THIS store. Never
    *  throws; undefined on any failure, so a missing git binary or a non-repo
@@ -308,7 +313,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         // Postgres storage keeps the selection slot local to this checkout and
         // host (decision postgres-store-backend-design-sync-bridge-schema-per-store,
         // point 9): the shared store's selection row would hand it to another machine's prompt.
-        if (e.type === 'select' && routed) writeSelectionFile(projectRoot, e.recordType, e.id, new Date().toISOString());
+        // A linked worktree's dashboard keeps its selection in its own checkout's file slot.
+        if (e.type === 'select' && (routed || selectionCheckout)) writeSelectionFile(selectionCheckout ?? projectRoot, e.recordType, e.id, new Date().toISOString());
         else runEffects(writeStore, [e]);
       } catch (err) {
         failed = true;

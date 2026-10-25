@@ -17,6 +17,7 @@ import { readLock } from './hooks/lib/plan-lock.mjs';
 import { OPENCODE_DEAD_LANE_CHECK } from './hooks/lib/rotation-restore.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { storeRootFor } from './lib/worktree-root.mjs';
 
 // Local wrappers preserve this script's existing exit code (2) and message
 // prefix while delegating all real parsing to the ONE shared, exact-token
@@ -210,7 +211,8 @@ const commitsAhead = commitsAheadRaw !== null && /^\d+$/.test(commitsAheadRaw) ?
 // exact failure this closes.
 function readStaleMinutes() {
   try {
-    const cfgPath = resolveStoreWritePath(cwd, '.sterling', 'config.json');
+    // The config is the project's (a linked worktree reads the main checkout's); the note stays in this checkout.
+    const cfgPath = resolveStoreWritePath(storeRootFor(cwd), '.sterling', 'config.json');
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
     const v = cfg?.dispatch_register?.stale_minutes;
     return typeof v === 'number' && v > 0 ? v : 60;

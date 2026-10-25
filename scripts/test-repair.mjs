@@ -34,6 +34,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { matchesGlob, normalizeRepoPath } from '@sterling/schemas';
 import { arg, hasFlag, fail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { storeRootFor } from './lib/worktree-root.mjs';
 import { appendSessionEventsAt, SESSION_EVENTS_LOCK_HELD } from './hooks/lib/session-events.mjs';
 
 let isAppend, rawPath, evidence;
@@ -88,7 +89,7 @@ if (trimmedEvidence.startsWith('--') || OWN_FLAGS.includes(trimmedEvidence)) {
 // through the helper regardless, per the manifest's zero-lexical-join bar.
 let configPath;
 try {
-  configPath = resolveStoreWritePath(target, '.sterling', 'config.json');
+  configPath = resolveStoreWritePath(storeRootFor(target), '.sterling', 'config.json');
 } catch (e) {
   fail(`test-repair: ${e.message}`);
 }

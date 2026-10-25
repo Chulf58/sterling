@@ -2,7 +2,11 @@
 // store and appended to the next prompt, as H2 does on Claude Code.
 // With Postgres storage the slot is a file local to this checkout and host
 // (scripts/hooks/lib/selection-file.mjs), not a store row, and no store is opened.
+// The same file slot, at the checkout, serves a linked worktree on any storage: the
+// shared store has one selection row, which belongs to the main checkout's dashboard,
+// so a worktree prompt never takes it (the dashboard publishes to the worktree's file).
 import { join } from 'node:path';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 import { inWorkerChild } from './worker.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { takeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
@@ -18,7 +22,8 @@ export function createPromptHandler({ openStore, rootOf, fenced, env = process.e
       // Checked before the take, so an unknown shape never consumes the selection.
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       let selection;
-      if (storeBackend(root) === 'routed') {
+      const storeRoot = storeRootFor(root);
+      if (storeRoot !== root || storeBackend(storeRoot) === 'routed') {
         selection = takeSelectionFile(root);
       } else {
         const store = openStore(join(root, '.sterling', 'sterling.db'));
