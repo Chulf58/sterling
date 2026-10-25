@@ -24617,6 +24617,7 @@ var SterlingStore = class _SterlingStore {
       if (identity.lifecycle === "retired" && !internal.allowRetired) {
         throw new Error(`${op}: record '${id}' is retired (served status 'superseded') \u2014 an in-place write goes to the live successor, never to a retired record`);
       }
+      internal.beforeVersionCheck?.(current);
       if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
         throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
       }
@@ -25569,7 +25570,7 @@ var SterlingStore = class _SterlingStore {
       this.refuseRepeatedOperation(operationId);
       this.insertRecord(newRecord, operationId);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(this.withStoredClaim(oldId, storedOld)), oldId);
       if (res.changes === 0) {
         throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
       }
@@ -25616,7 +25617,33 @@ var SterlingStore = class _SterlingStore {
       }
       out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
       return out;
-    }, opts, { claimWrite: true });
+    }, opts, {
+      claimWrite: true,
+      beforeVersionCheck: (current) => {
+        const stored = current.claim;
+        if (claimRenewal && stored && stored.holder_session !== claimRenewal.session) {
+          throw _SterlingStore.claimMoved("board_update", claimRenewal.session, void 0, stored);
+        }
+      }
+    });
+  }
+  /**
+   * `body` with the claim the row holds NOW (read under the caller's write
+   * lock) in place of whatever claim it carried: for the direct body writers
+   * outside applyInPlace (supersede's retired body), so a body built from an
+   * earlier read cannot restore a displaced claim. Non-todos pass through.
+   */
+  withStoredClaim(id, body) {
+    if (body.type !== "todo")
+      return body;
+    const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+    const claim = row ? JSON.parse(row.body).claim : void 0;
+    const out = { ...body };
+    if (claim === void 0)
+      delete out.claim;
+    else
+      out.claim = claim;
+    return out;
   }
   /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
   static claimRenewalDue(claim, r) {
@@ -26248,15 +26275,27 @@ var SterlingStore = class _SterlingStore {
     }
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
       return source;
-    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
     const at = (/* @__PURE__ */ new Date()).toISOString();
-    const stored = _SterlingStore.storableBody(updated);
+    let stored;
+    let updated;
+    let existing;
     this.tx(() => {
       this.assertNoMoveInFlight("addLink", [sourceId]);
+      const current = this.get(sourceId);
+      if (!current)
+        throw new Error(`addLink: no record '${sourceId}'`);
+      if (current.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) {
+        existing = current;
+        return;
+      }
+      updated = { ...current, links: [...current.links, { rel: parsedRel, target_id: targetId }] };
+      stored = _SterlingStore.storableBody(updated);
       this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
       this.insertRelation(sourceId, parsedRel, targetId, at);
       this.logActivity("linked", updated, at);
     });
+    if (existing)
+      return existing;
     return this.hydrateAll([stored])[0];
   }
   // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
@@ -38800,9 +38839,10 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       notes.push(`the artifact_evidence FILE-KEY arm hit its per-call query budget on this page \u2014 the items it could not reach say file_key_check:'unavailable:budget' themselves and their count is a CITATION-ONLY floor; narrow the page (a smaller cap, or offset/cursor) to check them`);
     }
     const boardFields = projection === "text" || projection === "full" ? this.boardDerived(records) : /* @__PURE__ */ new Map();
+    const claimOpts = this.claimReadOptions();
     const projectRecord = (r) => {
       const projected = projection === "text" ? textRowRecord(r) : projection === "headline" ? headlineRecord(r) : projection === "digest" ? digestRecord(r) : { ...r };
-      const base2 = projection === "text" || projection === "full" ? { ...projected, ...boardFields.get(r.id) } : projected;
+      const base2 = projection === "text" || projection === "full" ? { ...projected, ...boardFields.get(r.id) } : projection === "digest" ? { ...projected, ...claimStateOf(r, claimOpts) } : projected;
       const id = r.id;
       const warning = warnings.get(id);
       const note = reconcileNotes.get(id);
@@ -39162,7 +39202,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const derived = projection === "text" || projection === "full" ? _SterlingTools.foreignDerived(read, records, this.claimReadOptions()) : /* @__PURE__ */ new Map();
     const projected = records.map((r) => {
       const base2 = projection === "text" ? textRowRecord(r) : projection === "headline" ? headlineRecord(r) : projection === "digest" ? digestRecord(r) : { ...r };
-      return { ...base2, ...derived.get(String(r.id)), ...source };
+      const claim = projection === "digest" ? claimStateOf(r, this.claimReadOptions()) : {};
+      return { ...base2, ...derived.get(String(r.id)), ...claim, ...source };
     });
     return {
       ...source,
@@ -40998,7 +41039,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), claim_state on a claimed item (held, expired = check owner, or unreadable, with holder_session, checkout, generation and minutes_since_renewal; absent means nobody holds it), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), claim_state on a claimed item (held, expired = check owner, or unreadable, with holder_session, checkout, generation and minutes_since_renewal; absent means nobody holds it; also on digest rows, not on headline rows), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),

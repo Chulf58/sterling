@@ -906,7 +906,7 @@ try {
   // the store's one readiness function; a failure is its own loud line below,
   // never a silently missing list.
   try {
-    boardReadiness = store.boardReadiness(undefined, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
+    boardReadiness = store.boardReadiness(undefined, { leaseMinutes: claimLeaseMinutes(claimLease(config, configUnreadable)) });
   } catch (e) {
     boardReadinessError = (e && e.message) || String(e);
   }
@@ -930,7 +930,7 @@ const handoffStatus = delegated.length
 // existing delegation.max_concurrent ceiling (lib/board-ready.mjs).
 const boardReadinessText = boardReadinessError
   ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.`
-  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus, session: input.session_id, lease: claimLease(config) });
+  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus, session: input.session_id, lease: claimLease(config, configUnreadable) });
 const boardReadinessContext = boardReadinessText ? `\n\n${boardReadinessText}` : '';
 
 // DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold): the

@@ -2490,7 +2490,7 @@ export class SterlingStore {
     id: string,
     buildPatch: (current: DurableRecord) => Record<string, unknown>,
     opts: RecordWriteOptions,
-    internal: { allowRetired?: boolean; activityAt?: string; suppressReconcilePrune?: boolean; claimWrite?: boolean } = {}
+    internal: { allowRetired?: boolean; activityAt?: string; suppressReconcilePrune?: boolean; claimWrite?: boolean; beforeVersionCheck?: (current: DurableRecord) => void } = {}
   ): DurableRecord {
     this.assertWritable(op);
     let served!: DurableRecord;
@@ -2505,6 +2505,11 @@ export class SterlingStore {
           `${op}: record '${id}' is retired (served status 'superseded') — an in-place write goes to the live successor, never to a retired record`
         );
       }
+      // A check that must win over a version conflict (board_update by a
+      // session whose claim was taken over: it is told the task moved, not
+      // that its read is stale). Runs under the lock; a stale content write is
+      // still refused right after it.
+      internal.beforeVersionCheck?.(current);
       if (opts.expected_version !== undefined && opts.expected_version !== identity.version) {
         throw new Error(
           `${op}: stale expected_version — the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ` +
@@ -3885,7 +3890,7 @@ export class SterlingStore {
           `UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`
         )
-        .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
+        .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(this.withStoredClaim(oldId, storedOld)), oldId);
       if (res.changes === 0) {
         throw new Error(`supersede: record '${oldId}' was concurrently superseded — retry against the current version`);
       }
@@ -3960,8 +3965,32 @@ export class SterlingStore {
         return out;
       },
       opts,
-      { claimWrite: true }
+      {
+        claimWrite: true,
+        beforeVersionCheck: (current) => {
+          const stored = (current as unknown as { claim?: TodoClaim }).claim;
+          if (claimRenewal && stored && stored.holder_session !== claimRenewal.session) {
+            throw SterlingStore.claimMoved('board_update', claimRenewal.session, undefined, stored);
+          }
+        },
+      }
     );
+  }
+
+  /**
+   * `body` with the claim the row holds NOW (read under the caller's write
+   * lock) in place of whatever claim it carried: for the direct body writers
+   * outside applyInPlace (supersede's retired body), so a body built from an
+   * earlier read cannot restore a displaced claim. Non-todos pass through.
+   */
+  private withStoredClaim(id: string, body: Record<string, unknown>): Record<string, unknown> {
+    if (body.type !== 'todo') return body;
+    const row = this.db.prepare('SELECT body FROM records WHERE id = ?').get(id) as { body: string } | undefined;
+    const claim = row ? (JSON.parse(row.body) as { claim?: unknown }).claim : undefined;
+    const out = { ...body };
+    if (claim === undefined) delete out.claim;
+    else out.claim = claim;
+    return out;
   }
 
   /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
@@ -4759,11 +4788,24 @@ export class SterlingStore {
       );
     }
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
-    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
     const at = new Date().toISOString();
-    const stored = SterlingStore.storableBody(updated as unknown as Record<string, unknown>);
+    let stored!: Record<string, unknown>;
+    let updated!: DurableRecord;
+    let existing: DurableRecord | undefined;
     this.tx(() => {
       this.assertNoMoveInFlight('addLink', [sourceId]);
+      // The body is rebuilt from the row as it stands under the write lock,
+      // never from the read above: a write that landed in between (a claim
+      // takeover, an edit) must not be reverted by a link (decision
+      // board-task-claims-for-parallel-sessions-claim-generation-ren).
+      const current = this.get(sourceId);
+      if (!current) throw new Error(`addLink: no record '${sourceId}'`);
+      if (current.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) {
+        existing = current;
+        return;
+      }
+      updated = { ...current, links: [...current.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
+      stored = SterlingStore.storableBody(updated as unknown as Record<string, unknown>);
       this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(stored), sourceId);
       // record_relations is the authoritative edge home (contract 6); the body
       // copy is a convenience the read materialization overwrites anyway.
@@ -4772,6 +4814,7 @@ export class SterlingStore {
       // the activity row still needs a real timestamp, so it stamps "now".
       this.logActivity('linked', updated, at);
     });
+    if (existing) return existing;
     return this.hydrateAll([stored as DurableRecord])[0];
   }
 

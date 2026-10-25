@@ -11484,6 +11484,7 @@ export class SterlingTools {
     }
     // blocked_by_state and unblocks for the page, from one readiness read.
     const boardFields = projection === 'text' || projection === 'full' ? this.boardDerived(records) : new Map();
+    const claimOpts = this.claimReadOptions();
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const projected =
         projection === 'text'
@@ -11495,7 +11496,14 @@ export class SterlingTools {
               : { ...(r as unknown as Record<string, unknown>) };
       // text and full rows carry each blocker's current state beside the stored
       // blocked_by list (rule 6); headline and digest stay one compact line.
-      const base = projection === 'text' || projection === 'full' ? { ...projected, ...boardFields.get((r as unknown as { id: string }).id) } : projected;
+      // A digest row also carries claim_state, judged from the row itself, so
+      // the cheap landscape read still shows which items a session holds.
+      const base =
+        projection === 'text' || projection === 'full'
+          ? { ...projected, ...boardFields.get((r as unknown as { id: string }).id) }
+          : projection === 'digest'
+            ? { ...projected, ...claimStateOf(r as unknown as { claim?: unknown }, claimOpts) }
+            : projected;
       const id = (r as unknown as { id: string }).id;
       const warning = warnings.get(id);
       // COMPOSED AFTER THE PROJECTION CLIP, like the provenance warning beside
@@ -11990,7 +11998,9 @@ export class SterlingTools {
     const projected = records.map((r) => {
       const base =
         projection === 'text' ? textRowRecord(r) : projection === 'headline' ? headlineRecord(r) : projection === 'digest' ? digestRecord(r) : { ...r };
-      return { ...base, ...derived.get(String(r.id)), ...source };
+      // A digest row carries claim_state from the row, as the local read does.
+      const claim = projection === 'digest' ? claimStateOf(r, this.claimReadOptions()) : {};
+      return { ...base, ...derived.get(String(r.id)), ...claim, ...source };
     });
     return {
       ...source,

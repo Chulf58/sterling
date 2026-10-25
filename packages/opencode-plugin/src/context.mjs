@@ -226,7 +226,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
    * readiness function. onPrompt delivers it again whenever it changed, which
    * covers what H20's mid-session line does on Claude Code at the next prompt.
    */
-  function boardBlock(root, config, sessionID) {
+  function boardBlock(root, config, sessionID, configUnreadable = false) {
     // The cache holds the readiness read per ROOT; the live-lane count is per
     // SESSION, so it is computed on every call and never cached with the text.
     let hit = boardCache.get(root);
@@ -235,7 +235,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         const store = openStore(join(root, '.sterling', 'sterling.db'));
         let readiness;
         try {
-          readiness = store.boardReadiness(undefined, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
+          readiness = store.boardReadiness(undefined, { leaseMinutes: claimLeaseMinutes(claimLease(config, configUnreadable)) });
         } finally {
           store.close();
         }
@@ -256,7 +256,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // The block names only the lane ceiling. The live count goes stale in a block that is
       // not re-sent for every lane that starts or ends (GitHub #93), so it travels as its own
       // `live lanes k/n` line (laneLine). The ceiling and its errors stay in the block.
-      const lease = claimLease(config);
+      const lease = claimLease(config, configUnreadable);
       const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, session: sessionID, lease });
       // The delivery key is the text with elapsed time held constant: an external wait's
       // "Nh ago" grows by itself, and re-sending the board for that is the noise GitHub #93
@@ -413,7 +413,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // Root sessions only, and never inside the maintenance worker's own child
       // (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)): the worker is not the conductor filling lanes.
       if (!inWorkerChild(env)) {
-        out.push({ key: 'board', ...boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
+        out.push({ key: 'board', ...boardBlock(root, state.config, sessionID, state.configUnreadable), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
         // The live-lane count, a line of its own so it can change without re-sending the board.
         out.push({ key: 'lanes', text: laneLine(root, state.config, sessionID) });
       }

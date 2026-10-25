@@ -10575,6 +10575,7 @@ var init_dist2 = __esm({
           if (identity.lifecycle === "retired" && !internal.allowRetired) {
             throw new Error(`${op}: record '${id}' is retired (served status 'superseded') \u2014 an in-place write goes to the live successor, never to a retired record`);
           }
+          internal.beforeVersionCheck?.(current);
           if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
             throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
           }
@@ -11527,7 +11528,7 @@ var init_dist2 = __esm({
           this.refuseRepeatedOperation(operationId);
           this.insertRecord(newRecord, operationId);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(this.withStoredClaim(oldId, storedOld)), oldId);
           if (res.changes === 0) {
             throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
           }
@@ -11574,7 +11575,33 @@ var init_dist2 = __esm({
           }
           out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
           return out;
-        }, opts, { claimWrite: true });
+        }, opts, {
+          claimWrite: true,
+          beforeVersionCheck: (current) => {
+            const stored = current.claim;
+            if (claimRenewal && stored && stored.holder_session !== claimRenewal.session) {
+              throw _SterlingStore.claimMoved("board_update", claimRenewal.session, void 0, stored);
+            }
+          }
+        });
+      }
+      /**
+       * `body` with the claim the row holds NOW (read under the caller's write
+       * lock) in place of whatever claim it carried: for the direct body writers
+       * outside applyInPlace (supersede's retired body), so a body built from an
+       * earlier read cannot restore a displaced claim. Non-todos pass through.
+       */
+      withStoredClaim(id, body) {
+        if (body.type !== "todo")
+          return body;
+        const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+        const claim = row ? JSON.parse(row.body).claim : void 0;
+        const out = { ...body };
+        if (claim === void 0)
+          delete out.claim;
+        else
+          out.claim = claim;
+        return out;
       }
       /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
       static claimRenewalDue(claim, r) {
@@ -12206,15 +12233,27 @@ var init_dist2 = __esm({
         }
         if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
           return source;
-        const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
         const at = (/* @__PURE__ */ new Date()).toISOString();
-        const stored = _SterlingStore.storableBody(updated);
+        let stored;
+        let updated;
+        let existing;
         this.tx(() => {
           this.assertNoMoveInFlight("addLink", [sourceId]);
+          const current = this.get(sourceId);
+          if (!current)
+            throw new Error(`addLink: no record '${sourceId}'`);
+          if (current.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) {
+            existing = current;
+            return;
+          }
+          updated = { ...current, links: [...current.links, { rel: parsedRel, target_id: targetId }] };
+          stored = _SterlingStore.storableBody(updated);
           this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
           this.insertRelation(sourceId, parsedRel, targetId, at);
           this.logActivity("linked", updated, at);
         });
+        if (existing)
+          return existing;
         return this.hydrateAll([stored])[0];
       }
       // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
@@ -17066,8 +17105,11 @@ function boardGroups(readiness) {
     delegated: sorted.filter((r) => r.state === "delegated")
   };
 }
-function claimLease(config2) {
-  const raw = config2?.board_claims;
+function claimLease(config2, configUnreadable2 = false) {
+  if (configUnreadable2) return { error: ".sterling/config.json could not be read" };
+  if (config2 === void 0 || config2 === null) return { value: DEFAULT_CLAIM_LEASE_MINUTES };
+  if (typeof config2 !== "object" || Array.isArray(config2)) return { error: `.sterling/config.json is ${Array.isArray(config2) ? "an array" : JSON.stringify(config2)}, not an object` };
+  const raw = config2.board_claims;
   const parsed = configSchema.shape.board_claims.safeParse(raw === void 0 ? {} : raw);
   if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join("; ") };
   return { value: parsed.data.lease_minutes };
@@ -17638,7 +17680,7 @@ try {
   queueReasonEntries = m.queueReasonEntries;
   queueReasons = m.queueReasons;
   try {
-    boardReadiness = store.boardReadiness(void 0, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
+    boardReadiness = store.boardReadiness(void 0, { leaseMinutes: claimLeaseMinutes(claimLease(config, configUnreadable)) });
   } catch (e) {
     boardReadinessError = e && e.message || String(e);
   }
@@ -17647,7 +17689,7 @@ try {
 }
 var delegated = boardReadiness.filter((r) => r.state === "delegated");
 var handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff, created_at: r.created_at })), { budgetMs: 500, registryPath: registryPath() }) : void 0;
-var boardReadinessText = boardReadinessError ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.` : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus, session: input.session_id, lease: claimLease(config) });
+var boardReadinessText = boardReadinessError ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.` : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus, session: input.session_id, lease: claimLease(config, configUnreadable) });
 var boardReadinessContext = boardReadinessText ? `
 
 ${boardReadinessText}` : "";

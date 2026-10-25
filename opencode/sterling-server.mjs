@@ -11088,6 +11088,7 @@ var init_dist2 = __esm({
           if (identity.lifecycle === "retired" && !internal.allowRetired) {
             throw new Error(`${op}: record '${id}' is retired (served status 'superseded') \u2014 an in-place write goes to the live successor, never to a retired record`);
           }
+          internal.beforeVersionCheck?.(current);
           if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
             throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
           }
@@ -12040,7 +12041,7 @@ var init_dist2 = __esm({
           this.refuseRepeatedOperation(operationId);
           this.insertRecord(newRecord, operationId);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(this.withStoredClaim(oldId, storedOld)), oldId);
           if (res.changes === 0) {
             throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
           }
@@ -12087,7 +12088,33 @@ var init_dist2 = __esm({
           }
           out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
           return out;
-        }, opts, { claimWrite: true });
+        }, opts, {
+          claimWrite: true,
+          beforeVersionCheck: (current) => {
+            const stored = current.claim;
+            if (claimRenewal && stored && stored.holder_session !== claimRenewal.session) {
+              throw _SterlingStore.claimMoved("board_update", claimRenewal.session, void 0, stored);
+            }
+          }
+        });
+      }
+      /**
+       * `body` with the claim the row holds NOW (read under the caller's write
+       * lock) in place of whatever claim it carried: for the direct body writers
+       * outside applyInPlace (supersede's retired body), so a body built from an
+       * earlier read cannot restore a displaced claim. Non-todos pass through.
+       */
+      withStoredClaim(id, body) {
+        if (body.type !== "todo")
+          return body;
+        const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+        const claim = row ? JSON.parse(row.body).claim : void 0;
+        const out = { ...body };
+        if (claim === void 0)
+          delete out.claim;
+        else
+          out.claim = claim;
+        return out;
       }
       /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
       static claimRenewalDue(claim, r) {
@@ -12719,15 +12746,27 @@ var init_dist2 = __esm({
         }
         if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
           return source;
-        const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
         const at = (/* @__PURE__ */ new Date()).toISOString();
-        const stored = _SterlingStore.storableBody(updated);
+        let stored;
+        let updated;
+        let existing;
         this.tx(() => {
           this.assertNoMoveInFlight("addLink", [sourceId]);
+          const current = this.get(sourceId);
+          if (!current)
+            throw new Error(`addLink: no record '${sourceId}'`);
+          if (current.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) {
+            existing = current;
+            return;
+          }
+          updated = { ...current, links: [...current.links, { rel: parsedRel, target_id: targetId }] };
+          stored = _SterlingStore.storableBody(updated);
           this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
           this.insertRelation(sourceId, parsedRel, targetId, at);
           this.logActivity("linked", updated, at);
         });
+        if (existing)
+          return existing;
         return this.hydrateAll([stored])[0];
       }
       // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
@@ -23318,8 +23357,11 @@ function boardGroups(readiness) {
     delegated: sorted.filter((r) => r.state === "delegated")
   };
 }
-function claimLease(config) {
-  const raw = config?.board_claims;
+function claimLease(config, configUnreadable = false) {
+  if (configUnreadable) return { error: ".sterling/config.json could not be read" };
+  if (config === void 0 || config === null) return { value: DEFAULT_CLAIM_LEASE_MINUTES };
+  if (typeof config !== "object" || Array.isArray(config)) return { error: `.sterling/config.json is ${Array.isArray(config) ? "an array" : JSON.stringify(config)}, not an object` };
+  const raw = config.board_claims;
   const parsed = configSchema.shape.board_claims.safeParse(raw === void 0 ? {} : raw);
   if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join("; ") };
   return { value: parsed.data.lease_minutes };
@@ -24073,7 +24115,7 @@ function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig2(root);
   const atClone = Boolean(pluginRoot && samePath2(root, pluginRoot));
   const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === "work" && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), overpassLine({ config, configUnreadable, host: "opencode" }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
-  return { lines, config };
+  return { lines, config, configUnreadable };
 }
 function undeclaredSourceBlock(root, config) {
   try {
@@ -25105,14 +25147,14 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       return void 0;
     }
   }
-  function boardBlock(root, config, sessionID) {
+  function boardBlock(root, config, sessionID, configUnreadable = false) {
     let hit = boardCache.get(root);
     if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
       try {
         const store = openStore(join41(root, ".sterling", "sterling.db"));
         let readiness;
         try {
-          readiness = store.boardReadiness(void 0, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
+          readiness = store.boardReadiness(void 0, { leaseMinutes: claimLeaseMinutes(claimLease(config, configUnreadable)) });
         } finally {
           store.close();
         }
@@ -25130,7 +25172,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     try {
       const live = liveLanes(root, sessionID);
       const ceiling = laneCeiling(config);
-      const lease = claimLease(config);
+      const lease = claimLease(config, configUnreadable);
       const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, session: sessionID, lease });
       const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, now: 0, session: sessionID, lease }) : "";
       return { text, sig };
@@ -25236,7 +25278,7 @@ ${opencodeHostTail(pluginRoot)}`;
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
       if (!inWorkerChild(env)) {
-        out.push({ key: "board", ...boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+        out.push({ key: "board", ...boardBlock(root, state.config, sessionID, state.configUnreadable), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
         out.push({ key: "lanes", text: laneLine(root, state.config, sessionID) });
       }
     }

@@ -49,11 +49,20 @@ export function boardGroups(readiness) {
   };
 }
 
-/** board_claims.lease_minutes with the schema's own default; {error} when the configured value is invalid. */
-export function claimLease(config) {
-  // Only an ABSENT key takes the default: null or any other bad value is
-  // reported as unreadable, never read as "not set".
-  const raw = config?.board_claims;
+/**
+ * board_claims.lease_minutes with the schema's own default; {error} when it
+ * cannot be read (anti_pattern config-derived-posture-line-collapses-absent-into-unusable).
+ * `configUnreadable` is the loader's flag (readProjectConfig): a config file
+ * that failed to load is unreadable, never "absent". Only a genuinely absent
+ * config (the loader's null with the flag off, or undefined) or an absent key
+ * takes the default; a config that is not a plain object, and a key that is
+ * null or invalid, are unreadable.
+ */
+export function claimLease(config, configUnreadable = false) {
+  if (configUnreadable) return { error: '.sterling/config.json could not be read' };
+  if (config === undefined || config === null) return { value: DEFAULT_CLAIM_LEASE_MINUTES };
+  if (typeof config !== 'object' || Array.isArray(config)) return { error: `.sterling/config.json is ${Array.isArray(config) ? 'an array' : JSON.stringify(config)}, not an object` };
+  const raw = config.board_claims;
   const parsed = configSchema.shape.board_claims.safeParse(raw === undefined ? {} : raw);
   if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
   return { value: parsed.data.lease_minutes };

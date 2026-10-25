@@ -265,3 +265,40 @@ test('generic in-place writes cannot restore a displaced holder: A to B takeover
     close();
   }
 });
+
+test('addLink rebuilds the body under its lock: a takeover landing just before it is not reverted, and the old release stays refused', () => {
+  const { a, b, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    const target = a.create(todo()) as unknown as Claimed;
+    const gA = (a.claimTodo(item.id, { session: 'A', checkout: 'wt-a', now: at(0) }) as unknown as Claimed).claim!.generation;
+    // B takes over after addLink's pre-lock read and before its transaction.
+    beforeFirstWriteTx(a, () => b.takeoverClaim(item.id, { session: 'B', checkout: 'wt-b', expected_holder: 'A', expected_generation: gA, now: at(70) }));
+    a.addLink(item.id, 'cites', target.id);
+    const after = get(a, item.id) as Claimed & { links: { rel: string; target_id: string }[] };
+    assert.equal(after.claim!.holder_session, 'B', 'the link write kept the takeover');
+    assert.ok(after.links.some((l) => l.rel === 'cites' && l.target_id === target.id), 'the link landed');
+    assert.throws(() => a.releaseClaim(item.id, { session: 'A', generation: gA, now: at(71) }), /the task moved — session 'B'/);
+  } finally {
+    close();
+  }
+});
+
+test('board_update by a displaced holder: a takeover between its read and its lock reports the move, not a stale version', () => {
+  const { a, b, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    const gA = (a.claimTodo(item.id, { session: 'A', checkout: 'wt-a', now: at(0) }) as unknown as Claimed).claim!.generation;
+    const read = get(a, item.id);
+    beforeFirstWriteTx(a, () => b.takeoverClaim(item.id, { session: 'B', checkout: 'wt-b', expected_holder: 'A', expected_generation: gA, now: at(70) }));
+    assert.throws(
+      () => a.updateTodo(item.id, { ...read, text: 'A edits on' }, { expected_version: read.version }, { session: 'A', leaseMinutes: 60, now: at(71) }),
+      (e: Error) => e instanceof ClaimMovedError && /board_update: the task moved — session 'B' in checkout 'wt-b'.*taken over from you at/.test(e.message)
+    );
+    // A stale content write that names no session is still refused for its version.
+    assert.throws(() => a.updateTodo(item.id, { ...read, text: 'stale' }, { expected_version: read.version }), /stale expected_version/);
+    assert.equal(get(a, item.id).text, 'board item to claim');
+  } finally {
+    close();
+  }
+});

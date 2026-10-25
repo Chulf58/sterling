@@ -225,3 +225,36 @@ test('claim_state is judged from the returned row, never from a second board rea
     h.cleanup();
   }
 });
+
+test('compact projections: digest rows carry claim_state, locally and through target_project; headline rows stay unchanged', () => {
+  const h = harness(60);
+  try {
+    const local = addItem(h.tools, 'Local claimed\nsee packages/store/src/index.ts');
+    h.tools.boardClaim(local.id, 'sess-A', 'main');
+    const betaStore = new SterlingStore(join(h.beta, '.sterling', 'sterling.db'));
+    let betaId: string;
+    try {
+      betaId = addItem(new SterlingTools({ store: betaStore, repoRoot: h.beta, now: () => T0 }), 'Beta claimed\nsee src/b.ts').id;
+      betaStore.claimTodo(betaId, { session: 'beta-sess', checkout: 'beta-main', now: T0 });
+    } finally {
+      betaStore.close();
+    }
+    h.clock.now = at(90);
+    const digest = h.tools.boardQueryResult({ source: 'user', projection: 'digest' }).records as unknown as Loose[];
+    assert.deepEqual(
+      { state: (digest[0].claim_state as ClaimState).state, holder: (digest[0].claim_state as ClaimState).holder_session },
+      { state: 'expired', holder: 'sess-A' }
+    );
+    const headline = h.tools.boardQueryResult({ source: 'user', projection: 'headline' }).records as unknown as Loose[];
+    assert.equal('claim_state' in headline[0], false, 'headline rows are left as they were');
+    const foreign = h.tools.foreignBoardQuery({ target_project: 'beta', projection: 'digest' }).records as Loose[];
+    assert.deepEqual(
+      { id: foreign[0].id, state: (foreign[0].claim_state as ClaimState).state, holder: (foreign[0].claim_state as ClaimState).holder_session },
+      { id: betaId, state: 'expired', holder: 'beta-sess' }
+    );
+    const foreignHeadline = h.tools.foreignBoardQuery({ target_project: 'beta', projection: 'headline' }).records as Loose[];
+    assert.equal('claim_state' in foreignHeadline[0], false);
+  } finally {
+    h.cleanup();
+  }
+});
