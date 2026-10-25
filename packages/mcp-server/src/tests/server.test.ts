@@ -75,6 +75,12 @@ const SERVED_TOOLS = [
   // find/replace that keeps trackers current without retransmitting them.
   'board_get',
   'board_edit',
+  // Board task claims for parallel sessions (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren).
+  'board_claim',
+  'board_reaffirm',
+  'board_release',
+  'board_takeover',
   // Session-event register writers (boards 75b1a05f + 1af5d630): the script
   // paths were unreachable from a consuming project's shell; the MCP surface
   // is mounted wherever the store is. Scripts remain the no-server fallback.

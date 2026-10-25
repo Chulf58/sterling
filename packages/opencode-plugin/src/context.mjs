@@ -16,7 +16,7 @@ import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs
 import { errText, logLine } from './log.mjs';
 import { NOTICES_REL, claimNotices } from './notices.mjs';
 import { queueDepthLine, readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
-import { laneCeiling, lanesText, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
+import { claimLease, claimLeaseMinutes, laneCeiling, lanesText, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
 import { composeContext, dispatchChrome } from '../../../scripts/hooks/lib/stage-brief.mjs';
 import { VOLATILE_HEADER, briefOf, notStagedLine, stageChild } from './staging.mjs';
@@ -235,7 +235,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         const store = openStore(join(root, '.sterling', 'sterling.db'));
         let readiness;
         try {
-          readiness = store.boardReadiness();
+          readiness = store.boardReadiness(undefined, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
         } finally {
           store.close();
         }
@@ -256,11 +256,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // The block names only the lane ceiling. The live count goes stale in a block that is
       // not re-sent for every lane that starts or ends (GitHub #93), so it travels as its own
       // `live lanes k/n` line (laneLine). The ceiling and its errors stay in the block.
-      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false });
+      const lease = claimLease(config);
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, session: sessionID, lease });
       // The delivery key is the text with elapsed time held constant: an external wait's
       // "Nh ago" grows by itself, and re-sending the board for that is the noise GitHub #93
       // reported. now: 0 pins every age to 0h; the since-date, reason and the rest stay.
-      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, now: 0 }) : '';
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, now: 0, session: sessionID, lease }) : '';
       return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);

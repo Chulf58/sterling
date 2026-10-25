@@ -17798,7 +17798,7 @@ var SYSTEM_REASONS = [
 ];
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
-var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks", claim: "marks" };
 var HANDOFF_MILESTONE_MAX = 80;
 var receivedHandoffShape = external_exports.object({
   role: external_exports.literal("received"),
@@ -17819,6 +17819,20 @@ var sentHandoffShape = external_exports.object({
   milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
 });
 var todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+var todoClaimSchema = external_exports.object({
+  holder_session: external_exports.string().min(1),
+  checkout: external_exports.string().min(1),
+  generation: external_exports.number().int().positive(),
+  claimed_at: external_exports.string().datetime(),
+  renewed_at: external_exports.string().datetime(),
+  taken_over_from: external_exports.object({
+    holder_session: external_exports.string().min(1),
+    checkout: external_exports.string().min(1),
+    generation: external_exports.number().int().positive(),
+    renewed_at: external_exports.string().datetime(),
+    at: external_exports.string().datetime()
+  }).strict().optional()
+}).strict();
 var todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
 var HANDOFFS_DIR_REL = ".sterling/handoffs";
 var handoffClosureSchema = external_exports.object({
@@ -17938,7 +17952,9 @@ var todoSchema = base.extend({
   // which any unrelated edit resets.
   needs_set_at: external_exports.string().datetime().optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
-  handoff: todoHandoffSchema.optional()
+  handoff: todoHandoffSchema.optional(),
+  // Which session works on this task now (see todoClaimSchema). User items only.
+  claim: todoClaimSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -19050,6 +19066,13 @@ var configSchema = external_exports.object({
   // 677f1639/299d853a stand). Absent → shipped default 5.
   delegation: external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
+  // Board task claims (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren): a claim not
+  // renewed by task work or board_reaffirm for lease_minutes shows as 'check
+  // owner', is kept out of READY and may be taken over by any session.
+  board_claims: external_exports.object({
+    lease_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents; max never
@@ -21268,8 +21291,8 @@ var MountedStores = class {
   }
   /** Board readiness is project-local like the board itself, so the project
    *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
-  boardReadiness(items) {
-    return this.project.boardReadiness(items);
+  boardReadiness(...args2) {
+    return this.project.boardReadiness(...args2);
   }
   storeFor(scope) {
     if (scope === "project")
@@ -21591,6 +21614,22 @@ var MountedStores = class {
    *  routes the same way as supersede/remove for consistency rather than assuming. */
   updateTodo(...args2) {
     return this.mutatingStoreHolding("updateTodo", args2[0]).updateTodo(...args2);
+  }
+  // Board task claims: routed to the store holding the item, like updateTodo.
+  claimTodo(...args2) {
+    return this.mutatingStoreHolding("claimTodo", args2[0]).claimTodo(...args2);
+  }
+  reaffirmClaim(...args2) {
+    return this.mutatingStoreHolding("reaffirmClaim", args2[0]).reaffirmClaim(...args2);
+  }
+  releaseClaim(...args2) {
+    return this.mutatingStoreHolding("releaseClaim", args2[0]).releaseClaim(...args2);
+  }
+  takeoverClaim(...args2) {
+    return this.mutatingStoreHolding("takeoverClaim", args2[0]).takeoverClaim(...args2);
+  }
+  renewClaimIfDue(...args2) {
+    return this.mutatingStoreHolding("renewClaimIfDue", args2[0]).renewClaimIfDue(...args2);
   }
   /** Typed link edge, added on the source record in its holding store. The TARGET
    *  is resolved across ALL mounted stores (cross-store get, like get()) before
@@ -23663,7 +23702,33 @@ function deepReplaceString(value, from, to) {
   }
   return value;
 }
-function boardReadinessOf(targets, live, openBlocker) {
+var DEFAULT_CLAIM_LEASE_MINUTES = 60;
+function boardClaimView(claim, now, leaseMinutes) {
+  if (claim === void 0 || claim === null)
+    return void 0;
+  const c = claim;
+  const renewed = typeof c.renewed_at === "string" ? Date.parse(c.renewed_at) : NaN;
+  if (typeof c.holder_session !== "string" || typeof c.checkout !== "string" || typeof c.generation !== "number" || Number.isNaN(renewed)) {
+    return { state: "unreadable" };
+  }
+  const minutes = Math.max(0, Math.floor((now - renewed) / 6e4));
+  const from = c.taken_over_from;
+  return {
+    state: now - renewed >= leaseMinutes * 6e4 ? "expired" : "held",
+    holder_session: c.holder_session,
+    checkout: c.checkout,
+    generation: c.generation,
+    ...typeof c.claimed_at === "string" ? { claimed_at: c.claimed_at } : {},
+    renewed_at: c.renewed_at,
+    minutes_since_renewal: minutes,
+    ...from && typeof from.holder_session === "string" ? { taken_over_from: { holder_session: from.holder_session, checkout: String(from.checkout), generation: Number(from.generation), at: String(from.at) } } : {}
+  };
+}
+var ClaimRenewalNotDue = class extends Error {
+};
+function boardReadinessOf(targets, live, openBlocker, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const lease = opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES;
   const dependents = /* @__PURE__ */ new Map();
   for (const t of live) {
     for (const slug of new Set(t.blocked_by ?? [])) {
@@ -23700,9 +23765,13 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {},
+      ...claimField(boardClaimView(t.claim, now, lease))
     };
   });
+}
+function claimField(view) {
+  return view ? { claim: view } : {};
 }
 function boardWriteOverlaps(ready) {
   const marks = /* @__PURE__ */ new Map();
@@ -25160,7 +25229,7 @@ var SterlingStore = class _SterlingStore {
    * `unblocks` lists live user items whose blocked_by names the item. Read
    * only; the stored blocked_by is never rewritten. No cycle detection.
    */
-  boardReadiness(items) {
+  boardReadiness(items, opts = {}) {
     return this.readTx(() => {
       const total = this.count({ types: ["todo"], source: "user" });
       const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
@@ -25169,7 +25238,7 @@ var SterlingStore = class _SterlingStore {
         if (t.slug)
           bySlug.set(t.slug, t);
       const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-      return boardReadinessOf(items ?? live, live, openBlocker);
+      return boardReadinessOf(items ?? live, live, openBlocker, opts);
     });
   }
   /**
@@ -25515,7 +25584,7 @@ var SterlingStore = class _SterlingStore {
    * and the UPDATE is guarded on that status inside the transaction to close the
    * same concurrent-supersede race.
    */
-  updateTodo(id, newInput, opts = {}) {
+  updateTodo(id, newInput, opts = {}, claimRenewal) {
     const old = this.get(id);
     if (!old)
       throw new Error(`updateTodo: no record '${id}'`);
@@ -25525,7 +25594,155 @@ var SterlingStore = class _SterlingStore {
     if (typeof candidate.type === "string" && candidate.type !== "todo") {
       throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
     }
-    return this.applyInPlace("updateTodo", id, () => candidate, opts);
+    return this.applyInPlace("updateTodo", id, (current) => {
+      const out = { ...candidate };
+      const stored = current.claim;
+      if (stored === void 0) {
+        delete out.claim;
+        return out;
+      }
+      out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
+      return out;
+    }, opts);
+  }
+  /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
+  static claimRenewalDue(claim, r) {
+    if (claim.holder_session !== r.session)
+      return false;
+    const now = Date.parse(r.now ?? (/* @__PURE__ */ new Date()).toISOString());
+    return now - Date.parse(claim.renewed_at) >= r.leaseMinutes * 6e4 / 4;
+  }
+  /**
+   * The one claim write (decision
+   * board-task-claims-for-parallel-sessions-claim-generation-ren): `decide`
+   * reads the claim stored under the write lock and returns the next claim
+   * (undefined removes it) or throws a refusal, so two sessions racing for one
+   * item serialize and exactly one wins. Only source:'user' board tasks take a
+   * claim. The item's updated_at is kept (a claim is not a content edit, so the
+   * board order does not move); the activity row carries the real time.
+   */
+  claimWrite(op, id, now, decide) {
+    return this.applyInPlace(op, id, (current) => {
+      const cur = current;
+      if (cur.type !== "todo")
+        throw new Error(`${op}: '${id}' is a ${String(cur.type)}, not a board task. Nothing was written.`);
+      if (cur.source !== "user")
+        throw new Error(`${op}: '${id}' is a maintenance-queue item; only source:'user' board tasks are claimed. Nothing was written.`);
+      const next = decide(cur.claim, cur);
+      const out = { ...cur };
+      if (next)
+        out.claim = next;
+      else
+        delete out.claim;
+      return out;
+    }, {}, { activityAt: now });
+  }
+  /** The refusal an old holder gets: where the task is now, so it can stop or coordinate. */
+  static claimMoved(op, session, generation, claim) {
+    if (!claim) {
+      return new Error(`${op}: the task has no claim now (it was released, or never claimed). Nothing was written; claim it with board_claim if you still work on it.`);
+    }
+    if (claim.holder_session !== session) {
+      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : "";
+      return new Error(`${op}: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. Nothing was written; stop work on it, or coordinate with that session.`);
+    }
+    return new Error(`${op}: stale claim generation ${generation} \u2014 your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
+  }
+  /** The next claim generation: above both the previous claim's and the record's version, so it never repeats on one item. */
+  static nextGeneration(claim, current) {
+    const version2 = typeof current.version === "number" ? current.version : 0;
+    return Math.max(claim?.generation ?? 0, version2) + 1;
+  }
+  /**
+   * board_claim: take an unclaimed task, or refresh one this session already
+   * holds (same generation, checkout updated). A claim by another session is
+   * refused whether or not it expired: an expired one is taken over only
+   * through takeoverClaim, which names the holder it displaces.
+   */
+  claimTodo(id, req) {
+    const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    return this.claimWrite("board_claim", id, now, (claim, current) => {
+      if (claim && claim.holder_session !== req.session) {
+        const view = boardClaimView(claim, Date.parse(now), req.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+        const age = `last renewed ${view?.minutes_since_renewal ?? "?"} min ago`;
+        throw new Error(view?.state === "expired" ? `board_claim: session '${claim.holder_session}' in checkout '${claim.checkout}' still holds this task at claim generation ${claim.generation}, ${age}, so it shows as check owner. Nothing was written; take it over with board_takeover naming expected_holder '${claim.holder_session}' and expected_generation ${claim.generation}.` : `board_claim: session '${claim.holder_session}' in checkout '${claim.checkout}' holds this task at claim generation ${claim.generation}, ${age}. Nothing was written; pick another task, or take this one over with board_takeover naming that holder and generation.`);
+      }
+      if (claim)
+        return { ...claim, checkout: req.checkout, renewed_at: now };
+      return { holder_session: req.session, checkout: req.checkout, generation: _SterlingStore.nextGeneration(void 0, current), claimed_at: now, renewed_at: now };
+    });
+  }
+  /** board_reaffirm: the holder renews its claim; refused for any other session or generation. */
+  reaffirmClaim(id, req) {
+    const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    return this.claimWrite("board_reaffirm", id, now, (claim) => {
+      if (!claim || claim.holder_session !== req.session || claim.generation !== req.generation)
+        throw _SterlingStore.claimMoved("board_reaffirm", req.session, req.generation, claim);
+      return { ...claim, renewed_at: now };
+    });
+  }
+  /** board_release: the holder gives the task up; the claim is removed. */
+  releaseClaim(id, req) {
+    const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    return this.claimWrite("board_release", id, now, (claim) => {
+      if (!claim || claim.holder_session !== req.session || claim.generation !== req.generation)
+        throw _SterlingStore.claimMoved("board_release", req.session, req.generation, claim);
+      return void 0;
+    });
+  }
+  /**
+   * board_takeover: any session takes a claimed task, naming the holder and
+   * generation it read (compare-and-set: a claim that changed since is
+   * refused, naming what holds it now). The new claim gets a new generation
+   * and records the displaced holder; the old holder's later renew, release
+   * or close is refused by generation. Allowed on a held claim too (the
+   * caller sees its state in board_get first); nothing stops the old
+   * holder's running processes.
+   */
+  takeoverClaim(id, req) {
+    const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    return this.claimWrite("board_takeover", id, now, (claim, current) => {
+      if (!claim)
+        throw new Error(`board_takeover: the task has no claim to take over. Nothing was written; claim it with board_claim.`);
+      if (claim.holder_session !== req.expected_holder || claim.generation !== req.expected_generation) {
+        throw new Error(`board_takeover: the claim changed since you read it \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it at generation ${claim.generation}, not '${req.expected_holder}' at generation ${req.expected_generation}. Nothing was written; re-read the item with board_get.`);
+      }
+      return {
+        holder_session: req.session,
+        checkout: req.checkout,
+        generation: _SterlingStore.nextGeneration(claim, current),
+        claimed_at: now,
+        renewed_at: now,
+        taken_over_from: { holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation, renewed_at: claim.renewed_at, at: now }
+      };
+    });
+  }
+  /**
+   * Renewal by task work: bump renewed_at when `session` holds the claim and
+   * the last renewal is older than a quarter of the lease, else write nothing.
+   * Every write archives a version, so renewing on every event would grow the
+   * history by one row per event; at most four renewals per lease keep a
+   * worked claim from ever expiring. Returns whether it wrote. board_update
+   * folds the same rule into its own write (updateTodo's claimRenewal); the
+   * dispatch and commit callers arrive in a later slice.
+   */
+  renewClaimIfDue(id, r) {
+    const read = this.get(id);
+    if (!read || read.type !== "todo" || !read.claim || !_SterlingStore.claimRenewalDue(read.claim, r))
+      return { renewed: false };
+    const now = r.now ?? (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      this.claimWrite("renew", id, now, (claim) => {
+        if (!claim || !_SterlingStore.claimRenewalDue(claim, { ...r, now }))
+          throw new ClaimRenewalNotDue();
+        return { ...claim, renewed_at: now };
+      });
+    } catch (e) {
+      if (e instanceof ClaimRenewalNotDue)
+        return { renewed: false };
+      throw e;
+    }
+    return { renewed: true };
   }
   /**
    * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
@@ -31747,7 +31964,8 @@ function readinessFields(r, overlaps) {
   return {
     readiness: r.state,
     ...r.blockers_open.length ? { blockers_open: r.blockers_open } : {},
-    ...shares?.length ? { shares_write_path_with: shares } : {}
+    ...shares?.length ? { shares_write_path_with: shares } : {},
+    ...r.claim ? { claim_state: r.claim } : {}
   };
 }
 var BOARD_TEXT_CLIP = 240;
@@ -37975,11 +38193,12 @@ ${JSON.stringify(entry)}
     const users = records.filter((r) => r.source === "user");
     if (!users.length)
       return out;
-    const whole = this.store.boardReadiness();
+    const claimOpts = this.claimReadOptions();
+    const whole = this.store.boardReadiness(void 0, claimOpts);
     const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
     const byId = new Map(whole.map((r) => [r.id, r]));
     const missing = users.filter((u) => !byId.has(u.id));
-    const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...missing.length ? this.store.boardReadiness(missing) : []];
+    const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...missing.length ? this.store.boardReadiness(missing, claimOpts) : []];
     const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
     const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { registryPath: this.registryPath ?? registryPath() });
     for (const r of readiness) {
@@ -38610,7 +38829,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * same reason: nothing to update is not a no-op success.
    */
   static BOARD_UPDATABLE_FIELDS = ["text", "priority", "file_keys", "objective", "measured_at_head", "blocked_by", "needs", "needs_reason"];
-  boardUpdate(id, patch) {
+  boardUpdate(id, patch, opts = {}) {
     const old = this.resolveRecordId(id, "board_update");
     if (old.type !== "todo")
       throw new Error(`board_update: '${id}' is a ${old.type}, not a task \u2014 board_update only edits board/queue items`);
@@ -38677,13 +38896,71 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       next.needs_set_at = this.now();
     const claimsCheck = this.assertClaimedPaths("board_update", next);
     try {
-      const updated = this.store.updateTodo(old.id, next, old.version !== void 0 ? { expected_version: old.version } : {});
+      const renewal = opts.session ? { session: opts.session, leaseMinutes: this.claimLeaseMinutes(), now: this.now() } : void 0;
+      const updated = this.store.updateTodo(old.id, next, old.version !== void 0 ? { expected_version: old.version } : {}, renewal);
       return claimsCheck.claims_check ? { ...updated, ...claimsCheck } : updated;
     } catch (err) {
       if (err instanceof ZodError2)
         throw this.renderValidationFailure(err, "todo", "board_update");
       throw err;
     }
+  }
+  /** config board_claims.lease_minutes: how long a claim lasts without renewal. */
+  claimLeaseMinutes() {
+    return this.config.board_claims.lease_minutes;
+  }
+  /** The clock and lease every claim read is judged against. */
+  claimReadOptions() {
+    return { now: Date.parse(this.now()), leaseMinutes: this.claimLeaseMinutes() };
+  }
+  /** A claim tool's receipt: the item's handle and its claim as read after the write. */
+  claimReceipt(record2, extra = {}) {
+    const r = record2;
+    const label = boardDisplayLabel(r.text, r.slug);
+    const opts = this.claimReadOptions();
+    const view = boardClaimView(r.claim, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+    return { id: r.id, ...r.slug ? { slug: r.slug } : {}, ...label ? { label } : {}, claim_state: view ?? { state: "none" }, ...extra };
+  }
+  static requireClaimText(tool, name, value) {
+    if (typeof value !== "string" || value.trim() === "")
+      throw new Error(`${tool}: ${name} is required and must be a non-empty string. Nothing was written.`);
+    return value.trim();
+  }
+  /**
+   * board_claim / board_reaffirm / board_release / board_takeover (decision
+   * board-task-claims-for-parallel-sessions-claim-generation-ren). Each
+   * resolves the item through the read ladder (a claim write is recoverable,
+   * so the forgiving forms are allowed) and makes its one compare-and-set
+   * write in the store, which decides under the write lock.
+   */
+  boardClaim(id, session, checkout) {
+    const s2 = _SterlingTools.requireClaimText("board_claim", "session", session);
+    const c = _SterlingTools.requireClaimText("board_claim", "checkout", checkout);
+    const item = this.resolveRecordId(id, "board_claim");
+    return this.claimReceipt(this.store.claimTodo(item.id, { session: s2, checkout: c, leaseMinutes: this.claimLeaseMinutes(), now: this.now() }));
+  }
+  boardReaffirm(id, session, generation) {
+    const s2 = _SterlingTools.requireClaimText("board_reaffirm", "session", session);
+    const item = this.resolveRecordId(id, "board_reaffirm");
+    return this.claimReceipt(this.store.reaffirmClaim(item.id, { session: s2, generation, now: this.now() }));
+  }
+  boardRelease(id, session, generation) {
+    const s2 = _SterlingTools.requireClaimText("board_release", "session", session);
+    const item = this.resolveRecordId(id, "board_release");
+    return this.claimReceipt(this.store.releaseClaim(item.id, { session: s2, generation, now: this.now() }));
+  }
+  boardTakeover(id, session, checkout, expected_holder, expected_generation) {
+    const s2 = _SterlingTools.requireClaimText("board_takeover", "session", session);
+    const c = _SterlingTools.requireClaimText("board_takeover", "checkout", checkout);
+    const holder = _SterlingTools.requireClaimText("board_takeover", "expected_holder", expected_holder);
+    const item = this.resolveRecordId(id, "board_takeover");
+    const before = item.claim;
+    const opts = this.claimReadOptions();
+    const wasState = boardClaimView(before, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES)?.state;
+    const record2 = this.store.takeoverClaim(item.id, { session: s2, checkout: c, expected_holder: holder, expected_generation, now: this.now() });
+    return this.claimReceipt(record2, {
+      notice: `taken over from session '${holder}' (generation ${expected_generation}${wasState === "held" ? ", which was still within its lease" : ""}); that session's later renew, release or close of this task is refused, and its running processes were not stopped`
+    });
   }
   /**
    * board_get(id) — the full, untruncated board/queue item (board e725979c):
@@ -38761,13 +39038,19 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * reads handoff_status 'unavailable:other_project'. Empty when the read was
    * partial, because a missing slug would then read as a closed blocker.
    */
-  static foreignDerived(read, page) {
+  static foreignDerived(read, page, claimOpts) {
     const out = /* @__PURE__ */ new Map();
-    if (read.truncated)
+    if (read.truncated) {
+      for (const row of page) {
+        const view = boardClaimView(row.claim, claimOpts.now ?? Date.now(), claimOpts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+        if (view)
+          out.set(String(row.id), { claim_state: view });
+      }
       return out;
+    }
     const holder = (slug) => read.slugHolders.get(slug);
-    const readiness = boardReadinessOf(page, read.items, holder);
-    const whole = boardReadinessOf(read.items, read.items, holder);
+    const readiness = boardReadinessOf(page, read.items, holder, claimOpts);
+    const whole = boardReadinessOf(read.items, read.items, holder, claimOpts);
     const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
     for (const r of readiness) {
       out.set(r.id, {
@@ -38832,7 +39115,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       notes.push(`cap reached \u2014 showing ${records.length} of ${ordered.length} matching items; page with cursor:"${page.next_cursor}"` + (filter.cursor === void 0 ? ` or offset:${page.offset + records.length}` : "") + `, or raise cap`);
     }
     const disclosures = _SterlingTools.foreignDisclosures(read, notes);
-    const derived = projection === "text" || projection === "full" ? _SterlingTools.foreignDerived(read, records) : /* @__PURE__ */ new Map();
+    const derived = projection === "text" || projection === "full" ? _SterlingTools.foreignDerived(read, records, this.claimReadOptions()) : /* @__PURE__ */ new Map();
     const projected = records.map((r) => {
       const base2 = projection === "text" ? textRowRecord(r) : projection === "headline" ? headlineRecord(r) : projection === "digest" ? digestRecord(r) : { ...r };
       return { ...base2, ...derived.get(String(r.id)), ...source };
@@ -38871,7 +39154,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     return {
       ...hit,
       ...label ? { label } : {},
-      ..._SterlingTools.foreignDerived(result.board, [hit]).get(String(hit.id)),
+      ..._SterlingTools.foreignDerived(result.board, [hit], this.claimReadOptions()).get(String(hit.id)),
       ...source,
       historical_ids: "not searched: the historical-id archive is read for this project only",
       ...disclosures,
@@ -40463,7 +40746,7 @@ function createSterlingServer(target, opts = {}) {
     guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
     toolWrappers.push("worker_policy");
   }
-  const SINGLE_WRITE_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_update", "board_edit"]);
+  const SINGLE_WRITE_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_update", "board_edit", "board_claim", "board_reaffirm", "board_release", "board_takeover"]);
   const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, SINGLE_WRITE_BOARD_TOOLS.has(name)) : e;
   const registerTool = server.registerTool.bind(server);
   server.registerTool = ((name, config3, handler) => registerTool(name, config3, ((...args2) => {
@@ -40671,7 +40954,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), claim_state on a claimed item (held, expired = check owner, or unreadable, with holder_session, checkout, generation and minutes_since_renewal; absent means nobody holds it), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
@@ -40710,11 +40993,47 @@ function createSterlingServer(target, opts = {}) {
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
       needs_reason: external_exports.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
+      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). It never sets or changes the claim").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
-  }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));
+  }, ({ id, projection, session, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch, session !== void 0 ? { session } : {}), projection)));
+  const CLAIM_LEASE = "config board_claims.lease_minutes (default 60)";
+  server.registerTool("board_claim", {
+    description: `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_update calls that pass your session, and through board_reaffirm; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_LADDER),
+      session: external_exports.string().describe("your session id"),
+      checkout: external_exports.string().describe("the checkout (worktree path or name) the work runs in")
+    })
+  }, ({ id, session, checkout }) => json(tools.boardClaim(id, session, checkout)));
+  server.registerTool("board_reaffirm", {
+    description: `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_LADDER),
+      session: external_exports.string().describe("your session id"),
+      generation: external_exports.number().int().positive().describe("the claim generation board_claim or board_takeover returned")
+    })
+  }, ({ id, session, generation }) => json(tools.boardReaffirm(id, session, generation)));
+  server.registerTool("board_release", {
+    description: "Give up your claim on a board task without closing it, so another session can claim it. Refused, with nothing written, when the item is no longer held by your session at that generation (the refusal says where the task moved). Returns {id, slug?, label?, claim_state} with claim_state none.",
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_LADDER),
+      session: external_exports.string().describe("your session id"),
+      generation: external_exports.number().int().positive().describe("the claim generation you hold")
+    })
+  }, ({ id, session, generation }) => json(tools.boardRelease(id, session, generation)));
+  server.registerTool("board_takeover", {
+    description: "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm or board_release is refused and told the task moved. Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_LADDER),
+      session: external_exports.string().describe("your session id"),
+      checkout: external_exports.string().describe("the checkout (worktree path or name) the work runs in"),
+      expected_holder: external_exports.string().describe("the holder_session you read on the claim"),
+      expected_generation: external_exports.number().int().positive().describe("the claim generation you read")
+    })
+  }, ({ id, session, checkout, expected_holder, expected_generation }) => json(tools.boardTakeover(id, session, checkout, expected_holder, expected_generation)));
   server.registerTool("board_get", {
-    description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
+    description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. A claimed item returns claim_state {state: held, expired (check owner) or unreadable, holder_session, checkout, generation, claimed_at, renewed_at, minutes_since_renewal, taken_over_from?}; absent means nobody holds it. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional()

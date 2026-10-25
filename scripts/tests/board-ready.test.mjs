@@ -556,3 +556,75 @@ test('renderBoardReadiness: a capped WAITING ON OTHERS list discloses the oldest
     p.cleanup();
   }
 });
+
+// Board task claims (decision board-task-claims-for-parallel-sessions-claim-generation-ren):
+// a claimed item is never READY; it is listed under IN PROGRESS with its holder,
+// checkout and age, and an expired claim is flagged 'check owner'.
+test('claims: claimed items leave READY for IN PROGRESS; an expired claim is flagged check owner', () => {
+  const p = project();
+  try {
+    const free = mk(p.store, { text: 'Free task' });
+    const mine = mk(p.store, { text: 'Held by this session' });
+    const theirs = mk(p.store, { text: 'Held by another session' });
+    const stale = mk(p.store, { text: 'Forgotten claim' });
+    const t0 = Date.parse('2026-10-25T09:00:00.000Z');
+    const iso = (m) => new Date(t0 + m * 60_000).toISOString();
+    p.store.claimTodo(mine.id, { session: 'me', checkout: 'main', now: iso(50) });
+    p.store.claimTodo(theirs.id, { session: 'other', checkout: 'wt-other', now: iso(40) });
+    p.store.claimTodo(stale.id, { session: 'gone', checkout: 'wt-gone', now: iso(0) });
+    const now = t0 + 70 * 60_000;
+    const readiness = p.store.boardReadiness(undefined, { now, leaseMinutes: 60 });
+    const g = lib.boardGroups(readiness);
+    assert.deepEqual(g.ready.map((r) => r.id), [free.id], 'only the unclaimed item is READY');
+    assert.deepEqual(new Set(g.inProgress.map((r) => r.id)), new Set([mine.id, theirs.id, stale.id]));
+
+    const text = lib.renderBoardReadiness({ readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, session: 'me', lease: { value: 60 } });
+    const lines = text.split('\n');
+    assert.ok(lines.includes('IN PROGRESS (3, claimed; not READY):'), text);
+    assert.ok(lines.includes(`- ${h('Held by this session', mine)} — session me (this session) in main, renewed 20m ago`), text);
+    assert.ok(lines.includes(`- ${h('Held by another session', theirs)} — session other in wt-other, renewed 30m ago`), text);
+    const gen = p.store.get(stale.id).claim.generation;
+    assert.ok(
+      lines.includes(`- ${h('Forgotten claim', stale)} — ⚠ check owner: session gone in wt-gone, no renewal for 70m (any session may take it over: board_takeover expected_holder gone, expected_generation ${gen})`),
+      text
+    );
+    assert.match(lines[0], /IN PROGRESS items are claimed by a session/);
+    const readyAt = lines.indexOf('READY (1):');
+    assert.ok(readyAt > 0 && lines[readyAt + 1] === `- ${h('Free task', free)}`, text);
+
+    // Only claims: the block still renders, and an unreadable lease is stated, never silent.
+    const onlyClaims = lib.renderBoardReadiness({ readiness: readiness.filter((r) => r.claim), live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, lease: { error: 'Expected number' } });
+    assert.match(onlyClaims, /board_claims\.lease_minutes unreadable: Expected number; judged at the 60-minute default/);
+    assert.deepEqual(lib.claimLease({ board_claims: { lease_minutes: 'x' } }).error !== undefined, true);
+    assert.deepEqual(lib.claimLease({}), { value: 60 });
+
+    // H20's ready line never offers a claimed item.
+    const notice = lib.boardReadyNotice(readiness, '', { availability: 'ok', count: 0, descriptions: [] }, { value: 5 });
+    assert.ok(notice.line.includes(h('Free task', free)) && !notice.line.includes('Held by') && !notice.line.includes('Forgotten'), notice.line);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H1 end to end: a claimed item is listed under IN PROGRESS, not READY, using the configured lease', () => {
+  const p = project({ board_claims: { lease_minutes: 5 } });
+  try {
+    const claimed = mk(p.store, { text: 'Claimed elsewhere' });
+    const free = mk(p.store, { text: 'Still free' });
+    p.store.claimTodo(claimed.id, { session: 'other-sess', checkout: 'wt-x', now: new Date(Date.now() - 10 * 60_000).toISOString() });
+    p.store.close();
+    const res = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+      input: JSON.stringify({ session_id: 'sess-claims', cwd: p.dir, hook_event_name: 'SessionStart', source: 'startup' }),
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PROJECT_DIR: p.dir },
+      timeout: 120_000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const ctx = JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(ctx.includes(`READY (1):\n- ${h('Still free', free)}`), ctx.slice(0, 3000));
+    assert.ok(ctx.includes('IN PROGRESS (1, claimed; not READY):'), ctx.slice(0, 3000));
+    assert.ok(ctx.includes(`- ${h('Claimed elsewhere', claimed)} — ⚠ check owner: session other-sess in wt-x, no renewal for 10m`), 'the 5-minute lease from config judged the 10-minute-old claim expired');
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+  }
+});

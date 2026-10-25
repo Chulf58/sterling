@@ -4362,7 +4362,7 @@ function validateRecord(input2) {
   }
   return entry.schema.parse(input2);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4774,7 +4774,7 @@ var init_records = __esm({
     ];
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
-    TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+    TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks", claim: "marks" };
     HANDOFF_MILESTONE_MAX = 80;
     receivedHandoffShape = external_exports.object({
       role: external_exports.literal("received"),
@@ -4795,6 +4795,20 @@ var init_records = __esm({
       milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
     });
     todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+    todoClaimSchema = external_exports.object({
+      holder_session: external_exports.string().min(1),
+      checkout: external_exports.string().min(1),
+      generation: external_exports.number().int().positive(),
+      claimed_at: external_exports.string().datetime(),
+      renewed_at: external_exports.string().datetime(),
+      taken_over_from: external_exports.object({
+        holder_session: external_exports.string().min(1),
+        checkout: external_exports.string().min(1),
+        generation: external_exports.number().int().positive(),
+        renewed_at: external_exports.string().datetime(),
+        at: external_exports.string().datetime()
+      }).strict().optional()
+    }).strict();
     todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
     HANDOFFS_DIR_REL = ".sterling/handoffs";
     handoffClosureSchema = external_exports.object({
@@ -4905,7 +4919,9 @@ var init_records = __esm({
       // which any unrelated edit resets.
       needs_set_at: external_exports.string().datetime().optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
-      handoff: todoHandoffSchema.optional()
+      handoff: todoHandoffSchema.optional(),
+      // Which session works on this task now (see todoClaimSchema). User items only.
+      claim: todoClaimSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -5453,6 +5469,13 @@ var init_config = __esm({
       // 677f1639/299d853a stand). Absent → shipped default 5.
       delegation: external_exports.object({
         max_concurrent: external_exports.number().int().positive().default(5)
+      }).default({}),
+      // Board task claims (decision
+      // board-task-claims-for-parallel-sessions-claim-generation-ren): a claim not
+      // renewed by task work or board_reaffirm for lease_minutes shows as 'check
+      // owner', is kept out of READY and may be taken over by any session.
+      board_claims: external_exports.object({
+        lease_minutes: external_exports.number().int().positive().default(60)
       }).default({}),
       // §7.2 model + effort defaults (tunable config, not architecture).
       // Hard rule encoded here as data: no xhigh/max for subagents; max never
@@ -7697,8 +7720,8 @@ var init_mounted = __esm({
       }
       /** Board readiness is project-local like the board itself, so the project
        *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
-      boardReadiness(items) {
-        return this.project.boardReadiness(items);
+      boardReadiness(...args) {
+        return this.project.boardReadiness(...args);
       }
       storeFor(scope) {
         if (scope === "project")
@@ -8020,6 +8043,22 @@ var init_mounted = __esm({
        *  routes the same way as supersede/remove for consistency rather than assuming. */
       updateTodo(...args) {
         return this.mutatingStoreHolding("updateTodo", args[0]).updateTodo(...args);
+      }
+      // Board task claims: routed to the store holding the item, like updateTodo.
+      claimTodo(...args) {
+        return this.mutatingStoreHolding("claimTodo", args[0]).claimTodo(...args);
+      }
+      reaffirmClaim(...args) {
+        return this.mutatingStoreHolding("reaffirmClaim", args[0]).reaffirmClaim(...args);
+      }
+      releaseClaim(...args) {
+        return this.mutatingStoreHolding("releaseClaim", args[0]).releaseClaim(...args);
+      }
+      takeoverClaim(...args) {
+        return this.mutatingStoreHolding("takeoverClaim", args[0]).takeoverClaim(...args);
+      }
+      renewClaimIfDue(...args) {
+        return this.mutatingStoreHolding("renewClaimIfDue", args[0]).renewClaimIfDue(...args);
       }
       /** Typed link edge, added on the source record in its holding store. The TARGET
        *  is resolved across ALL mounted stores (cross-store get, like get()) before
@@ -9465,7 +9504,30 @@ function deepReplaceString(value, from, to) {
   }
   return value;
 }
-function boardReadinessOf(targets, live, openBlocker) {
+function boardClaimView(claim, now, leaseMinutes) {
+  if (claim === void 0 || claim === null)
+    return void 0;
+  const c = claim;
+  const renewed = typeof c.renewed_at === "string" ? Date.parse(c.renewed_at) : NaN;
+  if (typeof c.holder_session !== "string" || typeof c.checkout !== "string" || typeof c.generation !== "number" || Number.isNaN(renewed)) {
+    return { state: "unreadable" };
+  }
+  const minutes = Math.max(0, Math.floor((now - renewed) / 6e4));
+  const from = c.taken_over_from;
+  return {
+    state: now - renewed >= leaseMinutes * 6e4 ? "expired" : "held",
+    holder_session: c.holder_session,
+    checkout: c.checkout,
+    generation: c.generation,
+    ...typeof c.claimed_at === "string" ? { claimed_at: c.claimed_at } : {},
+    renewed_at: c.renewed_at,
+    minutes_since_renewal: minutes,
+    ...from && typeof from.holder_session === "string" ? { taken_over_from: { holder_session: from.holder_session, checkout: String(from.checkout), generation: Number(from.generation), at: String(from.at) } } : {}
+  };
+}
+function boardReadinessOf(targets, live, openBlocker, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const lease = opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES;
   const dependents = /* @__PURE__ */ new Map();
   for (const t of live) {
     for (const slug of new Set(t.blocked_by ?? [])) {
@@ -9502,9 +9564,13 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {},
+      ...claimField(boardClaimView(t.claim, now, lease))
     };
   });
+}
+function claimField(view) {
+  return view ? { claim: view } : {};
 }
 function boardWriteOverlaps(ready) {
   const marks = /* @__PURE__ */ new Map();
@@ -9708,7 +9774,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -9844,6 +9910,9 @@ var init_dist2 = __esm({
         this.supported = supported;
         this.db_path = dbPath;
       }
+    };
+    DEFAULT_CLAIM_LEASE_MINUTES = 60;
+    ClaimRenewalNotDue = class extends Error {
     };
     DAY_MS = 864e5;
     PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
@@ -11118,7 +11187,7 @@ var init_dist2 = __esm({
        * `unblocks` lists live user items whose blocked_by names the item. Read
        * only; the stored blocked_by is never rewritten. No cycle detection.
        */
-      boardReadiness(items) {
+      boardReadiness(items, opts = {}) {
         return this.readTx(() => {
           const total = this.count({ types: ["todo"], source: "user" });
           const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
@@ -11127,7 +11196,7 @@ var init_dist2 = __esm({
             if (t.slug)
               bySlug.set(t.slug, t);
           const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-          return boardReadinessOf(items ?? live, live, openBlocker);
+          return boardReadinessOf(items ?? live, live, openBlocker, opts);
         });
       }
       /**
@@ -11473,7 +11542,7 @@ var init_dist2 = __esm({
        * and the UPDATE is guarded on that status inside the transaction to close the
        * same concurrent-supersede race.
        */
-      updateTodo(id, newInput, opts = {}) {
+      updateTodo(id, newInput, opts = {}, claimRenewal) {
         const old = this.get(id);
         if (!old)
           throw new Error(`updateTodo: no record '${id}'`);
@@ -11483,7 +11552,155 @@ var init_dist2 = __esm({
         if (typeof candidate.type === "string" && candidate.type !== "todo") {
           throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
         }
-        return this.applyInPlace("updateTodo", id, () => candidate, opts);
+        return this.applyInPlace("updateTodo", id, (current) => {
+          const out = { ...candidate };
+          const stored = current.claim;
+          if (stored === void 0) {
+            delete out.claim;
+            return out;
+          }
+          out.claim = claimRenewal && _SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? (/* @__PURE__ */ new Date()).toISOString() } : stored;
+          return out;
+        }, opts);
+      }
+      /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
+      static claimRenewalDue(claim, r) {
+        if (claim.holder_session !== r.session)
+          return false;
+        const now = Date.parse(r.now ?? (/* @__PURE__ */ new Date()).toISOString());
+        return now - Date.parse(claim.renewed_at) >= r.leaseMinutes * 6e4 / 4;
+      }
+      /**
+       * The one claim write (decision
+       * board-task-claims-for-parallel-sessions-claim-generation-ren): `decide`
+       * reads the claim stored under the write lock and returns the next claim
+       * (undefined removes it) or throws a refusal, so two sessions racing for one
+       * item serialize and exactly one wins. Only source:'user' board tasks take a
+       * claim. The item's updated_at is kept (a claim is not a content edit, so the
+       * board order does not move); the activity row carries the real time.
+       */
+      claimWrite(op, id, now, decide) {
+        return this.applyInPlace(op, id, (current) => {
+          const cur = current;
+          if (cur.type !== "todo")
+            throw new Error(`${op}: '${id}' is a ${String(cur.type)}, not a board task. Nothing was written.`);
+          if (cur.source !== "user")
+            throw new Error(`${op}: '${id}' is a maintenance-queue item; only source:'user' board tasks are claimed. Nothing was written.`);
+          const next = decide(cur.claim, cur);
+          const out = { ...cur };
+          if (next)
+            out.claim = next;
+          else
+            delete out.claim;
+          return out;
+        }, {}, { activityAt: now });
+      }
+      /** The refusal an old holder gets: where the task is now, so it can stop or coordinate. */
+      static claimMoved(op, session, generation, claim) {
+        if (!claim) {
+          return new Error(`${op}: the task has no claim now (it was released, or never claimed). Nothing was written; claim it with board_claim if you still work on it.`);
+        }
+        if (claim.holder_session !== session) {
+          const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : "";
+          return new Error(`${op}: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. Nothing was written; stop work on it, or coordinate with that session.`);
+        }
+        return new Error(`${op}: stale claim generation ${generation} \u2014 your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
+      }
+      /** The next claim generation: above both the previous claim's and the record's version, so it never repeats on one item. */
+      static nextGeneration(claim, current) {
+        const version = typeof current.version === "number" ? current.version : 0;
+        return Math.max(claim?.generation ?? 0, version) + 1;
+      }
+      /**
+       * board_claim: take an unclaimed task, or refresh one this session already
+       * holds (same generation, checkout updated). A claim by another session is
+       * refused whether or not it expired: an expired one is taken over only
+       * through takeoverClaim, which names the holder it displaces.
+       */
+      claimTodo(id, req) {
+        const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        return this.claimWrite("board_claim", id, now, (claim, current) => {
+          if (claim && claim.holder_session !== req.session) {
+            const view = boardClaimView(claim, Date.parse(now), req.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+            const age = `last renewed ${view?.minutes_since_renewal ?? "?"} min ago`;
+            throw new Error(view?.state === "expired" ? `board_claim: session '${claim.holder_session}' in checkout '${claim.checkout}' still holds this task at claim generation ${claim.generation}, ${age}, so it shows as check owner. Nothing was written; take it over with board_takeover naming expected_holder '${claim.holder_session}' and expected_generation ${claim.generation}.` : `board_claim: session '${claim.holder_session}' in checkout '${claim.checkout}' holds this task at claim generation ${claim.generation}, ${age}. Nothing was written; pick another task, or take this one over with board_takeover naming that holder and generation.`);
+          }
+          if (claim)
+            return { ...claim, checkout: req.checkout, renewed_at: now };
+          return { holder_session: req.session, checkout: req.checkout, generation: _SterlingStore.nextGeneration(void 0, current), claimed_at: now, renewed_at: now };
+        });
+      }
+      /** board_reaffirm: the holder renews its claim; refused for any other session or generation. */
+      reaffirmClaim(id, req) {
+        const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        return this.claimWrite("board_reaffirm", id, now, (claim) => {
+          if (!claim || claim.holder_session !== req.session || claim.generation !== req.generation)
+            throw _SterlingStore.claimMoved("board_reaffirm", req.session, req.generation, claim);
+          return { ...claim, renewed_at: now };
+        });
+      }
+      /** board_release: the holder gives the task up; the claim is removed. */
+      releaseClaim(id, req) {
+        const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        return this.claimWrite("board_release", id, now, (claim) => {
+          if (!claim || claim.holder_session !== req.session || claim.generation !== req.generation)
+            throw _SterlingStore.claimMoved("board_release", req.session, req.generation, claim);
+          return void 0;
+        });
+      }
+      /**
+       * board_takeover: any session takes a claimed task, naming the holder and
+       * generation it read (compare-and-set: a claim that changed since is
+       * refused, naming what holds it now). The new claim gets a new generation
+       * and records the displaced holder; the old holder's later renew, release
+       * or close is refused by generation. Allowed on a held claim too (the
+       * caller sees its state in board_get first); nothing stops the old
+       * holder's running processes.
+       */
+      takeoverClaim(id, req) {
+        const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        return this.claimWrite("board_takeover", id, now, (claim, current) => {
+          if (!claim)
+            throw new Error(`board_takeover: the task has no claim to take over. Nothing was written; claim it with board_claim.`);
+          if (claim.holder_session !== req.expected_holder || claim.generation !== req.expected_generation) {
+            throw new Error(`board_takeover: the claim changed since you read it \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it at generation ${claim.generation}, not '${req.expected_holder}' at generation ${req.expected_generation}. Nothing was written; re-read the item with board_get.`);
+          }
+          return {
+            holder_session: req.session,
+            checkout: req.checkout,
+            generation: _SterlingStore.nextGeneration(claim, current),
+            claimed_at: now,
+            renewed_at: now,
+            taken_over_from: { holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation, renewed_at: claim.renewed_at, at: now }
+          };
+        });
+      }
+      /**
+       * Renewal by task work: bump renewed_at when `session` holds the claim and
+       * the last renewal is older than a quarter of the lease, else write nothing.
+       * Every write archives a version, so renewing on every event would grow the
+       * history by one row per event; at most four renewals per lease keep a
+       * worked claim from ever expiring. Returns whether it wrote. board_update
+       * folds the same rule into its own write (updateTodo's claimRenewal); the
+       * dispatch and commit callers arrive in a later slice.
+       */
+      renewClaimIfDue(id, r) {
+        const read = this.get(id);
+        if (!read || read.type !== "todo" || !read.claim || !_SterlingStore.claimRenewalDue(read.claim, r))
+          return { renewed: false };
+        const now = r.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        try {
+          this.claimWrite("renew", id, now, (claim) => {
+            if (!claim || !_SterlingStore.claimRenewalDue(claim, { ...r, now }))
+              throw new ClaimRenewalNotDue();
+            return { ...claim, renewed_at: now };
+          });
+        } catch (e) {
+          if (e instanceof ClaimRenewalNotDue)
+            return { renewed: false };
+          throw e;
+        }
+        return { renewed: true };
       }
       /**
        * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
@@ -16803,8 +17020,11 @@ init_dist();
 var BOARD_GROUP_CAP = 8;
 var DECISION = "decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start";
 function boardGroups(readiness) {
-  const sorted = [...readiness].sort(compareBoardReadiness);
+  const all = [...readiness].sort(compareBoardReadiness);
+  const inProgress = all.filter((r) => r.claim && r.state !== "delegated");
+  const sorted = all.filter((r) => !r.claim || r.state === "delegated");
   return {
+    inProgress,
     ready: sorted.filter((r) => r.state === "ready"),
     research: sorted.filter((r) => r.state === "research"),
     waiting: sorted.filter((r) => r.state === "waiting"),
@@ -16814,6 +17034,24 @@ function boardGroups(readiness) {
     blocked: sorted.filter((r) => r.state === "blocked").length,
     delegated: sorted.filter((r) => r.state === "delegated")
   };
+}
+function claimLease(config2) {
+  const parsed = configSchema.shape.board_claims.safeParse(config2?.board_claims ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join("; ") };
+  return { value: parsed.data.lease_minutes };
+}
+function claimLeaseMinutes(lease) {
+  return lease?.error ? DEFAULT_CLAIM_LEASE_MINUTES : lease.value;
+}
+function claimText(claim, session, now) {
+  if (claim.state === "unreadable") return "claim unreadable by this Sterling (read it with board_get)";
+  const t = Date.parse(claim.renewed_at);
+  const mins = Number.isNaN(t) ? "?" : String(Math.max(0, Math.floor((now - t) / 6e4)));
+  const who = `session ${claim.holder_session}${claim.holder_session === session ? " (this session)" : ""} in ${claim.checkout}`;
+  if (claim.state === "expired") {
+    return `\u26A0 check owner: ${who}, no renewal for ${mins}m (any session may take it over: board_takeover expected_holder ${claim.holder_session}, expected_generation ${claim.generation})`;
+  }
+  return `${who}, renewed ${mins}m ago`;
 }
 function laneCeiling(config2) {
   const parsed = configSchema.shape.delegation.safeParse(config2?.delegation ?? {});
@@ -16852,12 +17090,12 @@ function oldestOmittedWait(omitted, now) {
   const unknown2 = stamped.length < omitted.length ? ` (${omitted.length - stamped.length} since unknown)` : "";
   return `, oldest ${boardWaitAge(oldest, now)}${unknown2}`;
 }
-function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus: handoffStatus2, showLaneCount = true, now = Date.now() }) {
+function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus: handoffStatus2, showLaneCount = true, now = Date.now(), session, lease }) {
   const g = boardGroups(readiness);
-  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return "";
+  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length && !g.inProgress.length) return "";
   const marks = boardWriteOverlaps(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : "";
-  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill); WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed. Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
+  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill); WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed. Items marked \u26A0 share a write path: their implementation lanes run one at a time.` + (g.inProgress.length ? ` IN PROGRESS items are claimed by a session (board_claim) and are never started here; one marked check owner has had no renewal for the claim lease${lease?.error ? ` (board_claims.lease_minutes unreadable: ${lease.error}; judged at the ${DEFAULT_CLAIM_LEASE_MINUTES}-minute default)` : ""}, so any session may take it over with board_takeover.` : "");
   const lines = [
     header,
     ...groupLines("READY ({n})", g.ready, cap, (r) => {
@@ -16874,7 +17112,8 @@ function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP,
       (r) => `- ${r.name} \u2014 ${r.needs_reason ?? "no reason recorded"} (${boardWaitAge(r.needs_set_at, now)})${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(", ")})` : ""}`,
       (omitted) => oldestOmittedWait(omitted, now)
     ),
-    ...groupLines("DELEGATED TO OTHER PROJECTS ({n}, not run here)", g.delegated, cap, (r) => `- ${r.name} \u2014 ${delegatedStatus(r, handoffStatus2)}`)
+    ...groupLines("DELEGATED TO OTHER PROJECTS ({n}, not run here)", g.delegated, cap, (r) => `- ${r.name} \u2014 ${delegatedStatus(r, handoffStatus2)}`),
+    ...groupLines("IN PROGRESS ({n}, claimed; not READY)", g.inProgress, cap, (r) => `- ${r.name} \u2014 ${claimText(r.claim, session, now)}`)
   ];
   return lines.join("\n");
 }
@@ -17367,7 +17606,7 @@ try {
   queueReasonEntries = m.queueReasonEntries;
   queueReasons = m.queueReasons;
   try {
-    boardReadiness = store.boardReadiness();
+    boardReadiness = store.boardReadiness(void 0, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
   } catch (e) {
     boardReadinessError = e && e.message || String(e);
   }
@@ -17376,7 +17615,7 @@ try {
 }
 var delegated = boardReadiness.filter((r) => r.state === "delegated");
 var handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff, created_at: r.created_at })), { budgetMs: 500, registryPath: registryPath() }) : void 0;
-var boardReadinessText = boardReadinessError ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.` : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus });
+var boardReadinessText = boardReadinessError ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.` : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus, session: input.session_id, lease: claimLease(config) });
 var boardReadinessContext = boardReadinessText ? `
 
 ${boardReadinessText}` : "";

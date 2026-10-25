@@ -24,6 +24,7 @@ import {
   parseStoreFence,
   STORE_FENCE_KEY,
   type BoardNeeds,
+  type TodoClaim,
   type DurableRecord,
   type Lifecycle,
   type Freshness,
@@ -628,6 +629,56 @@ export interface BoardItemReadiness {
   handoff?: SentHandoff;
   /** a 'delegated' item's created_at, for resolveSentHandoffs to locate its receiver as of then */
   created_at?: string;
+  /** the item's claim as read now; absent when nobody holds it (decision board-task-claims-for-parallel-sessions-claim-generation-ren) */
+  claim?: BoardClaimView;
+}
+
+/** The lease a claim has without renewal before it shows as 'check owner' (config board_claims.lease_minutes). */
+export const DEFAULT_CLAIM_LEASE_MINUTES = 60;
+
+/**
+ * A claim as read at one moment: 'held' while it was renewed within the lease,
+ * 'expired' after ('check owner': kept out of READY, any session may take it
+ * over), 'unreadable' when the stored claim lacks a field this build reads (a
+ * newer Sterling's row read through target_project). Expired never means the
+ * holder is dead; it means nobody renewed the claim.
+ */
+export type BoardClaimState = 'held' | 'expired' | 'unreadable';
+
+export interface BoardClaimView {
+  state: BoardClaimState;
+  holder_session?: string;
+  checkout?: string;
+  generation?: number;
+  claimed_at?: string;
+  renewed_at?: string;
+  minutes_since_renewal?: number;
+  /** the holder a takeover displaced */
+  taken_over_from?: { holder_session: string; checkout: string; generation: number; at: string };
+}
+
+/** A stored claim judged at `now` (epoch ms) against `leaseMinutes`; undefined when the item has no claim. Pure. */
+export function boardClaimView(claim: unknown, now: number, leaseMinutes: number): BoardClaimView | undefined {
+  if (claim === undefined || claim === null) return undefined;
+  const c = claim as Record<string, unknown>;
+  const renewed = typeof c.renewed_at === 'string' ? Date.parse(c.renewed_at) : NaN;
+  if (typeof c.holder_session !== 'string' || typeof c.checkout !== 'string' || typeof c.generation !== 'number' || Number.isNaN(renewed)) {
+    return { state: 'unreadable' };
+  }
+  const minutes = Math.max(0, Math.floor((now - renewed) / 60_000));
+  const from = c.taken_over_from as Record<string, unknown> | undefined;
+  return {
+    state: now - renewed >= leaseMinutes * 60_000 ? 'expired' : 'held',
+    holder_session: c.holder_session,
+    checkout: c.checkout,
+    generation: c.generation,
+    ...(typeof c.claimed_at === 'string' ? { claimed_at: c.claimed_at } : {}),
+    renewed_at: c.renewed_at as string,
+    minutes_since_renewal: minutes,
+    ...(from && typeof from.holder_session === 'string'
+      ? { taken_over_from: { holder_session: from.holder_session, checkout: String(from.checkout), generation: Number(from.generation), at: String(from.at) } }
+      : {}),
+  };
 }
 
 /** The board-item fields boardReadinessOf reads; unknown keys are ignored. */
@@ -647,6 +698,23 @@ export interface BoardReadinessInput {
   handoff?: unknown;
   /** the record's creation time; kept on a delegated item so its receiver is located as of then (GitHub issue #119) */
   created_at?: string;
+  claim?: unknown;
+}
+
+/** A renewal by task work: the session doing it, the lease in minutes, and the time (ISO; now when absent). */
+export interface ClaimRenewal {
+  session: string;
+  leaseMinutes: number;
+  now?: string;
+}
+
+/** Raised inside a renewal's write when, under the lock, the renewal is no longer due; the write rolls back. */
+class ClaimRenewalNotDue extends Error {}
+
+/** When readiness judges claims: `now` in epoch ms and the lease in minutes. */
+export interface BoardReadinessOptions {
+  now?: number;
+  leaseMinutes?: number;
 }
 
 /**
@@ -659,8 +727,11 @@ export interface BoardReadinessInput {
 export function boardReadinessOf(
   targets: readonly BoardReadinessInput[],
   live: readonly BoardReadinessInput[],
-  openBlocker: (slug: string) => { id: string; text?: unknown; slug?: unknown } | undefined
+  openBlocker: (slug: string) => { id: string; text?: unknown; slug?: unknown } | undefined,
+  opts: BoardReadinessOptions = {}
 ): BoardItemReadiness[] {
+  const now = opts.now ?? Date.now();
+  const lease = opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES;
   const dependents = new Map<string, BoardReadinessInput[]>();
   for (const t of live) {
     for (const slug of new Set(t.blocked_by ?? [])) {
@@ -711,8 +782,13 @@ export function boardReadinessOf(
         unblocks,
         state,
         ...(sent ? { handoff: sent, ...(typeof t.created_at === 'string' ? { created_at: t.created_at } : {}) } : {}),
+        ...claimField(boardClaimView(t.claim, now, lease)),
       };
     });
+}
+
+function claimField(view: BoardClaimView | undefined): { claim?: BoardClaimView } {
+  return view ? { claim: view } : {};
 }
 
 /**
@@ -993,6 +1069,12 @@ export type ToolStore = Pick<
   // (stable-identity S3) resolve dead ids through this index.
   | 'recordAliases'
   | 'updateTodo'
+  // Board task claims (decision board-task-claims-for-parallel-sessions-claim-generation-ren).
+  | 'claimTodo'
+  | 'reaffirmClaim'
+  | 'releaseClaim'
+  | 'takeoverClaim'
+  | 'renewClaimIfDue'
   | 'retireInFavorOf'
   | 'remove'
   // board_remove/maintenance_remove distinguish 'already removed' from 'never
@@ -3352,7 +3434,7 @@ export class SterlingStore {
    * `unblocks` lists live user items whose blocked_by names the item. Read
    * only; the stored blocked_by is never rewritten. No cycle detection.
    */
-  boardReadiness(items?: readonly DurableRecord[]): BoardItemReadiness[] {
+  boardReadiness(items?: readonly DurableRecord[], opts: BoardReadinessOptions = {}): BoardItemReadiness[] {
     return this.readTx(() => {
       const total = this.count({ types: ['todo'], source: 'user' });
       const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as BoardReadinessInput[];
@@ -3363,7 +3445,7 @@ export class SterlingStore {
       // to recordsBySlug so the definition is unchanged.
       const openBlocker = (slug: string): BoardReadinessInput | undefined =>
         bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as BoardReadinessInput | undefined);
-      return boardReadinessOf((items ?? live) as unknown as BoardReadinessInput[], live, openBlocker);
+      return boardReadinessOf((items ?? live) as unknown as BoardReadinessInput[], live, openBlocker, opts);
     });
   }
 
@@ -3813,7 +3895,7 @@ export class SterlingStore {
    * and the UPDATE is guarded on that status inside the transaction to close the
    * same concurrent-supersede race.
    */
-  updateTodo(id: string, newInput: unknown, opts: RecordWriteOptions = {}): DurableRecord {
+  updateTodo(id: string, newInput: unknown, opts: RecordWriteOptions = {}, claimRenewal?: ClaimRenewal): DurableRecord {
     const old = this.get(id);
     if (!old) throw new Error(`updateTodo: no record '${id}'`);
     if (old.type !== 'todo') throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo — board_update only mutates todos`);
@@ -3834,7 +3916,183 @@ export class SterlingStore {
     // through board_get instead). `slug` is not in BOARD_UPDATABLE_FIELDS, so
     // this method never mints, re-mints or clears one: it persists whatever
     // slug the caller's merged candidate already carried.
-    return this.applyInPlace('updateTodo', id, () => candidate, opts);
+    //
+    // THE CLAIM IS NOT THE CALLER'S (decision
+    // board-task-claims-for-parallel-sessions-claim-generation-ren): whatever
+    // claim the merged candidate carries, the stored one is carried forward,
+    // read under the write lock, so an edit merged from an older read can
+    // neither set, drop nor revert a claim. Only the claim methods below change
+    // it. A claimRenewal from the holder bumps renewed_at inside this same
+    // write when the last renewal is older than a quarter of the lease.
+    return this.applyInPlace(
+      'updateTodo',
+      id,
+      (current) => {
+        const out = { ...candidate };
+        const stored = (current as unknown as { claim?: TodoClaim }).claim;
+        if (stored === undefined) {
+          delete out.claim;
+          return out;
+        }
+        out.claim = claimRenewal && SterlingStore.claimRenewalDue(stored, claimRenewal) ? { ...stored, renewed_at: claimRenewal.now ?? new Date().toISOString() } : stored;
+        return out;
+      },
+      opts
+    );
+  }
+
+  /** True when `r.session` holds `claim` and its last renewal is older than a quarter of the lease. */
+  private static claimRenewalDue(claim: TodoClaim, r: ClaimRenewal): boolean {
+    if (claim.holder_session !== r.session) return false;
+    const now = Date.parse(r.now ?? new Date().toISOString());
+    return now - Date.parse(claim.renewed_at) >= (r.leaseMinutes * 60_000) / 4;
+  }
+
+  /**
+   * The one claim write (decision
+   * board-task-claims-for-parallel-sessions-claim-generation-ren): `decide`
+   * reads the claim stored under the write lock and returns the next claim
+   * (undefined removes it) or throws a refusal, so two sessions racing for one
+   * item serialize and exactly one wins. Only source:'user' board tasks take a
+   * claim. The item's updated_at is kept (a claim is not a content edit, so the
+   * board order does not move); the activity row carries the real time.
+   */
+  private claimWrite(op: string, id: string, now: string, decide: (claim: TodoClaim | undefined, current: Record<string, unknown>) => TodoClaim | undefined): DurableRecord {
+    return this.applyInPlace(
+      op,
+      id,
+      (current) => {
+        const cur = current as unknown as Record<string, unknown>;
+        if (cur.type !== 'todo') throw new Error(`${op}: '${id}' is a ${String(cur.type)}, not a board task. Nothing was written.`);
+        if (cur.source !== 'user') throw new Error(`${op}: '${id}' is a maintenance-queue item; only source:'user' board tasks are claimed. Nothing was written.`);
+        const next = decide(cur.claim as TodoClaim | undefined, cur);
+        const out = { ...cur };
+        if (next) out.claim = next;
+        else delete out.claim;
+        return out;
+      },
+      {},
+      { activityAt: now }
+    );
+  }
+
+  /** The refusal an old holder gets: where the task is now, so it can stop or coordinate. */
+  private static claimMoved(op: string, session: string, generation: number, claim: TodoClaim | undefined): Error {
+    if (!claim) {
+      return new Error(`${op}: the task has no claim now (it was released, or never claimed). Nothing was written; claim it with board_claim if you still work on it.`);
+    }
+    if (claim.holder_session !== session) {
+      const fromYou = claim.taken_over_from?.holder_session === session ? `, taken over from you at ${claim.taken_over_from.at}` : '';
+      return new Error(
+        `${op}: the task moved — session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}${fromYou}. ` +
+          `Nothing was written; stop work on it, or coordinate with that session.`
+      );
+    }
+    return new Error(`${op}: stale claim generation ${generation} — your claim is at generation ${claim.generation}. Nothing was written; re-read the item with board_get.`);
+  }
+
+  /** The next claim generation: above both the previous claim's and the record's version, so it never repeats on one item. */
+  private static nextGeneration(claim: TodoClaim | undefined, current: Record<string, unknown>): number {
+    const version = typeof current.version === 'number' ? current.version : 0;
+    return Math.max(claim?.generation ?? 0, version) + 1;
+  }
+
+  /**
+   * board_claim: take an unclaimed task, or refresh one this session already
+   * holds (same generation, checkout updated). A claim by another session is
+   * refused whether or not it expired: an expired one is taken over only
+   * through takeoverClaim, which names the holder it displaces.
+   */
+  claimTodo(id: string, req: { session: string; checkout: string; leaseMinutes?: number; now?: string }): DurableRecord {
+    const now = req.now ?? new Date().toISOString();
+    return this.claimWrite('board_claim', id, now, (claim, current) => {
+      if (claim && claim.holder_session !== req.session) {
+        const view = boardClaimView(claim, Date.parse(now), req.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+        const age = `last renewed ${view?.minutes_since_renewal ?? '?'} min ago`;
+        throw new Error(
+          view?.state === 'expired'
+            ? `board_claim: session '${claim.holder_session}' in checkout '${claim.checkout}' still holds this task at claim generation ${claim.generation}, ${age}, so it shows as check owner. ` +
+                `Nothing was written; take it over with board_takeover naming expected_holder '${claim.holder_session}' and expected_generation ${claim.generation}.`
+            : `board_claim: session '${claim.holder_session}' in checkout '${claim.checkout}' holds this task at claim generation ${claim.generation}, ${age}. ` +
+                `Nothing was written; pick another task, or take this one over with board_takeover naming that holder and generation.`
+        );
+      }
+      if (claim) return { ...claim, checkout: req.checkout, renewed_at: now };
+      return { holder_session: req.session, checkout: req.checkout, generation: SterlingStore.nextGeneration(undefined, current), claimed_at: now, renewed_at: now };
+    });
+  }
+
+  /** board_reaffirm: the holder renews its claim; refused for any other session or generation. */
+  reaffirmClaim(id: string, req: { session: string; generation: number; now?: string }): DurableRecord {
+    const now = req.now ?? new Date().toISOString();
+    return this.claimWrite('board_reaffirm', id, now, (claim) => {
+      if (!claim || claim.holder_session !== req.session || claim.generation !== req.generation) throw SterlingStore.claimMoved('board_reaffirm', req.session, req.generation, claim);
+      return { ...claim, renewed_at: now };
+    });
+  }
+
+  /** board_release: the holder gives the task up; the claim is removed. */
+  releaseClaim(id: string, req: { session: string; generation: number; now?: string }): DurableRecord {
+    const now = req.now ?? new Date().toISOString();
+    return this.claimWrite('board_release', id, now, (claim) => {
+      if (!claim || claim.holder_session !== req.session || claim.generation !== req.generation) throw SterlingStore.claimMoved('board_release', req.session, req.generation, claim);
+      return undefined;
+    });
+  }
+
+  /**
+   * board_takeover: any session takes a claimed task, naming the holder and
+   * generation it read (compare-and-set: a claim that changed since is
+   * refused, naming what holds it now). The new claim gets a new generation
+   * and records the displaced holder; the old holder's later renew, release
+   * or close is refused by generation. Allowed on a held claim too (the
+   * caller sees its state in board_get first); nothing stops the old
+   * holder's running processes.
+   */
+  takeoverClaim(id: string, req: { session: string; checkout: string; expected_holder: string; expected_generation: number; now?: string }): DurableRecord {
+    const now = req.now ?? new Date().toISOString();
+    return this.claimWrite('board_takeover', id, now, (claim, current) => {
+      if (!claim) throw new Error(`board_takeover: the task has no claim to take over. Nothing was written; claim it with board_claim.`);
+      if (claim.holder_session !== req.expected_holder || claim.generation !== req.expected_generation) {
+        throw new Error(
+          `board_takeover: the claim changed since you read it — session '${claim.holder_session}' in checkout '${claim.checkout}' holds it at generation ${claim.generation}, ` +
+            `not '${req.expected_holder}' at generation ${req.expected_generation}. Nothing was written; re-read the item with board_get.`
+        );
+      }
+      return {
+        holder_session: req.session,
+        checkout: req.checkout,
+        generation: SterlingStore.nextGeneration(claim, current),
+        claimed_at: now,
+        renewed_at: now,
+        taken_over_from: { holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation, renewed_at: claim.renewed_at, at: now },
+      };
+    });
+  }
+
+  /**
+   * Renewal by task work: bump renewed_at when `session` holds the claim and
+   * the last renewal is older than a quarter of the lease, else write nothing.
+   * Every write archives a version, so renewing on every event would grow the
+   * history by one row per event; at most four renewals per lease keep a
+   * worked claim from ever expiring. Returns whether it wrote. board_update
+   * folds the same rule into its own write (updateTodo's claimRenewal); the
+   * dispatch and commit callers arrive in a later slice.
+   */
+  renewClaimIfDue(id: string, r: ClaimRenewal): { renewed: boolean } {
+    const read = this.get(id) as unknown as { type?: string; claim?: TodoClaim } | undefined;
+    if (!read || read.type !== 'todo' || !read.claim || !SterlingStore.claimRenewalDue(read.claim, r)) return { renewed: false };
+    const now = r.now ?? new Date().toISOString();
+    try {
+      this.claimWrite('renew', id, now, (claim) => {
+        if (!claim || !SterlingStore.claimRenewalDue(claim, { ...r, now })) throw new ClaimRenewalNotDue();
+        return { ...claim, renewed_at: now };
+      });
+    } catch (e) {
+      if (e instanceof ClaimRenewalNotDue) return { renewed: false };
+      throw e;
+    }
+    return { renewed: true };
   }
 
   /**

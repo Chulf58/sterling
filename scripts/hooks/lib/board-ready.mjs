@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { boardWaitAge as waitAge, boardWriteOverlaps, compareBoardReadiness } from '@sterling/store';
+import { boardWaitAge as waitAge, boardWriteOverlaps, compareBoardReadiness, DEFAULT_CLAIM_LEASE_MINUTES } from '@sterling/store';
 import { configSchema } from '@sterling/schemas';
 import { presumedActiveEntries, readDispatchState } from '../../lib/dispatch-register.mjs';
 import { deliverySessionDir } from './delivery.mjs';
@@ -29,8 +29,15 @@ const DECISION = 'decision board-items-carry-a-needs-field-and-h1-lists-ready-it
  * READY, never WAITING ON YOU, listed apart with their remote status.
  */
 export function boardGroups(readiness) {
-  const sorted = [...readiness].sort(compareBoardReadiness);
+  const all = [...readiness].sort(compareBoardReadiness);
+  // A claimed item is in progress in some session (decision
+  // board-task-claims-for-parallel-sessions-claim-generation-ren): never READY,
+  // whoever holds it, and an expired claim waits for a takeover. A delegated
+  // tracker stays delegated; its work runs in the other project.
+  const inProgress = all.filter((r) => r.claim && r.state !== 'delegated');
+  const sorted = all.filter((r) => !r.claim || r.state === 'delegated');
   return {
+    inProgress,
     ready: sorted.filter((r) => r.state === 'ready'),
     research: sorted.filter((r) => r.state === 'research'),
     waiting: sorted.filter((r) => r.state === 'waiting'),
@@ -40,6 +47,33 @@ export function boardGroups(readiness) {
     blocked: sorted.filter((r) => r.state === 'blocked').length,
     delegated: sorted.filter((r) => r.state === 'delegated'),
   };
+}
+
+/** board_claims.lease_minutes with the schema's own default; {error} when the configured value is invalid. */
+export function claimLease(config) {
+  const parsed = configSchema.shape.board_claims.safeParse(config?.board_claims ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
+  return { value: parsed.data.lease_minutes };
+}
+
+/**
+ * The lease the readiness read judges claims by. An unreadable value is not
+ * replaced silently: the default is used and the block says so (claimLeaseNote).
+ */
+export function claimLeaseMinutes(lease) {
+  return lease?.error ? DEFAULT_CLAIM_LEASE_MINUTES : lease.value;
+}
+
+/** One IN PROGRESS line's claim text; ages are measured from renewed_at at `now`. */
+function claimText(claim, session, now) {
+  if (claim.state === 'unreadable') return 'claim unreadable by this Sterling (read it with board_get)';
+  const t = Date.parse(claim.renewed_at);
+  const mins = Number.isNaN(t) ? '?' : String(Math.max(0, Math.floor((now - t) / 60_000)));
+  const who = `session ${claim.holder_session}${claim.holder_session === session ? ' (this session)' : ''} in ${claim.checkout}`;
+  if (claim.state === 'expired') {
+    return `⚠ check owner: ${who}, no renewal for ${mins}m (any session may take it over: board_takeover expected_holder ${claim.holder_session}, expected_generation ${claim.generation})`;
+  }
+  return `${who}, renewed ${mins}m ago`;
 }
 
 /** delegation.max_concurrent with the schema's own default; {error} when the configured value is invalid. */
@@ -106,16 +140,19 @@ function oldestOmittedWait(omitted, now) {
  * count goes stale in a block that is not re-sent, so the plugin sends it as its
  * own `live lanes k/n` line when it changes (GitHub #174).
  */
-export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true, now = Date.now() }) {
+export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true, now = Date.now(), session, lease }) {
   const g = boardGroups(readiness);
-  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return '';
+  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length && !g.inProgress.length) return '';
   const marks = boardWriteOverlaps(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : '';
   const header =
     `BOARD READINESS (${DECISION}) — ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. ` +
     `At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). ` +
     `READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill); WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed. ` +
-    `Items marked ⚠ share a write path: their implementation lanes run one at a time.`;
+    `Items marked ⚠ share a write path: their implementation lanes run one at a time.` +
+    (g.inProgress.length
+      ? ` IN PROGRESS items are claimed by a session (board_claim) and are never started here; one marked check owner has had no renewal for the claim lease${lease?.error ? ` (board_claims.lease_minutes unreadable: ${lease.error}; judged at the ${DEFAULT_CLAIM_LEASE_MINUTES}-minute default)` : ''}, so any session may take it over with board_takeover.`
+      : '');
   const lines = [
     header,
     ...groupLines('READY ({n})', g.ready, cap, (r) => {
@@ -133,6 +170,7 @@ export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GRO
       (omitted) => oldestOmittedWait(omitted, now)
     ),
     ...groupLines('DELEGATED TO OTHER PROJECTS ({n}, not run here)', g.delegated, cap, (r) => `- ${r.name} — ${delegatedStatus(r, handoffStatus)}`),
+    ...groupLines('IN PROGRESS ({n}, claimed; not READY)', g.inProgress, cap, (r) => `- ${r.name} — ${claimText(r.claim, session, now)}`),
   ];
   return lines.join('\n');
 }

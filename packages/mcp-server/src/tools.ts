@@ -33,8 +33,12 @@ import {
   getForeignBoardItem,
   boardReadinessOf,
   boardWriteOverlaps,
+  boardClaimView,
+  DEFAULT_CLAIM_LEASE_MINUTES,
   SUPPORTED_SCHEMA_VERSION,
+  type BoardClaimView,
   type BoardItemReadiness,
+  type BoardReadinessOptions,
   type BoardReadinessState,
   type ForeignBoardRead,
   type ReadForeignBoardOptions,
@@ -74,6 +78,8 @@ type BoardDerivedFields = {
   blockers_open?: string[];
   shares_write_path_with?: string[];
   handoff_status?: HandoffStatus;
+  /** the item's claim as read now (held, expired = check owner, unreadable); absent when nobody holds it */
+  claim_state?: BoardClaimView;
 };
 
 /** Every readiness state, for the board_query readiness filter (GitHub issue #175). */
@@ -85,12 +91,13 @@ export const BOARD_READINESS_STATES = ['ready', 'research', 'waiting', 'blocked'
  * other READY items sharing a file_keys path. `overlaps` comes from
  * boardWriteOverlaps over the WHOLE ready set, never one page.
  */
-function readinessFields(r: BoardItemReadiness, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with'> {
+function readinessFields(r: BoardItemReadiness, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with' | 'claim_state'> {
   const shares = r.state === 'ready' ? overlaps.get(r.id) : undefined;
   return {
     readiness: r.state,
     ...(r.blockers_open.length ? { blockers_open: r.blockers_open } : {}),
     ...(shares?.length ? { shares_write_path_with: shares } : {}),
+    ...(r.claim ? { claim_state: r.claim } : {}),
   };
 }
 
@@ -10648,11 +10655,12 @@ export class SterlingTools {
     // count READY items on other pages too (GitHub issue #175); the page's own
     // rows are picked from it, and any row the whole-board read did not return
     // is computed directly rather than left without fields.
-    const whole = this.store.boardReadiness();
+    const claimOpts = this.claimReadOptions();
+    const whole = this.store.boardReadiness(undefined, claimOpts);
     const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
     const byId = new Map(whole.map((r) => [r.id, r]));
     const missing = users.filter((u) => !byId.has(u.id));
-    const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...(missing.length ? this.store.boardReadiness(missing) : [])];
+    const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...(missing.length ? this.store.boardReadiness(missing, claimOpts) : [])];
     // Each tracker's receiver is located through the registry (a moved folder,
     // GitHub issue #119) by the tracker's own created_at.
     const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
@@ -11559,7 +11567,7 @@ export class SterlingTools {
    */
   private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by', 'needs', 'needs_reason'] as const;
 
-  boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
+  boardUpdate(id: string, patch: Record<string, unknown>, opts: { session?: string } = {}): DurableRecord & { claims_check?: string } {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
     // exact slug, 8-char citation prefix — resolveRecordId, decision foreign_2debab53):
     // board_update previously used a raw store.get(id), so an unresolved
@@ -11682,7 +11690,12 @@ export class SterlingTools {
     // retry, for the reason knowledgeUpdate gives: a silent re-merge would
     // write onto a body the caller never saw.
     try {
-      const updated = this.store.updateTodo(old.id, next as typeof old, old.version !== undefined ? { expected_version: old.version } : {});
+      // An edit by the claim holder is task work and renews its claim, inside
+      // this same write (at most once per quarter lease; decision
+      // board-task-claims-for-parallel-sessions-claim-generation-ren). The
+      // stored claim itself is never taken from `next`: updateTodo carries it forward.
+      const renewal = opts.session ? { session: opts.session, leaseMinutes: this.claimLeaseMinutes(), now: this.now() } : undefined;
+      const updated = this.store.updateTodo(old.id, next as typeof old, old.version !== undefined ? { expected_version: old.version } : {}, renewal);
       // The disclosure rides the record itself because board_update's receipt IS
       // the bare record (its frozen callers read fields straight off the return),
       // and digestWriteEcho carries claims_check through the DEFAULT digest
@@ -11692,6 +11705,73 @@ export class SterlingTools {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, 'todo', 'board_update');
       throw err;
     }
+  }
+
+  /** config board_claims.lease_minutes: how long a claim lasts without renewal. */
+  private claimLeaseMinutes(): number {
+    return this.config.board_claims.lease_minutes;
+  }
+
+  /** The clock and lease every claim read is judged against. */
+  private claimReadOptions(): BoardReadinessOptions {
+    return { now: Date.parse(this.now()), leaseMinutes: this.claimLeaseMinutes() };
+  }
+
+  /** A claim tool's receipt: the item's handle and its claim as read after the write. */
+  private claimReceipt(record: DurableRecord, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    const r = record as unknown as { id: string; slug?: string; text?: string; claim?: unknown };
+    const label = boardDisplayLabel(r.text, r.slug);
+    const opts = this.claimReadOptions();
+    const view = boardClaimView(r.claim, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+    return { id: r.id, ...(r.slug ? { slug: r.slug } : {}), ...(label ? { label } : {}), claim_state: view ?? { state: 'none' }, ...extra };
+  }
+
+  private static requireClaimText(tool: string, name: string, value: unknown): string {
+    if (typeof value !== 'string' || value.trim() === '') throw new Error(`${tool}: ${name} is required and must be a non-empty string. Nothing was written.`);
+    return value.trim();
+  }
+
+  /**
+   * board_claim / board_reaffirm / board_release / board_takeover (decision
+   * board-task-claims-for-parallel-sessions-claim-generation-ren). Each
+   * resolves the item through the read ladder (a claim write is recoverable,
+   * so the forgiving forms are allowed) and makes its one compare-and-set
+   * write in the store, which decides under the write lock.
+   */
+  boardClaim(id: string, session: string, checkout: string): Record<string, unknown> {
+    const s = SterlingTools.requireClaimText('board_claim', 'session', session);
+    const c = SterlingTools.requireClaimText('board_claim', 'checkout', checkout);
+    const item = this.resolveRecordId(id, 'board_claim');
+    return this.claimReceipt(this.store.claimTodo(item.id, { session: s, checkout: c, leaseMinutes: this.claimLeaseMinutes(), now: this.now() }));
+  }
+
+  boardReaffirm(id: string, session: string, generation: number): Record<string, unknown> {
+    const s = SterlingTools.requireClaimText('board_reaffirm', 'session', session);
+    const item = this.resolveRecordId(id, 'board_reaffirm');
+    return this.claimReceipt(this.store.reaffirmClaim(item.id, { session: s, generation, now: this.now() }));
+  }
+
+  boardRelease(id: string, session: string, generation: number): Record<string, unknown> {
+    const s = SterlingTools.requireClaimText('board_release', 'session', session);
+    const item = this.resolveRecordId(id, 'board_release');
+    return this.claimReceipt(this.store.releaseClaim(item.id, { session: s, generation, now: this.now() }));
+  }
+
+  boardTakeover(id: string, session: string, checkout: string, expected_holder: string, expected_generation: number): Record<string, unknown> {
+    const s = SterlingTools.requireClaimText('board_takeover', 'session', session);
+    const c = SterlingTools.requireClaimText('board_takeover', 'checkout', checkout);
+    const holder = SterlingTools.requireClaimText('board_takeover', 'expected_holder', expected_holder);
+    const item = this.resolveRecordId(id, 'board_takeover');
+    // Whether the displaced claim had expired, judged on the claim this call read; the store re-checks holder and generation under the lock.
+    const before = (item as unknown as { claim?: unknown }).claim;
+    const opts = this.claimReadOptions();
+    const wasState = boardClaimView(before, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES)?.state;
+    const record = this.store.takeoverClaim(item.id, { session: s, checkout: c, expected_holder: holder, expected_generation, now: this.now() });
+    return this.claimReceipt(record, {
+      notice:
+        `taken over from session '${holder}' (generation ${expected_generation}${wasState === 'held' ? ', which was still within its lease' : ''}); ` +
+        `that session's later renew, release or close of this task is refused, and its running processes were not stopped`,
+    });
   }
 
   /**
@@ -11792,13 +11872,21 @@ export class SterlingTools {
    * reads handoff_status 'unavailable:other_project'. Empty when the read was
    * partial, because a missing slug would then read as a closed blocker.
    */
-  private static foreignDerived(read: ForeignBoardRead, page: readonly Record<string, unknown>[]): Map<string, Record<string, unknown>> {
+  private static foreignDerived(read: ForeignBoardRead, page: readonly Record<string, unknown>[], claimOpts: BoardReadinessOptions): Map<string, Record<string, unknown>> {
     const out = new Map<string, Record<string, unknown>>();
-    if (read.truncated) return out;
+    if (read.truncated) {
+      // A claim is read off the row itself, so it is stated even when the
+      // blocker-dependent fields cannot be.
+      for (const row of page) {
+        const view = boardClaimView(row.claim, claimOpts.now ?? Date.now(), claimOpts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES);
+        if (view) out.set(String(row.id), { claim_state: view });
+      }
+      return out;
+    }
     type Input = Parameters<typeof boardReadinessOf>[0][number];
     const holder = (slug: string) => read.slugHolders.get(slug);
-    const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], holder);
-    const whole = boardReadinessOf(read.items as unknown as Input[], read.items as unknown as Input[], holder);
+    const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], holder, claimOpts);
+    const whole = boardReadinessOf(read.items as unknown as Input[], read.items as unknown as Input[], holder, claimOpts);
     const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
     for (const r of readiness) {
       out.set(r.id, {
@@ -11878,7 +11966,7 @@ export class SterlingTools {
       );
     }
     const disclosures = SterlingTools.foreignDisclosures(read, notes);
-    const derived = projection === 'text' || projection === 'full' ? SterlingTools.foreignDerived(read, records) : new Map<string, Record<string, unknown>>();
+    const derived = projection === 'text' || projection === 'full' ? SterlingTools.foreignDerived(read, records, this.claimReadOptions()) : new Map<string, Record<string, unknown>>();
     const projected = records.map((r) => {
       const base =
         projection === 'text' ? textRowRecord(r) : projection === 'headline' ? headlineRecord(r) : projection === 'digest' ? digestRecord(r) : { ...r };
@@ -11924,7 +12012,7 @@ export class SterlingTools {
     return {
       ...hit,
       ...(label ? { label } : {}),
-      ...SterlingTools.foreignDerived(result.board, [hit]).get(String(hit.id)),
+      ...SterlingTools.foreignDerived(result.board, [hit], this.claimReadOptions()).get(String(hit.id)),
       ...source,
       historical_ids: 'not searched: the historical-id archive is read for this project only',
       ...disclosures,

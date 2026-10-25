@@ -32,7 +32,7 @@ import { domainMapDue, domainNotice, pendingFileNote, runDomainMap } from './lib
 import { WORKER_ENV_FLAG } from './lib/maintenance-worker.mjs';
 import { refreshRegistryRow } from './lib/registry-refresh.mjs';
 import { queueDepthLine, readMaintenanceState, reconcileBacklog } from './lib/maintenance-state.mjs';
-import { laneCeiling, liveLanes, renderBoardReadiness } from './lib/board-ready.mjs';
+import { claimLease, claimLeaseMinutes, laneCeiling, liveLanes, renderBoardReadiness } from './lib/board-ready.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -906,7 +906,7 @@ try {
   // the store's one readiness function; a failure is its own loud line below,
   // never a silently missing list.
   try {
-    boardReadiness = store.boardReadiness();
+    boardReadiness = store.boardReadiness(undefined, { leaseMinutes: claimLeaseMinutes(claimLease(config)) });
   } catch (e) {
     boardReadinessError = (e && e.message) || String(e);
   }
@@ -930,7 +930,7 @@ const handoffStatus = delegated.length
 // existing delegation.max_concurrent ceiling (lib/board-ready.mjs).
 const boardReadinessText = boardReadinessError
   ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.`
-  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus });
+  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus, session: input.session_id, lease: claimLease(config) });
 const boardReadinessContext = boardReadinessText ? `\n\n${boardReadinessText}` : '';
 
 // DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold): the
