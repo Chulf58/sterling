@@ -362,6 +362,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'touching safety code is not by itself a reason. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why, so the split can be re-measured — decision `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`, user-ruled 2026-10-20)',
     after: 'touching safety code is not by itself a reason. Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as "likely a migration"). Building an already-ruled design and resuming a hard lane may stay on hard. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why, so the split can be re-measured — decision `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`, user-ruled 2026-10-20, exclusions added 2026-10-25 because the misses measured in the Customer Hub projects were probes, a single-site safety refusal and speculation, finding `how-often-do-conductors-use-implementor-hard-versus-implemen`)',
   },
+  {
+    commit: 'board background-shells',
+    date: '2026-10-25',
+    reason: 'a shell expected to take more than about 20 seconds runs in the background and the conductor never waits with a foreground sleep or poll (user-stated 2026-10-25; finding why-do-customer-hub-ch-conductors-sit-waiting-while-shells-r)',
+    before: 'turns ended with fixes uncommitted or review threads open until the user asked again).\n',
+    after: 'turns ended with fixes uncommitted or review threads open until the user asked again).\n- Run any shell command expected to take more than about 20 seconds (a test suite, a build, a deploy, a review wait, a setup chain) as a background shell (`background: true` on OpenCode, `run_in_background` on Claude Code); never wait in the foreground with `sleep`, `sleep N; tail …` or a polling loop. While it runs, report, dispatch or prep other work, and act when its completion notice arrives (AGENTS.md rule "Start every subagent and every long shell command in the background"; finding `why-do-customer-hub-ch-conductors-sit-waiting-while-shells-r`: Customer Hub conductors ran 29 foreground shells over 60 s and 110 foreground `sleep`/`tail` polls in five days).\n',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
