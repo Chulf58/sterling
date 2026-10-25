@@ -1005,6 +1005,11 @@ export class MountedStores {
     return this.mutatingStoreHolding('renewClaimIfDue', args[0]).renewClaimIfDue(...args);
   }
 
+  /** Claim hand-over scans the board, which is project-local, so the project store answers it. */
+  adoptClaims(...args: Parameters<SterlingStore['adoptClaims']>): ReturnType<SterlingStore['adoptClaims']> {
+    return this.mutatingProject('adoptClaims').adoptClaims(...args);
+  }
+
   /** Typed link edge, added on the source record in its holding store. The TARGET
    *  is resolved across ALL mounted stores (cross-store get, like get()) before
    *  delegating: cross-store edges are a legitimate shape — promotion itself writes

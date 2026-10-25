@@ -5,17 +5,20 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readLock as readPlanLock } from '../../../scripts/hooks/lib/plan-lock.mjs';
 import { consumeRotationNote, readRotationNote, renderRotationRestore, rotationNotePath } from '../../../scripts/hooks/lib/rotation-restore.mjs';
+import { adoptionText, handoverFailedText } from './claim-handover.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { inWorkerChild } from './worker.mjs';
 
 /**
  * `getSession()` returns the plugin's ctx.session (null before setup);
- * `renderRestore` defaults to the shared renderer. Inside the maintenance worker
+ * `renderRestore` defaults to the shared renderer; `adoptClaims(root, { from, to })`
+ * moves the board claims session `from` holds in checkout `root` to session `to`
+ * (store.adoptClaims, each entry with its `label`), or is absent. Inside the maintenance worker
  * child (`env`, worker.mjs inWorkerChild) the note is never read or consumed: the
  * worker's root session is not the session the user opens next.
  */
-export function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, env = process.env }) {
+export function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, adoptClaims, env = process.env }) {
   // Restore text per session that consumed a rotation note, returned again on that
   // session's later prompts; context.mjs appends it only when it changed, so the
   // session sees it once. Process-lifetime only; a relaunched OpenCode does not re-send it.
@@ -75,8 +78,21 @@ export function createRotationRestore({ getSession, now, renderRestore = renderR
       addNotice(root, `Sterling: a rotation note is waiting but could not be checked against this session (${errText(e)}); it was left in place. See ${LOG_REL}.`, now());
       return '';
     }
+    // Claim hand-over (claim-handover.mjs): BEFORE the note is consumed, so a crash
+    // between the two leaves the note for the next session; adoption is repeatable, so
+    // running it again there is harmless. A failed adoption costs only the hand-over:
+    // the orphan notice lists the claims and names board_adopt.
+    let handover = '';
+    if (adoptClaims && typeof note.session_id === 'string' && note.session_id) {
+      try {
+        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
+      } catch (e) {
+        logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText(e)}`);
+        handover = handoverFailedText(e, note.session_id);
+      }
+    }
     const consumed = consumeRotationNote(root);
-    if (!consumed) return '';
+    if (!consumed) return handover;
     let planLock = null;
     let planLockMalformed = false;
     try {
@@ -89,12 +105,14 @@ export function createRotationRestore({ getSession, now, renderRestore = renderR
     }
     // The note is already consumed, so a render failure is logged and costs only the restore.
     try {
-      const text = renderRestore(consumed, { cwd: root, host: 'opencode', planLock, planLockMalformed }).replace(/^\n+/, '');
+      const rendered = renderRestore(consumed, { cwd: root, host: 'opencode', planLock, planLockMalformed }).replace(/^\n+/, '');
+      const text = handover ? `${rendered}\n\n${handover}` : rendered;
       restored.set(sessionID, text);
       return text;
     } catch (e) {
       logLine(root, `rotation restore: render failed after the note was consumed: ${errText(e)}`);
-      return '';
+      if (handover) restored.set(sessionID, handover);
+      return handover;
     }
   };
 }

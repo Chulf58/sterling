@@ -3,7 +3,7 @@
 // (PWD, OPENCODE_SESSION_ID) is stale, so the plugin is the one place that knows who is
 // calling: tool.execute.before carries the calling session's id, and session.get gives
 // that session's directory. Before a claim tool runs, the plugin writes the real session
-// (and, for board_claim and board_takeover, the real checkout) into the call's arguments,
+// (and, for board_claim, board_takeover and board_adopt, the real checkout) into the call's arguments,
 // and refuses a call that names another session. This holds whether or not OpenCode
 // gives a worktree directory its own MCP process, which is unobserved.
 
@@ -13,7 +13,7 @@ import { sterlingToolName } from './mcp-name.mjs';
 // segment of the host's tool name is the name the plugin registers), then classified by
 // its Sterling tool name. Another server's tool, a kanban board_claim say, is never touched.
 // board_update counts only when it names a session.
-const CLAIM_TOOLS = new Set(['board_claim', 'board_reaffirm', 'board_release', 'board_takeover', 'board_update']);
+const CLAIM_TOOLS = new Set(['board_claim', 'board_reaffirm', 'board_release', 'board_takeover', 'board_adopt', 'board_update']);
 // The other board tools the Sterling server serves (packages/mcp-server/src/server.ts).
 const OTHER_BOARD_TOOLS = new Set(['board_add', 'board_edit', 'board_get', 'board_query', 'board_remove']);
 
@@ -62,7 +62,7 @@ export async function applyClaimIdentity(input, { checkoutOfSession }) {
     throw refusal(`Sterling refused ${name}: it names session '${String(args.session)}', but this call comes from session ${real}. A session can claim, renew or release only as itself; call again with session '${real}', or leave session out and Sterling fills it in.`);
   }
   args.session = real;
-  if (name !== 'board_claim' && name !== 'board_takeover') return;
+  if (name !== 'board_claim' && name !== 'board_takeover' && name !== 'board_adopt') return;
   const found = await checkoutOfSession(real);
   if (!found?.checkout) {
     throw refusal(`Sterling refused ${name}: the checkout of session ${real} could not be read (${found?.why ?? 'no reason given'}), and a claim records the real checkout, never the one a caller names.`);

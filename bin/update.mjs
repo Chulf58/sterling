@@ -9449,6 +9449,10 @@ var init_mounted = __esm({
       renewClaimIfDue(...args) {
         return this.mutatingStoreHolding("renewClaimIfDue", args[0]).renewClaimIfDue(...args);
       }
+      /** Claim hand-over scans the board, which is project-local, so the project store answers it. */
+      adoptClaims(...args) {
+        return this.mutatingProject("adoptClaims").adoptClaims(...args);
+      }
       /** Typed link edge, added on the source record in its holding store. The TARGET
        *  is resolved across ALL mounted stores (cross-store get, like get()) before
        *  delegating: cross-store edges are a legitimate shape — promotion itself writes
@@ -11365,6 +11369,7 @@ __export(dist_exports2, {
   AXIS_MIN_RECORD_TERMS: () => AXIS_MIN_RECORD_TERMS,
   AXIS_MIN_TERM_LEN: () => AXIS_MIN_TERM_LEN,
   AXIS_RECORD_TOP_K: () => AXIS_RECORD_TOP_K,
+  ClaimAdoptionIncomplete: () => ClaimAdoptionIncomplete,
   ClaimMovedError: () => ClaimMovedError,
   DECLARED_CAPTURE_OWED_PREFIX: () => DECLARED_CAPTURE_OWED_PREFIX,
   DEFAULT_BUSY_TIMEOUT_MS: () => DEFAULT_BUSY_TIMEOUT_MS,
@@ -11850,7 +11855,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, ClaimMovedError, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, ClaimMovedError, ClaimAdoptionIncomplete, ClaimAdoptRefused, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -11993,6 +11998,22 @@ var init_dist2 = __esm({
     };
     ClaimMovedError = class extends Error {
       name = "ClaimMovedError";
+    };
+    ClaimAdoptionIncomplete = class extends Error {
+      partial;
+      name = "ClaimAdoptionIncomplete";
+      constructor(partial, cause) {
+        const why = cause instanceof Error ? cause.message : String(cause);
+        super(`board_adopt: stopped after adopting ${partial.adopted.length} item(s)${partial.adopted.length ? ` (${partial.adopted.map((a) => a.id).join(", ")})` : ""}: ${why}. The items adopted so far stay adopted; run board_adopt again to finish the rest.`, { cause });
+        this.partial = partial;
+      }
+    };
+    ClaimAdoptRefused = class extends Error {
+      claim;
+      constructor(claim) {
+        super("claim moved before adoption");
+        this.claim = claim;
+      }
     };
     DAY_MS = 864e5;
     PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
@@ -13836,6 +13857,74 @@ var init_dist2 = __esm({
           throw e;
         }
         return outcome;
+      }
+      /**
+       * Claim hand-over across a new session (decision
+       * board-task-claims-for-parallel-sessions-claim-generation-ren: "Claims hand
+       * over across /new from the board (generation-checked, repeatable)"). Every
+       * user board item whose claim names `from_session` as holder and
+       * `checkout` as its checkout moves to `session`: a new generation,
+       * renewed now, and the displaced holder in taken_over_from. Each item is
+       * its own compare-and-set write under the write lock against the holder and
+       * generation this call read, so a claim that moved in between (another
+       * session's takeover, a release) is reported as refused and left alone.
+       * A claim of `from_session` in another checkout is refused without a
+       * write: that session may be live there, and board_takeover is the
+       * explicit way to take it. Repeatable: a second run finds nothing held by
+       * `from_session` and lists the items it already moved under `already`.
+       * NOT guaranteed: that `from_session` has ended (the store cannot know; the
+       * caller names it), and all-or-nothing: a failure mid-way throws
+       * ClaimAdoptionIncomplete carrying what was done so far (those items stay
+       * adopted); running it again finishes the rest.
+       */
+      adoptClaims(req) {
+        if (req.from_session === req.session) {
+          throw new Error(`board_adopt: from_session '${req.from_session}' is your own session; there is nothing to adopt. Nothing was written.`);
+        }
+        const now = req.now ?? (/* @__PURE__ */ new Date()).toISOString();
+        const out = { adopted: [], already: [], refused: [] };
+        const scanned = this.readTx(() => {
+          const total = this.count({ types: ["todo"], source: "user" });
+          return total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+        });
+        for (const item of scanned) {
+          const claim = item.claim;
+          if (!claim)
+            continue;
+          if (claim.holder_session === req.session && claim.checkout === req.checkout && claim.taken_over_from?.holder_session === req.from_session) {
+            out.already.push({ id: item.id, generation: claim.generation });
+            continue;
+          }
+          if (claim.holder_session !== req.from_session)
+            continue;
+          if (claim.checkout !== req.checkout) {
+            out.refused.push({ id: item.id, reason: "other_checkout", holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation });
+            continue;
+          }
+          try {
+            const record = this.claimWrite("board_adopt", item.id, now, (current, body) => {
+              if (!current || current.holder_session !== claim.holder_session || current.generation !== claim.generation || current.checkout !== req.checkout) {
+                throw new ClaimAdoptRefused(current);
+              }
+              return {
+                holder_session: req.session,
+                checkout: req.checkout,
+                generation: _SterlingStore.nextGeneration(current, body),
+                claimed_at: now,
+                renewed_at: now,
+                taken_over_from: { holder_session: current.holder_session, checkout: current.checkout, generation: current.generation, renewed_at: current.renewed_at, at: now }
+              };
+            });
+            const moved = record.claim;
+            out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
+          } catch (e) {
+            if (!(e instanceof ClaimAdoptRefused))
+              throw new ClaimAdoptionIncomplete(out, e);
+            const held = e.claim;
+            out.refused.push(held ? { id: item.id, reason: "moved", holder_session: held.holder_session, checkout: held.checkout, generation: held.generation } : { id: item.id, reason: "released" });
+          }
+        }
+        return out;
       }
       /**
        * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a

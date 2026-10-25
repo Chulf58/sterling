@@ -716,6 +716,46 @@ export class ClaimMovedError extends Error {
   override name = 'ClaimMovedError';
 }
 
+/**
+ * What adoptClaims did: `adopted` moved to the adopting session now; `already`
+ * holds items the adopting session holds after taking them from the same
+ * predecessor (a repeated run); `refused` items were left alone, because the
+ * claim moved or was released after the scan ('moved', 'released') or sits in
+ * another checkout ('other_checkout').
+ */
+export interface ClaimAdoption {
+  adopted: { id: string; generation: number; from_generation: number }[];
+  already: { id: string; generation: number }[];
+  refused: { id: string; reason: 'moved' | 'released' | 'other_checkout'; holder_session?: string; checkout?: string; generation?: number }[];
+}
+
+/**
+ * adoptClaims stopped on an error after the scan: `partial` is what it did
+ * before the failing item (its `adopted` entries are committed and stay
+ * adopted), `cause` the error. Running the adoption again finishes the rest.
+ */
+export class ClaimAdoptionIncomplete extends Error {
+  override name = 'ClaimAdoptionIncomplete';
+  constructor(
+    readonly partial: ClaimAdoption,
+    cause: unknown
+  ) {
+    const why = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `board_adopt: stopped after adopting ${partial.adopted.length} item(s)${partial.adopted.length ? ` (${partial.adopted.map((a) => a.id).join(', ')})` : ''}: ${why}. ` +
+        `The items adopted so far stay adopted; run board_adopt again to finish the rest.`,
+      { cause }
+    );
+  }
+}
+
+/** Raised inside an adoption's write when the claim no longer names the predecessor at the generation read; the write rolls back. */
+class ClaimAdoptRefused extends Error {
+  constructor(readonly claim: TodoClaim | undefined) {
+    super('claim moved before adoption');
+  }
+}
+
 /** When readiness judges claims: `now` in epoch ms and the lease in minutes. */
 export interface BoardReadinessOptions {
   now?: number;
@@ -1080,6 +1120,7 @@ export type ToolStore = Pick<
   | 'releaseClaim'
   | 'takeoverClaim'
   | 'renewClaimIfDue'
+  | 'adoptClaims'
   | 'retireInFavorOf'
   | 'remove'
   // board_remove/maintenance_remove distinguish 'already removed' from 'never
@@ -4161,6 +4202,76 @@ export class SterlingStore {
       throw e;
     }
     return outcome;
+  }
+
+  /**
+   * Claim hand-over across a new session (decision
+   * board-task-claims-for-parallel-sessions-claim-generation-ren: "Claims hand
+   * over across /new from the board (generation-checked, repeatable)"). Every
+   * user board item whose claim names `from_session` as holder and
+   * `checkout` as its checkout moves to `session`: a new generation,
+   * renewed now, and the displaced holder in taken_over_from. Each item is
+   * its own compare-and-set write under the write lock against the holder and
+   * generation this call read, so a claim that moved in between (another
+   * session's takeover, a release) is reported as refused and left alone.
+   * A claim of `from_session` in another checkout is refused without a
+   * write: that session may be live there, and board_takeover is the
+   * explicit way to take it. Repeatable: a second run finds nothing held by
+   * `from_session` and lists the items it already moved under `already`.
+   * NOT guaranteed: that `from_session` has ended (the store cannot know; the
+   * caller names it), and all-or-nothing: a failure mid-way throws
+   * ClaimAdoptionIncomplete carrying what was done so far (those items stay
+   * adopted); running it again finishes the rest.
+   */
+  adoptClaims(req: { session: string; checkout: string; from_session: string; now?: string }): ClaimAdoption {
+    if (req.from_session === req.session) {
+      throw new Error(`board_adopt: from_session '${req.from_session}' is your own session; there is nothing to adopt. Nothing was written.`);
+    }
+    const now = req.now ?? new Date().toISOString();
+    const out: ClaimAdoption = { adopted: [], already: [], refused: [] };
+    const scanned = this.readTx(() => {
+      const total = this.count({ types: ['todo'], source: 'user' });
+      return (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as { id: string; claim?: TodoClaim }[];
+    });
+    for (const item of scanned) {
+      const claim = item.claim;
+      if (!claim) continue;
+      if (claim.holder_session === req.session && claim.checkout === req.checkout && claim.taken_over_from?.holder_session === req.from_session) {
+        out.already.push({ id: item.id, generation: claim.generation });
+        continue;
+      }
+      if (claim.holder_session !== req.from_session) continue;
+      if (claim.checkout !== req.checkout) {
+        out.refused.push({ id: item.id, reason: 'other_checkout', holder_session: claim.holder_session, checkout: claim.checkout, generation: claim.generation });
+        continue;
+      }
+      try {
+        const record = this.claimWrite('board_adopt', item.id, now, (current, body) => {
+          if (!current || current.holder_session !== claim.holder_session || current.generation !== claim.generation || current.checkout !== req.checkout) {
+            throw new ClaimAdoptRefused(current);
+          }
+          return {
+            holder_session: req.session,
+            checkout: req.checkout,
+            generation: SterlingStore.nextGeneration(current, body),
+            claimed_at: now,
+            renewed_at: now,
+            taken_over_from: { holder_session: current.holder_session, checkout: current.checkout, generation: current.generation, renewed_at: current.renewed_at, at: now },
+          };
+        });
+        const moved = (record as unknown as { claim: TodoClaim }).claim;
+        out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
+      } catch (e) {
+        if (!(e instanceof ClaimAdoptRefused)) throw new ClaimAdoptionIncomplete(out, e);
+        const held = e.claim;
+        out.refused.push(
+          held
+            ? { id: item.id, reason: 'moved', holder_session: held.holder_session, checkout: held.checkout, generation: held.generation }
+            : { id: item.id, reason: 'released' }
+        );
+      }
+    }
+    return out;
   }
 
   /**

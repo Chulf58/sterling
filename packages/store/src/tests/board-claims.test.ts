@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaimMovedError, SterlingStore, boardClaimView, boardReadinessOf } from '../index.js';
+import { ClaimAdoptionIncomplete, ClaimMovedError, SterlingStore, boardClaimView, boardReadinessOf } from '../index.js';
 
 const T0 = '2026-10-25T09:00:00.000Z';
 const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
@@ -298,6 +298,166 @@ test('board_update by a displaced holder: a takeover between its read and its lo
     // A stale content write that names no session is still refused for its version.
     assert.throws(() => a.updateTodo(item.id, { ...read, text: 'stale' }, { expected_version: read.version }), /stale expected_version/);
     assert.equal(get(a, item.id).text, 'board item to claim');
+  } finally {
+    close();
+  }
+});
+
+// Claim hand-over across /new (board 05fbab98): adoptClaims moves the predecessor's
+// claims in this checkout, generation-checked per item and repeatable.
+test('adoptClaims: the predecessor\'s claims in this checkout move with a new generation; the old holder is refused after', () => {
+  const { a, close } = pair();
+  try {
+    const one = a.create(todo()) as unknown as Claimed;
+    const two = a.create(todo()) as unknown as Claimed;
+    const other = a.create(todo()) as unknown as Claimed;
+    const g1 = (a.claimTodo(one.id, { session: 'old', checkout: '/repo', now: at(0) }) as unknown as Claimed).claim!.generation;
+    a.claimTodo(two.id, { session: 'old', checkout: '/repo', now: at(0) });
+    a.claimTodo(other.id, { session: 'someone-else', checkout: '/repo', now: at(0) });
+    const r = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(5) });
+    assert.deepEqual(r.adopted.map((x) => x.id).sort(), [one.id, two.id].sort());
+    assert.deepEqual(r.refused, []);
+    const moved = get(a, one.id).claim as unknown as { holder_session: string; generation: number; taken_over_from: { holder_session: string; generation: number } };
+    assert.equal(moved.holder_session, 'new');
+    assert.ok(moved.generation > g1, 'adoption gets a new generation');
+    assert.equal(moved.taken_over_from.holder_session, 'old');
+    assert.equal(moved.taken_over_from.generation, g1);
+    assert.equal(get(a, other.id).claim?.holder_session, 'someone-else', 'a third session\'s claim is untouched');
+    assert.throws(() => a.reaffirmClaim(one.id, { session: 'old', generation: g1, now: at(6) }), ClaimMovedError);
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims is repeatable: a second run (a crash after the transfer) writes nothing and lists the items under already', () => {
+  const { a, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(item.id, { session: 'old', checkout: '/repo', now: at(0) });
+    const first = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(1) });
+    assert.equal(first.adopted.length, 1);
+    const after = get(a, item.id);
+    const again = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) });
+    assert.deepEqual(again.adopted, []);
+    assert.deepEqual(again.already, [{ id: item.id, generation: after.claim!.generation }]);
+    assert.equal(get(a, item.id).version, after.version, 'the repeat wrote nothing');
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims refuses a claim the predecessor holds in another checkout, without a write', () => {
+  const { a, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    const claimed = a.claimTodo(item.id, { session: 'live-elsewhere', checkout: '/repo/wt-b', now: at(0) }) as unknown as Claimed;
+    const r = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'live-elsewhere', now: at(1) });
+    assert.deepEqual(r.adopted, []);
+    assert.deepEqual(r.refused, [{ id: item.id, reason: 'other_checkout', holder_session: 'live-elsewhere', checkout: '/repo/wt-b', generation: claimed.claim!.generation }]);
+    assert.equal(get(a, item.id).version, claimed.version, 'nothing was written');
+    assert.equal(get(a, item.id).claim?.holder_session, 'live-elsewhere');
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims: a takeover by another session between the scan and the write is refused as moved; the rest are adopted', () => {
+  const { a, b, close } = pair();
+  try {
+    const raced = a.create(todo()) as unknown as Claimed;
+    const calm = a.create(todo()) as unknown as Claimed;
+    const fine = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(fine.id, { session: 'old', checkout: '/repo', now: at(0) });
+    const g = (a.claimTodo(raced.id, { session: 'old', checkout: '/repo', now: at(0) }) as unknown as Claimed).claim!.generation;
+    a.claimTodo(calm.id, { session: 'old', checkout: '/repo', now: at(0) });
+    // The first write transaction adoptClaims opens runs after its board scan.
+    beforeFirstWriteTx(a, () => {
+      b.takeoverClaim(raced.id, { session: 'thief', checkout: '/repo/wt-c', expected_holder: 'old', expected_generation: g, now: at(1) });
+      b.takeoverClaim(calm.id, { session: 'old', checkout: '/repo', expected_holder: 'old', expected_generation: (b.get(calm.id) as unknown as Claimed).claim!.generation, now: at(1) });
+    });
+    const r = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) });
+    const thief = get(a, raced.id).claim!;
+    assert.deepEqual(r.refused.find((x) => x.id === raced.id), { id: raced.id, reason: 'moved', holder_session: 'thief', checkout: '/repo/wt-c', generation: thief.generation });
+    assert.equal(thief.holder_session, 'thief', 'the takeover stands');
+    // calm was re-taken by 'old' itself at a new generation: still the predecessor, but not the generation scanned.
+    assert.equal(r.refused.find((x) => x.id === calm.id)?.reason, 'moved', 'the generation is checked, not only the holder');
+    assert.deepEqual(r.adopted.map((x) => x.id), [fine.id]);
+    assert.equal(get(a, fine.id).claim?.holder_session, 'new');
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims: a claim released between the scan and the write is refused as released; adopting from yourself is refused', () => {
+  const { a, b, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    const g = (a.claimTodo(item.id, { session: 'old', checkout: '/repo', now: at(0) }) as unknown as Claimed).claim!.generation;
+    beforeFirstWriteTx(a, () => b.releaseClaim(item.id, { session: 'old', generation: g, now: at(1) }));
+    const r = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) });
+    assert.deepEqual(r.refused, [{ id: item.id, reason: 'released' }]);
+    assert.equal(get(a, item.id).claim, undefined);
+    assert.throws(() => a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'new' }), /is your own session; there is nothing to adopt/);
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims on a board with no claims writes nothing', () => {
+  const { a, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    assert.deepEqual(a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(1) }), { adopted: [], already: [], refused: [] });
+    assert.equal(get(a, item.id).version, item.version);
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims: an item adopted into another checkout is not listed as already when the repeat names this checkout', () => {
+  const { a, close } = pair();
+  try {
+    const there = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(there.id, { session: 'old', checkout: '/repo/wt-b', now: at(0) });
+    assert.equal(a.adoptClaims({ session: 'new', checkout: '/repo/wt-b', from_session: 'old', now: at(1) }).adopted.length, 1);
+    assert.deepEqual(a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) }), { adopted: [], already: [], refused: [] });
+    assert.deepEqual(a.adoptClaims({ session: 'new', checkout: '/repo/wt-b', from_session: 'old', now: at(3) }).already.map((x) => x.id), [there.id]);
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims: a failure after the first transfer throws ClaimAdoptionIncomplete naming what moved; a re-run finishes the rest', () => {
+  const { a, close } = pair();
+  try {
+    const one = a.create(todo()) as unknown as Claimed;
+    const two = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(one.id, { session: 'old', checkout: '/repo', now: at(0) });
+    a.claimTodo(two.id, { session: 'old', checkout: '/repo', now: at(0) });
+    const handle = a as unknown as { tx: (fn: () => void) => void };
+    const original = handle.tx.bind(a);
+    let writes = 0;
+    handle.tx = (fn: () => void) => {
+      if (++writes === 2) throw new Error('simulated busy store');
+      original(fn);
+    };
+    let thrown: unknown;
+    try {
+      a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(1) });
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown instanceof ClaimAdoptionIncomplete);
+    assert.equal(thrown.partial.adopted.length, 1);
+    const moved = thrown.partial.adopted[0].id;
+    assert.match(thrown.message, new RegExp(`stopped after adopting 1 item\\(s\\) \\(${moved}\\): simulated busy store\\. The items adopted so far stay adopted; run board_adopt again`));
+    assert.equal(get(a, moved).claim?.holder_session, 'new', 'the first transfer is committed');
+    handle.tx = original;
+    const rest = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) });
+    assert.equal(rest.adopted.length, 1);
+    assert.deepEqual(rest.already.map((x) => x.id), [moved]);
+    assert.equal(get(a, one.id).claim?.holder_session, 'new');
+    assert.equal(get(a, two.id).claim?.holder_session, 'new');
   } finally {
     close();
   }

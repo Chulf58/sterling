@@ -37,6 +37,7 @@ import {
   DEFAULT_CLAIM_LEASE_MINUTES,
   SUPPORTED_SCHEMA_VERSION,
   type BoardClaimView,
+  type ClaimAdoption,
   type BoardItemReadiness,
   type BoardReadinessOptions,
   type BoardReadinessState,
@@ -11808,6 +11809,42 @@ export class SterlingTools {
         `that session's later board_reaffirm, board_release and board_update naming its session are refused and told the task moved; ` +
         `board_remove does not check the claim, so it can still close the item; its running processes were not stopped`,
     });
+  }
+
+  /**
+   * board_adopt (decision board-task-claims-for-parallel-sessions-claim-generation-ren:
+   * claims hand over across /new from the board, generation-checked and
+   * repeatable): every board item `from_session` holds in `checkout` moves to
+   * `session`. The store checks holder and generation per item under the
+   * write lock; a claim in another checkout, or one that moved since the scan,
+   * is refused and listed, never taken.
+   */
+  boardAdopt(from_session: string, session: string, checkout: string): Record<string, unknown> {
+    const s = SterlingTools.requireClaimText('board_adopt', 'session', session);
+    const c = SterlingTools.requireClaimText('board_adopt', 'checkout', checkout);
+    const from = SterlingTools.requireClaimText('board_adopt', 'from_session', from_session);
+    const result = this.store.adoptClaims({ session: s, checkout: c, from_session: from, now: this.now() });
+    const named = (id: string): Record<string, unknown> => {
+      const r = this.store.get(id) as unknown as { slug?: string; text?: string } | undefined;
+      const label = r ? boardDisplayLabel(r.text, r.slug) : undefined;
+      return { id, ...(r?.slug ? { slug: r.slug } : {}), ...(label ? { label } : {}) };
+    };
+    const refusedWhy = (r: ClaimAdoption['refused'][number]): string =>
+      r.reason === 'other_checkout'
+        ? `held by '${r.holder_session}' in checkout '${r.checkout}', not this one; that session may still be live there, so take it over with board_takeover (expected_holder '${r.holder_session}', expected_generation ${r.generation}) if you mean to`
+        : r.reason === 'moved'
+          ? `moved before it could be adopted: session '${r.holder_session}' in checkout '${r.checkout}' holds it at generation ${r.generation}`
+          : 'released before it could be adopted; claim it with board_claim if you work on it';
+    const adopted = result.adopted.map((a) => ({ ...named(a.id), generation: a.generation, from_generation: a.from_generation }));
+    const already = result.already.map((a) => ({ ...named(a.id), generation: a.generation }));
+    const refused = result.refused.map((r) => ({ ...named(r.id), reason: r.reason, why: refusedWhy(r) }));
+    const notice =
+      adopted.length + already.length + refused.length === 0
+        ? `no board item is claimed by session '${from}'; nothing was written`
+        : `adopted ${adopted.length} claim(s) from session '${from}' (new generations; its later board_reaffirm, board_release and board_update naming its session are refused)` +
+          (already.length ? `; ${already.length} already yours from an earlier adoption` : '') +
+          (refused.length ? `; ${refused.length} refused and left alone (see refused[].why)` : '');
+    return { from_session: from, adopted, already, refused, notice };
   }
 
   /**

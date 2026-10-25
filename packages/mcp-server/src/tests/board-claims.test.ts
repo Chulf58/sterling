@@ -258,3 +258,49 @@ test('compact projections: digest rows carry claim_state, locally and through ta
     h.cleanup();
   }
 });
+
+// Claim hand-over across /new (board 05fbab98): board_adopt moves an ended session's
+// claims in this checkout, refuses ones in another checkout, and repeats as a no-op.
+test('board_adopt: adopts the predecessor\'s claims, refuses another checkout, repeats as a no-op, and is served', async () => {
+  const h = harness();
+  try {
+    const mine = addItem(h.tools, 'Handed over task\nsee packages/store/src/index.ts');
+    const away = addItem(h.tools, 'Task in another worktree\nsee packages/store/src/index.ts');
+    h.tools.boardClaim(mine.id, 'old', '/repo');
+    h.tools.boardClaim(away.id, 'old', '/repo/wt-b');
+    h.clock.now = at(3);
+    const r = h.tools.boardAdopt('old', 'new', '/repo') as unknown as { adopted: Loose[]; already: Loose[]; refused: Loose[]; notice: string };
+    assert.deepEqual(r.adopted.map((x) => x.id), [mine.id]);
+    assert.equal(r.adopted[0].label, 'Handed over task');
+    assert.deepEqual(r.refused.map((x) => [x.id, x.reason]), [[away.id, 'other_checkout']]);
+    assert.match(String(r.refused[0].why), /board_takeover \(expected_holder 'old', expected_generation \d+\)/);
+    assert.equal(claimOf(h.tools, mine.id)?.holder_session, 'new');
+    assert.equal(claimOf(h.tools, away.id)?.holder_session, 'old', 'the other checkout keeps its holder');
+    const again = h.tools.boardAdopt('old', 'new', '/repo') as unknown as { adopted: Loose[]; already: Loose[] };
+    assert.deepEqual(again.adopted, []);
+    assert.deepEqual(again.already.map((x) => x.id), [mine.id]);
+    const none = h.tools.boardAdopt('nobody', 'new', '/repo') as unknown as { notice: string };
+    assert.match(none.notice, /no board item is claimed by session 'nobody'; nothing was written/);
+    assert.throws(() => h.tools.boardAdopt('', 'new', '/repo'), /from_session is required/);
+  } finally {
+    h.cleanup();
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-adopt-mcp-'));
+  const { server, store, tools } = createSterlingServer(join(dir, 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const item = addItem(tools, 'Served adopt\nsee packages/store/src/index.ts');
+    tools.boardClaim(item.id, 'old', 'main');
+    const res = (await client.callTool({ name: 'board_adopt', arguments: { from_session: 'old', session: 'new', checkout: 'main' } })) as { isError?: boolean; content: { text: string }[] };
+    assert.notEqual(res.isError, true, res.content[0]?.text);
+    assert.equal((JSON.parse(res.content[0].text) as { adopted: Loose[] }).adopted.length, 1);
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
