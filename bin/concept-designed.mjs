@@ -7,7 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/concept-designed.mjs
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -5649,6 +5649,11 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -5692,8 +5697,8 @@ function fail(message, code = 1) {
 // scripts/hooks/lib/session-events.mjs
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname, join as join2 } from "node:path";
-var SESSION_EVENTS_REL = join2(".sterling", "transient", "session-events.json");
+import { dirname, join as join3 } from "node:path";
+var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath2, newEvents, lockOptions) {
   mkdirSync(dirname(eventsPath2), { recursive: true });
   withSessionEventsLock(
@@ -5750,7 +5755,7 @@ function withSessionEventsLock(path, fn, { timeoutMs = 5e3 } = {}) {
 var families = argAll("--family");
 var target = arg("--target") ?? process.cwd();
 if (!families.length) fail("concept-designed: at least one --family required (the concept family slug, e.g. weapons)");
-var eventsPath = join3(target, ".sterling", "transient", "session-events.json");
+var eventsPath = join4(target, ".sterling", "transient", "session-events.json");
 var at = (/* @__PURE__ */ new Date()).toISOString();
 try {
   appendSessionEventsAt(eventsPath, families.map((family) => ({ kind: "concept_designed", detail: family, at })));

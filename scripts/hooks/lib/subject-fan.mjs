@@ -33,6 +33,7 @@
 // Hooks bundle this module: builtins, sibling libs and @sterling/* only.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts, allocateShares, DEFAULT_QUERY_CAP, DOMAIN_DESCRIPTION_KEY } from '@sterling/store';
 import { openRoutedForHook } from './broker-client.mjs';
@@ -71,6 +72,7 @@ const errorText = (e) => String((e && e.message) || e);
  * failure to open the PROJECT store throws.
  */
 export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
+  cwd = storeRootFor(cwd);
   if (storeBackend(cwd) === 'routed') return openRoutedSubjectFan(cwd);
   const projectPath = join(cwd, '.sterling', 'sterling.db');
   if (!existsSync(projectPath)) return null;

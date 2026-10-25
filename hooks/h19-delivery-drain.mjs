@@ -6,12 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h19-delivery-drain.mjs
-import { readFileSync as readFileSync4, readdirSync, rmSync as rmSync2, statSync } from "node:fs";
+import { readFileSync as readFileSync4, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
 import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
-import { dirname, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5659,21 +5658,66 @@ function isSterlingRoot(dir) {
   return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join3, resolve } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync(resolve(cwd, gitDir));
+  const commonReal = realpathSync(resolve(cwd, commonDir));
+  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
+  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join3(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join3(linkedWorktree.mainRoot, configRel)) && existsSync2(join3(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join3(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
+
+// scripts/hooks/lib/common.mjs
 function readStdin() {
   const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const root = projectRoot(input2.cwd);
-  if (root) input2.cwd = root;
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots) {
+    input2.cwd = roots.storeRoot;
+    input2.checkout = roots.checkoutRoot;
+  } else {
+    input2.checkout = input2.cwd;
+  }
   return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -5792,7 +5836,7 @@ var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/hooks/lib/ledger.mjs
-import { readFileSync as readFileSync3, writeFileSync, existsSync as existsSync3, rmSync } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync, existsSync as existsSync4, rmSync } from "node:fs";
 import { join as join5 } from "node:path";
 function ledgerPath(cwd, runId, agentId) {
   if (runId && agentId) return join5(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
@@ -5800,7 +5844,7 @@ function ledgerPath(cwd, runId, agentId) {
   return join5(cwd, ".sterling", "transient", "conductor-reads.json");
 }
 function readLedgerEntries(path) {
-  if (!existsSync3(path)) return [];
+  if (!existsSync4(path)) return [];
   const raw = readFileSync3(path, "utf8");
   try {
     const parsed = JSON.parse(raw);
@@ -5815,7 +5859,7 @@ function readLedgerEntries(path) {
   }
 }
 function pruneUnhashed(path) {
-  if (!existsSync3(path)) return;
+  if (!existsSync4(path)) return;
   const kept = readLedgerEntries(path).filter((e) => e.sha256);
   if (kept.length) writeFileSync(path, JSON.stringify(kept));
   else rmSync(path);
@@ -5858,7 +5902,7 @@ try {
   const legacy = join6(input.cwd, ".sterling", "transient", "delivery", "pending.json");
   let legacyExists = false;
   try {
-    statSync(legacy);
+    statSync2(legacy);
     legacyExists = true;
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;

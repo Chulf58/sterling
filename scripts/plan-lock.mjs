@@ -68,6 +68,7 @@ import {
 } from './hooks/lib/plan-lock.mjs';
 import { arg as sharedArg, hasFlag, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { storeRootFor } from './lib/worktree-root.mjs';
 
 const argv = process.argv.slice(2);
 
@@ -100,7 +101,9 @@ function refuse(message) {
 const cwd = process.cwd();
 // A bare .sterling directory is not a project — the sterling.db predicate
 // scripts/lib/project.mjs uses for every other sanctioned script.
-if (!isSterlingProject(cwd)) {
+// A linked worktree's checkout counts when its project's store root is one; the lock
+// and plans stay in this checkout, like the rest of a session's state.
+if (!isSterlingProject(storeRootFor(cwd))) {
   refuse(`${cwd} is not an initialized Sterling project (no .sterling/sterling.db) — run from the project root`);
 }
 const sterlingDir = sterlingDirOf(cwd);

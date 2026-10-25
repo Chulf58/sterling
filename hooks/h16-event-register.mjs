@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync4 } from "node:fs";
-import { dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
+import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
+import { join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -12348,21 +12348,82 @@ function storeBackend(root) {
   return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync4(resolve3(cwd, gitDir));
+  const commonReal = realpathSync4(resolve3(cwd, commonDir));
+  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
+  return { worktree: realpathSync4(toplevel), mainRoot: dirname5(commonReal) };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join9(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync4(join9(linkedWorktree.mainRoot, configRel)) && existsSync4(join9(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync4(join9(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve3(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname5(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve3(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync4(p);
+  } catch {
+    return p;
+  }
+}
+
+// scripts/hooks/lib/common.mjs
 function readStdin() {
   const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const root = projectRoot(input2.cwd);
-  if (root) input2.cwd = root;
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots) {
+    input2.cwd = roots.storeRoot;
+    input2.checkout = roots.checkoutRoot;
+  } else {
+    input2.checkout = input2.cwd;
+  }
   return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -12471,13 +12532,14 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   stderr: process.stderr,
   exit: (code) => process.exit(code)
 });
-function openStore(cwd) {
+function openStore(dir) {
+  const cwd = storeRootFor(dir);
   if (storeBackend(cwd) === "routed") {
     const route = resolveStoreRoute(cwd);
     if (route?.storage === "postgres") return openRoutedForHook(cwd).store;
   }
-  const p = join9(cwd, ".sterling", "sterling.db");
-  return existsSync4(p) ? new SterlingStore(p) : null;
+  const p = join10(cwd, ".sterling", "sterling.db");
+  return existsSync5(p) ? new SterlingStore(p) : null;
 }
 function namedError(e) {
   const name = e?.constructor?.name && e.constructor.name !== "Object" ? e.constructor.name : e?.name ?? "Error";
@@ -12498,24 +12560,24 @@ function openStoreOrDegrade(cwd, who, open2 = openStore) {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { dirname as dirname6, join as join10 } from "node:path";
-var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
+import { dirname as dirname6, join as join11 } from "node:path";
+var SESSION_EVENTS_REL = join11(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
   const event2 = { kind: "research_tool", detail: String(detail ?? ""), at };
   if (typeof agentId === "string" && agentId !== "") event2.agent_id = agentId;
   return event2;
 }
 function appendSessionEvent(projectDir, event2, lockOptions) {
-  appendSessionEventsAt(join10(projectDir, SESSION_EVENTS_REL), [event2], lockOptions);
+  appendSessionEventsAt(join11(projectDir, SESSION_EVENTS_REL), [event2], lockOptions);
 }
 function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   mkdirSync5(dirname6(eventsPath), { recursive: true });
   withSessionEventsLock(
     eventsPath,
     () => {
-      const events = existsSync5(eventsPath) ? JSON.parse(readFileSync7(eventsPath, "utf8")) : [];
+      const events = existsSync6(eventsPath) ? JSON.parse(readFileSync7(eventsPath, "utf8")) : [];
       events.push(...newEvents);
       const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
       writeFileSync3(tmp, JSON.stringify(events), { flag: "wx" });

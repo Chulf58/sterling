@@ -7,9 +7,9 @@ var __export = (target, all) => {
 };
 
 // scripts/rotation-note.mjs
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, writeFileSync as writeFileSync3, readFileSync as readFileSync2 } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { dirname as dirname2 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync3, writeFileSync as writeFileSync3, readFileSync as readFileSync3 } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { dirname as dirname3 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync, readFileSync, writeFileSync, rmSync, rmdirSync, renameSync, existsSync, lstatSync, readdirSync, realpathSync, chmodSync } from "node:fs";
@@ -5593,9 +5593,13 @@ import { closeSync, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSyn
 import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 var CONFIG_REL = join2(".sterling", "config.json");
 var STORE_DB_REL = join2(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync2(join2(dir, CONFIG_REL)) || existsSync2(join2(dir, STORE_DB_REL)));
+}
 
 // scripts/hooks/lib/plan-lock.mjs
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
@@ -5971,6 +5975,55 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync3, realpathSync as realpathSync3, statSync } from "node:fs";
+import { basename, dirname as dirname2, join as join6, resolve as resolve3 } from "node:path";
+function resolveLinkedWorktree(cwd2 = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd: cwd2, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync3(resolve3(cwd2, gitDir));
+  const commonReal = realpathSync3(resolve3(cwd2, commonDir));
+  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
+  return { worktree: realpathSync3(toplevel), mainRoot: dirname2(commonReal) };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join6(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync3(join6(linkedWorktree.mainRoot, configRel)) && existsSync3(join6(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join6(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve3(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync3(p);
+  } catch {
+    return p;
+  }
+}
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -6024,7 +6077,7 @@ try {
 } catch (e) {
   fail2(e.message);
 }
-if (!existsSync2(sterlingDirForCheck)) {
+if (!existsSync4(sterlingDirForCheck)) {
   fail2(`${cwd} is not a Sterling project (.sterling/ missing) \u2014 run from the project root`);
 }
 var nextSlice = (arg2("next-slice") ?? "").trim();
@@ -6072,7 +6125,7 @@ var sessionHost = host === "opencode" && sessionId ? "opencode" : null;
 var boundary = host === "opencode" ? "the new session" : "the /clear";
 var git = (args) => {
   try {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
+    const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
     return r.status === 0 ? (r.stdout ?? "").trim() : null;
   } catch {
     return null;
@@ -6097,8 +6150,8 @@ var commitsAheadRaw = baseBranch ? git(["rev-list", "--count", `${baseBranch}..H
 var commitsAhead = commitsAheadRaw !== null && /^\d+$/.test(commitsAheadRaw) ? Number(commitsAheadRaw) : null;
 function readStaleMinutes() {
   try {
-    const cfgPath = resolveStoreWritePath(cwd, ".sterling", "config.json");
-    const cfg = JSON.parse(readFileSync2(cfgPath, "utf8"));
+    const cfgPath = resolveStoreWritePath(storeRootFor(cwd), ".sterling", "config.json");
+    const cfg = JSON.parse(readFileSync3(cfgPath, "utf8"));
     const v = cfg?.dispatch_register?.stale_minutes;
     return typeof v === "number" && v > 0 ? v : 60;
   } catch {
@@ -6149,7 +6202,7 @@ try {
 } catch (e) {
   fail2(e.message);
 }
-mkdirSync3(dirname2(notePath), { recursive: true });
+mkdirSync3(dirname3(notePath), { recursive: true });
 writeFileSync3(notePath, JSON.stringify(note, null, 2) + "\n");
 process.stdout.write(
   `rotation note written (single slot \u2014 this supersedes any prior note).

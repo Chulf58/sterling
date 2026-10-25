@@ -8,12 +8,12 @@ var __export = (target2, all) => {
 
 // scripts/cleanup-plan.mjs
 import { lstatSync as lstatSync4, readFileSync as readFileSync6, realpathSync as realpathSync3 } from "node:fs";
-import { basename as basename2, join as join9, posix } from "node:path";
+import { basename as basename2, join as join10, posix } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
 import { readFileSync as readFileSync5, existsSync as existsSync3, mkdtempSync, rmSync as rmSync3 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
@@ -12026,6 +12026,11 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -12103,8 +12108,8 @@ function openProjectReadOnly(cwd = process.cwd()) {
     const store3 = openRouted(cwd, { readOnlySnapshot: true }).store;
     return { cwd, store: store3, config, close: () => store3.close() };
   }
-  const dir = mkdtempSync(join8(tmpdir(), "sterling-readonly-"));
-  const snapshot = join8(dir, "sterling.db");
+  const dir = mkdtempSync(join9(tmpdir(), "sterling-readonly-"));
+  const snapshot = join9(dir, "sterling.db");
   let store2;
   try {
     const ro = new DatabaseSync4(dbPath, { readOnly: true });
@@ -12174,7 +12179,7 @@ function needlesFor(path) {
   if (base2.endsWith(".gd")) {
     let text;
     try {
-      text = readFileSync6(join9(target, path), "utf8");
+      text = readFileSync6(join10(target, path), "utf8");
     } catch (e) {
       return { error: `could not read the file to find its class_name (${e.code ?? e.message})` };
     }
@@ -12225,7 +12230,7 @@ function buildPlan(store2) {
   }
   const isGone = (path) => {
     try {
-      lstatSync4(join9(target, path));
+      lstatSync4(join10(target, path));
       return false;
     } catch (e) {
       return e.code === "ENOENT";
@@ -12237,7 +12242,7 @@ function buildPlan(store2) {
     if (owners.length) return ["release", `also owned by live article(s) ${listed(owners)}; only this article's ownership goes`];
     let st;
     try {
-      st = lstatSync4(join9(target, path));
+      st = lstatSync4(join10(target, path));
     } catch (e) {
       if (e.code === "ENOENT") return ["absent", "not on disk; only the store entry goes"];
       return ["keep", `could not stat the file (${e.code ?? e.message})`];

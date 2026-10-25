@@ -3,6 +3,7 @@
 // With Postgres storage the slot is a file local to this checkout and host
 // (scripts/hooks/lib/selection-file.mjs), not a store row, and no store is opened.
 import { join } from 'node:path';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 import { inWorkerChild } from './worker.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { takeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
@@ -18,7 +19,7 @@ export function createPromptHandler({ openStore, rootOf, fenced, env = process.e
       // Checked before the take, so an unknown shape never consumes the selection.
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       let selection;
-      if (storeBackend(root) === 'routed') {
+      if (storeBackend(storeRootFor(root)) === 'routed') {
         selection = takeSelectionFile(root);
       } else {
         const store = openStore(join(root, '.sterling', 'sterling.db'));

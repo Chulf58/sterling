@@ -18,6 +18,7 @@ import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/mai
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, overpassLine, pendingIssueReportsLine, projectModeLine, readProjectConfig, storageLine, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
 import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
+import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
 
 /**
  * The config-derived lines, read live on every request so a TUI toggle shows on
@@ -27,9 +28,11 @@ import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
  * lines, the config the undeclared-source scan reads and the loader's unreadable flag.
  */
 export function operatingStateLines(root, pluginRoot, { opener } = {}) {
-  const { config, configUnreadable } = readProjectConfig(root);
+  // The store and config lines read the project's store root (a linked worktree's root is its checkout).
+  const store = storeRootFor(root);
+  const { config, configUnreadable } = readProjectConfig(store);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), overpassLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config, configUnreadable };
 }
 
@@ -53,6 +56,6 @@ export function undeclaredSourceBlock(root, config) {
  */
 export function maintenanceLines(state, config, root) {
   const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
-  const backlog = reconcileBacklog({ reconcile: state.reconcile, cwd: root });
+  const backlog = reconcileBacklog({ reconcile: state.reconcile, cwd: storeRootFor(root) });
   return [queue, backlog.line].filter(Boolean);
 }

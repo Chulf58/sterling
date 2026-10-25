@@ -9,8 +9,7 @@ var __export = (target, all) => {
 import { rmSync } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
-import { dirname, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5658,21 +5657,66 @@ function isSterlingRoot(dir) {
   return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join3, resolve } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync(resolve(cwd, gitDir));
+  const commonReal = realpathSync(resolve(cwd, commonDir));
+  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
+  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join3(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join3(linkedWorktree.mainRoot, configRel)) && existsSync2(join3(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join3(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
+
+// scripts/hooks/lib/common.mjs
 function readStdin() {
   const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const root = projectRoot(input2.cwd);
-  if (root) input2.cwd = root;
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots) {
+    input2.cwd = roots.storeRoot;
+    input2.checkout = roots.checkoutRoot;
+  } else {
+    input2.checkout = input2.cwd;
+  }
   return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {

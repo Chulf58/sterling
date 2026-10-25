@@ -7,7 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/debug-scope.mjs
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -5649,6 +5649,11 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -5691,9 +5696,9 @@ function fail(message, code = 1) {
 
 // scripts/lib/debug-scope.mjs
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
-import { join as join2, dirname } from "node:path";
+import { join as join3, dirname } from "node:path";
 function debugScopePath(cwd) {
-  return join2(cwd, ".sterling", "transient", "debug-scope.json");
+  return join3(cwd, ".sterling", "transient", "debug-scope.json");
 }
 function readDebugScope(cwd) {
   const p = debugScopePath(cwd);
@@ -5711,8 +5716,8 @@ function clearDebugScope(cwd) {
 // scripts/hooks/lib/session-events.mjs
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname2, join as join3 } from "node:path";
-var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
+import { dirname as dirname2, join as join4 } from "node:path";
+var SESSION_EVENTS_REL = join4(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   mkdirSync2(dirname2(eventsPath), { recursive: true });
   withSessionEventsLock(
@@ -5772,7 +5777,7 @@ if (action === "register") {
   const paths = argAll("--path");
   if (!paths.length) fail("debug-scope register: at least one --path required (the explorer map)");
   registerDebugScope(target, paths);
-  const eventsPath = join4(target, ".sterling", "transient", "session-events.json");
+  const eventsPath = join5(target, ".sterling", "transient", "session-events.json");
   try {
     appendSessionEventsAt(eventsPath, [{ kind: "debug_scope", detail: paths.join(", "), at: (/* @__PURE__ */ new Date()).toISOString() }]);
   } catch (e) {

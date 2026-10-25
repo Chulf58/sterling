@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir4 } from "node:os";
-import { basename as basename3, dirname as dirname6, join as join10 } from "node:path";
+import { basename as basename3, dirname as dirname6, join as join11 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 
@@ -9728,6 +9728,11 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join7 } from "node:path";
+var CONFIG_REL = join7(".sterling", "config.json");
+var STORE_DB_REL = join7(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -9778,14 +9783,14 @@ function hasFlag(name, argv = process.argv.slice(2)) {
 // scripts/lib/hobby-only.mjs
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync2, realpathSync as realpathSync4 } from "node:fs";
-import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve5 } from "node:path";
+import { basename as basename2, dirname as dirname5, join as join10, resolve as resolve5 } from "node:path";
 
 // scripts/lib/handoff-projection.mjs
-import { join as join8, resolve as resolve4 } from "node:path";
+import { join as join9, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync, readdirSync, mkdirSync as mkdirSync3, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
-import { join as join7, resolve as resolve3 } from "node:path";
+import { join as join8, resolve as resolve3 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
     super(message);
@@ -9805,7 +9810,7 @@ function containedPath(root, rel, leaf) {
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
   let cursor = resolve3(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join7(cursor, part);
+    cursor = join8(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -9831,13 +9836,13 @@ var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
 var fwd = (p) => p.replace(/\\/g, "/");
-var CONFIG_REL = ".sterling/config.json";
+var CONFIG_REL2 = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
-  const where = `${fwd(resolve4(root))}/${CONFIG_REL}`;
-  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
+  const where = `${fwd(resolve4(root))}/${CONFIG_REL2}`;
+  if (!existsContained(root, CONFIG_REL2, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, CONFIG_REL));
+    parsed = JSON.parse(readContained(root, CONFIG_REL2));
   } catch (err) {
     throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
@@ -9872,7 +9877,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/hobby-only.mjs
 var HOBBY_ONLY_EXIT = 4;
 function invokingRoot(cwd = process.cwd()) {
-  if (existsSync2(join9(cwd, ".sterling"))) return cwd;
+  if (existsSync2(join10(cwd, ".sterling"))) return cwd;
   const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return cwd;
   const [gitDir, commonDir] = r.stdout.split("\n").map((l) => l.trim());
@@ -9920,7 +9925,7 @@ var POSIX = (p) => p.replace(/\\/g, "/");
 function defaultRoots() {
   const roots2 = [resolveStoreWritePath(homedir4(), ".sterling", "domains")];
   const user = basename3(homedir4());
-  const winHomeRoot = join10("/mnt/c/Users", user);
+  const winHomeRoot = join11("/mnt/c/Users", user);
   if (existsSync3(winHomeRoot)) {
     const winHome = resolveStoreWritePath(winHomeRoot, ".sterling", "domains");
     if (existsSync3(winHome)) roots2.push(winHome);
@@ -10144,7 +10149,7 @@ function storeFilesUnder(rootList, { onInaccessible = null } = {}) {
     }
     if (!rootPresence.exists) continue;
     for (const name of readdirSync2(root)) {
-      const dbPath = POSIX(join10(root, name, "sterling.db"));
+      const dbPath = POSIX(join11(root, name, "sterling.db"));
       const presence = storePresence(dbPath);
       if (presence.inaccessible) {
         if (onInaccessible) onInaccessible({ kind: "store", root: POSIX(root), path: dbPath, domain: name, error: presence.accessError });
@@ -10163,12 +10168,12 @@ function projectContext(projectDir) {
   } catch (e) {
     fail(e.message);
   }
-  const configPath = join10(dotDir, "config.json");
+  const configPath = join11(dotDir, "config.json");
   if (!existsSync3(configPath)) fail(`no Sterling config at ${POSIX(configPath)} \u2014 is this an init'd project?`);
-  let storePath = POSIX(join10(dotDir, "store.db"));
+  let storePath = POSIX(join11(dotDir, "store.db"));
   if (!existsSync3(storePath)) {
     const dbs = readdirSync2(dotDir).filter((f) => f.endsWith(".db"));
-    if (dbs.length === 1) storePath = POSIX(join10(dotDir, dbs[0]));
+    if (dbs.length === 1) storePath = POSIX(join11(dotDir, dbs[0]));
     else fail(`no project store at ${storePath}${dbs.length ? ` (found ${dbs.join(", ")} \u2014 ambiguous, pass a project with a store.db)` : ""}`);
   }
   const config = parseConfig(JSON.parse(readFileSync2(configPath, "utf8")));
@@ -10653,7 +10658,7 @@ function adoptCreateOnly(from, to) {
       `refusing: the destination directory '${destDir}' could not be created (${e.message}). Nothing was published and no destination was created at '${to}'.`
     );
   }
-  const snapshot = POSIX(join10(destDir, `.adopt-snapshot-${process.pid}-${randomUUID3()}.tmp`));
+  const snapshot = POSIX(join11(destDir, `.adopt-snapshot-${process.pid}-${randomUUID3()}.tmp`));
   pendingSnapshot = snapshot;
   console.log(`adopt --apply --create-only ${from} \u2192 ${to}`);
   vacuumIntoSnapshot(from, snapshot);
@@ -11096,17 +11101,17 @@ function scopeAuditProjectContext(projectDir) {
   } catch (e) {
     fail(e.message);
   }
-  const configPath = join10(dotDir, "config.json");
+  const configPath = join11(dotDir, "config.json");
   if (!existsSync3(configPath)) fail(`no Sterling config at ${POSIX(configPath)} \u2014 is this an init'd project?`);
   const config = parseConfig(JSON.parse(readFileSync2(configPath, "utf8")));
-  const canonical = POSIX(join10(dotDir, "sterling.db"));
-  const present = ["sterling.db", "store.db"].filter((name) => existsSync3(POSIX(join10(dotDir, name))));
+  const canonical = POSIX(join11(dotDir, "sterling.db"));
+  const present = ["sterling.db", "store.db"].filter((name) => existsSync3(POSIX(join11(dotDir, name))));
   if (present.length) {
     const note = present.length > 1 ? `two candidate project stores are present in ${POSIX(dotDir)} (${present.join(", ")}); the canonical '${present[0]}' was audited and '${present.slice(1).join(", ")}' was NOT read at all \u2014 its rows are outside every number in this report` : null;
-    return { config, storePath: POSIX(join10(dotDir, present[0])), projectStoreNote: note };
+    return { config, storePath: POSIX(join11(dotDir, present[0])), projectStoreNote: note };
   }
   const dbs = readdirSync2(dotDir).filter((f) => f.endsWith(".db"));
-  if (dbs.length === 1) return { config, storePath: POSIX(join10(dotDir, dbs[0])), projectStoreNote: null };
+  if (dbs.length === 1) return { config, storePath: POSIX(join11(dotDir, dbs[0])), projectStoreNote: null };
   if (dbs.length > 1) {
     fail(
       `cannot tell which file in ${POSIX(dotDir)} is the project store (found ${dbs.join(", ")} and no sterling.db/store.db) \u2014 auditing the wrong one would attribute its rows to this project`
@@ -11617,7 +11622,7 @@ function readRenameReceipt(dbPath) {
   }
 }
 function agentsMdLines(dir, oldName, newName) {
-  const path = join10(dir, "AGENTS.md");
+  const path = join11(dir, "AGENTS.md");
   if (!existsSync3(path)) return [];
   const escaped = oldName.replace(/[-\\^$.*+?()[\]{}|]/g, "\\$&");
   const word = new RegExp(`(^|[^a-z0-9_-])${escaped}(?![a-z0-9_-])`, "g");
@@ -11724,7 +11729,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId, r
 function renameCopy(oldPath, newPath, oldName, newName, operationId, retag = false) {
   const destDir = dirname6(newPath);
   mkdirSync4(destDir, { recursive: true });
-  const temp = POSIX(join10(destDir, `.rename-${operationId}-${process.pid}-${randomUUID3()}.tmp`));
+  const temp = POSIX(join11(destDir, `.rename-${operationId}-${process.pid}-${randomUUID3()}.tmp`));
   pendingSnapshot = temp;
   vacuumIntoSnapshot(oldPath, temp);
   const db = new DatabaseSync5(temp);
@@ -11859,7 +11864,7 @@ Renames a whole domain on this machine. Without --apply it prints the plan and w
       absent.push({ row, why: "registered path does not exist" });
       continue;
     }
-    const configPath = join10(row.repo_path, ".sterling", "config.json");
+    const configPath = join11(row.repo_path, ".sterling", "config.json");
     const configPresence = storePresence(configPath);
     if (configPresence.inaccessible) {
       unresolved.push({ row, error: `.sterling/config.json cannot be read (${configPresence.accessError})` });
@@ -11898,7 +11903,7 @@ Fix or unregister them, then rerun. Nothing was written.`
     const receipts = [...new Set(projects.filter((p) => p.newMount).map((p) => POSIX(p.newMount.dbPath)))].filter((path) => existsSync3(path)).map((path) => readRenameReceipt(path).receipt).filter((r2) => r2 && r2.from_domain === oldName && r2.to_domain === newName);
     const from = [...new Set(receipts.map((r2) => r2.from_path))];
     if (from.length > 1) fail(`refusing: the stores mounted as '${newName}' carry rename receipts naming different old stores (${from.join(", ")}). Nothing was written.`);
-    oldPath = from[0] ?? POSIX(join10(homedir4(), ".sterling", "domains", oldName, "sterling.db"));
+    oldPath = from[0] ?? POSIX(join11(homedir4(), ".sterling", "domains", oldName, "sterling.db"));
   }
   const elsewhere = mounting.filter((p) => !sameFile(POSIX(p.oldMount.dbPath), oldPath));
   if (elsewhere.length) {
@@ -11914,7 +11919,7 @@ Fix or unregister them, then rerun. Nothing was written.`
   if (basename3(oldPath) !== "sterling.db" || basename3(dirname6(oldPath)) !== oldName) {
     fail(`refusing: the store for '${oldName}' is at '${oldPath}', not at <root>/${oldName}/sterling.db, so there is no sibling path to give '${newName}'. Nothing was written.`);
   }
-  const newPath = POSIX(join10(dirname6(dirname6(oldPath)), newName, "sterling.db"));
+  const newPath = POSIX(join11(dirname6(dirname6(oldPath)), newName, "sterling.db"));
   const probe = probeSchemaVersion(oldPath);
   if (probe.error) fail(`refusing: ${probe.error}`);
   if (probe.version !== SUPPORTED_SCHEMA_VERSION2) {

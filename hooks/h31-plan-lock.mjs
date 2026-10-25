@@ -6,12 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h31-plan-lock.mjs
-import { spawnSync } from "node:child_process";
-import { basename } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
-import { dirname, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5659,21 +5658,66 @@ function isSterlingRoot(dir) {
   return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
 }
 
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join3, resolve } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync(resolve(cwd, gitDir));
+  const commonReal = realpathSync(resolve(cwd, commonDir));
+  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
+  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join3(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join3(linkedWorktree.mainRoot, configRel)) && existsSync2(join3(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join3(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
+
+// scripts/hooks/lib/common.mjs
 function readStdin() {
   const input = JSON.parse(readFileSync2(0, "utf8"));
-  const root = projectRoot(input.cwd);
-  if (root) input.cwd = root;
+  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+  if (roots) {
+    input.cwd = roots.storeRoot;
+    input.checkout = roots.checkoutRoot;
+  } else {
+    input.checkout = input.cwd;
+  }
   return input;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -5968,7 +6012,7 @@ try {
   const previous = priorRead.lock ?? null;
   const git = (args) => {
     try {
-      const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
       return r.status === 0 ? (r.stdout ?? "").trim() || null : null;
     } catch {
       return null;
@@ -5978,7 +6022,7 @@ try {
   const lock = {
     schema_version: 1,
     plan_path: rawPath,
-    title: extractTitle(planText, basename(rawPath)),
+    title: extractTitle(planText, basename2(rawPath)),
     approved_at: (/* @__PURE__ */ new Date()).toISOString(),
     // TWO HASHES, TWO QUESTIONS. approved_sha256 hashes the APPROVED TEXT (what
     // the user said yes to); file_sha256_at_approval hashes the FILE BYTES at

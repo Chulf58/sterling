@@ -8,7 +8,7 @@ var __export = (target, all) => {
 
 // scripts/check-record-citations.mjs
 import { fileURLToPath } from "node:url";
-import { dirname as dirname5, join as join8 } from "node:path";
+import { dirname as dirname5, join as join9 } from "node:path";
 import { existsSync as existsSync4, readFileSync as readFileSync6 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -12028,6 +12028,11 @@ function resolveStoreWritePath(root2, ...segments) {
   return target;
 }
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
@@ -12283,11 +12288,11 @@ function lintCitationCurrency(content, label, resolve5, getById2) {
 }
 
 // scripts/check-record-citations.mjs
-var selfRoot = join8(dirname5(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
+var selfRoot = join9(dirname5(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
 var root = process.argv[2] ?? selfRoot;
 var SLUG_CITATIONS_FAIL = false;
 var SLUG_WARNING_PRINT_CAP = 50;
-var storePath = join8(root, ".sterling", "sterling.db");
+var storePath = join9(root, ".sterling", "sterling.db");
 if (!existsSync4(storePath)) {
   console.log("record citations: skipped (no store)");
   process.exit(0);
@@ -12329,7 +12334,7 @@ var slugCitations = 0;
 var slugWarnings = [];
 var optOuts = 0;
 for (const file of files) {
-  const abs = join8(root, file);
+  const abs = join9(root, file);
   if (!existsSync4(abs)) continue;
   const content = readFileSync6(abs, "utf8");
   optOuts += countCitationOptOuts(content);

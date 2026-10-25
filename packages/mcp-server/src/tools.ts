@@ -828,6 +828,13 @@ export interface ToolDeps {
   newId?: () => string;
   /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
   repoRoot?: string;
+  /**
+   * The git checkout this server's session works in (--checkout): file hashing
+   * and checks, board provenance HEAD and the session-event register resolve
+   * here. Absent → repoRoot. It differs from repoRoot only in a linked git
+   * worktree, whose store, config, ledgers and handoffs stay on repoRoot.
+   */
+  checkoutRoot?: string;
   /** the machine's project registry file, for board_add target_project; absent → registryPath() */
   registryPath?: string;
   /** the time budget for reading another project's board (board_query/board_get target_project); absent → the reader's defaults */
@@ -1965,6 +1972,7 @@ export class SterlingTools {
   private now: () => string;
   private newId: () => string;
   private repoRoot?: string;
+  private checkoutRoot?: string;
   private domains?: DomainSurface;
   private registryPath?: string;
   private foreignBoardRead?: ReadForeignBoardOptions;
@@ -1977,6 +1985,7 @@ export class SterlingTools {
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? randomUUID;
     this.repoRoot = deps.repoRoot;
+    this.checkoutRoot = deps.checkoutRoot ?? deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : undefined);
   }
 
@@ -2269,10 +2278,10 @@ export class SterlingTools {
    */
   private treeRootFor(record: Record<string, unknown>): { root?: string; unresolved: boolean } {
     const name = (record as { working_tree?: string }).working_tree;
-    if (!name) return { root: this.repoRoot, unresolved: false };
+    if (!name) return { root: this.checkoutRoot, unresolved: false };
     const mapped = this.config.working_trees?.[name];
     if (!mapped) {
-      if (!this.declaresForeignTree(name)) return { root: this.repoRoot, unresolved: false };
+      if (!this.declaresForeignTree(name)) return { root: this.checkoutRoot, unresolved: false };
       return { root: undefined, unresolved: true };
     }
     // HOST-INDEPENDENT classification (decision windows-linux-parity):
@@ -3106,7 +3115,7 @@ export class SterlingTools {
    *  baseline. The attestation does NOT share it — it collects its own evidence
    *  through ./attestation-proof.ts, whose whole claim is about a buffer it read
    *  itself, not about a pathname. */
-  private hashFile(rel: string, root: string | undefined = this.repoRoot): string | undefined {
+  private hashFile(rel: string, root: string | undefined = this.checkoutRoot): string | undefined {
     if (!root) return undefined;
     try {
       return createHash('sha256').update(readFileSync(join(root, rel))).digest('hex');
@@ -3126,7 +3135,7 @@ export class SterlingTools {
    * established on the next create/reconcile; H7 covers every governed edit
    * meanwhile. An unreadable file also abstains (no fabricated flag).
    */
-  private contentChanged(rel: string, baselines: Record<string, string> | undefined, root: string | undefined = this.repoRoot): boolean {
+  private contentChanged(rel: string, baselines: Record<string, string> | undefined, root: string | undefined = this.checkoutRoot): boolean {
     const baseline = baselines?.[rel];
     if (baseline === undefined) return false;
     const current = this.hashFile(rel, root);
@@ -4667,7 +4676,7 @@ export class SterlingTools {
         // for every copy-only file. An unmapped tree name abstains LOUD.
         const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
         if (tree.unresolved) return { ...record, verify_before_use: true };
-        const treeRoot = tree.root ?? this.repoRoot;
+        const treeRoot = tree.root ?? this.checkoutRoot ?? this.repoRoot;
         // EVERY drifting file, not just the first (board 2ded3b4b). This loop used
         // to `break` on the first drift, and the enqueue dedup keyed on the
         // ARTICLE — so a second drifting file never got an item, and because
@@ -7724,7 +7733,7 @@ export class SterlingTools {
     if (article.type !== 'feature_article' || !closed.some((item) => item.system_reason === 'state_review')) return [];
     if (article.state !== 'wired_in' && article.state !== 'active' && article.state !== 'built') return [];
     const entries = ((article.files ?? []) as { path: string; role?: string; entry?: boolean }[]).filter((f) => f.entry);
-    const root = this.treeRootFor(article).root ?? this.repoRoot;
+    const root = this.treeRootFor(article).root ?? this.checkoutRoot;
     const reachability = root ? new EntryReachability(root) : undefined;
     return entries.flatMap((f) => {
       const why = reachability ? reachability.unjudgedReason(f.path, f.role ?? '') : 'its working tree could not be resolved, so reachability was not checked';
@@ -10450,7 +10459,8 @@ export class SterlingTools {
         'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)'
       );
     }
-    const eventsPath = join(this.repoRoot, '.sterling', 'transient', 'session-events.json');
+    // The session-event register is transient state, so it is the checkout's (a linked worktree has its own).
+    const eventsPath = join(this.checkoutRoot ?? this.repoRoot, '.sterling', 'transient', 'session-events.json');
     const at = this.now();
     // `lane` rides through only when present: an entry without it is written
     // byte-identical to a pre-lane (legacy) event, which H10 reads as the
@@ -10864,7 +10874,7 @@ export class SterlingTools {
           `board_add: measured_at_head '${candidate}' is refused for its shape — a full 40-character lowercase hex SHA is required, abbreviations are not accepted — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
       }
-      if (!this.shaResolves(candidate, this.repoRoot)) {
+      if (!this.shaResolves(candidate, this.checkoutRoot)) {
         throw new Error(
           `board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
@@ -10878,7 +10888,7 @@ export class SterlingTools {
       // the whole board write. Unstampable stays unstamped, and board_query's
       // annotation surface is where the absence is disclosed, exactly as when git
       // is unavailable.
-      const head = this.currentHeadSha(this.repoRoot);
+      const head = this.currentHeadSha(this.checkoutRoot);
       stampedHead = head !== undefined && MEASURED_AT_HEAD_RE.test(head) ? head : undefined;
     }
     const res = this.knowledgeCreate(
@@ -11451,7 +11461,7 @@ export class SterlingTools {
     // projected record's `text` (full/digest/headline all read `text`, and
     // this keeps the annotation visible through whichever projection the
     // caller asked for without adding a wire field no projection declares).
-    const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    const { status: provenance, warnings } = this.computeProvenance(records, this.checkoutRoot);
     // TRUTH AT READ (decision queue-truth-at-read-annotation-design): the ONE
     // integration point for the reconcile_needed drift re-check. Gated INSIDE to
     // this page's source:'system'/reconcile_needed rows, so a source:'user'
@@ -11663,7 +11673,7 @@ export class SterlingTools {
           `board_update: measured_at_head '${candidate}' is refused for its shape — a full 40-character lowercase hex SHA is required, abbreviations are not accepted — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
       }
-      if (!this.shaResolves(candidate, this.repoRoot)) {
+      if (!this.shaResolves(candidate, this.checkoutRoot)) {
         throw new Error(
           `board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
@@ -11672,7 +11682,7 @@ export class SterlingTools {
       // Narrowed to the schema's 40-hex shape, same reasoning as boardAdd's
       // stamping arm: a 64-hex SHA-256 id would be refused by zod, converting a
       // silent no-stamp into a failed board write.
-      const head = this.currentHeadSha(this.repoRoot);
+      const head = this.currentHeadSha(this.checkoutRoot);
       if (head && MEASURED_AT_HEAD_RE.test(head)) patch = { ...patch, measured_at_head: head };
     }
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;

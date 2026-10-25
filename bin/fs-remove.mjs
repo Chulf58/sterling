@@ -8,7 +8,7 @@ var __export = (target2, all) => {
 
 // scripts/fs-remove.mjs
 import { rmSync as rmSync4, existsSync as existsSync4 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 import { randomUUID as randomUUID4 } from "node:crypto";
 
 // node_modules/zod/v3/external.js
@@ -12024,6 +12024,11 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -12110,11 +12115,11 @@ var removed = [];
 try {
   for (const p of paths) {
     const rel = normalizeRepoPath(p);
-    if (!existsSync4(join8(target, rel))) fail(`fs-remove REFUSED: '${rel}' does not exist`, 2);
+    if (!existsSync4(join9(target, rel))) fail(`fs-remove REFUSED: '${rel}' does not exist`, 2);
   }
   for (const p of paths) {
     const rel = normalizeRepoPath(p);
-    rmSync4(join8(target, rel));
+    rmSync4(join9(target, rel));
     removed.push(rel);
     for (const article of store.query({ types: ["feature_article"], file_keys: [rel], cap: 100 })) {
       store.enqueueSystemTodo({

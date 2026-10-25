@@ -1,13 +1,14 @@
 // Shared hook plumbing. Hooks import workspace packages at AUTHOR time; the
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
 import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { resolveStoreRoute } from '@sterling/store/routing';
 import { openRoutedForHook } from './broker-client.mjs';
 import { isSterlingRoot, storeBackend } from './store-backend.mjs';
+import { resolveProjectRoots, storeRootFor } from '../../lib/worktree-root.mjs';
 
 export { storeBackend } from './store-backend.mjs';
 
@@ -81,14 +82,23 @@ export function formatLineRanges(ranges) {
  * would resolve the entire enforcement surface against a store that isn't there.
  */
 export function projectRoot(from) {
-  if (!from) return null;
-  let dir = resolve(String(from));
-  for (;;) {
-    if (isSterlingRoot(dir)) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return null; // filesystem root — bounded, never walks forever
-    dir = parent;
-  }
+  return resolveProjectRoots(from, isSterlingRoot)?.storeRoot ?? null;
+}
+
+/**
+ * The git checkout a session in `from` works in, or null outside a Sterling
+ * project. It is projectRoot(from) except in a linked git worktree (outside the
+ * main checkout or nested in it), where the store stays at the main checkout and
+ * the worktree's own .sterling/transient, HEAD and files are this session's
+ * (scripts/lib/worktree-root.mjs resolveProjectRoots).
+ */
+export function checkoutRoot(from) {
+  return resolveProjectRoots(from, isSterlingRoot)?.checkoutRoot ?? null;
+}
+
+/** Where a session's transient state lives: <checkout>/.sterling/transient. */
+export function transientDir(checkout) {
+  return join(checkout, '.sterling', 'transient');
 }
 
 /**
@@ -110,8 +120,16 @@ export function projectRoot(from) {
  */
 export function readStdin() {
   const input = JSON.parse(readFileSync(0, 'utf8'));
-  const root = projectRoot(input.cwd);
-  if (root) input.cwd = root;
+  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+  // input.cwd is the STORE root (store, config, board); input.checkout is the git
+  // checkout whose .sterling/transient this session writes. They differ only in a
+  // linked worktree. Outside a project both stay as given (checkout = cwd).
+  if (roots) {
+    input.cwd = roots.storeRoot;
+    input.checkout = roots.checkoutRoot;
+  } else {
+    input.checkout = input.cwd;
+  }
   return input;
 }
 
@@ -320,8 +338,10 @@ export const { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers(
   exit: (code) => process.exit(code),
 });
 
+// loadConfig and openStore take a store root or a linked worktree's checkout root
+// (storeRootFor maps the second to the first; anything else answers for itself).
 export function loadConfig(cwd) {
-  const p = join(cwd, '.sterling', 'config.json');
+  const p = join(storeRootFor(cwd), '.sterling', 'config.json');
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
 }
 
@@ -392,7 +412,8 @@ export function withRetry(fn) {
  * anything connects, so a caller that runs its cheap event exclusions first
  * pays the Postgres connect only on the events it acts on.
  */
-export function openStore(cwd) {
+export function openStore(dir) {
+  const cwd = storeRootFor(dir);
   if (storeBackend(cwd) === 'routed') {
     const route = resolveStoreRoute(cwd);
     if (route?.storage === 'postgres') return openRoutedForHook(cwd).store;

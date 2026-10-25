@@ -7,14 +7,14 @@ var __export = (target, all) => {
 };
 
 // scripts/check-record-hygiene.mjs
-import { dirname as dirname6, join as join10 } from "node:path";
+import { dirname as dirname6, join as join11 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { existsSync as existsSync5 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync4, mkdtempSync, rmSync as rmSync3 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
@@ -12403,6 +12403,11 @@ function resolveStoreWritePath(root2, ...segments) {
   return target;
 }
 
+// scripts/hooks/lib/store-backend.mjs
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+
 // scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
@@ -12451,8 +12456,8 @@ function openProjectReadOnly(cwd = process.cwd()) {
     const store2 = openRouted(cwd, { readOnlySnapshot: true }).store;
     return { cwd, store: store2, config, close: () => store2.close() };
   }
-  const dir = mkdtempSync(join8(tmpdir(), "sterling-readonly-"));
-  const snapshot = join8(dir, "sterling.db");
+  const dir = mkdtempSync(join9(tmpdir(), "sterling-readonly-"));
+  const snapshot = join9(dir, "sterling.db");
   let store;
   try {
     const ro = new DatabaseSync4(dbPath, { readOnly: true });
@@ -12475,10 +12480,10 @@ function openProjectReadOnly(cwd = process.cwd()) {
 
 // scripts/lib/record-hygiene.mjs
 import { readFileSync as readFileSync7 } from "node:fs";
-import { dirname as dirname5, join as join9 } from "node:path";
+import { dirname as dirname5, join as join10 } from "node:path";
 import { fileURLToPath } from "node:url";
 var here = dirname5(fileURLToPath(new URL("../scripts/lib/record-hygiene.mjs", import.meta.url).href));
-var FILLER_WORDS = JSON.parse(readFileSync7(join9(here, "record-hygiene-filler.json"), "utf8")).words;
+var FILLER_WORDS = JSON.parse(readFileSync7(join10(here, "record-hygiene-filler.json"), "utf8")).words;
 var FILLER = new Set(FILLER_WORDS);
 var AUDITED_TYPES = [
   "decision",
@@ -12580,13 +12585,13 @@ function readDomainRetiredDecisions(mounts) {
 var PRINT_CAP = 10;
 var args = process.argv.slice(2);
 var showAll = args.includes("--all");
-var root = args.find((a) => !a.startsWith("--")) ?? join10(dirname6(fileURLToPath2(new URL("../scripts/check-record-hygiene.mjs", import.meta.url).href)), "..");
+var root = args.find((a) => !a.startsWith("--")) ?? join11(dirname6(fileURLToPath2(new URL("../scripts/check-record-hygiene.mjs", import.meta.url).href)), "..");
 process.on("exit", (code) => {
   if (code !== 0) console.log(`record hygiene: could not run (a helper exited ${code}, see above) \u2014 REPORTING ONLY, exit code forced to 0`);
   process.exitCode = 0;
 });
 function main() {
-  if (!existsSync5(join10(root, ".sterling", "sterling.db"))) {
+  if (!existsSync5(join11(root, ".sterling", "sterling.db"))) {
     console.log("record hygiene: skipped (no store)");
     return;
   }

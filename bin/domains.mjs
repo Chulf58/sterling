@@ -9,7 +9,7 @@ var __export = (target, all) => {
 // scripts/domains.mjs
 import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync5 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename3, dirname as dirname6, join as join10, resolve as resolve6 } from "node:path";
+import { basename as basename3, dirname as dirname6, join as join11, resolve as resolve6 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -10203,8 +10203,15 @@ function resolveStoreWritePath(root, ...segments) {
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync3, realpathSync as realpathSync4 } from "node:fs";
-import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve5 } from "node:path";
+import { existsSync as existsSync3, realpathSync as realpathSync4, statSync as statSync3 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join10, resolve as resolve5 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join9 } from "node:path";
+var CONFIG_REL2 = join9(".sterling", "config.json");
+var STORE_DB_REL = join9(".sterling", "sterling.db");
+
+// scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
   const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
@@ -10498,7 +10505,7 @@ if (opts.apply && !opts.add.length) refuse("--apply needs at least one --add <do
 if (opts.apply && opts.json) refuse("--json prints the map; it cannot be combined with --apply");
 var projectRootOf = (dir) => resolveLinkedWorktree(dir)?.mainRoot ?? dir;
 var projectDir = projectRootOf(resolve6(opts.target ?? process.cwd()));
-var hasConfig = (dir) => existsSync4(join10(dir, ".sterling", "config.json"));
+var hasConfig = (dir) => existsSync4(join11(dir, ".sterling", "config.json"));
 function enclosingProject(dir) {
   for (let d = dir; ; d = dirname6(d)) {
     if (hasConfig(d)) return d;
@@ -10534,7 +10541,7 @@ if (project) {
   }
 }
 var onPostgres = route?.storage === "postgres";
-var domainsRoot = join10(homedir5(), ".sterling", "domains");
+var domainsRoot = join11(homedir5(), ".sterling", "domains");
 function inspectStore(name, dbPath) {
   const entry = { name, path: fwd2(dbPath), description: null, format: "current", unreadable: null, renamed_to: null };
   let db;
@@ -10597,7 +10604,7 @@ function listStores() {
   const found = /* @__PURE__ */ new Map();
   if (existsSync4(domainsRoot)) {
     for (const d of readdirSync(domainsRoot, { withFileTypes: true })) {
-      const dbPath = join10(domainsRoot, d.name, "sterling.db");
+      const dbPath = join11(domainsRoot, d.name, "sterling.db");
       if (d.isDirectory() && existsSync4(dbPath)) found.set(d.name, dbPath);
     }
   }
@@ -10617,7 +10624,7 @@ if (!project) {
 }
 var rows = [];
 var registeredByThisRun = false;
-var hasStore = project ? onPostgres || existsSync4(join10(projectDir, ".sterling", "sterling.db")) : false;
+var hasStore = project ? onPostgres || existsSync4(join11(projectDir, ".sterling", "sterling.db")) : false;
 if (existsSync4(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
   try {
@@ -10781,7 +10788,7 @@ if (toAdd.length) {
     }
     done.push("updated this project's tags in the project registry");
   } else done.push("this project has no registry row, so the registry was not changed (run /sterling:init to register it)");
-  const agentsMdPath = join10(project.dir, "AGENTS.md");
+  const agentsMdPath = join11(project.dir, "AGENTS.md");
   if (existsSync4(agentsMdPath)) {
     const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
     const refresh = refreshAgentsMdFacts(readFileSync4(agentsMdPath, "utf8"), facts);
