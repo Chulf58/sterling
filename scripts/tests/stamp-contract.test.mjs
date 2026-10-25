@@ -955,7 +955,7 @@ const withOwnBullet = (text, own) => `${text.replace(/\n*$/, '\n')}${OWN_HEADING
 const swapLead = (lead, own) => (text) => (text.split('\n').some((l) => l.startsWith(lead)) ? withOwnBullet(dropBlock(text, lead), own) : text);
 
 for (const [lead, own, label] of [
-  [BACKGROUND_LEAD, '- **Start every subagent in the background when the host can notify you.** Our own wording, longer than the template.', 'background'],
+  [BACKGROUND_LEAD, '- **Start every subagent and every long shell command in the background when the host can notify you.** Our own wording, longer than the template.', 'background'],
   [FINISH_LEAD, '- **Never stop with work half done.** Our own wording.', 'finish'],
 ]) {
   test(`stamp-contract (#111): a project's own ${label} bullet under another heading is kept, nothing is inserted, one info line, exit 0`, () => {
@@ -1005,7 +1005,7 @@ const OWN_WORDING = new Map([
   [LINT_LEAD, '- **Run lint and tests before reporting done.** Ours.'],
   [WRITE_PLAINLY_LEAD, '- **Write plainly in docs; no AI tells.** Ours.'],
   [COPY_LEAD, '- **Put text to paste between horizontal rules.** Ours.'],
-  [BACKGROUND_LEAD, '- **Run subagents in the background.** Ours.'],
+  [BACKGROUND_LEAD, '- **Run subagents and long shell commands in the background.** Ours.'],
   [FINISH_LEAD, '- **Never stop with work half done.** Ours.'],
   [RESOLVE_LEAD, '- **Resolve review threads when handled.** Ours.'],
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Run the de-ai-writing pass on prose.** Ours.'],
@@ -1065,7 +1065,7 @@ const UNRELATED_WORDING = new Map([
   [LINT_LEAD, ['- **Lint config lives next to the tests.** Ours.']],
   [WRITE_PLAINLY_LEAD, ['- **Write plain SQL migrations.** Ours.']],
   [COPY_LEAD, ['- **Copy edited text into the CMS.** Ours.', '- **Respect copyright rules for copied text.** Cite the source.', '- **Never copy secrets to the clipboard.** Ours.', '- **Use horizontal rules to separate documentation sections.** Ours.', '- **Redact secrets from text intended to be copied.** Ours.']],
-  [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.']],
+  [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.', '- **Run subagents in the background.** Ours.', '- **Start every subagent in the background when the host can notify you.** Ours.', '- **Run long shell commands.** Ours.']],
   [FINISH_LEAD, ['- **Never stop the dev server with unfinished migrations pending.** Ours.', '- **Glossy finish for buttons.** Ours.']],
   [RESOLVE_LEAD, ['- **Resolve thread pool starvation first.** Ours.']],
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Spell-check prose deliverables.** Ours.', '- **AI-writing tools require approval.** Do not send customer data to them.']],
@@ -1096,6 +1096,32 @@ test('stamp-contract (#111): an unrelated bullet that shares a generic word with
       } finally {
         f.cleanup();
       }
+    }
+  }
+});
+
+test('stamp-contract: a project whose own background bullet covers only subagents keeps that line untouched and still receives the shell-command bullet, once, with a second run writing nothing', () => {
+  const own = '- **Run subagents in the background.** Ours, with no word about shell commands.';
+  for (const mode of [['--apply-inserts'], ['--apply']]) {
+    const f = sectionFixture('background-subagents-only', swapLead(BACKGROUND_LEAD, own));
+    try {
+      const before = f.read();
+      assert.ok(!before.agents.includes(BACKGROUND_LEAD) && before.agents.includes(own), 'fixture: only the project subagent bullet is there');
+      const r = runStampContract(f.regDb, mode);
+      assert.equal(r.status, 0, `${mode}: ${r.stdout}\n${r.stderr}`);
+      assert.ok(!r.stdout.includes('SIMILAR_BULLET_KEPT'), `a subagent-only bullet does not cover the combined rule:\n${r.stdout}`);
+      assert.match(r.stdout, /inserted {2}- \*\*Start every subagent and every long shell command in the/);
+      const lines = f.read().agents.split('\n');
+      assert.equal(lines.filter((l) => l === own).length, 1, 'the project line is kept byte for byte');
+      assert.equal(lines.filter((l) => l.startsWith(BACKGROUND_LEAD)).length, 1, 'the template bullet, with the shell rule and the sleep ban, is inserted once');
+      assert.match(lines.find((l) => l.startsWith(BACKGROUND_LEAD)), /Never wait with a foreground \`sleep\`/);
+      const after = f.read();
+      const again = runStampContract(f.regDb, mode);
+      assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+      assert.ok(!/inserted|updated|renamed/.test(again.stdout), `a second run has nothing to do:\n${again.stdout}`);
+      assert.deepEqual(f.read(), after, 'a second run writes nothing');
+    } finally {
+      f.cleanup();
     }
   }
 });

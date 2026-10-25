@@ -205,7 +205,9 @@ export const SUBJECT_MARKERS = new Map([
   // Both a copy/paste context AND a formatting context at once: each alone matches unrelated bullets
   // ('Use horizontal rules to separate sections', 'Redact secrets from text intended to be copied').
   ['- **Text meant to be copied goes between two horizontal rules.**', [/^(?=.*\b(copied|pasted?|copy[- ]friendly)\b)(?=.*(\bhorizontal rules?\b|-{3}))/i]],
-  ['- **Start every subagent and every long shell command in the background.**', [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
+  // The bullet covers two subjects, so a project bullet covers it only when its lead names both: a
+  // subagent-only lead would withhold the shell-command rule and the sleep-polling ban from that project.
+  ['- **Start every subagent and every long shell command in the background.**', [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)(?=.*\b(shells?|commands?)\b)/i]],
   ['- **Finish what you start.**', [
     /\bfinish what you start\b/i,
     /^(?=.*\b(never|don'?t|do not)\b)(?=.*\b(stop|end|quit)\b)(?=.*\b(work|tasks?)\b)(?=.*\b(half|unfinished|incomplete)\b)/i,
