@@ -22,6 +22,8 @@ before(async () => {
 });
 
 const SONNET = 'anthropic/claude-sonnet-5-5#high';
+// Changed 2026-10-25: the plain implementor's default effort is medium (decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2).
+const IMPL_SONNET = 'anthropic/claude-sonnet-5-5#medium';
 const OPUS = 'anthropic/claude-opus-5-5#high';
 const SOL = 'openai/gpt-6.1-sol#high';
 const ASTRA = 'openai/gpt-6-astra#high';
@@ -62,7 +64,7 @@ const ref = (role, intent, config = {}, mode = null) => {
 };
 
 test('resolver: the shipped defaults reproduce the models the conductor named before (hobby)', () => {
-  assert.equal(ref('implementor', null), SONNET);
+  assert.equal(ref('implementor', null), IMPL_SONNET);
   // decision hard-implementor-is-its-own-agent-sterling-implementor-hard: the hard lane is models.implementor-hard
   assert.equal(ref('implementor', 'hard'), OPUS, 'hard on implementor -> models.implementor-hard (Opus 5.5)');
   assert.equal(ref('implementor-hard', null), OPUS, 'sterling/implementor-hard runs on models.implementor-hard (Opus 5.5)');
@@ -108,7 +110,7 @@ test('resolver: implementor-hard is its own config.models role, and MODEL-INTENT
 test('resolver: fallback runs on the role\'s Claude model with its effort', () => {
   assert.equal(ref('reviewer', 'fallback=openai not logged in'), OPUS);
   assert.equal(ref('sparring', 'fallback=Astra capped'), OPUS);
-  assert.equal(ref('implementor', 'fallback=x'), SONNET);
+  assert.equal(ref('implementor', 'fallback=x'), IMPL_SONNET);
 });
 
 test('resolver: config wins over defaults; effort becomes the variant; hard_task takes a Claude id or a provider ref', () => {
@@ -238,8 +240,8 @@ test('seam: Overpass off (hobby and work) sets each role\'s model from config.mo
   for (const config of [{}, { mode: 'hobby', overpass: { enabled: true } }, { mode: 'work' }]) {
     await withPlugin(config, async ({ dispatch }) => {
       const impl = await dispatch({});
-      assert.equal(impl.args.model, SONNET, JSON.stringify(config));
-      assert.match(impl.result, /MODEL: this dispatch runs on anthropic\/claude-sonnet-5-5#high/);
+      assert.equal(impl.args.model, IMPL_SONNET, JSON.stringify(config));
+      assert.match(impl.result, /MODEL: this dispatch runs on anthropic\/claude-sonnet-5-5#medium/);
       assert.equal((await dispatch({ prompt: brief('hard') })).args.model, OPUS);
       assert.equal((await dispatch({ agent: 'sterling/reviewer', prompt: brief('') })).args.model, SOL);
       assert.equal((await dispatch({ agent: 'sterling/sparring', prompt: brief('') })).args.model, ASTRA);
@@ -394,7 +396,7 @@ test('resume: a call with a sessionID and no intent line keeps the session\'s ow
   assert.deepEqual(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.', model: OPUS }), { model: null, line: null }, 'a model the call names is the caller\'s pin');
   assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: brief('hard') }).model, OPUS, 'an intent line resolves as usual');
   assert.equal(dm.dispatchModel({}, { agent: 'sterling/reviewer', sessionID: 'ses_warm', prompt: brief('fallback=x') }).model, OPUS);
-  assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: '', prompt: 'x' }).model, SONNET, 'an empty sessionID is a new dispatch');
+  assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: '', prompt: 'x' }).model, IMPL_SONNET, 'an empty sessionID is a new dispatch');
   assert.throws(() => dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: brief('hrad') }), /MODEL-INTENT/, 'a malformed line still refuses on a resume');
 });
 

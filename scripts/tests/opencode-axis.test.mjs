@@ -609,7 +609,7 @@ test('a live background implementor registers a round from its brief, and a seco
     // Changed with the dispatch model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch):
     // a call that names no model now gets the role's config.models model before the register is written, so the
     // register records the model the lane really runs on instead of null.
-    assert.equal(row?.model, 'anthropic/claude-sonnet-5-5#high', 'a call with no model argument stores the model config.models gave it');
+    assert.equal(row?.model, 'anthropic/claude-sonnet-5-5#medium', 'a call with no model argument stores the model config.models gave it');
     assert.ok(!row.ended);
 
     const { after } = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/implementor', description: 'second', prompt: 'Refactor src/a.mjs.' }, metadata: { sessionID: 'ses_impl2', status: 'completed' } });

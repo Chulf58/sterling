@@ -267,7 +267,9 @@ export const configSchema = z.object({
       // model). Live entries written before them get them once, visibly, from
       // addModelDefaults below at sync and init (user-ruled 2026-10-23, "Write it into each
       // config").
-      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
+      // The plain implementor runs at medium (user-ruled 2026-10-25, "Trial medium, then
+      // measure"; decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2).
+      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
       // implementor-hard is the sterling/implementor-hard agent (decision
       // hard-implementor-is-its-own-agent-sterling-implementor-hard): the hard implementor
       // lane, with its own Overpass tier and System tab row. It replaces
@@ -713,12 +715,13 @@ export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
 // user-ruled 2026-10-24 for GitHub #203): with no effort sent, the gateway used each
 // member's own default (max on some members), and a max-effort lane failed at OpenCode
 // compaction. The plugin cannot set a default per served model, because the gateway picks
-// the member, so the default is per role: high for the agentic-auto roles, xhigh for
+// the member, so the default is per role: high for the other agentic-auto roles, medium for
+// the plain implementor (user-ruled 2026-10-25, "Trial medium, then measure"), xhigh for
 // implementor-hard and sparring, and none for reviewer and researcher, whose agentic-high
 // members carry their own effort and never served max. No default is ever max. An explicit
 // roles.<role>.effort still wins.
 export const DEFAULT_OVERPASS_ROLE_EFFORTS: Readonly<Partial<Record<OverpassRole, OverpassEffort>>> = {
-  implementor: 'high',
+  implementor: 'medium',
   'implementor-hard': 'xhigh',
   scout: 'high',
   librarian: 'high',

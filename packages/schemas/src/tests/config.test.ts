@@ -18,8 +18,9 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (user-ruled 2026-09-28, replacing implementor-default-model-opus-5-5); Opus 5.5
   // stays available as a per-dispatch pin.
   assert.equal(shipped.models.implementor.model, 'claude-sonnet-5-5');
-  // high: user-ruled 2026-09-28 (decision implementor-default-effort-high) — Sonnet 5.5 is cheap to run.
-  assert.equal(shipped.models.implementor.effort, 'high');
+  // Changed 2026-10-25: medium (was high, user-ruled 2026-09-28, decision implementor-default-effort-high).
+  // User-ruled "Trial medium, then measure"; decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2.
+  assert.equal(shipped.models.implementor.effort, 'medium');
   // The schema's per-key defaults are the effective default for every project
   // whose config omits a models key; they must match the shipped file, or a bump
   // to one silently misses projects that inherit from the other.
@@ -769,4 +770,15 @@ test('models.preflight: Sonnet 5.5 at low effort by default, in the schema and i
   assert.deepEqual(shippedRaw.models.preflight, { model: 'claude-sonnet-5-5', effort: 'low' });
   assert.deepEqual(parseConfig({}).models.preflight, { model: 'claude-sonnet-5-5', effort: 'low' });
   assert.deepEqual(parseConfig({ models: { preflight: { model: 'claude-opus-5-5', effort: 'high' } } }).models.preflight, { model: 'claude-opus-5-5', effort: 'high' }, 'an explicit entry wins');
+});
+
+// Decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2 (user-ruled
+// 2026-10-25, "Trial medium, then measure"): the plain implementor defaults to medium effort on
+// the direct route, in the schema and in the shipped template; implementor-hard stays high.
+test('models.implementor: medium effort by default, in the schema and in templates/default-config.json; implementor-hard unchanged', () => {
+  const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.deepEqual(shippedRaw.models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' });
+  assert.deepEqual(parseConfig({}).models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' });
+  assert.deepEqual(parseConfig({}).models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
+  assert.deepEqual(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' }, 'an explicit entry wins');
 });
