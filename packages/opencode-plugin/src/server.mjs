@@ -239,24 +239,32 @@ export function createSterlingServer(deps = {}) {
     /**
      * The claim hand-over the rotation restore runs (claim-handover.mjs): session `from`'s
      * claims in checkout `root` move to session `to` through store.adoptClaims, each entry
-     * labelled for the restore line. The board cache is dropped so the next board block and
-     * orphan notice read the moved claims.
+     * labelled for the restore line. A failure part-way (the store's ClaimAdoptionIncomplete)
+     * is rethrown with its labelled `partial`, since the items moved so far stay moved. The
+     * board cache is dropped whatever happened, so the next board block and the orphan
+     * notice re-read who holds each claim.
      */
     function adoptClaims(root, { from, to }) {
-      const store = openStore(join(root, '.sterling', 'sterling.db'));
-      let result;
       try {
-        result = store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() });
-        const label = (e) => {
-          const r = store.get(e.id);
-          return { ...e, ...(r ? { label: boardDisplayLabel(r.text, r.slug) } : {}) };
-        };
-        result = { adopted: result.adopted.map(label), already: result.already.map(label), refused: result.refused.map(label) };
+        const store = openStore(join(root, '.sterling', 'sterling.db'));
+        try {
+          const label = (e) => {
+            const r = store.get(e.id);
+            return { ...e, ...(r ? { label: boardDisplayLabel(r.text, r.slug) } : {}) };
+          };
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          try {
+            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+          } catch (e) {
+            if (e?.partial) e.partial = labelled(e.partial);
+            throw e;
+          }
+        } finally {
+          store.close();
+        }
       } finally {
-        store.close();
+        resetStatus(root);
       }
-      if (result.adopted.length) resetStatus(root);
-      return result;
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, adoptClaims, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });

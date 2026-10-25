@@ -9087,6 +9087,15 @@ var ClaimRenewalNotDue = class extends Error {
 var ClaimMovedError = class extends Error {
   name = "ClaimMovedError";
 };
+var ClaimAdoptionIncomplete = class extends Error {
+  partial;
+  name = "ClaimAdoptionIncomplete";
+  constructor(partial, cause) {
+    const why = cause instanceof Error ? cause.message : String(cause);
+    super(`board_adopt: stopped after adopting ${partial.adopted.length} item(s)${partial.adopted.length ? ` (${partial.adopted.map((a) => a.id).join(", ")})` : ""}: ${why}. The items adopted so far stay adopted; run board_adopt again to finish the rest.`, { cause });
+    this.partial = partial;
+  }
+};
 var ClaimAdoptRefused = class extends Error {
   claim;
   constructor(claim) {
@@ -11172,8 +11181,9 @@ var SterlingStore = class _SterlingStore {
    * explicit way to take it. Repeatable: a second run finds nothing held by
    * `from_session` and lists the items it already moved under `already`.
    * NOT guaranteed: that `from_session` has ended (the store cannot know; the
-   * caller names it), and all-or-nothing (a failure mid-way leaves the items
-   * moved so far adopted; running it again finishes the rest).
+   * caller names it), and all-or-nothing: a failure mid-way throws
+   * ClaimAdoptionIncomplete carrying what was done so far (those items stay
+   * adopted); running it again finishes the rest.
    */
   adoptClaims(req) {
     if (req.from_session === req.session) {
@@ -11189,7 +11199,7 @@ var SterlingStore = class _SterlingStore {
       const claim = item.claim;
       if (!claim)
         continue;
-      if (claim.holder_session === req.session && claim.taken_over_from?.holder_session === req.from_session) {
+      if (claim.holder_session === req.session && claim.checkout === req.checkout && claim.taken_over_from?.holder_session === req.from_session) {
         out.already.push({ id: item.id, generation: claim.generation });
         continue;
       }
@@ -11217,7 +11227,7 @@ var SterlingStore = class _SterlingStore {
         out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
       } catch (e) {
         if (!(e instanceof ClaimAdoptRefused))
-          throw e;
+          throw new ClaimAdoptionIncomplete(out, e);
         const held = e.claim;
         out.refused.push(held ? { id: item.id, reason: "moved", holder_session: held.holder_session, checkout: held.checkout, generation: held.generation } : { id: item.id, reason: "released" });
       }

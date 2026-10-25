@@ -729,6 +729,26 @@ export interface ClaimAdoption {
   refused: { id: string; reason: 'moved' | 'released' | 'other_checkout'; holder_session?: string; checkout?: string; generation?: number }[];
 }
 
+/**
+ * adoptClaims stopped on an error after the scan: `partial` is what it did
+ * before the failing item (its `adopted` entries are committed and stay
+ * adopted), `cause` the error. Running the adoption again finishes the rest.
+ */
+export class ClaimAdoptionIncomplete extends Error {
+  override name = 'ClaimAdoptionIncomplete';
+  constructor(
+    readonly partial: ClaimAdoption,
+    cause: unknown
+  ) {
+    const why = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `board_adopt: stopped after adopting ${partial.adopted.length} item(s)${partial.adopted.length ? ` (${partial.adopted.map((a) => a.id).join(', ')})` : ''}: ${why}. ` +
+        `The items adopted so far stay adopted; run board_adopt again to finish the rest.`,
+      { cause }
+    );
+  }
+}
+
 /** Raised inside an adoption's write when the claim no longer names the predecessor at the generation read; the write rolls back. */
 class ClaimAdoptRefused extends Error {
   constructor(readonly claim: TodoClaim | undefined) {
@@ -4199,8 +4219,9 @@ export class SterlingStore {
    * explicit way to take it. Repeatable: a second run finds nothing held by
    * `from_session` and lists the items it already moved under `already`.
    * NOT guaranteed: that `from_session` has ended (the store cannot know; the
-   * caller names it), and all-or-nothing (a failure mid-way leaves the items
-   * moved so far adopted; running it again finishes the rest).
+   * caller names it), and all-or-nothing: a failure mid-way throws
+   * ClaimAdoptionIncomplete carrying what was done so far (those items stay
+   * adopted); running it again finishes the rest.
    */
   adoptClaims(req: { session: string; checkout: string; from_session: string; now?: string }): ClaimAdoption {
     if (req.from_session === req.session) {
@@ -4215,7 +4236,7 @@ export class SterlingStore {
     for (const item of scanned) {
       const claim = item.claim;
       if (!claim) continue;
-      if (claim.holder_session === req.session && claim.taken_over_from?.holder_session === req.from_session) {
+      if (claim.holder_session === req.session && claim.checkout === req.checkout && claim.taken_over_from?.holder_session === req.from_session) {
         out.already.push({ id: item.id, generation: claim.generation });
         continue;
       }
@@ -4241,7 +4262,7 @@ export class SterlingStore {
         const moved = (record as unknown as { claim: TodoClaim }).claim;
         out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
       } catch (e) {
-        if (!(e instanceof ClaimAdoptRefused)) throw e;
+        if (!(e instanceof ClaimAdoptRefused)) throw new ClaimAdoptionIncomplete(out, e);
         const held = e.claim;
         out.refused.push(
           held

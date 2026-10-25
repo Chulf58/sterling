@@ -10291,7 +10291,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, ClaimMovedError, ClaimAdoptRefused, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DEFAULT_CLAIM_LEASE_MINUTES, ClaimRenewalNotDue, ClaimMovedError, ClaimAdoptionIncomplete, ClaimAdoptRefused, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -10433,6 +10433,15 @@ var init_dist2 = __esm({
     };
     ClaimMovedError = class extends Error {
       name = "ClaimMovedError";
+    };
+    ClaimAdoptionIncomplete = class extends Error {
+      partial;
+      name = "ClaimAdoptionIncomplete";
+      constructor(partial, cause) {
+        const why = cause instanceof Error ? cause.message : String(cause);
+        super(`board_adopt: stopped after adopting ${partial.adopted.length} item(s)${partial.adopted.length ? ` (${partial.adopted.map((a) => a.id).join(", ")})` : ""}: ${why}. The items adopted so far stay adopted; run board_adopt again to finish the rest.`, { cause });
+        this.partial = partial;
+      }
     };
     ClaimAdoptRefused = class extends Error {
       claim;
@@ -12299,8 +12308,9 @@ var init_dist2 = __esm({
        * explicit way to take it. Repeatable: a second run finds nothing held by
        * `from_session` and lists the items it already moved under `already`.
        * NOT guaranteed: that `from_session` has ended (the store cannot know; the
-       * caller names it), and all-or-nothing (a failure mid-way leaves the items
-       * moved so far adopted; running it again finishes the rest).
+       * caller names it), and all-or-nothing: a failure mid-way throws
+       * ClaimAdoptionIncomplete carrying what was done so far (those items stay
+       * adopted); running it again finishes the rest.
        */
       adoptClaims(req) {
         if (req.from_session === req.session) {
@@ -12316,7 +12326,7 @@ var init_dist2 = __esm({
           const claim = item.claim;
           if (!claim)
             continue;
-          if (claim.holder_session === req.session && claim.taken_over_from?.holder_session === req.from_session) {
+          if (claim.holder_session === req.session && claim.checkout === req.checkout && claim.taken_over_from?.holder_session === req.from_session) {
             out.already.push({ id: item.id, generation: claim.generation });
             continue;
           }
@@ -12344,7 +12354,7 @@ var init_dist2 = __esm({
             out.adopted.push({ id: item.id, generation: moved.generation, from_generation: claim.generation });
           } catch (e) {
             if (!(e instanceof ClaimAdoptRefused))
-              throw e;
+              throw new ClaimAdoptionIncomplete(out, e);
             const held = e.claim;
             out.refused.push(held ? { id: item.id, reason: "moved", holder_session: held.holder_session, checkout: held.checkout, generation: held.generation } : { id: item.id, reason: "released" });
           }
@@ -25092,6 +25102,12 @@ function orphanClaimsText(readiness, { checkout, session }) {
 ${lines.join("\n")}
 If that session has ended (a /new whose hand-over did not run, or a crash), adopt them; if it is still running in this checkout, leave them.`;
 }
+function handoverFailedText(error, from) {
+  const why = error?.cause instanceof Error ? error.cause.message : error?.message ?? String(error);
+  const moved = error?.partial?.adopted;
+  const done = Array.isArray(moved) ? moved.length ? `it stopped part-way: adopted ${moved.length} (${moved.map(itemName).join(", ")}) before the failure; those stay adopted` : "it stopped before adopting any claim" : "it may have stopped part-way, and which claims moved is not known";
+  return `BOARD CLAIM HAND-OVER FAILED (${why}): ${done}. Claims session '${from}' still holds in this checkout are listed under CLAIMS HELD BY AN EARLIER SESSION; finish with board_adopt from_session '${from}' (safe to repeat).`;
+}
 
 // scripts/hooks/lib/registry-refresh.mjs
 init_dist();
@@ -25828,7 +25844,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
         handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
       } catch (e) {
         logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText2(e)}`);
-        handover = `BOARD CLAIM HAND-OVER FAILED (${errText2(e)}): the claims session '${note.session_id}' held in this checkout were not adopted; adopt them with board_adopt from_session '${note.session_id}'.`;
+        handover = handoverFailedText(e, note.session_id);
       }
     }
     const consumed = consumeRotationNote(root);
@@ -27777,20 +27793,26 @@ function createSterlingServer(deps = {}) {
       return { dir: remember(sessionDirs, sessionID, dir) };
     }
     function adoptClaims(root, { from, to }) {
-      const store = openStore(join54(root, ".sterling", "sterling.db"));
-      let result;
       try {
-        result = store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() });
-        const label = (e) => {
-          const r = store.get(e.id);
-          return { ...e, ...r ? { label: boardDisplayLabel(r.text, r.slug) } : {} };
-        };
-        result = { adopted: result.adopted.map(label), already: result.already.map(label), refused: result.refused.map(label) };
+        const store = openStore(join54(root, ".sterling", "sterling.db"));
+        try {
+          const label = (e) => {
+            const r = store.get(e.id);
+            return { ...e, ...r ? { label: boardDisplayLabel(r.text, r.slug) } : {} };
+          };
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          try {
+            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+          } catch (e) {
+            if (e?.partial) e.partial = labelled(e.partial);
+            throw e;
+          }
+        } finally {
+          store.close();
+        }
       } finally {
-        store.close();
+        resetStatus(root);
       }
-      if (result.adopted.length) resetStatus(root);
-      return result;
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, adoptClaims, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });

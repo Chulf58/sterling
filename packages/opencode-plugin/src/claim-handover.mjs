@@ -57,3 +57,24 @@ export function orphanClaimsText(readiness, { checkout, session }) {
     `If that session has ended (a /new whose hand-over did not run, or a crash), adopt them; if it is still running in this checkout, leave them.`
   );
 }
+
+/**
+ * The restore's line when the hand-over threw. An adoption can stop part-way: the store's
+ * ClaimAdoptionIncomplete carries `partial` (labelled by the plugin), whose adopted items
+ * are committed. Without it, which items moved is unknown. The current holders are not
+ * restated here: the orphan notice re-reads the board after the restore and lists what
+ * the earlier session still holds.
+ */
+export function handoverFailedText(error, from) {
+  const why = error?.cause instanceof Error ? error.cause.message : error?.message ?? String(error);
+  const moved = error?.partial?.adopted;
+  const done = Array.isArray(moved)
+    ? moved.length
+      ? `it stopped part-way: adopted ${moved.length} (${moved.map(itemName).join(', ')}) before the failure; those stay adopted`
+      : 'it stopped before adopting any claim'
+    : 'it may have stopped part-way, and which claims moved is not known';
+  return (
+    `BOARD CLAIM HAND-OVER FAILED (${why}): ${done}. ` +
+    `Claims session '${from}' still holds in this checkout are listed under CLAIMS HELD BY AN EARLIER SESSION; finish with board_adopt from_session '${from}' (safe to repeat).`
+  );
+}

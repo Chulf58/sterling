@@ -5,7 +5,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readLock as readPlanLock } from '../../../scripts/hooks/lib/plan-lock.mjs';
 import { consumeRotationNote, readRotationNote, renderRotationRestore, rotationNotePath } from '../../../scripts/hooks/lib/rotation-restore.mjs';
-import { adoptionText } from './claim-handover.mjs';
+import { adoptionText, handoverFailedText } from './claim-handover.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { inWorkerChild } from './worker.mjs';
@@ -88,7 +88,7 @@ export function createRotationRestore({ getSession, now, renderRestore = renderR
         handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
       } catch (e) {
         logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText(e)}`);
-        handover = `BOARD CLAIM HAND-OVER FAILED (${errText(e)}): the claims session '${note.session_id}' held in this checkout were not adopted; adopt them with board_adopt from_session '${note.session_id}'.`;
+        handover = handoverFailedText(e, note.session_id);
       }
     }
     const consumed = consumeRotationNote(root);

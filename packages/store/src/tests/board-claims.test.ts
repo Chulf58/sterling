@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaimMovedError, SterlingStore, boardClaimView, boardReadinessOf } from '../index.js';
+import { ClaimAdoptionIncomplete, ClaimMovedError, SterlingStore, boardClaimView, boardReadinessOf } from '../index.js';
 
 const T0 = '2026-10-25T09:00:00.000Z';
 const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
@@ -409,6 +409,55 @@ test('adoptClaims on a board with no claims writes nothing', () => {
     const item = a.create(todo()) as unknown as Claimed;
     assert.deepEqual(a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(1) }), { adopted: [], already: [], refused: [] });
     assert.equal(get(a, item.id).version, item.version);
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims: an item adopted into another checkout is not listed as already when the repeat names this checkout', () => {
+  const { a, close } = pair();
+  try {
+    const there = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(there.id, { session: 'old', checkout: '/repo/wt-b', now: at(0) });
+    assert.equal(a.adoptClaims({ session: 'new', checkout: '/repo/wt-b', from_session: 'old', now: at(1) }).adopted.length, 1);
+    assert.deepEqual(a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) }), { adopted: [], already: [], refused: [] });
+    assert.deepEqual(a.adoptClaims({ session: 'new', checkout: '/repo/wt-b', from_session: 'old', now: at(3) }).already.map((x) => x.id), [there.id]);
+  } finally {
+    close();
+  }
+});
+
+test('adoptClaims: a failure after the first transfer throws ClaimAdoptionIncomplete naming what moved; a re-run finishes the rest', () => {
+  const { a, close } = pair();
+  try {
+    const one = a.create(todo()) as unknown as Claimed;
+    const two = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(one.id, { session: 'old', checkout: '/repo', now: at(0) });
+    a.claimTodo(two.id, { session: 'old', checkout: '/repo', now: at(0) });
+    const handle = a as unknown as { tx: (fn: () => void) => void };
+    const original = handle.tx.bind(a);
+    let writes = 0;
+    handle.tx = (fn: () => void) => {
+      if (++writes === 2) throw new Error('simulated busy store');
+      original(fn);
+    };
+    let thrown: unknown;
+    try {
+      a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(1) });
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown instanceof ClaimAdoptionIncomplete);
+    assert.equal(thrown.partial.adopted.length, 1);
+    const moved = thrown.partial.adopted[0].id;
+    assert.match(thrown.message, new RegExp(`stopped after adopting 1 item\\(s\\) \\(${moved}\\): simulated busy store\\. The items adopted so far stay adopted; run board_adopt again`));
+    assert.equal(get(a, moved).claim?.holder_session, 'new', 'the first transfer is committed');
+    handle.tx = original;
+    const rest = a.adoptClaims({ session: 'new', checkout: '/repo', from_session: 'old', now: at(2) });
+    assert.equal(rest.adopted.length, 1);
+    assert.deepEqual(rest.already.map((x) => x.id), [moved]);
+    assert.equal(get(a, one.id).claim?.holder_session, 'new');
+    assert.equal(get(a, two.id).claim?.holder_session, 'new');
   } finally {
     close();
   }

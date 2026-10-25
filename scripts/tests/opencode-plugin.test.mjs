@@ -1683,7 +1683,7 @@ test('claim hand-over: a crash after the transfer (note still there) re-runs as 
     const openStore = (dbPath) => Object.assign(new SterlingStore(dbPath), { adoptClaims: () => { throw new Error('simulated busy store'); } });
     const { ctx, cleanup } = await setupPlugin(failing.p.dir, { openStore }, { ses_new: { time: { created: after } } });
     const text = await contextFor(ctx, 'ses_new');
-    assert.match(text, /BOARD CLAIM HAND-OVER FAILED \(simulated busy store\): the claims session 'ses_old' held in this checkout were not adopted; adopt them with board_adopt from_session 'ses_old'/);
+    assert.match(text, /BOARD CLAIM HAND-OVER FAILED \(simulated busy store\): it may have stopped part-way, and which claims moved is not known\. Claims session 'ses_old' still holds in this checkout are listed under CLAIMS HELD BY AN EARLIER SESSION; finish with board_adopt from_session 'ses_old' \(safe to repeat\)\./);
     assert.match(text, /ROTATION-SLICE-42/, 'the restore itself still arrives');
     assert.match(text, /- session 'ses_old': Stuck task/);
     assert.match(readFileSync(join(failing.p.dir, server.LOG_REL), 'utf8'), /claim hand-over from ses_old failed: simulated busy store/);
@@ -1702,6 +1702,45 @@ test('claim hand-over: a project with no claims gets no hand-over line and no or
     const text = await contextFor(ctx, 'ses_new');
     assert.match(text, /ROTATION-SLICE-42/);
     assert.doesNotMatch(text, /BOARD CLAIM|CLAIMS HELD BY AN EARLIER SESSION/);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('claim hand-over: a store failing after the first transfer reports the partial hand-over, and the orphan notice re-reads who still holds what', async () => {
+  const { p, ids, holderOf } = await claimedProject([['First task', 'ses_old'], ['Second task', 'ses_old']]);
+  try {
+    writeNote(p.dir);
+    // The adoption's second write fails, after its first transfer committed.
+    const openStore = (dbPath) => {
+      const s = new SterlingStore(dbPath);
+      const adopt = s.adoptClaims.bind(s);
+      s.adoptClaims = (req) => {
+        const tx = s.tx;
+        let writes = 0;
+        s.tx = (fn) => {
+          if (++writes === 2) throw new Error('simulated busy store');
+          return tx.call(s, fn);
+        };
+        try {
+          return adopt(req);
+        } finally {
+          s.tx = tx;
+        }
+      };
+      return s;
+    };
+    const { ctx, cleanup } = await setupPlugin(p.dir, { openStore }, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    const moved = ids.filter((id) => holderOf(id) === 'ses_new');
+    const stuck = ids.filter((id) => holderOf(id) === 'ses_old');
+    assert.equal(moved.length, 1, 'the first transfer committed');
+    assert.equal(stuck.length, 1);
+    assert.match(text, new RegExp(`BOARD CLAIM HAND-OVER FAILED \\(simulated busy store\\): it stopped part-way: adopted 1 \\((First|Second) task \\(${moved[0].slice(0, 8)}\\)\\) before the failure; those stay adopted\\.`));
+    const orphans = text.slice(text.indexOf('CLAIMS HELD BY AN EARLIER SESSION IN THIS CHECKOUT'));
+    assert.match(orphans, new RegExp(`- session 'ses_old': (First|Second) task \\(${stuck[0].slice(0, 8)}\\)`));
+    assert.doesNotMatch(orphans.split('\n').slice(0, 3).join('\n'), new RegExp(moved[0].slice(0, 8)), 'the board cache was dropped, so the moved item is not listed as orphaned');
     await cleanup?.();
   } finally {
     p.cleanup();
