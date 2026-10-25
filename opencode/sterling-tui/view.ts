@@ -206,9 +206,12 @@ function contextText(tokens: TokenUsageLike | undefined, model: ModelRefLike | u
  *  unended, so the sidebar and the board readiness line share one definition of a live lane
  *  (GitHub #174; decision opencode-live-lane-count-separate-line-and-tui-counts-from-register). */
 export function isActiveChild(start: string, env: Record<string, string | undefined>, running: (id: string) => boolean): (id: string) => boolean {
-  // The register lives under the project that holds the store, which may be above `start`.
+  // The register is transient state, so it lives in the checkout: a linked worktree's own
+  // (the plugin writes it there), not the main checkout that holds the shared store.
+  // Otherwise it is the project that holds the store, which may be above `start`.
+  const roots = env.STERLING_STORE ? null : resolveProjectRoots(start);
   const storePath = findStorePath(start, env);
-  const root = storePath ? dirname(dirname(storePath)) : start;
+  const root = roots && roots.storeRoot !== roots.checkoutRoot ? roots.checkoutRoot : storePath ? dirname(dirname(storePath)) : start;
   return (id) => running(id) || liveChildInRegister(root, id);
 }
 

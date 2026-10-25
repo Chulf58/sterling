@@ -9505,6 +9505,7 @@ function restoreFullAgentFiles(writes, fs = {}) {
 }
 function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir3(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
+  const configDir2 = storeRootFor(projectDir);
   if (env.STERLING_OPENCODE_SETUP_DISABLE === "1") return { skipped: "Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)" };
   const oc = probe({ env, home });
   if (!oc.installed) return { skipped: `OpenCode not installed (${oc.reason}) \u2014 Sterling on OpenCode SKIPPED; install OpenCode 2, then run /sterling:update` };
@@ -9518,7 +9519,7 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   let handoff;
   let unmaintained = [];
   try {
-    const setting = readHandoffSetting(projectDir);
+    const setting = readHandoffSetting(configDir2);
     handoff = setting.enabled;
     unmaintained = setting.unmaintained.filter((rel) => PORTABLE_AGENT_PATHS.includes(rel));
   } catch (err) {
@@ -9526,7 +9527,7 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
     rows.push({ item: ".sterling/config.json handoff", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
   }
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained, ownAgentPaths: opencodeOwnAgentPaths(pluginRoot2) }));
-  const configured = configuredFullAgentModels(projectDir);
+  const configured = configuredFullAgentModels(configDir2);
   if (configured.refused) rows.push(configured.refused);
   const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {} });
   let agentRows = staged.rows;

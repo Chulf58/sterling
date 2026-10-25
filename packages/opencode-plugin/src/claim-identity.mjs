@@ -7,29 +7,27 @@
 // and refuses a call that names another session. This holds whether or not OpenCode
 // gives a worktree directory its own MCP process, which is unobserved.
 
-// The host's name for an MCP tool is unobserved for every host: OpenCode, Claude Code
-// (mcp__sterling__board_claim) and a renamed server entry each prefix it differently. So a
-// claim tool is recognised by its Sterling tool name as the suffix, whatever the prefix
-// (board_update counts only when it names a session).
-const CLAIM_TOOLS = ['board_claim', 'board_reaffirm', 'board_release', 'board_takeover', 'board_update'];
+import { sterlingToolName } from './mcp-name.mjs';
+
+// A tool is first established as the Sterling MCP server's (mcp-name.mjs: the server
+// segment of the host's tool name is the name the plugin registers), then classified by
+// its Sterling tool name. Another server's tool, a kanban board_claim say, is never touched.
+// board_update counts only when it names a session.
+const CLAIM_TOOLS = new Set(['board_claim', 'board_reaffirm', 'board_release', 'board_takeover', 'board_update']);
 // The other board tools the Sterling server serves (packages/mcp-server/src/server.ts).
-const OTHER_BOARD_TOOLS = ['board_add', 'board_edit', 'board_get', 'board_query', 'board_remove'];
-const SUFFIX = (names) => new RegExp(`(?:^|[^A-Za-z0-9])(${names.join('|')})$`);
-const CLAIM_SUFFIX = SUFFIX(CLAIM_TOOLS);
-const OTHER_SUFFIX = SUFFIX(OTHER_BOARD_TOOLS);
+const OTHER_BOARD_TOOLS = new Set(['board_add', 'board_edit', 'board_get', 'board_query', 'board_remove']);
 
 /**
  * What `tool` is to the claim check: { claim: 'board_claim' | ... } for a claim tool,
- * { claim: null } for any other tool, or { unknown: true } for a Sterling tool whose name
- * mentions board_ but ends in no board tool this plugin knows, which it cannot classify.
+ * { claim: null } for any other tool (every tool of another server), or { unknown: true }
+ * for a board_* tool of the Sterling server that this plugin does not know.
  */
 export function classifyTool(tool) {
-  if (typeof tool !== 'string') return { claim: null };
-  const claim = CLAIM_SUFFIX.exec(tool)?.[1];
-  if (claim) return { claim };
-  if (OTHER_SUFFIX.test(tool)) return { claim: null };
-  if (/sterling/i.test(tool) && /board_/.test(tool)) return { unknown: true };
-  return { claim: null };
+  const name = sterlingToolName(tool);
+  if (name === null) return { claim: null };
+  if (CLAIM_TOOLS.has(name)) return { claim: name };
+  if (OTHER_BOARD_TOOLS.has(name) || !name.startsWith('board_')) return { claim: null };
+  return { unknown: true };
 }
 
 /** The Sterling claim tool `tool` names ('board_claim', ...), or null for any other tool. */

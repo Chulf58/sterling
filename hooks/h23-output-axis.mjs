@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, join as join10, resolve as resolve4 } from "node:path";
+import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -12785,17 +12785,19 @@ function hookProjectRoot(from) {
 }
 function readStdin({ reportInertWorktree = false } = {}) {
   const input = JSON.parse(readFileSync6(0, "utf8"));
-  const root = hookProjectRoot(input.cwd);
-  if (root) {
-    input.cwd = root;
-  } else {
-    const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input.inertWorktree = roots;
-    }
+  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input.inertWorktree = roots;
+    return input;
   }
+  const root = hookProjectRoot(input.cwd);
+  if (root) input.cwd = root;
   return input;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -13341,7 +13343,7 @@ function composeOutputAxis(store, { content, guardFor }) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync9, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join15, resolve as resolve5, dirname as dirname8, isAbsolute } from "node:path";
+import { join as join15, resolve as resolve5, dirname as dirname8, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
 

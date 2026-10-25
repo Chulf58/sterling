@@ -8,14 +8,14 @@ var __export = (target, all) => {
 
 // scripts/open-session.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync6, realpathSync as realpathSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync4, readFileSync as readFileSync7, realpathSync as realpathSync5 } from "node:fs";
 import { basename as basename4, dirname as dirname4, join as join10, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync5, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { basename as basename3, dirname as dirname3, isAbsolute, join as join9, resolve as resolve6 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1403,13 +1403,17 @@ function writeFileAtomicIfChanged(path, content, fs) {
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4, realpathSync as realpathSync2, statSync } from "node:fs";
+import { existsSync as existsSync5, realpathSync as realpathSync2, statSync } from "node:fs";
 import { basename as basename2, dirname as dirname2, join as join5, resolve as resolve2 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var CONFIG_REL = join4(".sterling", "config.json");
 var STORE_DB_REL = join4(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync4(join4(dir, CONFIG_REL)) || existsSync4(join4(dir, STORE_DB_REL)));
+}
 
 // scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
@@ -1443,6 +1447,40 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   else if (basename2(commonReal) === ".git") mainRoot = dirname2(commonReal);
   if (!mainRoot || mainRoot === worktree) return null;
   return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join5(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync5(join5(linkedWorktree.mainRoot, configRel)) && existsSync5(join5(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join5(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve2(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync2(p);
+  } catch {
+    return p;
+  }
 }
 
 // scripts/lib/generated-marker.mjs
@@ -6996,7 +7034,7 @@ var renameFenceSchema = external_exports.object({
 
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync, statSync as statSync2, lstatSync, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync, statSync as statSync2, lstatSync, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -7166,7 +7204,7 @@ function validateHosts(entry, where) {
   }
 }
 function loadRegistry(registryPath) {
-  const registry = JSON.parse(readFileSync3(registryPath, "utf8"));
+  const registry = JSON.parse(readFileSync4(registryPath, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -7202,7 +7240,7 @@ var RESTART_INSTRUCTION = [
 ].join("\n");
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync4, readdirSync as readdirSync3, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync3, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
 import { join as join7, resolve as resolve4 } from "node:path";
 
 // scripts/lib/store-path.mjs
@@ -7373,7 +7411,7 @@ function existsContained(root, rel, leaf) {
   return lstatOrNull(containedPath(root, rel, leaf)) !== null;
 }
 function readContained(root, rel) {
-  return readFileSync4(containedPath(root, rel, "file"), "utf8");
+  return readFileSync5(containedPath(root, rel, "file"), "utf8");
 }
 function mkdirContained(root, rel) {
   const segments = rel.split("/").filter(Boolean);
@@ -7474,7 +7512,7 @@ function parseOpenCodeHeader(content) {
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync7 } from "node:fs";
 import { join as join8, resolve as resolve5 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 var CONFIG_REL2 = ".sterling/config.json";
@@ -7513,10 +7551,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync3 } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync6(root)) return { files: [], unknown: null };
+  if (!existsSync7(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync6(join8(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync7(join8(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -7622,7 +7660,7 @@ function mcpLauncherPath({ home = homedir3() } = {}) {
 function probeOpenCode({ env = process.env, home = homedir3() } = {}) {
   let r = spawnSync4("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   const homeBin = join9(home, ".opencode", "bin", "opencode");
-  if (r.error?.code === "ENOENT" && existsSync7(homeBin)) r = spawnSync4(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  if (r.error?.code === "ENOENT" && existsSync8(homeBin)) r = spawnSync4(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH or in ~/.opencode/bin" : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `opencode --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -7810,13 +7848,13 @@ await import(pathToFileURL(entry).href);
 `, "//");
 }
 function ensureStampedFile(path, content, label) {
-  if (!existsSync7(path)) {
+  if (!existsSync8(path)) {
     mkdirSync3(dirname3(path), { recursive: true });
     writeFileSync3(path, content);
     return { item: label, status: "created" };
   }
   if (!statSync3(path).isFile()) return refusal(label, `${fwd2(path)} exists and is not a file`, `move it aside, then rerun /sterling:update`);
-  const disk = normalize3(readFileSync5(path, "utf8"));
+  const disk = normalize3(readFileSync6(path, "utf8"));
   if (disk === content) return { item: label, status: "matches" };
   const stamp = verifyStamp(disk, "//");
   if (stamp === null) return refusal(label, `${fwd2(path)} exists and Sterling did not write it`, `rename or remove it (it would shadow Sterling's), then rerun /sterling:update`);
@@ -7830,9 +7868,9 @@ function refusal(item, what, remedy) {
 var TWICE = "the npm package is registered too, so Sterling would load twice; remove it unless you mean it to";
 function retireServerShim(path) {
   const item = fwd2(path);
-  if (!existsSync7(path)) return { item, status: "skipped", detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
+  if (!existsSync8(path)) return { item, status: "skipped", detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
   if (!statSync3(path).isFile()) return { item, status: "skipped", detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
-  const stamp = verifyStamp(normalize3(readFileSync5(path, "utf8")), "//");
+  const stamp = verifyStamp(normalize3(readFileSync6(path, "utf8")), "//");
   if (stamp === null) return { item, status: "skipped", detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
   if (!stamp.unmodified) return { item, status: "skipped", detail: `KEPT: ${item} was edited after Sterling wrote it, so it stays; ${TWICE}` };
   unlinkSync3(path);
@@ -7849,7 +7887,7 @@ function materializedTuiRoot({ home = homedir3() } = {}) {
 function materializedState(dir) {
   let marker;
   try {
-    marker = JSON.parse(readFileSync5(join9(dir, MATERIALIZED_MARKER), "utf8"));
+    marker = JSON.parse(readFileSync6(join9(dir, MATERIALIZED_MARKER), "utf8"));
   } catch (err) {
     if (err.code === "ENOENT" || err instanceof SyntaxError) return "foreign";
     throw err;
@@ -7859,7 +7897,7 @@ function materializedState(dir) {
   const extra = readdirSync4(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
   if (extra.length) return "edited";
   for (const [name, hash] of Object.entries(files)) {
-    if (!existsSync7(join9(dir, name)) || bytesHash(readFileSync5(join9(dir, name))) !== hash) return "edited";
+    if (!existsSync8(join9(dir, name)) || bytesHash(readFileSync6(join9(dir, name))) !== hash) return "edited";
   }
   return "ours";
 }
@@ -7869,12 +7907,12 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
   const src = join9(pluginRoot2, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot2, "opencode");
   if (!v.version) return [refusal(`${fwd2(base2)}/`, `the version of ${fwd2(pluginRoot2)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
-  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync7(join9(src, f)));
+  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync8(join9(src, f)));
   if (missing.length) return [refusal(`${fwd2(base2)}/`, `${fwd2(src)} lacks ${missing.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
   const dest = join9(base2, v.version);
   const item = `${fwd2(dest)}/`;
-  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync5(join9(src, f))]));
+  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync6(join9(src, f))]));
   const hashes = Object.fromEntries(Object.entries(content).map(([f, b]) => [f, bytesHash(b)]));
   const write = () => {
     mkdirSync3(dest, { recursive: true });
@@ -7882,14 +7920,14 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
     writeFileSync3(join9(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
-  if (!existsSync7(dest)) {
+  if (!existsSync8(dest)) {
     write();
     rows.push({ item, status: "created", detail: `the dashboard copied out of the npm cache (OpenCode gives its own solid-js only outside node_modules)` });
   } else {
     const state = statSync3(dest).isDirectory() ? materializedState(dest) : "foreign";
     if (state === "foreign") rows.push(refusal(item, `${item} exists and Sterling did not write it`, `move it aside, then rerun /sterling:update`));
     else if (state === "edited") rows.push(refusal(item, `${item} was edited after Sterling wrote it`, `delete it so Sterling can copy the dashboard again, then rerun /sterling:update`));
-    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync5(join9(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
+    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync6(join9(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
     else {
       write();
       rows.push({ item, status: "refreshed" });
@@ -7915,8 +7953,8 @@ function ensureTuiShim(tuiDir, shim) {
   const pkgPath = join9(tuiDir, "package.json");
   const pkgLabel = `${fwd2(tuiDir)}/package.json`;
   const pkg = renderTuiPackageJson();
-  const pkgState = existsSync7(pkgPath) && statSync3(pkgPath).isFile() ? tuiPackageState(normalize3(readFileSync5(pkgPath, "utf8"))) : null;
-  if (existsSync7(tuiDir) && !statSync3(tuiDir).isDirectory()) {
+  const pkgState = existsSync8(pkgPath) && statSync3(pkgPath).isFile() ? tuiPackageState(normalize3(readFileSync6(pkgPath, "utf8"))) : null;
+  if (existsSync8(tuiDir) && !statSync3(tuiDir).isDirectory()) {
     return [refusal(`${fwd2(tuiDir)}/`, `${fwd2(tuiDir)} exists and is not a directory`, "move it aside, then rerun /sterling:update")];
   }
   if (pkgState === "foreign") {
@@ -7925,10 +7963,10 @@ function ensureTuiShim(tuiDir, shim) {
   if (pkgState === "edited") {
     return [refusal(pkgLabel, `${fwd2(pkgPath)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`)];
   }
-  if (existsSync7(tuiDir) && !existsSync7(pkgPath) && readdirSync4(tuiDir).length > 0) {
+  if (existsSync8(tuiDir) && !existsSync8(pkgPath) && readdirSync4(tuiDir).length > 0) {
     return [refusal(`${fwd2(tuiDir)}/`, `${fwd2(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd2(tuiDir)}/, then rerun /sterling:update`)];
   }
-  const before = existsSync7(pkgPath) ? normalize3(readFileSync5(pkgPath, "utf8")) : null;
+  const before = existsSync8(pkgPath) ? normalize3(readFileSync6(pkgPath, "utf8")) : null;
   mkdirSync3(tuiDir, { recursive: true });
   if (before !== pkg) writeFileSync3(pkgPath, pkg);
   return [
@@ -7941,11 +7979,11 @@ function npmCopyOnMachine({ env = process.env, home = homedir3() } = {}) {
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
   const root = copies.length ? copies[copies.length - 1].root : null;
   const path = join9(opencodeConfigDir({ env, home }), "opencode.json");
-  if (!existsSync7(path)) return { root, configured: false };
+  if (!existsSync8(path)) return { root, configured: false };
   const item = `${fwd2(path)} plugins`;
   let config;
   try {
-    config = parseJsonc(readFileSync5(path, "utf8"));
+    config = parseJsonc(readFileSync6(path, "utf8"));
   } catch (err) {
     return { root, configured: false, row: { item, status: "skipped", detail: `${fwd2(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
   }
@@ -7979,7 +8017,7 @@ function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, en
 var PINNED_CODEX_REL = ".local/codex-mcp-0.153.4/bin/codex";
 var PINNED_CODEX_INSTALL = "npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4";
 var CODEX_PROBE_TIMEOUT_MS = 1e4;
-var isFile = (p) => existsSync7(p) && statSync3(p).isFile();
+var isFile = (p) => existsSync8(p) && statSync3(p).isFile();
 function codexCandidates({ env, home }) {
   const out = [];
   const notes = [];
@@ -7987,7 +8025,7 @@ function codexCandidates({ env, home }) {
   if (isFile(claudeJson)) {
     let command;
     try {
-      command = JSON.parse(readFileSync5(claudeJson, "utf8"))?.mcpServers?.codex?.command;
+      command = JSON.parse(readFileSync6(claudeJson, "utf8"))?.mcpServers?.codex?.command;
     } catch (err) {
       notes.push(`${fwd2(claudeJson)} not read (${err.message})`);
     }
@@ -8028,8 +8066,8 @@ function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = 
   }
   let config = {};
   let before = null;
-  if (existsSync7(path)) {
-    before = normalize3(readFileSync5(path, "utf8"));
+  if (existsSync8(path)) {
+    before = normalize3(readFileSync6(path, "utf8"));
     try {
       config = JSON.parse(before);
     } catch (err) {
@@ -8106,7 +8144,7 @@ function guardPermission(permission) {
   return { value: out, removedShellDeny };
 }
 function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new Set() } = {}) {
-  if (!existsSync7(dir)) return [];
+  if (!existsSync8(dir)) return [];
   const real = realpathSync4(dir);
   if (seen.has(real)) return [];
   seen.add(real);
@@ -8192,7 +8230,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir3(), check
         if (dir !== dotDir || !checkAgentFiles) continue;
         let text;
         try {
-          text = readFileSync5(path, "utf8");
+          text = readFileSync6(path, "utf8");
         } catch (err) {
           unreadable(fwd2(path), err);
           continue;
@@ -8210,7 +8248,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir3(), check
     join9(dotDir, "opencode.jsonc"),
     ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join9(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
-  ].map((path) => ({ label: fwd2(path), path, read: () => existsSync7(path) ? readFileSync5(path, "utf8") : null }));
+  ].map((path) => ({ label: fwd2(path), path, read: () => existsSync8(path) ? readFileSync6(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
   const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd2(join9(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   const late2 = /* @__PURE__ */ new Set([fwd2(join9(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
@@ -8259,8 +8297,8 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(),
   }
   let config = {};
   let before = null;
-  if (existsSync7(path)) {
-    before = normalize3(readFileSync5(path, "utf8"));
+  if (existsSync8(path)) {
+    before = normalize3(readFileSync6(path, "utf8"));
     try {
       config = JSON.parse(before);
     } catch (err) {
@@ -8364,7 +8402,7 @@ function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [], ownAg
   const gp = git(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
   const excludePath = resolve6(projectDir, gp.stdout.trim());
-  const current = existsSync7(excludePath) ? normalize3(readFileSync5(excludePath, "utf8")) : "";
+  const current = existsSync8(excludePath) ? normalize3(readFileSync6(excludePath, "utf8")) : "";
   const begin = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END);
   if (begin !== -1 && end > begin) {
@@ -8393,7 +8431,7 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync5(join9(pluginRoot2, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync6(join9(pluginRoot2, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
   if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join9(pluginRoot2, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
@@ -8423,7 +8461,7 @@ function configuredFullAgentModels(projectDir) {
   });
   let raw;
   try {
-    raw = JSON.parse(readFileSync5(join9(projectDir, ".sterling", "config.json"), "utf8"));
+    raw = JSON.parse(readFileSync6(join9(projectDir, ".sterling", "config.json"), "utf8"));
   } catch (err) {
     return leave(err.code === "ENOENT" ? `${where} does not exist` : `${where} could not be read (${err.message})`);
   }
@@ -8446,7 +8484,7 @@ function configuredFullAgentModels(projectDir) {
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname3(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname3(dir)) {
-    if (existsSync7(join9(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync8(join9(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname3(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -8530,13 +8568,13 @@ function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models =
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
     const path = join9(projectDir, rel);
-    const templateContent = readFileSync5(join9(pluginRoot2, "agent-templates", entry.file), "utf8");
+    const templateContent = readFileSync6(join9(pluginRoot2, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync7(path) ? readFileSync5(path, "utf8") : null;
+    const raw = existsSync8(path) ? readFileSync6(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -8602,6 +8640,7 @@ function restoreFullAgentFiles(writes, fs = {}) {
 }
 function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir3(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
+  const configDir = storeRootFor(projectDir);
   if (env.STERLING_OPENCODE_SETUP_DISABLE === "1") return { skipped: "Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)" };
   const oc = probe({ env, home });
   if (!oc.installed) return { skipped: `OpenCode not installed (${oc.reason}) \u2014 Sterling on OpenCode SKIPPED; install OpenCode 2, then run /sterling:update` };
@@ -8615,7 +8654,7 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   let handoff;
   let unmaintained = [];
   try {
-    const setting = readHandoffSetting(projectDir);
+    const setting = readHandoffSetting(configDir);
     handoff = setting.enabled;
     unmaintained = setting.unmaintained.filter((rel) => PORTABLE_AGENT_PATHS.includes(rel));
   } catch (err) {
@@ -8623,7 +8662,7 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
     rows.push({ item: ".sterling/config.json handoff", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
   }
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained, ownAgentPaths: opencodeOwnAgentPaths(pluginRoot2) }));
-  const configured = configuredFullAgentModels(projectDir);
+  const configured = configuredFullAgentModels(configDir);
   if (configured.refused) rows.push(configured.refused);
   const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {} });
   let agentRows = staged.rows;
@@ -8762,7 +8801,7 @@ function registeredWorktrees(mainRoot) {
 function nextDefaultLabel(mainRoot) {
   for (let n = 2; ; n++) {
     const label = `session-${n}`;
-    if (!existsSync8(worktreePathFor(mainRoot, label)) && !branchExists(mainRoot, `${BRANCH_PREFIX}${label}`)) return label;
+    if (!existsSync9(worktreePathFor(mainRoot, label)) && !branchExists(mainRoot, `${BRANCH_PREFIX}${label}`)) return label;
   }
 }
 function openSession({ target, name, setup = setupOpenCode, pluginRootDir = pluginRoot }) {
@@ -8771,7 +8810,7 @@ function openSession({ target, name, setup = setupOpenCode, pluginRootDir = plug
   checkLabel(label);
   const branch = `${BRANCH_PREFIX}${label}`;
   const path = worktreePathFor(mainRoot, label);
-  if (existsSync8(path) || registeredWorktrees(mainRoot).includes(path)) {
+  if (existsSync9(path) || registeredWorktrees(mainRoot).includes(path)) {
     throw new SessionRefusal(`REFUSED: the worktree ${path} already exists; pick another --name, or remove it first with --remove ${label}`);
   }
   if (branchExists(mainRoot, branch)) {
@@ -8785,8 +8824,8 @@ function openSession({ target, name, setup = setupOpenCode, pluginRootDir = plug
   let result;
   try {
     containedPath(path, ".sterling", "dir");
-    if (!existsContained(path, CONFIG_REL3, "file") && existsSync8(mainConfig)) {
-      copied = readFileSync6(mainConfig, "utf8");
+    if (!existsContained(path, CONFIG_REL3, "file") && existsSync9(mainConfig)) {
+      copied = readFileSync7(mainConfig, "utf8");
       writeContained(path, CONFIG_REL3, copied);
     }
     result = setup({ projectDir: path, pluginRoot: pluginRootDir });

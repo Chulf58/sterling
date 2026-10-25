@@ -6864,7 +6864,7 @@ function abandon(bridge, owner) {
 }
 function translateStatement(sql, schema) {
   let out = "";
-  let n = 0;
+  let n2 = 0;
   let i = 0;
   let prevSignificant = "";
   let firstWords = [];
@@ -6888,7 +6888,7 @@ function translateStatement(sql, schema) {
       continue;
     }
     if (c === "?") {
-      out += `$${++n}`;
+      out += `$${++n2}`;
       prevSignificant = "?";
       i++;
       continue;
@@ -6921,7 +6921,7 @@ function translateStatement(sql, schema) {
     i++;
   }
   const derivedText = firstWords[0] === "insert" && firstWords[1] === "into" && firstWords[2] === "records_fts" || firstWords[0] === "update" && firstWords[1] === "records_fts";
-  return { text: out, params: n, derivedText };
+  return { text: out, params: n2, derivedText };
 }
 function storeDdl(s2) {
   return `
@@ -7972,13 +7972,13 @@ var init_mounted = __esm({
        *  layer reports it so a capped retrieval can say how many records matched the
        *  filter it was given, instead of presenting its window as the whole store. */
       count(opts = {}) {
-        return this.countBySource(opts).reduce((n, s2) => n + s2.count, 0);
+        return this.countBySource(opts).reduce((n2, s2) => n2 + s2.count, 0);
       }
       /** Cross-mount twin of countAboveScore (board a577a69d) — summed
        *  project-first across every mounted store, same fan as count(). */
       countAboveScore(opts, minScore) {
         this.commonScoreScale("countAboveScore");
-        return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
+        return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n2, c) => n2 + c, 0);
       }
       /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
       scoreScale() {
@@ -13220,13 +13220,13 @@ var init_agent_distribution = __esm({
 });
 
 // packages/opencode-plugin/src/axis.mjs
-import { isAbsolute as isAbsolute5, resolve as resolve14 } from "node:path";
+import { isAbsolute as isAbsolute6, resolve as resolve14 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 init_dist();
 init_dist2();
 import { readFileSync as readFileSync7, existsSync as existsSync6 } from "node:fs";
-import { dirname as dirname7, join as join12, resolve as resolve5 } from "node:path";
+import { dirname as dirname7, isAbsolute, join as join12, relative, resolve as resolve5 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
 // packages/store/dist/routing.js
@@ -13315,10 +13315,10 @@ function readBounded(path) {
     const buf = Buffer.alloc(size);
     let off = 0;
     while (off < size) {
-      const n = readSync2(fd, buf, off, size - off, off);
-      if (n === 0)
+      const n2 = readSync2(fd, buf, off, size - off, off);
+      if (n2 === 0)
         break;
-      off += n;
+      off += n2;
     }
     return buf.subarray(0, off).toString("utf8");
   } finally {
@@ -13327,7 +13327,7 @@ function readBounded(path) {
 }
 function listBrokerRegistrations(dir, root) {
   const prefix = `${brokerProjectKey(root)}.`;
-  const names = readdirSync(dir).filter((n) => n.startsWith(prefix) && n.endsWith(".json")).slice(0, BROKER_DISCOVERY_MAX_ENTRIES);
+  const names = readdirSync(dir).filter((n2) => n2.startsWith(prefix) && n2.endsWith(".json")).slice(0, BROKER_DISCOVERY_MAX_ENTRIES);
   const found = [];
   const refused = [];
   for (const name of names) {
@@ -14525,8 +14525,8 @@ var BatchShapeError = class extends Error {
     this.name = "BatchShapeError";
   }
 };
-function assertBatchShape(value, n, what) {
-  if (!Array.isArray(value) || value.length !== n || !value.every(Array.isArray)) throw new BatchShapeError(what, n, value);
+function assertBatchShape(value, n2, what) {
+  if (!Array.isArray(value) || value.length !== n2 || !value.every(Array.isArray)) throw new BatchShapeError(what, n2, value);
   return value;
 }
 function withInboundSupersedesAll(store, records) {
@@ -15474,9 +15474,9 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const clip3 = (v, n = 160) => {
+  const clip3 = (v, n2 = 160) => {
     const t = String(v ?? "").replace(/\s+/g, " ").trim();
-    return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
+    return t.length <= n2 ? t : `${t.slice(0, n2)}\u2026`;
   };
   const pointerHead = (r, name) => `  \u2192 ${clip3(name, 80)} (${String(r.id).slice(0, 8)})`;
   const questionDecisionLine = (d) => {
@@ -15753,7 +15753,7 @@ function isReviewerClass(type) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync10, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync9, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync6, chmodSync } from "node:fs";
-import { join as join16, resolve as resolve6, dirname as dirname9, isAbsolute } from "node:path";
+import { join as join16, resolve as resolve6, dirname as dirname9, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
@@ -15958,7 +15958,7 @@ function currentUid() {
 function registerLockRoot() {
   const uid2 = currentUid();
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (typeof xdg === "string" && isAbsolute(xdg)) {
+  if (typeof xdg === "string" && isAbsolute2(xdg)) {
     try {
       const st = lstatSync4(xdg);
       if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join16(xdg, "sterling-locks");
@@ -17180,8 +17180,8 @@ function sessionBoundarySweep(root, opts = {}) {
     }
     const record = v.record;
     if (parsed.kind === "live") {
-      const doneTwins = names.filter((n) => {
-        const pn = parseStateFileName(n);
+      const doneTwins = names.filter((n2) => {
+        const pn = parseStateFileName(n2);
         return pn.kind === "done" && pn.key === parsed.key;
       });
       if (doneTwins.length > 0) {
@@ -17293,8 +17293,8 @@ function exclusionSpans(prompt) {
 }
 var dropGoverned = (norm) => norm !== ".git" && !norm.startsWith(".git/") && !norm.startsWith(".sterling/") && !norm.startsWith("sterling/") && !norm.startsWith("git/");
 var normFor = (cwd) => (raw) => {
-  const n = repoRel(String(raw).replace(/\/+$/, ""), cwd);
-  return n && dropGoverned(n) ? n : null;
+  const n2 = repoRel(String(raw).replace(/\/+$/, ""), cwd);
+  return n2 && dropGoverned(n2) ? n2 : null;
 };
 function normCandidate(text, raw, cwd) {
   const norm = normFor(cwd);
@@ -17316,26 +17316,26 @@ function proseTerritory(prompt, cwd) {
   const excludedDirs = /* @__PURE__ */ new Set();
   for (const span of exclusionSpans(text)) {
     for (const raw of extractPathCandidates(span)) {
-      const n = normCandidate(span, raw, cwd);
-      if (n) excludedFiles.add(n);
+      const n2 = normCandidate(span, raw, cwd);
+      if (n2) excludedFiles.add(n2);
     }
     for (const raw of extractGlobPrefixCandidates(span)) {
-      const n = norm(raw);
-      if (n) excludedDirs.add(n);
+      const n2 = norm(raw);
+      if (n2) excludedDirs.add(n2);
     }
   }
   const excluded = (p) => excludedFiles.has(p) || excludedDirs.has(p) || [...excludedDirs].some((d) => p.startsWith(`${d}/`));
   const unsuppressed = (raw) => hasUnsuppressedMatch(text, new RegExp(escapeRe(raw)), { checkSubjectVerb: false });
   const out = /* @__PURE__ */ new Set();
   for (const raw of extractPathCandidates(text)) {
-    const n = normCandidate(text, raw, cwd);
-    if (!n || EXECUTABLE_EXT_RE.test(n) || excluded(n)) continue;
-    if (unsuppressed(raw) && hasNonRunMention(text, raw)) out.add(n);
+    const n2 = normCandidate(text, raw, cwd);
+    if (!n2 || EXECUTABLE_EXT_RE.test(n2) || excluded(n2)) continue;
+    if (unsuppressed(raw) && hasNonRunMention(text, raw)) out.add(n2);
   }
   for (const raw of extractGlobPrefixCandidates(text)) {
-    const n = norm(raw);
-    if (!n || excluded(n)) continue;
-    if (unsuppressed(`${raw}**`)) out.add(n);
+    const n2 = norm(raw);
+    if (!n2 || excluded(n2)) continue;
+    if (unsuppressed(`${raw}**`)) out.add(n2);
   }
   return [...out];
 }
@@ -17441,7 +17441,7 @@ function isListingCommand(command) {
 
 // packages/opencode-plugin/src/delivery.mjs
 import { statSync as statSync5 } from "node:fs";
-import { isAbsolute as isAbsolute2, join as join17, resolve as resolve7 } from "node:path";
+import { isAbsolute as isAbsolute3, join as join17, resolve as resolve7 } from "node:path";
 var PATH_TOOLS = /* @__PURE__ */ new Set(["read", "edit", "write"]);
 var PENDING_CAP = 200;
 var PATCH_HEADER = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
@@ -17455,7 +17455,7 @@ function patchPaths(patchText) {
 }
 function governedRel(raw, root, directory) {
   if (typeof raw !== "string" || !raw) return null;
-  const rel = repoRel(isAbsolute2(raw) ? raw : resolve7(directory, raw), root);
+  const rel = repoRel(isAbsolute3(raw) ? raw : resolve7(directory, raw), root);
   if (!rel || rel === ".git" || rel.startsWith(".git/") || rel.startsWith(".sterling/")) return null;
   return rel;
 }
@@ -17540,7 +17540,7 @@ function buildShellDelivery(store, root, command, directory, sessionID) {
   const totalCap = resolveTotalCap(root);
   const headerPart = { kind: "ordinary", pinned: true, contentClass: "chrome", text: bashPointerBlock([]).header };
   const assembled = assembleDelivery([headerPart, ...hzParts, ...ownerParts], totalCap, {
-    aggregateLabel: (n) => `  (+${n} more pointer line(s) held back by the ${totalCap}-byte delivery cap \u2014 knowledge_query the command's governed paths)`
+    aggregateLabel: (n2) => `  (+${n2} more pointer line(s) held back by the ${totalCap}-byte delivery cap \u2014 knowledge_query the command's governed paths)`
   });
   const shownIds = new Set([...assembled.emittedSubstance, ...assembled.emittedDiscovery].map((e) => e.identity));
   const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
@@ -17663,7 +17663,7 @@ var CONDUCTOR_AGENT = "sterling/conductor";
 import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync5, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync5, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync6, writeFileSync as writeFileSync5, appendFileSync as appendFileSync2 } from "node:fs";
-import { dirname as dirname10, isAbsolute as isAbsolute3, join as join18, resolve as resolve8, sep } from "node:path";
+import { dirname as dirname10, isAbsolute as isAbsolute4, join as join18, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 var WORKER_RUN_BUDGET_USD = 5;
 var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
@@ -17919,7 +17919,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   return readJson(paths.lock)?.token === token ? token : null;
 }
 function resolveMcpConfig(pluginRoot, projectRoot2, policy = null) {
-  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute3(policy.path))) {
+  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute4(policy.path))) {
     throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
   }
   const path = join18(pluginRoot, ".claude-plugin", "sterling-mcp.json");
@@ -18149,7 +18149,7 @@ var WORKER_EFFORT_MODEL_ENV = "STERLING_MAINTENANCE_WORKER_EFFORT_MODEL";
 import { createHash as createHash7 } from "node:crypto";
 import { existsSync as existsSync15, mkdirSync as mkdirSync11, readFileSync as readFileSync15, readdirSync as readdirSync5, realpathSync as realpathSync9, rmSync as rmSync7, statSync as statSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { basename as basename3, dirname as dirname11, isAbsolute as isAbsolute4, join as join24, resolve as resolve13 } from "node:path";
+import { basename as basename3, dirname as dirname11, isAbsolute as isAbsolute5, join as join24, resolve as resolve13 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
@@ -21341,7 +21341,7 @@ function materializedState(dir) {
   }
   const files = marker && typeof marker.files === "object" ? marker.files : null;
   if (!files) return "foreign";
-  const extra = readdirSync5(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
+  const extra = readdirSync5(dir).filter((n2) => n2 !== MATERIALIZED_MARKER && !(n2 in files));
   if (extra.length) return "edited";
   for (const [name, hash] of Object.entries(files)) {
     if (!existsSync15(join24(dir, name)) || bytesHash(readFileSync15(join24(dir, name))) !== hash) return "edited";
@@ -21380,10 +21380,10 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir7() }) {
       rows.push({ item, status: "refreshed" });
     }
   }
-  const versions = readdirSync5(base2).filter((n) => SEMVER_DIR.test(n) && statSync7(join24(base2, n)).isDirectory());
+  const versions = readdirSync5(base2).filter((n2) => SEMVER_DIR.test(n2) && statSync7(join24(base2, n2)).isDirectory());
   versions.sort((a, b) => compareSterlingVersions(b, a));
   const keep = /* @__PURE__ */ new Set([...versions.slice(0, TUI_MATERIALIZED_KEEP), v.version]);
-  for (const old of versions.filter((n) => !keep.has(n))) {
+  for (const old of versions.filter((n2) => !keep.has(n2))) {
     const dir = join24(base2, old);
     const oldItem = `${fwd2(dir)}/`;
     const state = materializedState(dir);
@@ -21526,7 +21526,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
       problems.push({ item: doc.label, status: "skipped", detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
     }
   }
-  const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
+  const envOnly = [...envNames].filter((n2) => !names.has(n2)).sort();
   return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete, sources };
 }
 var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
@@ -21814,7 +21814,7 @@ function readOwnership(root) {
   if (parsed.pending !== void 0 && !(isObject(parsed.pending) && isObject(parsed.pending.agent) && isObject(parsed.pending.before) && isObject(parsed.pending.after))) {
     throw new Error(`${OVERLAY_REL} has a "pending" value that is not an interrupted-update record; nothing is changed until it is fixed or removed`);
   }
-  if (parsed.pending?.notes !== void 0 && !(Array.isArray(parsed.pending.notes) && parsed.pending.notes.every((n) => typeof n === "string"))) {
+  if (parsed.pending?.notes !== void 0 && !(Array.isArray(parsed.pending.notes) && parsed.pending.notes.every((n2) => typeof n2 === "string"))) {
     throw new Error(`${OVERLAY_REL} has "pending.notes" that is not a list of notes; nothing is changed until it is fixed or removed`);
   }
   return parsed;
@@ -22224,21 +22224,21 @@ function readNotices(root) {
 function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(), key = void 0) {
   withNoticesLock(root, () => {
     const notices = readNotices(root);
-    if (notices.some((n) => !n.shown_at && (n.text === text || key !== void 0 && n.key === key))) return;
+    if (notices.some((n2) => !n2.shown_at && (n2.text === text || key !== void 0 && n2.key === key))) return;
     notices.push({ id: randomUUID8(), at: now, text, ...key === void 0 ? {} : { key } });
     writeJsonAtomic(join28(root, NOTICES_REL), notices);
   });
 }
 var NOTICE_CLAIM_TTL_MS = 6e4;
-var claimLive = (n, nowMs) => typeof n.claim === "string" && nowMs - Date.parse(n.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
+var claimLive = (n2, nowMs) => typeof n2.claim === "string" && nowMs - Date.parse(n2.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
 function claimNotices(root, now) {
   const nowMs = Date.parse(now);
   const token = randomUUID8();
   const fresh = withNoticesLock(root, () => {
     const notices = readNotices(root);
-    const open2 = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
+    const open2 = notices.filter((n2) => !n2.shown_at && !claimLive(n2, nowMs));
     if (!open2.length) return [];
-    for (const n of open2) Object.assign(n, { claim: token, claimed_at: now });
+    for (const n2 of open2) Object.assign(n2, { claim: token, claimed_at: now });
     writeJsonAtomic(join28(root, NOTICES_REL), notices);
     return open2;
   });
@@ -22246,20 +22246,20 @@ function claimNotices(root, now) {
     if (!fresh.length) return;
     withNoticesLock(root, () => {
       const notices = readNotices(root);
-      const mine = notices.filter((n) => n.claim === token);
+      const mine = notices.filter((n2) => n2.claim === token);
       if (!mine.length) return;
-      for (const n of mine) {
-        delete n.claim;
-        delete n.claimed_at;
-        fn(n);
+      for (const n2 of mine) {
+        delete n2.claim;
+        delete n2.claimed_at;
+        fn(n2);
       }
       writeJsonAtomic(join28(root, NOTICES_REL), notices);
     });
   };
   return {
     notices: fresh,
-    commit: () => settle((n) => {
-      n.shown_at = now;
+    commit: () => settle((n2) => {
+      n2.shown_at = now;
     }),
     release: () => settle(() => {
     })
@@ -22269,7 +22269,7 @@ function pruneShownNotices(root, { afterRead } = {}) {
   withNoticesLock(root, () => {
     const notices = readNotices(root);
     afterRead?.();
-    const left = notices.filter((n) => !n.shown_at);
+    const left = notices.filter((n2) => !n2.shown_at);
     if (left.length === notices.length) return;
     if (left.length) writeJsonAtomic(join28(root, NOTICES_REL), left);
     else rmSync9(join28(root, NOTICES_REL), { force: true });
@@ -22546,7 +22546,7 @@ function buildOutputAxis(store, root, { tool, args, content, sessionID, director
   if (tool === "shell" && isListingCommand(args?.command)) return null;
   if (tool === "read") {
     const raw = args?.path;
-    const rel = typeof raw === "string" && raw ? repoRel(isAbsolute5(raw) ? raw : resolve14(directory, raw), root) : null;
+    const rel = typeof raw === "string" && raw ? repoRel(isAbsolute6(raw) ? raw : resolve14(directory, raw), root) : null;
     if (outputAxisReadGated(store, rel, root)) return null;
   }
   const gPath = guardPath(root, void 0, sessionID);
@@ -22729,6 +22729,15 @@ function createCompactionHandler({ rootOf, fenced }) {
 init_agent_fences();
 import { existsSync as existsSync22, readdirSync as readdirSync6, readFileSync as readFileSync20 } from "node:fs";
 import { join as join32 } from "node:path";
+
+// packages/opencode-plugin/src/mcp-name.mjs
+var MCP_SERVER_NAME = "sterling";
+var escape = (s2) => s2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var n = escape(MCP_SERVER_NAME);
+var STERLING_TOOL = new RegExp(`^(?:${n}_(?:${n}__)?|mcp__(?:plugin_${n}_)?${n}__)([a-z][a-z0-9_]*)$`);
+function sterlingToolName(tool) {
+  return typeof tool === "string" ? STERLING_TOOL.exec(tool)?.[1] ?? null : null;
+}
 
 // packages/opencode-plugin/src/layer.mjs
 import { existsSync as existsSync20, readFileSync as readFileSync19 } from "node:fs";
@@ -23088,12 +23097,12 @@ function createConfigHandler(deps = {}) {
     const want = mcpEntry(root, project, checkout);
     let replacedLogged = false;
     await ctx.mcp.transform((editor) => {
-      const existing = editor.get("sterling");
+      const existing = editor.get(MCP_SERVER_NAME);
       if (existing && !replacedLogged && JSON.stringify(existing.command) !== JSON.stringify(want.command)) {
         replacedLogged = true;
         logLine(checkout, `config: the sterling MCP entry from the project config (${JSON.stringify(existing)}) is replaced by this copy's (${JSON.stringify(want)})`);
       }
-      editor.set("sterling", { ...want, command: [...want.command] });
+      editor.set(MCP_SERVER_NAME, { ...want, command: [...want.command] });
     });
   };
 }
@@ -23227,8 +23236,8 @@ import { join as join34 } from "node:path";
 var isWorkerLane = (r) => WORKER_LANES.includes(r);
 var REASONS_SHOWN = 3;
 var REASON_CLIP = 120;
-var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-var inLane = (n, r) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`;
+var plural = (n2, word) => `${n2} ${word}${n2 === 1 ? "" : "s"}`;
+var inLane = (n2, r) => `${n2} item${n2 === 1 ? "" : "s"} in lane ${r}`;
 function readMaintenanceState(store, cwd) {
   const reconcile = { count: 0, lanes: [], handedOff: 0, handoffs: [], oldest: null, unjudged: 0, oldestUnjudged: null, writes: null };
   let queueReasonEntries = [];
@@ -23239,7 +23248,7 @@ function readMaintenanceState(store, cwd) {
   const system = systemTotal > 0 ? store.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
   const workerItems = system.filter((t) => isWorkerLane(t.system_reason));
   reconcile.count = workerItems.length;
-  reconcile.lanes = WORKER_LANES.map((r) => [r, workerItems.filter((t) => t.system_reason === r).length]).filter(([, n]) => n > 0);
+  reconcile.lanes = WORKER_LANES.map((r) => [r, workerItems.filter((t) => t.system_reason === r).length]).filter(([, n2]) => n2 > 0);
   const handedByLane = /* @__PURE__ */ new Map();
   try {
     const verdicts = handoffVerdicts(cwd);
@@ -23261,8 +23270,8 @@ function readMaintenanceState(store, cwd) {
   parked = system.length - drainable;
   const byReason = /* @__PURE__ */ new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => [r, n, handedByLane.get(r) ?? 0]);
-  queueReasons = queueReasonEntries.map(([r, n]) => inLane(n, r));
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n2]) => [r, n2, handedByLane.get(r) ?? 0]);
+  queueReasons = queueReasonEntries.map(([r, n2]) => inLane(n2, r));
   return { total: systemTotal, reconcile, drainable, parked, queueReasonEntries, queueReasons };
 }
 function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: rawThreshold }) {
@@ -23273,24 +23282,24 @@ function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, d
   const conductorEntries = [];
   const conductorText = /* @__PURE__ */ new Map();
   const workerEntries = [];
-  for (const [r, n, handed = 0] of queueReasonEntries) {
+  for (const [r, n2, handed = 0] of queueReasonEntries) {
     if (!isWorkerLane(r)) {
-      conductorEntries.push([r, n]);
-      conductorText.set(r, reasonText.get(r) ?? inLane(n, r));
+      conductorEntries.push([r, n2]);
+      conductorText.set(r, reasonText.get(r) ?? inLane(n2, r));
       continue;
     }
     if (handed > 0) {
       conductorEntries.push([r, handed]);
       conductorText.set(r, `${inLane(handed, r)} handed to you by the worker`);
     }
-    if (n - handed > 0) workerEntries.push([r, n - handed]);
+    if (n2 - handed > 0) workerEntries.push([r, n2 - handed]);
   }
   conductorEntries.sort((a, b) => b[1] - a[1]);
   workerEntries.sort((a, b) => WORKER_LANES.indexOf(a[0]) - WORKER_LANES.indexOf(b[0]));
   const conductorLanes = queueReasonEntries.length ? conductorEntries.map(([r]) => conductorText.get(r)) : queueReasons;
-  const conductorCount = queueReasonEntries.length ? conductorEntries.reduce((s2, [, n]) => s2 + n, 0) : drainable;
-  const be = (n) => n === 1 ? "is" : "are";
-  const workerNote = workerEntries.length ? `The ${inLane(workerEntries[0][1], workerEntries[0][0])} ${be(workerEntries[0][1])} drained by the background worker, not by you` + workerEntries.slice(1).map(([r, n]) => `, and so ${be(n)} ${inLane(n, r)}`).join("") + ` (its state is on the RECONCILE BACKLOG line). ` : "";
+  const conductorCount = queueReasonEntries.length ? conductorEntries.reduce((s2, [, n2]) => s2 + n2, 0) : drainable;
+  const be = (n2) => n2 === 1 ? "is" : "are";
+  const workerNote = workerEntries.length ? `The ${inLane(workerEntries[0][1], workerEntries[0][0])} ${be(workerEntries[0][1])} drained by the background worker, not by you` + workerEntries.slice(1).map(([r, n2]) => `, and so ${be(n2)} ${inLane(n2, r)}`).join("") + ` (its state is on the RECONCILE BACKLOG line). ` : "";
   if (conductorCount >= deepThreshold) {
     const parkedNote = parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
     if (conductorCount >= deepThreshold * TOO_DEEP_MULTIPLIER && conductorEntries.length) {
@@ -23422,7 +23431,7 @@ function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = pr
     }
     const age = ageText(reconcile.oldest, nowMs);
     const lanes = reconcile.lanes?.length ? reconcile.lanes : [["reconcile_needed", reconcile.count]];
-    const lanesText2 = lanes.map(([r, n]) => inLane(n, r)).join(", ");
+    const lanesText2 = lanes.map(([r, n2]) => inLane(n2, r)).join(", ");
     reconcileBanner = ` \xB7 ${lanesText2}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext = `
 
@@ -23493,10 +23502,10 @@ function liveLanes(root, sessionId) {
   return { availability, count: entries.length, descriptions };
 }
 function lanesText(live, ceiling, { showCount = true } = {}) {
-  const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
-  if (!showCount) return `lane ceiling ${n}`;
+  const n2 = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  if (!showCount) return `lane ceiling ${n2}`;
   const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
-  return `live lanes ${k}/${n}`;
+  return `live lanes ${k}/${n2}`;
 }
 function groupLines(title, items, cap, render3, moreNote = () => "") {
   if (!items.length) return [];
@@ -24121,7 +24130,7 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 }
 var RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
 var OVERPASS_RESET_LINE = /^config migration: overpass\./;
-var plural2 = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var plural2 = (n2, word) => `${n2} ${word}${n2 === 1 ? "" : "s"}`;
 var strip = (l) => l.replace(/^config migration: /, "");
 function splitMigrated(migrated) {
   return {
@@ -24202,7 +24211,7 @@ function readPrLoops(root) {
 function prLoopStateExists(root) {
   if (existsSync26(prLoopPath(root))) return true;
   const dir = join37(root, PR_LOOPS_DIR_REL);
-  return existsSync26(dir) && readdirSync8(dir).some((n) => /^\d+\.json$/.test(n));
+  return existsSync26(dir) && readdirSync8(dir).some((n2) => /^\d+\.json$/.test(n2));
 }
 
 // packages/opencode-plugin/src/operating-state.mjs
@@ -24273,9 +24282,9 @@ function readBounded2(path, maxBytes, noun) {
     const buf = Buffer.allocUnsafe(st.size);
     let read = 0;
     while (read < st.size) {
-      const n = readSync4(fd, buf, read, st.size - read, read);
-      if (n <= 0) break;
-      read += n;
+      const n2 = readSync4(fd, buf, read, st.size - read, read);
+      if (n2 <= 0) break;
+      read += n2;
     }
     if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
     const probe = Buffer.allocUnsafe(1);
@@ -25438,15 +25447,15 @@ STERLING NOTICES UNREADABLE (${errText2(e)}): the pending notices in ${NOTICES_R
           fresh: () => true
         };
       }
-      notices = notices.filter((n) => {
-        if (n.key === void 0) return true;
-        const mark = `notice:${n.key}`;
+      notices = notices.filter((n2) => {
+        if (n2.key === void 0) return true;
+        const mark = `notice:${n2.key}`;
         if (seen.has(mark) || marks.has(mark)) return false;
         marks.set(mark, "shown");
         return true;
       });
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):
-${notices.map((n) => `- ${n.text}`).join("\n")}`);
+${notices.map((n2) => `- ${n2.text}`).join("\n")}`);
     }
     return {
       text: due.length ? `${VOLATILE_HEADER}
@@ -25809,10 +25818,10 @@ var STEP_ENDED = "session.step.ended";
 var STEP_FAILED = "session.step.failed";
 var EXECUTION_ENDS = /* @__PURE__ */ new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
 function stepFillTokens(tokens) {
-  const n = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
-  const input = n(tokens?.input);
-  const read = n(tokens?.cache?.read);
-  const write = n(tokens?.cache?.write);
+  const n2 = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+  const input = n2(tokens?.input);
+  const read = n2(tokens?.cache?.read);
+  const write = n2(tokens?.cache?.write);
   if (input === null || read === null || write === null) return null;
   const used = input + read + write;
   return used > 0 ? used : null;
@@ -26071,7 +26080,7 @@ function readKnowledgeWrites(root) {
     return { latestAt, unreadable };
   }
   const legacy = KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1);
-  for (const name of names.filter((n) => n === legacy || KNOWLEDGE_WRITES_PROCESS_FILE.test(n)).sort()) {
+  for (const name of names.filter((n2) => n2 === legacy || KNOWLEDGE_WRITES_PROCESS_FILE.test(n2)).sort()) {
     const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
     let text;
     try {
@@ -26583,8 +26592,8 @@ function skipQuoted(s2, i) {
 var escapeRe2 = (s2) => s2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function stripHeredocBodies(cmd, bodies, o) {
   let out = "", i = 0;
-  const n = cmd.length;
-  while (i < n) {
+  const n2 = cmd.length;
+  while (i < n2) {
     const c = cmd[i];
     if (c === "'" || c === '"') {
       const end = skipQuoted(cmd, i);
@@ -26593,7 +26602,7 @@ function stripHeredocBodies(cmd, bodies, o) {
       continue;
     }
     if (c === "\\" && !o.ps) {
-      out += cmd.slice(i, Math.min(i + 2, n));
+      out += cmd.slice(i, Math.min(i + 2, n2));
       i += 2;
       continue;
     }
@@ -26605,11 +26614,11 @@ function stripHeredocBodies(cmd, bodies, o) {
       if (cmd[j] === "'" || cmd[j] === '"') {
         const q = cmd[j];
         k = j + 1;
-        while (k < n && cmd[k] !== q) k++;
+        while (k < n2 && cmd[k] !== q) k++;
         tag2 = cmd.slice(j + 1, k);
         k++;
       } else {
-        while (k < n && /[A-Za-z0-9_]/.test(cmd[k])) k++;
+        while (k < n2 && /[A-Za-z0-9_]/.test(cmd[k])) k++;
         tag2 = cmd.slice(j, k);
       }
       j = k;
@@ -26617,14 +26626,14 @@ function stripHeredocBodies(cmd, bodies, o) {
         const lineEnd = cmd.indexOf("\n", j);
         if (lineEnd === -1) {
           out += cmd.slice(i, j);
-          i = n;
+          i = n2;
           continue;
         }
         out += cmd.slice(i, j) + "\n";
         const rest = cmd.slice(lineEnd + 1);
         const m = new RegExp("^\\t*" + escapeRe2(tag2) + "$", "m").exec(rest);
         if (bodies) bodies.push(m ? rest.slice(0, m.index) : rest);
-        i = m ? lineEnd + 1 + m.index + m[0].length : n;
+        i = m ? lineEnd + 1 + m.index + m[0].length : n2;
         continue;
       }
     }
@@ -26635,8 +26644,8 @@ function stripHeredocBodies(cmd, bodies, o) {
 }
 function extractBalanced(str, start, openCh, closeCh) {
   let depth = 1, i = start;
-  const n = str.length;
-  while (i < n && depth > 0) {
+  const n2 = str.length;
+  while (i < n2 && depth > 0) {
     const c = str[i];
     if (c === "'" || c === '"') {
       i = skipQuoted(str, i);
@@ -26654,10 +26663,10 @@ function extractBalanced(str, start, openCh, closeCh) {
 }
 function scanDoubleQuoted(str, i, o) {
   let j = i + 1;
-  const n = str.length;
+  const n2 = str.length;
   const subs = [];
-  while (j < n && str[j] !== '"') {
-    if (str[j] === "\\" && j + 1 < n && !o.ps) {
+  while (j < n2 && str[j] !== '"') {
+    if (str[j] === "\\" && j + 1 < n2 && !o.ps) {
       j += 2;
       continue;
     }
@@ -26669,25 +26678,25 @@ function scanDoubleQuoted(str, i, o) {
     }
     if (str[j] === "`") {
       let k = j + 1;
-      while (k < n && str[k] !== "`") k += str[k] === "\\" ? 2 : 1;
+      while (k < n2 && str[k] !== "`") k += str[k] === "\\" ? 2 : 1;
       subs.push(...splitTopLevel(str.slice(j + 1, k), o));
       j = k + 1;
       continue;
     }
     j++;
   }
-  return { end: Math.min(j + 1, n), subs };
+  return { end: Math.min(j + 1, n2), subs };
 }
 function splitTopLevel(str, o) {
   const fragments = [];
   let buf = "", i = 0;
-  const n = str.length;
+  const n2 = str.length;
   const flush = () => {
     const t = buf.trim();
     if (t) fragments.push(t);
     buf = "";
   };
-  while (i < n) {
+  while (i < n2) {
     const c = str[i];
     if (c === "'") {
       const end = skipQuoted(str, i);
@@ -26703,7 +26712,7 @@ function splitTopLevel(str, o) {
       continue;
     }
     if (c === "\\" && !o.ps) {
-      buf += str.slice(i, Math.min(i + 2, n));
+      buf += str.slice(i, Math.min(i + 2, n2));
       i += 2;
       continue;
     }
@@ -26716,7 +26725,7 @@ function splitTopLevel(str, o) {
     }
     if (c === "`") {
       let j = i + 1;
-      while (j < n && str[j] !== "`") j += str[j] === "\\" ? 2 : 1;
+      while (j < n2 && str[j] !== "`") j += str[j] === "\\" ? 2 : 1;
       fragments.push(...splitTopLevel(str.slice(i + 1, j), o));
       buf += " ";
       i = j + 1;
@@ -26773,7 +26782,7 @@ function splitTopLevel(str, o) {
 function tokenizeFragment(fragment, o) {
   const tokens = [];
   let word = "", i = 0;
-  const n = fragment.length;
+  const n2 = fragment.length;
   const flushWord = () => {
     if (word !== "") {
       tokens.push({ type: "word", value: word });
@@ -26789,7 +26798,7 @@ function tokenizeFragment(fragment, o) {
     flushWord();
     return "";
   };
-  while (i < n) {
+  while (i < n2) {
     const c = fragment[i];
     if (c === " " || c === "	") {
       flushWord();
@@ -26798,15 +26807,15 @@ function tokenizeFragment(fragment, o) {
     }
     if (c === "'") {
       const j = fragment.indexOf("'", i + 1);
-      const end = j === -1 ? n : j;
+      const end = j === -1 ? n2 : j;
       word += fragment.slice(i + 1, end);
-      i = j === -1 ? n : j + 1;
+      i = j === -1 ? n2 : j + 1;
       continue;
     }
     if (c === '"') {
       let j = i + 1;
-      while (j < n && fragment[j] !== '"') {
-        if (fragment[j] === "\\" && j + 1 < n && !o.ps) {
+      while (j < n2 && fragment[j] !== '"') {
+        if (fragment[j] === "\\" && j + 1 < n2 && !o.ps) {
           word += fragment[j + 1];
           j += 2;
         } else {
@@ -26817,7 +26826,7 @@ function tokenizeFragment(fragment, o) {
       i = j + 1;
       continue;
     }
-    if (c === "\\" && i + 1 < n && !o.ps) {
+    if (c === "\\" && i + 1 < n2 && !o.ps) {
       word += fragment[i + 1];
       i += 2;
       continue;
@@ -27215,7 +27224,7 @@ function createProjectStores({ openRouted = (root) => openRoutedStores(root).sto
 // packages/opencode-plugin/src/session-move.mjs
 import { existsSync as existsSync31 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { isAbsolute as isAbsolute6, join as join50, resolve as resolve16 } from "node:path";
+import { isAbsolute as isAbsolute7, join as join50, resolve as resolve16 } from "node:path";
 var MOVE_TOOLS = /* @__PURE__ */ new Set(["opencode_session_move", "session_move"]);
 function isSessionMove(tool) {
   return MOVE_TOOLS.has(tool);
@@ -27224,9 +27233,9 @@ function moveTarget(dir, base2, home = homedir9()) {
   let d = String(dir);
   if (d === "~") d = home;
   else if (d.startsWith("~/") || d.startsWith("~\\")) d = join50(home, d.slice(2));
-  return isAbsolute6(d) ? resolve16(d) : resolve16(base2, d);
+  return isAbsolute7(d) ? resolve16(d) : resolve16(base2, d);
 }
-var isAbsoluteMove = (dir) => dir === "~" || dir.startsWith("~/") || dir.startsWith("~\\") || isAbsolute6(dir);
+var isAbsoluteMove = (dir) => dir === "~" || dir.startsWith("~/") || dir.startsWith("~\\") || isAbsolute7(dir);
 var sterlingAgent = (agent) => typeof agent === "string" && agentRole(agent) !== agent;
 function sessionMoveRefusal(sessionID, agent, target) {
   return `Sterling refused this session_move: session ${sessionID} runs agent ${agent}, and OpenCode looks up a session's agent in the session's current directory on every turn. OpenCode started in ${target} would not see ${agent} (no .opencode/agents/${agent}.md there or in a parent, and no config entry for it; Sterling keeps .opencode/ untracked, so a git worktree outside the project has none), so after the move every turn and every resume of this session would fail with 'Agent not found: "${agent}"' (GitHub #189). Stay in this directory and work in ${target} by path (the shell tool's workdir, absolute file paths), or copy the project's .opencode/agents/sterling/ into ${target} first and move again.`;
@@ -27511,18 +27520,14 @@ import { realpathSync as realpathSync11 } from "node:fs";
 import { basename as basename7, dirname as dirname23, join as join54, resolve as resolve17 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
-var CLAIM_TOOLS = ["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_update"];
-var OTHER_BOARD_TOOLS = ["board_add", "board_edit", "board_get", "board_query", "board_remove"];
-var SUFFIX = (names) => new RegExp(`(?:^|[^A-Za-z0-9])(${names.join("|")})$`);
-var CLAIM_SUFFIX = SUFFIX(CLAIM_TOOLS);
-var OTHER_SUFFIX = SUFFIX(OTHER_BOARD_TOOLS);
+var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_update"]);
+var OTHER_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_add", "board_edit", "board_get", "board_query", "board_remove"]);
 function classifyTool(tool) {
-  if (typeof tool !== "string") return { claim: null };
-  const claim = CLAIM_SUFFIX.exec(tool)?.[1];
-  if (claim) return { claim };
-  if (OTHER_SUFFIX.test(tool)) return { claim: null };
-  if (/sterling/i.test(tool) && /board_/.test(tool)) return { unknown: true };
-  return { claim: null };
+  const name = sterlingToolName(tool);
+  if (name === null) return { claim: null };
+  if (CLAIM_TOOLS.has(name)) return { claim: name };
+  if (OTHER_BOARD_TOOLS.has(name) || !name.startsWith("board_")) return { claim: null };
+  return { unknown: true };
 }
 function refusal3(message) {
   return Object.assign(new Error(message), { claimIdentityRefusal: true });

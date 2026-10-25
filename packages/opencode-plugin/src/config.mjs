@@ -27,6 +27,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderOpenCodeFullText } from '../../../scripts/lib/agent-fences.mjs';
 import { checkoutRoot, projectRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { MCP_SERVER_NAME } from './mcp-name.mjs';
 import { sterlingRoot as defaultSterlingRoot } from './layer.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
@@ -226,12 +227,12 @@ export function createConfigHandler(deps = {}) {
     const want = mcpEntry(root, project, checkout);
     let replacedLogged = false;
     await ctx.mcp.transform((editor) => {
-      const existing = editor.get('sterling');
+      const existing = editor.get(MCP_SERVER_NAME);
       if (existing && !replacedLogged && JSON.stringify(existing.command) !== JSON.stringify(want.command)) {
         replacedLogged = true;
         logLine(checkout, `config: the sterling MCP entry from the project config (${JSON.stringify(existing)}) is replaced by this copy's (${JSON.stringify(want)})`);
       }
-      editor.set('sterling', { ...want, command: [...want.command] });
+      editor.set(MCP_SERVER_NAME, { ...want, command: [...want.command] });
     });
   };
 }

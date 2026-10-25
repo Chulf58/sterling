@@ -64,7 +64,7 @@ import { fileURLToPath } from 'node:url';
 import { CORE_SCHEMA, load } from 'js-yaml';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { writeFileAtomic, writeFileAtomicIfChanged } from './atomic-write.mjs';
-import { resolveLinkedWorktree } from './worktree-root.mjs';
+import { resolveLinkedWorktree, storeRootFor } from './worktree-root.mjs';
 export { writeFileAtomic };
 import { OPENCODE_LOADED_SOURCE, RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, SPECS_SOURCE, STERLING_NPM_PACKAGE, installHostOf, openCodeLoadedSterling, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
 import { JSONC_SOURCE, parseJsonc } from './jsonc.mjs';
@@ -1664,6 +1664,10 @@ export function restoreFullAgentFiles(writes, fs = {}) {
  */
 export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
+  // The config (models, handoff) is the project's one shared file: a linked worktree's
+  // checkout reads it at the store root, while every file written here (agents,
+  // .opencode/opencode.json, the git exclude) stays in projectDir, the checkout.
+  const configDir = storeRootFor(projectDir);
   // The test preload sets this so a test run never touches the real ~/.config/opencode.
   if (env.STERLING_OPENCODE_SETUP_DISABLE === '1') return { skipped: 'Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)' };
   const oc = probe({ env, home });
@@ -1678,7 +1682,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   let handoff;
   let unmaintained = [];
   try {
-    const setting = readHandoffSetting(projectDir);
+    const setting = readHandoffSetting(configDir);
     handoff = setting.enabled;
     unmaintained = setting.unmaintained.filter((rel) => PORTABLE_AGENT_PATHS.includes(rel));
   } catch (err) {
@@ -1692,7 +1696,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   // opencode-only-model-override-per-role-for-openai-picks).
   // A config.json that cannot be read refuses the whole agent set: every render and
   // refusal check still runs and is reported, and nothing is written.
-  const configured = configuredFullAgentModels(projectDir);
+  const configured = configuredFullAgentModels(configDir);
   if (configured.refused) rows.push(configured.refused);
   // The agents render first so default_agent is set only when the conductor file is Sterling's.
   const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models ?? {} });

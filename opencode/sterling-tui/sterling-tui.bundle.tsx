@@ -20524,8 +20524,9 @@ function contextText(tokens, model, limit) {
   return `${Math.round(contextFill(tokens) / limit * 100)}% ctx`;
 }
 function isActiveChild(start, env, running) {
+  const roots = env.STERLING_STORE ? null : resolveProjectRoots(start);
   const storePath = findStorePath(start, env);
-  const root = storePath ? dirname12(dirname12(storePath)) : start;
+  const root = roots && roots.storeRoot !== roots.checkoutRoot ? roots.checkoutRoot : storePath ? dirname12(dirname12(storePath)) : start;
   return (id) => running(id) || liveChildInRegister(root, id);
 }
 function readSubagents(src) {

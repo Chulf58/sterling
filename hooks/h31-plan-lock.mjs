@@ -11,7 +11,7 @@ import { basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname2, join as join4, resolve as resolve2 } from "node:path";
+import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5744,17 +5744,19 @@ function hookProjectRoot(from) {
 }
 function readStdin({ reportInertWorktree = false } = {}) {
   const input = JSON.parse(readFileSync2(0, "utf8"));
-  const root = hookProjectRoot(input.cwd);
-  if (root) {
-    input.cwd = root;
-  } else {
-    const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input.inertWorktree = roots;
-    }
+  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input.inertWorktree = roots;
+    return input;
   }
+  const root = hookProjectRoot(input.cwd);
+  if (root) input.cwd = root;
   return input;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;

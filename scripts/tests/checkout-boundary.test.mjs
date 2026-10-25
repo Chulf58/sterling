@@ -180,6 +180,7 @@ test('the plugin writes a worktree session\'s transient state into the worktree 
 test('claim identity: the plugin fills the real session and checkout into claim tools and refuses another session', async () => {
   assert.equal(claimToolOf('sterling_board_claim'), 'board_claim');
   assert.equal(claimToolOf('sterling_sterling__board_takeover'), 'board_takeover');
+  assert.equal(claimToolOf('board_claim'), null, 'only the Sterling server\'s tools');
   assert.equal(claimToolOf('sterling_board_get'), null);
   const checkoutOfSession = async () => ({ checkout: outside });
   const claim = { tool: 'sterling_board_claim', sessionID: 'ses_real', input: { id: 'i1', checkout: '/somewhere/else' } };
@@ -361,15 +362,33 @@ test('a claim after the session moves records the new checkout, not the cached o
   }
 });
 
-test('claim tools are recognised by their Sterling suffix under any prefix; an unknown Sterling board tool is refused', async () => {
-  for (const t of ['mcp__sterling__board_claim', 'sterling_board_claim', 'acme-gw_board_claim', 'board_claim']) assert.equal(claimToolOf(t), 'board_claim', t);
+test('claim tools are the Sterling server\'s under each host prefix; another server\'s board tools are left alone; an unknown Sterling board tool is refused', async () => {
+  for (const t of ['mcp__sterling__board_claim', 'sterling_board_claim', 'sterling_sterling__board_claim', 'mcp__plugin_sterling_sterling__board_claim']) assert.equal(claimToolOf(t), 'board_claim', t);
+  for (const t of ['mcp__kanban__board_claim', 'acme-gw_board_claim', 'kanban_board_claim', 'mcp__sterlingx__board_claim', 'board_claim']) assert.equal(claimToolOf(t), null, t);
   assert.equal(claimToolOf('mcp__sterling__board_get'), null);
-  assert.equal(claimToolOf('github_board_list'), null);
+  assert.deepEqual(classifyTool('mcp__kanban__board_frobnicate'), { claim: null }, 'an unknown board tool of another server is not ours to refuse');
   assert.deepEqual(classifyTool('sterling_board_frobnicate'), { unknown: true });
-  await assert.rejects(applyClaimIdentity({ tool: 'mcp__sterling__board_frobnicate', sessionID: 's', input: {} }, { checkoutOfSession: async () => ({ checkout: main }) }), /does not know/);
-  const call = { tool: 'acme-gw_board_takeover', sessionID: 's', input: { id: 'i' } };
-  await applyClaimIdentity(call, { checkoutOfSession: async () => ({ checkout: main }) });
+  const checkoutOfSession = async () => ({ checkout: main });
+  await assert.rejects(applyClaimIdentity({ tool: 'mcp__sterling__board_frobnicate', sessionID: 's', input: {} }, { checkoutOfSession }), /does not know/);
+  const kanban = { tool: 'mcp__kanban__board_claim', sessionID: 's', input: { id: 'k', session: 'someone-else', checkout: 'x' } };
+  await applyClaimIdentity(kanban, { checkoutOfSession });
+  assert.deepEqual(kanban.input, { id: 'k', session: 'someone-else', checkout: 'x' }, 'another server\'s board_claim is neither refused nor rewritten');
+  const call = { tool: 'mcp__plugin_sterling_sterling__board_takeover', sessionID: 's', input: { id: 'i' } };
+  await applyClaimIdentity(call, { checkoutOfSession });
   assert.deepEqual(call.input, { id: 'i', session: 's', checkout: main });
+});
+
+test('the plugin leaves another server\'s board_claim untouched in a non-Sterling project too', async () => {
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, env: {}, bootstrap: async () => {} });
+  const ctx = stubCtx(foreignWt, { ses_1: {} });
+  const cleanup = await plugin.setup(ctx);
+  try {
+    const call = { tool: 'mcp__kanban__board_claim', sessionID: 'ses_1', input: { id: 'k', session: 'other' } };
+    await ctx.hooks.tool['execute.before'](call);
+    assert.deepEqual(call.input, { id: 'k', session: 'other' });
+  } finally {
+    await cleanup?.();
+  }
 });
 
 test('a linked worktree of a Sterling git submodule resolves to the submodule checkout; a bare-repo worktree does not', () => {
@@ -397,4 +416,52 @@ test('a linked worktree of a Sterling git submodule resolves to the submodule ch
   const bareWt = join(base, 'bare-wt');
   git(bare, ['worktree', 'add', '-q', bareWt, 'outside-branch']);
   assert.equal(resolveLinkedWorktree(bareWt), null, 'a bare main repo has no main checkout');
+});
+
+test('bundled H16 in a worktree beside its project under a Sterling hub stays inert and never writes the hub\'s state', () => {
+  const hub = join(base, 'hub');
+  const proj = join(hub, 'project');
+  mkdirSync(join(hub, '.sterling'), { recursive: true });
+  writeFileSync(join(hub, '.sterling', 'config.json'), '{}');
+  new SterlingStore(join(hub, '.sterling', 'sterling.db')).close();
+  mkdirSync(join(proj, '.sterling'), { recursive: true });
+  writeFileSync(join(proj, '.sterling', 'config.json'), '{}');
+  new SterlingStore(join(proj, '.sterling', 'sterling.db')).close();
+  writeFileSync(join(proj, '.gitignore'), '.sterling/\n');
+  git(proj, ['init', '-q']);
+  git(proj, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', '-A']);
+  git(proj, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'p']);
+  const alpha = join(hub, 'project.worktrees', 'alpha');
+  git(proj, ['worktree', 'add', '-q', '-b', 'alpha', alpha]);
+  const r = runHook('h16-event-register.mjs', { cwd: alpha, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'q' }, tool_response: {} });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(join(hub, '.sterling', 'transient')), false, 'the hub is not the worktree\'s project');
+  assert.equal(existsSync(join(proj, '.sterling', 'transient')), false);
+  assert.equal(existsSync(join(alpha, '.sterling', 'transient')), false);
+  const h1 = runHook('h1-session-start.mjs', { cwd: alpha, session_id: 's-a', source: 'startup', hook_event_name: 'SessionStart' });
+  assert.match(h1.stdout, new RegExp(`STERLING HOOKS INERT: this session runs in the linked git worktree ${alpha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} of the Sterling project at`));
+  // Control: from the hub itself H16 writes the hub's register.
+  assert.equal(runHook('h16-event-register.mjs', { cwd: hub, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'q' }, tool_response: {} }).status, 0);
+  assert.ok(existsSync(join(hub, '.sterling', 'transient', 'session-events.json')));
+});
+
+test('the OpenCode agent refresh in a worktree reads the shared config and writes the agents into the worktree', async () => {
+  const { setupOpenCode } = await import('../lib/opencode-install.mjs');
+  const proj = join(base, 'agents-main');
+  mkdirSync(join(proj, '.sterling'), { recursive: true });
+  writeFileSync(join(proj, '.sterling', 'config.json'), readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
+  writeFileSync(join(proj, '.gitignore'), '.sterling/\n');
+  git(proj, ['init', '-q']);
+  git(proj, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', '-A']);
+  git(proj, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'p']);
+  const wt = join(base, 'agents-wt');
+  git(proj, ['worktree', 'add', '-q', '-b', 'agents', wt]);
+  const home = join(base, 'agents-home');
+  mkdirSync(home, { recursive: true });
+  const result = setupOpenCode({ projectDir: wt, pluginRoot: repo, env: { HOME: home }, home, installed: false, probe: () => ({ installed: true, version: '2.0.22', major: 2 }) });
+  const rows = result.rows ?? [];
+  assert.equal(result.skipped, undefined, String(result.skipped));
+  assert.equal(rows.some((r) => r.refused), false, JSON.stringify(rows.filter((r) => r.refused)));
+  assert.ok(existsSync(join(wt, '.opencode', 'agents', 'sterling', 'implementor.md')), 'into the worktree checkout');
+  assert.equal(existsSync(join(proj, '.opencode')), false, 'not into the main checkout');
 });

@@ -13,7 +13,7 @@ import { join as join21, basename as basename3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, join as join10, resolve as resolve4 } from "node:path";
+import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -12532,17 +12532,19 @@ function hookProjectRoot(from) {
 }
 function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const root = hookProjectRoot(input2.cwd);
-  if (root) {
-    input2.cwd = root;
-  } else {
-    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input2.inertWorktree = roots;
-    }
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input2.inertWorktree = roots;
+    return input2;
   }
+  const root = hookProjectRoot(input2.cwd);
+  if (root) input2.cwd = root;
   return input2;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -12699,7 +12701,7 @@ function namedError(e) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join11, resolve as resolve5, dirname as dirname7, isAbsolute } from "node:path";
+import { join as join11, resolve as resolve5, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
@@ -12887,7 +12889,7 @@ function currentUid() {
 function registerLockRoot() {
   const uid2 = currentUid();
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (typeof xdg === "string" && isAbsolute(xdg)) {
+  if (typeof xdg === "string" && isAbsolute2(xdg)) {
     try {
       const st = lstatSync4(xdg);
       if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join11(xdg, "sterling-locks");
@@ -13743,7 +13745,7 @@ var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number}
 import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync6, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync6, readFileSync as readFileSync13, renameSync as renameSync6, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync7, appendFileSync } from "node:fs";
-import { dirname as dirname13, isAbsolute as isAbsolute2, join as join19, resolve as resolve6, sep } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute3, join as join19, resolve as resolve6, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -13994,7 +13996,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   return readJson(paths.lock)?.token === token ? token : null;
 }
 function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
-  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute2(policy.path))) {
+  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute3(policy.path))) {
     throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
   }
   const path = join19(pluginRoot2, ".claude-plugin", "sterling-mcp.json");

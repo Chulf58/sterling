@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, join as join10, resolve as resolve4 } from "node:path";
+import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -12877,17 +12877,19 @@ function hookProjectRoot(from) {
 }
 function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const root = hookProjectRoot(input2.cwd);
-  if (root) {
-    input2.cwd = root;
-  } else {
-    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input2.inertWorktree = roots;
-    }
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input2.inertWorktree = roots;
+    return input2;
   }
+  const root = hookProjectRoot(input2.cwd);
+  if (root) input2.cwd = root;
   return input2;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -14034,7 +14036,7 @@ import { join as join15 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync8, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join14, resolve as resolve5, dirname as dirname8, isAbsolute } from "node:path";
+import { join as join14, resolve as resolve5, dirname as dirname8, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
@@ -14219,7 +14221,7 @@ function currentUid() {
 function registerLockRoot() {
   const uid2 = currentUid();
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (typeof xdg === "string" && isAbsolute(xdg)) {
+  if (typeof xdg === "string" && isAbsolute2(xdg)) {
     try {
       const st = lstatSync4(xdg);
       if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join14(xdg, "sterling-locks");

@@ -6,11 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h15-store-guard.mjs
-import { basename as basename2, isAbsolute, resolve as resolve3, sep } from "node:path";
+import { basename as basename2, isAbsolute as isAbsolute2, resolve as resolve3, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname2, join as join4, resolve as resolve2 } from "node:path";
+import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5743,17 +5743,19 @@ function hookProjectRoot(from) {
 }
 function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const root = hookProjectRoot(input2.cwd);
-  if (root) {
-    input2.cwd = root;
-  } else {
-    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input2.inertWorktree = roots;
-    }
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input2.inertWorktree = roots;
+    return input2;
   }
+  const root = hookProjectRoot(input2.cwd);
+  if (root) input2.cwd = root;
   return input2;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -6475,10 +6477,10 @@ if (typeof submitted !== "string" || submitted.trim() === "") {
   deny(`H15: this ${tool} call carries no usable tool_input.${field}, so the store database cannot be shown untouched \u2014 re-issue with an explicit path.`);
 }
 var base2 = typeof input.cwd === "string" ? input.cwd : "";
-if (!isAbsolute(submitted) && base2 === "") {
+if (!isAbsolute2(submitted) && base2 === "") {
   deny(`H15: '${submitted}' is a relative path and this call carries no cwd to resolve it against, so the store database cannot be shown untouched.`);
 }
-var destination = isAbsolute(submitted) ? resolve3(submitted) : resolve3(base2, submitted);
+var destination = isAbsolute2(submitted) ? resolve3(submitted) : resolve3(base2, submitted);
 if (namesStoreComponent(destination) && DB_FILE_RE.test(basename2(destination))) {
   deny(
     `H15: this ${tool} call targets the Sterling store database (${destination}), which only the Sterling MCP server writes \u2014 use the knowledge_* / board_* tools. Every other file under .sterling/ (config.json, transient/*) may be edited directly.`

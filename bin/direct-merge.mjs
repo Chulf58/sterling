@@ -13066,7 +13066,7 @@ import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync9, existsSync as existsSync7 } from "node:fs";
-import { dirname as dirname7, join as join12, resolve as resolve6 } from "node:path";
+import { dirname as dirname7, isAbsolute, join as join12, relative, resolve as resolve6 } from "node:path";
 init_dist();
 init_dist2();
 

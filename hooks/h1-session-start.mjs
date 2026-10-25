@@ -12740,7 +12740,7 @@ function walkUpPluginRoot(moduleUrl) {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync7 } from "node:fs";
-import { dirname as dirname9, join as join14, resolve as resolve5 } from "node:path";
+import { dirname as dirname9, isAbsolute, join as join14, relative, resolve as resolve5 } from "node:path";
 init_dist();
 init_dist2();
 
@@ -13606,17 +13606,19 @@ function hookProjectRoot(from) {
 }
 function readStdin({ reportInertWorktree = false } = {}) {
   const input2 = JSON.parse(readFileSync7(0, "utf8"));
-  const root = hookProjectRoot(input2.cwd);
-  if (root) {
-    input2.cwd = root;
-  } else {
-    const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input2.inertWorktree = roots;
-    }
+  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input2.inertWorktree = roots;
+    return input2;
   }
+  const root = hookProjectRoot(input2.cwd);
+  if (root) input2.cwd = root;
   return input2;
+}
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
 function inertWorktreeLine({ storeRoot, checkoutRoot }) {
   return `STERLING HOOKS INERT: this session runs in the linked git worktree ${checkoutRoot} of the Sterling project at ${storeRoot}. Claude Code's Sterling hooks do not run in a worktree outside the main checkout (no knowledge delivery, no touch register, no settlement), because they cannot yet keep this checkout's transient state apart from the main checkout's. Work from ${storeRoot}, or use OpenCode, whose Sterling plugin supports linked worktrees.`;
@@ -14144,7 +14146,7 @@ function formatResidueLine(entry, paths, { verified = true, reason = "", stopSee
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync10, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync8, lstatSync as lstatSync4, readdirSync as readdirSync3, realpathSync as realpathSync6, chmodSync } from "node:fs";
-import { join as join19, resolve as resolve6, dirname as dirname10, isAbsolute } from "node:path";
+import { join as join19, resolve as resolve6, dirname as dirname10, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash4 } from "node:crypto";
@@ -14341,7 +14343,7 @@ function currentUid() {
 function registerLockRoot() {
   const uid2 = currentUid();
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (typeof xdg === "string" && isAbsolute(xdg)) {
+  if (typeof xdg === "string" && isAbsolute2(xdg)) {
     try {
       const st = lstatSync4(xdg);
       if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join19(xdg, "sterling-locks");
@@ -16688,7 +16690,7 @@ import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync7, existsSync as existsSync18, mkdirSync as mkdirSync12, openSync as openSync7, readFileSync as readFileSync19, renameSync as renameSync6, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
-import { dirname as dirname14, isAbsolute as isAbsolute2, join as join31, resolve as resolve12, sep as sep3 } from "node:path";
+import { dirname as dirname14, isAbsolute as isAbsolute3, join as join31, resolve as resolve12, sep as sep3 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";

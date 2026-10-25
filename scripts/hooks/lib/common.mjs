@@ -1,7 +1,7 @@
 // Shared hook plumbing. Hooks import workspace packages at AUTHOR time; the
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
 import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
@@ -141,21 +141,27 @@ export function transientDir(checkout) {
  */
 export function readStdin({ reportInertWorktree = false } = {}) {
   const input = JSON.parse(readFileSync(0, 'utf8'));
-  const root = hookProjectRoot(input.cwd);
-  if (root) {
-    input.cwd = root;
-  } else {
-    // A worktree outside the main checkout of a Sterling project: every hook exits
-    // here, allowing, before it can reach the shared store (loadConfig and openStore
-    // map a worktree to its store root for the OpenCode plugin). H1 asks to see it
-    // instead, and names it once so the gap is not silent (P5).
-    const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
-    if (roots && roots.checkoutRoot !== roots.storeRoot) {
-      if (!reportInertWorktree) allow();
-      input.inertWorktree = roots;
-    }
+  // A linked worktree outside its project's main checkout is detected BEFORE the
+  // ancestor walk, so a Sterling directory that merely contains the worktree (a hub
+  // holding project/ and project.worktrees/alpha) is never taken for its project.
+  // Every hook exits here, allowing, before it can reach any store (loadConfig and
+  // openStore map a worktree to its store root for the OpenCode plugin); H1 asks to
+  // see it instead and names it once, so the gap is not silent (P5). A worktree
+  // nested inside its main checkout keeps the walk, as before linked-worktree support.
+  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
+    if (!reportInertWorktree) allow();
+    input.inertWorktree = roots;
+    return input;
   }
+  const root = hookProjectRoot(input.cwd);
+  if (root) input.cwd = root;
   return input;
+}
+
+function isWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /** H1's one line for a Claude Code session in a linked worktree, where the hooks are inert. */
