@@ -773,7 +773,7 @@ function readCheckRollup(pull) {
  * answer does not say), its state (OPEN, CLOSED, MERGED), merged flag, current
  * head SHA (headRefOid), its last 100 reviews and EVERY review thread (paged),
  * as { merge_state_status, review_decision, check_rollup, check_rollup_error,
- * pr_state, merged, head_sha, reviews: [{id, state, login, bot, commit, body}],
+ * pr_state, merged, head_sha, reviews: [{id, state, login, bot, commit}],
  * threads: [{id, resolved, outdated, path, url, comment_ids}] }. A review's
  * login is GraphQL's, which names a Bot without the REST '[bot]' suffix.
  * `repo` is 'host/owner/repo'. */
@@ -784,7 +784,7 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
   let state = null;
   for (;;) {
     const page = after ? `, after:"${after}"` : '';
-    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state body author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query, deadline)?.repository?.pullRequest;
     if (
       !pull ||
@@ -799,7 +799,7 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
     }
     if (!state) {
       const rollup = readCheckRollup(pull);
-      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === 'Bot', commit: r?.commit?.oid ?? null, body: typeof r?.body === 'string' ? r.body : '' }));
+      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === 'Bot', commit: r?.commit?.oid ?? null }));
       state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
@@ -815,6 +815,28 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
 }
 
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** One review's body, by its database id, through the REST reviews endpoint.
+ * Kept out of fetchPrMergeState on purpose: that query is repeated for every
+ * thread page, and 100 reviews' bodies together can overflow gh's output
+ * buffer (ENOBUFS), which would stop a PR with no findings from settling. A
+ * failed read, invalid JSON or a body that is not a string throws; it is never
+ * read as empty. `repo` is 'host/owner/repo'. */
+export function fetchReviewBody(cwd, repo, number, reviewId, { deadline = null } = {}) {
+  const { host, owner, name } = splitRepo(repo);
+  const path = `repos/${owner}/${name}/pulls/${number}/reviews/${reviewId}`;
+  const r = gh(cwd, ['api', '--hostname', host, path], callTimeoutMs(deadline));
+  if (deadline !== null && r.error?.code === 'ETIMEDOUT' && Date.now() >= deadline) throw new DeadlineReachedError();
+  if (r.error || r.status !== 0) throw new Error(`gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
+  let review;
+  try {
+    review = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Error(`gh api ${path} returned invalid JSON (${e.message}): ${String(r.stdout).slice(0, 200)}`);
+  }
+  if (typeof review?.body !== 'string') throw new Error(`gh api ${path} returned no review body (got ${JSON.stringify(review?.body)})`);
+  return review.body;
+}
 
 /** fetchPrMergeState, read again ONCE after `retryDelayMs` when GitHub answers
  * UNKNOWN: it computes mergeability lazily, so a first read right after a push

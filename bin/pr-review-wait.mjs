@@ -204,14 +204,14 @@ function fetchPrMergeState(cwd, repo, number, { deadline: deadline2 = null } = {
   let state = null;
   for (; ; ) {
     const page = after ? `, after:"${after}"` : "";
-    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state body author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query, deadline2)?.repository?.pullRequest;
     if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes) || typeof pull.state !== "string" || typeof pull.merged !== "boolean" || typeof pull.headRefOid !== "string" || !Array.isArray(pull.reviews?.nodes)) {
       throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads/state/merged/headRefOid/reviews for ${repo}#${number}`);
     }
     if (!state) {
       const rollup = readCheckRollup(pull);
-      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === "Bot", commit: r?.commit?.oid ?? null, body: typeof r?.body === "string" ? r.body : "" }));
+      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === "Bot", commit: r?.commit?.oid ?? null }));
       state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
@@ -226,6 +226,21 @@ function fetchPrMergeState(cwd, repo, number, { deadline: deadline2 = null } = {
   return { ...state, threads };
 }
 var sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function fetchReviewBody(cwd, repo, number, reviewId, { deadline: deadline2 = null } = {}) {
+  const { host, owner: owner2, name: name2 } = splitRepo(repo);
+  const path = `repos/${owner2}/${name2}/pulls/${number}/reviews/${reviewId}`;
+  const r = gh(cwd, ["api", "--hostname", host, path], callTimeoutMs(deadline2));
+  if (deadline2 !== null && r.error?.code === "ETIMEDOUT" && Date.now() >= deadline2) throw new DeadlineReachedError();
+  if (r.error || r.status !== 0) throw new Error(`gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
+  let review;
+  try {
+    review = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Error(`gh api ${path} returned invalid JSON (${e.message}): ${String(r.stdout).slice(0, 200)}`);
+  }
+  if (typeof review?.body !== "string") throw new Error(`gh api ${path} returned no review body (got ${JSON.stringify(review?.body)})`);
+  return review.body;
+}
 function fetchSettledMergeState(cwd, repo, number, { retryDelayMs: retryDelayMs2 = 3e3, sleep: sleep2 = sleepMs, deadline: deadline2 = null } = {}) {
   const first = fetchPrMergeState(cwd, repo, number, { deadline: deadline2 });
   if (first.merge_state_status !== "UNKNOWN" || first.merged) return first;
@@ -436,6 +451,7 @@ if (argv.includes("--settle")) {
       const bounded = checksWait.timeoutMs > 0;
       const deadline2 = started + checksWait.timeoutMs;
       let pinnedAt = null;
+      let bodyRead = null;
       for (; ; ) {
         const firstRead = pinnedAt === null;
         try {
@@ -468,7 +484,17 @@ if (argv.includes("--settle")) {
             { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha }
           );
         }
-        const missed = parsePreviouslyMissed(last.body);
+        if (bodyRead?.id !== last.id) {
+          let body;
+          try {
+            body = fetchReviewBody(target, originRepo, armed.pr_number, last.id, { deadline: bounded ? deadline2 : null });
+          } catch (e) {
+            if (e instanceof DeadlineReachedError) throw e;
+            throw blocked(`the newest Copilot review (${last.id}) body could not be read (${e.message}), so previously missed findings cannot be ruled out and the loop is NOT clean: settle again; nothing settled`, { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha });
+          }
+          bodyRead = { id: last.id, missed: parsePreviouslyMissed(body) };
+        }
+        const missed = bodyRead.missed;
         if (missed.items.length || missed.unparsed) {
           throw blocked(
             `the newest Copilot review (${last.id}) lists previously missed findings${missed.unparsed ? " that could not be read in full" : ""}, so the loop is NOT clean: disposition each finding and push the fix so Copilot reviews again, then settle again; nothing settled`,

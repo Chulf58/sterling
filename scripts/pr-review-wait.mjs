@@ -151,7 +151,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
-import { autoMergeOnCleanOf, DeadlineReachedError, fetchPrMergeState, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
+import { autoMergeOnCleanOf, DeadlineReachedError, fetchPrMergeState, fetchReviewBody, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -324,6 +324,7 @@ if (argv.includes('--settle')) {
       const bounded = checksWait.timeoutMs > 0;
       const deadline = started + checksWait.timeoutMs;
       let pinnedAt = null;
+      let bodyRead = null;
       for (;;) {
         const firstRead = pinnedAt === null;
         try {
@@ -364,7 +365,19 @@ if (argv.includes('--settle')) {
         // GitHub issue #204: a review body that lists previously missed findings
         // is open work even when no thread is: refused, no override. A fresh
         // Copilot review after the fix push is the way past it.
-        const missed = parsePreviouslyMissed(last.body);
+        // The body is read once per review id, apart from the merge-state query
+        // (which every thread page repeats); a failed read refuses the settle.
+        if (bodyRead?.id !== last.id) {
+          let body;
+          try {
+            body = fetchReviewBody(target, originRepo, armed.pr_number, last.id, { deadline: bounded ? deadline : null });
+          } catch (e) {
+            if (e instanceof DeadlineReachedError) throw e;
+            throw blocked(`the newest Copilot review (${last.id}) body could not be read (${e.message}), so previously missed findings cannot be ruled out and the loop is NOT clean: settle again; nothing settled`, { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha });
+          }
+          bodyRead = { id: last.id, missed: parsePreviouslyMissed(body) };
+        }
+        const missed = bodyRead.missed;
         if (missed.items.length || missed.unparsed) {
           throw blocked(
             `the newest Copilot review (${last.id}) lists previously missed findings${missed.unparsed ? ' that could not be read in full' : ''}, so the loop is NOT clean: disposition each finding and push the fix so Copilot reviews again, then settle again; nothing settled`,
