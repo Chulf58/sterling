@@ -86,7 +86,7 @@ test('board_remove: a unique live 8-char prefix is refused, the refusal names th
     assert.doesNotMatch(msg, /exactly one/i, 'no uniqueness claim: the reads share no snapshot');
     assert.match(msg, /nothing was removed/);
     assert.equal(tools.boardQuery({ source: 'user' }).length, 1, 'the item survives the refused call');
-    assert.equal(tools.boardRemove(record.id).removed, record.id, 'one retry with the named uuid removes it');
+    assert.equal(tools.boardRemove(record.id, { outcome: 'done' }).removed, record.id, 'one retry with the named uuid removes it');
   } finally {
     cleanup();
   }
@@ -134,7 +134,7 @@ test('board_remove: an AMBIGUOUS prefix, an unknown prefix and a prefix of a non
       .record as unknown as { id: string };
 
     for (const cited of [record.id.slice(0, 8), 'zzzzzzzz', decision.id.slice(0, 8)]) {
-      const msg = refusal(() => tools.boardRemove(cited));
+      const msg = refusal(() => tools.boardRemove(cited, { outcome: 'done' }));
       assert.match(msg, /EXACT full uuid only/);
       assert.doesNotMatch(msg, UUID_RE, `'${cited}' must name no uuid — got: ${msg}`);
     }
@@ -200,7 +200,7 @@ test('board_remove: when the cited id is task B\'s exact slug AND a prefix of ta
     const got = tools.boardGet(cited) as unknown as { id?: string; record?: { id: string } };
     assert.equal(got.record?.id ?? got.id, bId, 'precondition: board_get resolves the cited id to task B by slug');
 
-    const msg = refusal(() => tools.boardRemove(cited));
+    const msg = refusal(() => tools.boardRemove(cited, { outcome: 'done' }));
     assert.match(msg, /EXACT full uuid only/);
     assert.doesNotMatch(msg, UUID_RE, `task A's uuid must not be offered for task B's slug — got: ${msg}`);
     assert.equal(tools.boardQuery({ source: 'user' }).length, 2, 'both tasks survive');

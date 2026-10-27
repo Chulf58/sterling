@@ -193,7 +193,7 @@ test('board_remove: an 8-char prefix that WOULD have resolved unambiguously is n
     const prefix = original.id.slice(0, 8);
 
     assert.throws(
-      () => tools.boardRemove(prefix),
+      () => tools.boardRemove(prefix, { outcome: 'done' }),
       (err: Error) => {
         assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
         assert.match(
@@ -228,7 +228,7 @@ test('board_remove: an AMBIGUOUS 8-char prefix is refused the same exact-id-only
     const prefix = seedPrefixTwin(store, tools, original.id);
 
     assert.throws(
-      () => tools.boardRemove(prefix),
+      () => tools.boardRemove(prefix, { outcome: 'done' }),
       'a prefix must still be refused when it happens to be ambiguous — the exact-id-only rule does not carve out an exception for this case'
     );
 
@@ -246,7 +246,7 @@ test('board_remove: a genuinely unresolvable (non-prefix-shaped) identifier is r
     tools.boardAdd({ text: 'untouched item', source: 'user' });
 
     assert.throws(
-      () => tools.boardRemove(UNRESOLVABLE),
+      () => tools.boardRemove(UNRESOLVABLE, { outcome: 'done' }),
       new RegExp(escapeRegex(UNRESOLVABLE)),
       'the refusal states the identifier AS GIVEN'
     );
@@ -263,7 +263,7 @@ test('board_remove: a FULL uuid still succeeds and removes the item — the exac
       record: { id: string };
     };
 
-    const result = tools.boardRemove(original.id) as unknown as { removed?: string; id?: string };
+    const result = tools.boardRemove(original.id, { outcome: 'done' }) as unknown as { removed?: string; id?: string };
     const removedId = result.removed ?? result.id;
     assert.equal(removedId, original.id, 'the full uuid removes the item directly, no resolution needed');
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the item is gone');

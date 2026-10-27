@@ -51,7 +51,7 @@ import {
 import { openRoutedStores } from '@sterling/store/routing';
 import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
 import { RETIRED_REASONS } from '@sterling/schemas';
-import { HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, handoffEvidenceSchema, todoHandoffSchema, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
+import { BOARD_REMOVAL_OUTCOMES, HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, boardRemovalOutcomeSchema, handoffEvidenceSchema, todoHandoffSchema, type BoardRemovalOutcome, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
 import { EntryReachability, type EntryVerdict } from './entry-reachability.js';
@@ -13134,11 +13134,13 @@ export class SterlingTools {
    * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
    * what sent callers hunting for a deleted item in the first place.
    */
-  boardRemove(id: string, closeNote?: string, closeEvidence?: unknown): {
+  boardRemove(id: string, close: { outcome?: unknown; note?: string; evidence?: unknown } = {}): {
     removed: string;
+    /** how a user task ended, as journaled in board_removal_journal with the removal */
+    outcome?: BoardRemovalOutcome;
     /** a received handoff item's closure file, written before the row was deleted */
     handoff_closure?: string;
-    /** a received handoff item's evidence sidecar, written before the closure file */
+    /** a received handoff item's evidence sidecar (evidence and outcome), written before the closure file */
     handoff_evidence?: string;
     artifact_evidence?: ArtifactEvidenceRecord[];
     /** the FULL dedup'd match count — may exceed artifact_evidence.length (capped like board_query's) */
@@ -13150,9 +13152,39 @@ export class SterlingTools {
    * removal tool can see the proven outcome without unpacking the receipt. */
   absence_paths?: string[];
   } {
+    const { outcome: closeOutcome, note: closeNote, evidence: closeEvidence } = close;
     const record = this.store.get(id);
     if (!record) throw this.removedItemError('board_remove', id);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
+    // A USER task's end is journaled with its removal (decision
+    // board-issue-mirror-design-required-outcome-snapshot-read-single-writer):
+    // the outcome is required, never defaulted, because a default records a
+    // claim the caller never made. A maintenance-queue item is not journaled,
+    // so an outcome, note or evidence given for one is refused rather than
+    // dropped.
+    const isUser = (record as unknown as { source?: unknown }).source === 'user';
+    const outcomeValues = BOARD_REMOVAL_OUTCOMES.join(', ');
+    if (!isUser) {
+      const given = [closeOutcome !== undefined ? 'outcome' : '', closeNote !== undefined ? 'note' : '', closeEvidence !== undefined ? 'evidence' : ''].filter(Boolean);
+      if (given.length) {
+        throw new Error(
+          `board_remove: '${id}' is a maintenance-queue item, and ${given.map((g) => `'${g}'`).join(', ')} ${given.length === 1 ? 'is' : 'are'} recorded for user board tasks only. Remove it with its id alone. Nothing was removed.`
+        );
+      }
+    }
+    let outcome: BoardRemovalOutcome | undefined;
+    if (isUser) {
+      if (closeOutcome === undefined) {
+        throw new Error(
+          `board_remove: 'outcome' is required to remove the user board task '${id}': one of ${outcomeValues} (done: finished; dropped: will not be done; superseded: replaced by other work; duplicate: the same as another task). Add 'evidence' (commit, pr, deploy or url) for a done task when you have it. Nothing was removed.`
+        );
+      }
+      const parsedOutcome = boardRemovalOutcomeSchema.safeParse(closeOutcome);
+      if (!parsedOutcome.success) {
+        throw new Error(`board_remove: outcome '${String(closeOutcome)}' is not one of ${outcomeValues}. Nothing was removed.`);
+      }
+      outcome = parsedOutcome.data;
+    }
     // A RECEIVED handoff item (GitHub issue #105) tells its sender it is done by
     // a closure file in this project's tree, written BEFORE the row goes: the
     // sender reads it (completion is pulled, this project never writes the
@@ -13161,16 +13193,6 @@ export class SterlingTools {
     const received = (record as unknown as { handoff?: unknown }).handoff;
     const receivedMeta = received !== undefined ? todoHandoffSchema.safeParse(received) : undefined;
     const isReceived = receivedMeta?.success === true && receivedMeta.data.role === 'received';
-    if (closeNote !== undefined && !isReceived) {
-      throw new Error(
-        `board_remove: 'note' is sent back to the project a task came from, and '${id}' was not handed over from another project, so the note would go nowhere. Remove it without a note. Nothing was removed.`
-      );
-    }
-    if (closeEvidence !== undefined && !isReceived) {
-      throw new Error(
-        `board_remove: 'evidence' is sent back to the project a task came from, and '${id}' was not handed over from another project, so it would go nowhere. Remove it without evidence. Nothing was removed.`
-      );
-    }
     let checkedEvidence: HandoffEvidence | undefined;
     if (closeEvidence !== undefined) {
       const parsed = handoffEvidenceSchema.safeParse(closeEvidence);
@@ -13186,17 +13208,22 @@ export class SterlingTools {
     // leaves no file behind.
     if (closeNote !== undefined && closeNote.trim().length === 0) {
       throw new Error(
-        `board_remove: '${record.id}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (the note is blank; omit it or say what was done). Nothing was removed.`
+        isReceived
+          ? `board_remove: '${record.id}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (the note is blank; omit it or say what was done). Nothing was removed.`
+          : `board_remove: the note for '${record.id}' is blank; omit it or say what was done. Nothing was removed.`
       );
     }
     // The evidence sidecar goes first, so a failed write refuses the removal
-    // before the closure file says done (GitHub issue #108). A close without
-    // evidence first deletes any sidecar an earlier, failed close left, so the
-    // sender never shows evidence this close did not give.
+    // before the closure file says done (GitHub issue #108). It carries the
+    // outcome too, so the sender can tell a finished item from a dropped one;
+    // the closure file keeps its old shape for older senders. A close with
+    // neither evidence nor outcome first deletes any sidecar an earlier,
+    // failed close left, so the sender never shows evidence this close did
+    // not give.
     let closurePath: string | undefined;
     let evidencePath: string | undefined;
     if (isReceived && receivedMeta?.success) {
-      if (checkedEvidence) evidencePath = this.writeHandoffEvidence(record.id, receivedMeta.data.transfer_id, checkedEvidence);
+      if (checkedEvidence || outcome) evidencePath = this.writeHandoffEvidence(record.id, receivedMeta.data.transfer_id, checkedEvidence, outcome);
       else this.removeStaleHandoffEvidence(record.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record.id, receivedMeta.data.transfer_id, closeNote);
     }
@@ -13220,8 +13247,14 @@ export class SterlingTools {
         ...(attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}),
       };
     }
-    this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
-    return { removed: record.id, ...evidence };
+    // System todos land in the §3.2.7 drain log; a user task's journal row is
+    // written in the same transaction as its delete.
+    this.store.remove(
+      record.id,
+      this.now(),
+      outcome ? { outcome, ...(checkedEvidence ? { evidence: checkedEvidence } : {}), ...(closeNote !== undefined ? { note: closeNote } : {}) } : undefined
+    );
+    return { removed: record.id, ...(outcome ? { outcome } : {}), ...evidence };
   }
 
   /**
@@ -13255,7 +13288,7 @@ export class SterlingTools {
    * a newer sender reads this sidecar and checks its transfer and item ids.
    * Any failure refuses the removal by name.
    */
-  private writeHandoffEvidence(itemId: string, transferId: string, evidence: HandoffEvidence): string {
+  private writeHandoffEvidence(itemId: string, transferId: string, evidence: HandoffEvidence | undefined, outcome: BoardRemovalOutcome | undefined): string {
     const fail = (why: string, cause?: unknown) =>
       new Error(
         `board_remove: '${itemId}' was handed over from another project, and its evidence file could not be written (${why}). Nothing was removed.`,
@@ -13264,7 +13297,7 @@ export class SterlingTools {
     if (!this.repoRoot) throw fail('this server has no project root');
     const dir = join(this.repoRoot, HANDOFFS_DIR_REL);
     const path = join(dir, `${transferId}.evidence.json`);
-    const file: HandoffEvidenceFile = { transfer_id: transferId, item_id: itemId, evidence };
+    const file: HandoffEvidenceFile = { transfer_id: transferId, item_id: itemId, ...(evidence ? { evidence } : {}), ...(outcome ? { outcome } : {}) };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
       mkdirSync(dir, { recursive: true });

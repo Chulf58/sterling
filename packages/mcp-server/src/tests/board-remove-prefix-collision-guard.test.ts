@@ -94,11 +94,11 @@ function seedBoardDrainedCollision(
   const prefix = liveId.slice(0, 8);
 
   const { record: donorShape } = tools.boardAdd({ text: opts.donorText, source: 'user' }) as unknown as { record: Loose };
-  tools.boardRemove(donorShape.id as string); // discard the donor's own (non-colliding) real id
+  tools.boardRemove(donorShape.id as string, { outcome: 'done' }); // discard the donor's own (non-colliding) real id
 
   const drainedId = prefixedId(prefix);
   store.create(withForcedId(donorShape, drainedId));
-  tools.boardRemove(drainedId); // the removal that leaves a trail under `prefix`
+  tools.boardRemove(drainedId, { outcome: 'done' }); // the removal that leaves a trail under `prefix`
 
   return { liveId, drainedId, prefix };
 }
@@ -150,7 +150,7 @@ test('board_remove refuses a prefix that collides between a LIVE item and a prev
     });
 
     assert.throws(
-      () => tools.boardRemove(prefix),
+      () => tools.boardRemove(prefix, { outcome: 'done' }),
       (err: Error) => {
         assert.match(err.message, FULL_UUID_REQUIRED, `refusal must name the full-uuid requirement — got: "${err.message}"`);
         return true;
@@ -207,7 +207,7 @@ test('board_remove(full uuid) succeeds and removes the live item even amid an id
       donorText: 'drained item A sharing the prefix',
     });
 
-    const result = tools.boardRemove(liveId) as unknown as { removed?: string; id?: string };
+    const result = tools.boardRemove(liveId, { outcome: 'done' }) as unknown as { removed?: string; id?: string };
     const removedId = result.removed ?? result.id;
     assert.equal(removedId, liveId, 'a full uuid removes unconditionally, regardless of any colliding prefix elsewhere');
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'the live item is actually gone');

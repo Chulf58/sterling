@@ -128,6 +128,25 @@ CREATE TABLE IF NOT EXISTS store_meta (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+-- Board removal journal (decision
+-- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
+-- removed user task, written in remove()'s transaction and never pruned.
+-- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
+-- user_version bump. evidence is JSON text or NULL.
+CREATE TABLE IF NOT EXISTS board_removal_journal (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  slug TEXT,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  objective TEXT,
+  priority TEXT,
+  outcome TEXT NOT NULL,
+  evidence TEXT,
+  note TEXT,
+  removed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
 
 /**

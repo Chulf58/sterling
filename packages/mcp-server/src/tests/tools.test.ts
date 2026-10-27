@@ -423,8 +423,8 @@ test('board tools: add/query separates board from maintenance queue; remove is t
       alternatives_rejected: [],
       rationale: 'r',
     });
-    assert.throws(() => tools.boardRemove(d.id), /not a task/);
-    const res = tools.boardRemove(userTodo.id);
+    assert.throws(() => tools.boardRemove(d.id, { outcome: 'done' }), /not a task/);
+    const res = tools.boardRemove(userTodo.id, { outcome: 'done' });
     // the artifact binding is BUILT now (board b8ff0b68): a keyless item still
     // reports the check as skipped, but for the real reason — no file identity
     // to join on — not as not_built
@@ -1161,7 +1161,7 @@ test('board_remove / maintenance_remove disclose artifact_evidence — the bindi
     // fulfilled item: a durable record touching its file_keys landed after it
     const fulfilled = (tools.boardAdd({ text: 'fix the widget', source: 'user', file_keys: ['src/widget.ts'] }) as { record: { id: string } }).record;
     tools.knowledgeCreate('decision', { title: 'widget fixed thus', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/widget.ts'] });
-    const closed = tools.boardRemove(fulfilled.id);
+    const closed = tools.boardRemove(fulfilled.id, { outcome: 'done' });
     assert.equal(closed.artifact_evidence?.length, 1, 'the fulfilling write is visible in the receipt');
     assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
     assert.equal(closed.note, undefined, 'no operator-word warning when evidence exists');
@@ -1169,13 +1169,13 @@ test('board_remove / maintenance_remove disclose artifact_evidence — the bindi
     // unfulfilled item: nothing touched its file_keys — removed, but the
     // receipt says out loud that the close rides the operator's word
     const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
-    const abandoned = tools.boardRemove(bare.id);
+    const abandoned = tools.boardRemove(bare.id, { outcome: 'done' });
     assert.deepEqual(abandoned.artifact_evidence, [], 'empty evidence is reported, never fabricated');
     assert.match(abandoned.note ?? '', /operator's word/, 'and the receipt names what that means');
 
     // no file identity → the check cannot run and says so (P5)
     const keyless = (tools.boardAdd({ text: 'free-floating idea', source: 'user' }) as { record: { id: string } }).record;
-    const skipped = tools.boardRemove(keyless.id);
+    const skipped = tools.boardRemove(keyless.id, { outcome: 'done' });
     assert.equal(skipped.check_skipped?.[0]?.check, 'board-remove-artifact-binding');
     assert.equal(skipped.check_skipped?.[0]?.reason, 'no_file_keys');
 
@@ -1196,7 +1196,7 @@ test('board_remove / maintenance_remove cap artifact_evidence to board_query\'s 
     for (let i = 0; i < 6; i++) {
       tools.knowledgeCreate('decision', { title: `gadget ruling ${i}`, statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/gadget.ts'] });
     }
-    for (const closed of [tools.maintenanceRemove(qi.record.id), tools.boardRemove(item.id)]) {
+    for (const closed of [tools.maintenanceRemove(qi.record.id), tools.boardRemove(item.id, { outcome: 'done' })]) {
       assert.equal(closed.artifact_evidence_count, 6, 'the count is the TRUE dedup\'d total, not the clipped length');
       assert.equal(closed.artifact_evidence?.length, 3, 'only three records ride the receipt');
       for (const rec of closed.artifact_evidence ?? []) {
@@ -1209,7 +1209,7 @@ test('board_remove / maintenance_remove cap artifact_evidence to board_query\'s 
 
     // the empty-evidence case is unchanged: an empty array and the operator's-word note
     const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
-    const abandoned = tools.boardRemove(bare.id);
+    const abandoned = tools.boardRemove(bare.id, { outcome: 'done' });
     assert.deepEqual(abandoned.artifact_evidence, []);
     assert.equal(abandoned.artifact_evidence_count, 0);
     assert.match(abandoned.note ?? '', /operator's word/);
@@ -1242,7 +1242,7 @@ test('removal evidence survives the store cap: old high-overlap records cannot p
     // so a small pre-filter cap would drop exactly the record that matters and
     // the receipt would falsely accuse drift.
     tools.knowledgeCreate('decision', { title: 'the fulfilling ruling', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/hot.ts'] });
-    const closed = tools.boardRemove(item.id);
+    const closed = tools.boardRemove(item.id, { outcome: 'done' });
     assert.ok(
       (closed.artifact_evidence ?? []).some((e) => (e as { name?: string }).name === 'the fulfilling ruling'),
       'the since-filter runs over a wide scan, not a pre-filtered window'
@@ -1283,7 +1283,7 @@ test("board_remove artifact_evidence FIX B (1): a decision citing the item's 8-c
       alternatives_rejected: [],
       rationale: 'r',
     });
-    const closed = tools.boardRemove(item.id);
+    const closed = tools.boardRemove(item.id, { outcome: 'done' });
     assert.equal(closed.artifact_evidence?.length, 1, 'the id-citing decision is visible as evidence even though it never touched file_keys');
     assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
     assert.equal(closed.note, undefined, "no operator's-word note when id-citation evidence exists");
@@ -1302,7 +1302,7 @@ test('board_remove artifact_evidence FIX B (2): a decision citing an UNRELATED i
       alternatives_rejected: [],
       rationale: 'r',
     });
-    const closed = tools.boardRemove(item.id);
+    const closed = tools.boardRemove(item.id, { outcome: 'done' });
     assert.deepEqual(closed.artifact_evidence, [], 'citing a different id, off file_keys, is not evidence');
     assert.match(closed.note ?? '', /operator's word/, 'the no-fulfilling-write note still fires — unchanged behavior');
   } finally {
@@ -1331,7 +1331,7 @@ test('board_remove artifact_evidence FIX B (3): a record CREATED BEFORE the item
     });
 
     t = '2026-06-13T12:00:00.000Z';
-    const closed = tools.boardRemove(item.id);
+    const closed = tools.boardRemove(item.id, { outcome: 'done' });
     assert.deepEqual(closed.artifact_evidence, [], 'a same-prefix record predating the item is never its fulfilling write');
     assert.match(closed.note ?? '', /operator's word/);
   } finally {
@@ -1358,7 +1358,7 @@ test("board_remove artifact_evidence FIX B (4): a board item with NO file_keys s
       alternatives_rejected: [],
       rationale: 'r',
     });
-    const closed = tools.boardRemove(item.id);
+    const closed = tools.boardRemove(item.id, { outcome: 'done' });
     assert.equal(closed.artifact_evidence?.length, 1, 'a keyless item still surfaces id-citation evidence even though the file_keys arm cannot run');
     assert.equal((closed.artifact_evidence?.[0] as { type?: unknown }).type, 'decision');
     assert.equal(closed.note, undefined, "no operator's-word note when id-citation evidence exists");
@@ -1371,7 +1371,7 @@ test('board_remove artifact_evidence FIX B (5): the no-evidence note discloses t
   const { tools, cleanup } = harness();
   try {
     const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
-    const abandoned = tools.boardRemove(bare.id);
+    const abandoned = tools.boardRemove(bare.id, { outcome: 'done' });
     assert.deepEqual(abandoned.artifact_evidence, [], 'no fulfilling write exists for either arm');
     assert.match(abandoned.note ?? '', /operator's word/, 'the pre-existing note still fires (unchanged)');
     assert.match(

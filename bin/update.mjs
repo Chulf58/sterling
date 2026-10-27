@@ -5134,7 +5134,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS, REPO_PATH_FORMAT, REPO_PATH_REFUSALS, OMIT_EXAMPLE;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS, REPO_PATH_FORMAT, REPO_PATH_REFUSALS, OMIT_EXAMPLE;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -5630,15 +5630,37 @@ var init_records = __esm({
     hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
     EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
     handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+    BOARD_REMOVAL_OUTCOMES = ["done", "dropped", "superseded", "duplicate"];
+    boardRemovalOutcomeSchema = external_exports.enum(BOARD_REMOVAL_OUTCOMES);
+    boardRemovalSchema = external_exports.object({
+      outcome: boardRemovalOutcomeSchema,
+      evidence: handoffEvidenceSchema.optional(),
+      note: external_exports.string().refine((v) => v.trim().length > 0, "note must not be blank").optional()
+    }).strict();
+    boardRemovalJournalEntrySchema = external_exports.object({
+      seq: external_exports.number().int().positive(),
+      item_id: external_exports.string().min(1),
+      slug: external_exports.string().min(1).optional(),
+      text: external_exports.string(),
+      source: external_exports.literal("user"),
+      objective: external_exports.string().min(1).optional(),
+      priority: external_exports.string().min(1).optional(),
+      outcome: boardRemovalOutcomeSchema,
+      evidence: handoffEvidenceSchema.optional(),
+      note: external_exports.string().min(1).optional(),
+      removed_at: external_exports.string().min(1)
+    }).strict();
     handoffEvidenceFileSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
-      evidence: handoffEvidenceSchema
-    }).strict();
+      evidence: handoffEvidenceSchema.optional(),
+      outcome: boardRemovalOutcomeSchema.optional()
+    }).strict().refine((f) => f.evidence !== void 0 || f.outcome !== void 0, "the evidence file needs evidence, an outcome or both");
     handoffEvidenceFileReadSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
-      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY).optional(),
+      outcome: external_exports.string().min(1).optional()
     });
     needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
     todoWaitFieldsReadSchema = external_exports.object({
@@ -7194,6 +7216,7 @@ __export(dist_exports, {
   ARTICLE_STATE_REQUIRES: () => ARTICLE_STATE_REQUIRES,
   AUTHOR_RE: () => AUTHOR_RE,
   BOARD_NEEDS: () => BOARD_NEEDS,
+  BOARD_REMOVAL_OUTCOMES: () => BOARD_REMOVAL_OUTCOMES,
   BROKER_BOUNDS: () => BROKER_BOUNDS,
   BROKER_DISCOVERY_MAX_ENTRIES: () => BROKER_DISCOVERY_MAX_ENTRIES,
   BROKER_MAX_ARGS: () => BROKER_MAX_ARGS,
@@ -7267,6 +7290,9 @@ __export(dist_exports, {
   antiPatternSchema: () => antiPatternSchema,
   attestationSchema: () => attestationSchema,
   boardDisplayLabel: () => boardDisplayLabel,
+  boardRemovalJournalEntrySchema: () => boardRemovalJournalEntrySchema,
+  boardRemovalOutcomeSchema: () => boardRemovalOutcomeSchema,
+  boardRemovalSchema: () => boardRemovalSchema,
   briefSchema: () => briefSchema,
   brokerCallSchema: () => brokerCallSchema,
   brokerErrorSchema: () => brokerErrorSchema,
@@ -8211,6 +8237,20 @@ CREATE TABLE IF NOT EXISTS ${s2}.store_meta (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ${s2}.board_removal_journal (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  slug TEXT,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  objective TEXT,
+  priority TEXT,
+  outcome TEXT NOT NULL,
+  evidence TEXT,
+  note TEXT,
+  removed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON ${s2}.board_removal_journal (item_id);
 `;
 }
 function pgSearchQuery(terms, matchAll) {
@@ -8358,7 +8398,8 @@ var init_pg_driver = __esm({
       "selection",
       "queue_drain_log",
       "activity_log",
-      "store_meta"
+      "store_meta",
+      "board_removal_journal"
     ]);
     PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
     DEFAULT_PG_RANKING = "bm25";
@@ -10549,25 +10590,25 @@ function readIfPresent(p) {
 function evidenceText(e) {
   return EVIDENCE_LABELS.filter(([k]) => e[k] !== void 0).map(([k, label]) => `${label} ${e[k]}`).join(", ");
 }
-function readEvidence(h, root) {
+function readSidecar(h, root) {
   let parsed;
   try {
     const text = readIfPresent(join16(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
     if (text === void 0)
-      return void 0;
+      return {};
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
   } catch {
-    return void 0;
+    return {};
   }
   if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id)
-    return void 0;
+    return {};
   const out = {};
   for (const [k] of EVIDENCE_LABELS) {
-    const v = parsed.data.evidence[k]?.trim();
+    const v = parsed.data.evidence?.[k]?.trim();
     if (v)
       out[k] = v;
   }
-  return out;
+  return { ...Object.keys(out).length ? { evidence: out } : {}, ...parsed.data.outcome ? { outcome: parsed.data.outcome } : {} };
 }
 function unknown(reason) {
   return { state: "unknown", text: statusText.unknown(reason) };
@@ -10600,13 +10641,14 @@ function closureStatus(h, root) {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  const evidence = readEvidence(h, root);
+  const { evidence, outcome } = readSidecar(h, root);
   return {
     state: "done",
-    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence, outcome),
     closed_at: c.closed_at,
     ...c.note ? { note: c.note } : {},
-    ...evidence ? { evidence } : {}
+    ...evidence ? { evidence } : {},
+    ...outcome ? { outcome } : {}
   };
 }
 function rowStatus(db, root, trackerId, h, budget) {
@@ -10944,8 +10986,9 @@ var init_handoff = __esm({
       needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
       waiting_external: (to, reason) => `waiting on others in ${to}${reason ? `: ${reason}` : ""}`,
       blocked: (to) => `blocked in ${to}`,
-      done: (to, closedAt, note, milestone, evidence) => {
-        const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+      done: (to, closedAt, note, milestone, evidence, outcome) => {
+        const verb = outcome === void 0 || outcome === "done" ? "DONE" : `CLOSED as ${outcome}`;
+        const head = milestone === void 0 ? `${verb} in ${to} ${closedAt}` : evidence ? `${verb} in ${to} ${closedAt} (${milestone})` : `${verb} in ${to} ${closedAt}, unverified (${milestone})`;
         const parts = [evidence ? evidenceText(evidence) : void 0, note].filter((p) => p !== void 0 && p.length > 0);
         return parts.length ? `${head}: ${parts.join("; ")}` : head;
       },
@@ -10994,10 +11037,169 @@ var init_handoff = __esm({
   }
 });
 
+// packages/store/dist/board-snapshot.js
+import { readFileSync as readFileSync13 } from "node:fs";
+import { join as join17 } from "node:path";
+function journalRowToEntry(row) {
+  let evidence;
+  if (row.evidence !== null) {
+    try {
+      evidence = JSON.parse(row.evidence);
+    } catch {
+      return "its evidence is not valid JSON";
+    }
+  }
+  const parsed = boardRemovalJournalEntrySchema.safeParse({
+    seq: Number(row.seq),
+    item_id: row.item_id,
+    ...row.slug !== null ? { slug: row.slug } : {},
+    text: row.text,
+    source: row.source,
+    ...row.objective !== null ? { objective: row.objective } : {},
+    ...row.priority !== null ? { priority: row.priority } : {},
+    outcome: row.outcome,
+    ...evidence !== void 0 ? { evidence } : {},
+    ...row.note !== null ? { note: row.note } : {},
+    removed_at: row.removed_at
+  });
+  return parsed.success ? parsed.data : parsed.error.issues.map((i) => `${i.path.join(".") || "(row)"}: ${i.message}`).join("; ");
+}
+function storageOf(projectRoot) {
+  const p = join17(projectRoot, ".sterling", "config.json");
+  let text;
+  try {
+    text = readFileSync13(p, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      return void 0;
+    throw new BoardSnapshotError("unreadable", `board snapshot: ${p} could not be read (${e?.message ?? String(e)}).`, { cause: e });
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new BoardSnapshotError("unreadable", `board snapshot: ${p} is not valid JSON, so the storage backend is unknown.`, { cause: e });
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new BoardSnapshotError("unreadable", `board snapshot: ${p} is not a JSON object (it holds ${raw === null ? "null" : Array.isArray(raw) ? "an array" : `a ${typeof raw}`}), so the storage backend is unknown.`);
+  }
+  const storage = raw.storage;
+  if (storage === void 0)
+    return void 0;
+  if (typeof storage !== "string") {
+    throw new BoardSnapshotError("unreadable", `board snapshot: ${p} has a storage value that is not text (${JSON.stringify(storage)}), so the storage backend is unknown.`);
+  }
+  return storage;
+}
+function readBoardSnapshot(projectRoot, opts2 = {}) {
+  const storage = storageOf(projectRoot);
+  if (storage !== void 0 && storage !== "sqlite") {
+    throw new BoardSnapshotError("not_sqlite", `board snapshot: ${projectRoot} stores its knowledge in '${storage}', and the board snapshot reads SQLite only. Nothing was read.`);
+  }
+  const dbPath = join17(projectRoot, ".sterling", "sterling.db");
+  let db;
+  try {
+    db = openForeignDbReadOnly(dbPath, opts2.busyTimeoutMs ?? 5e3);
+  } catch (e) {
+    const msg = e?.message ?? String(e);
+    if (msg.startsWith("no database at"))
+      throw new BoardSnapshotError("no_database", `board snapshot: ${msg}.`, { cause: e });
+    throw new BoardSnapshotError("unreadable", `board snapshot: ${dbPath} could not be opened read-only (${msg}).`, { cause: e });
+  }
+  try {
+    db.exec("BEGIN");
+    try {
+      return readInside(db, dbPath, opts2);
+    } finally {
+      db.exec("ROLLBACK");
+    }
+  } catch (e) {
+    if (e instanceof BoardSnapshotError)
+      throw e;
+    throw new BoardSnapshotError("unreadable", `board snapshot: reading ${dbPath} failed (${e?.message ?? String(e)}). Nothing was written.`, { cause: e });
+  } finally {
+    db.close();
+  }
+}
+function readInside(db, dbPath, opts2) {
+  const version = Number(db.prepare("PRAGMA user_version").get().user_version);
+  if (version !== SUPPORTED_SCHEMA_VERSION) {
+    throw new BoardSnapshotError("schema_mismatch", `board snapshot: ${dbPath} is at schema version ${version} and this Sterling reads version ${SUPPORTED_SCHEMA_VERSION}; ${version < SUPPORTED_SCHEMA_VERSION ? "migrate the store first" : "update Sterling"}. Nothing was read.`);
+  }
+  const hasJournal = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'board_removal_journal'`).get() !== void 0;
+  if (!hasJournal) {
+    throw new BoardSnapshotError("journal_missing", `board snapshot: ${dbPath} has no board_removal_journal table yet; open a Sterling session in that project once (it creates the table), then read again. Nothing was read.`);
+  }
+  const rows = db.prepare(`SELECT id, body, json_valid(body) AS ok,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text
+       FROM records WHERE type = 'todo' AND status != 'superseded' ORDER BY updated_at DESC, id DESC`).all();
+  const items = [];
+  const unreadable = [];
+  const slugHolders = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (!row.ok) {
+      unreadable.push({ id: row.id, reason: "the stored body is not valid JSON" });
+      continue;
+    }
+    if (typeof row.slug === "string" && row.slug.length > 0) {
+      slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...typeof row.text === "string" ? { text: row.text } : {} });
+    }
+    if (row.source === "system")
+      continue;
+    const parsed = parseForeignItem(row.id, row.body);
+    if (typeof parsed === "string")
+      unreadable.push({ id: row.id, reason: parsed });
+    else
+      items.push(parsed);
+  }
+  const inputs = items;
+  const readiness = new Map(boardReadinessOf(inputs, inputs, (slug) => slugHolders.get(slug), {
+    ...opts2.now !== void 0 ? { now: opts2.now } : {},
+    ...opts2.leaseMinutes !== void 0 ? { leaseMinutes: opts2.leaseMinutes } : {}
+  }).map((r) => [r.id, r]));
+  const journal = [];
+  for (const row of db.prepare(JOURNAL_SELECT).all()) {
+    const entry = journalRowToEntry(row);
+    if (typeof entry === "string") {
+      throw new BoardSnapshotError("bad_journal_row", `board snapshot: board_removal_journal row ${String(row.seq)} (item ${row.item_id}) is not a journal entry: ${entry}. Nothing was returned.`);
+    }
+    journal.push(entry);
+  }
+  const out = [];
+  for (const record of items) {
+    const r = readiness.get(String(record.id));
+    if (r)
+      out.push({ record, readiness: r });
+    else
+      unreadable.push({ id: String(record.id), reason: `the readiness rule does not read it (source ${String(record.source)})` });
+  }
+  return { schema_version: version, items: out, unreadable, journal };
+}
+var BoardSnapshotError, JOURNAL_SELECT;
+var init_board_snapshot = __esm({
+  "packages/store/dist/board-snapshot.js"() {
+    "use strict";
+    init_dist();
+    init_handoff();
+    init_dist2();
+    BoardSnapshotError = class extends Error {
+      kind;
+      name = "BoardSnapshotError";
+      constructor(kind, message, options) {
+        super(message, options);
+        this.kind = kind;
+      }
+    };
+    JOURNAL_SELECT = "SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at FROM board_removal_journal ORDER BY seq ASC";
+  }
+});
+
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync as realpathSync4 } from "node:fs";
-import { dirname as dirname6, basename as basename2, join as join17, resolve as resolvePath } from "node:path";
+import { dirname as dirname6, basename as basename2, join as join18, resolve as resolvePath } from "node:path";
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
     return false;
@@ -11122,6 +11324,25 @@ CREATE TABLE IF NOT EXISTS store_meta (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+-- Board removal journal (decision
+-- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
+-- removed user task, written in remove()'s transaction and never pruned.
+-- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
+-- user_version bump. evidence is JSON text or NULL.
+CREATE TABLE IF NOT EXISTS board_removal_journal (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  slug TEXT,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  objective TEXT,
+  priority TEXT,
+  outcome TEXT NOT NULL,
+  evidence TEXT,
+  note TEXT,
+  removed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
     JournalDemotionRefusedError = class extends Error {
       dbPath;
@@ -11176,7 +11397,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
         this.db = new DatabaseSync3(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join17(realpathSync4(dirname6(this.dbPath)), basename2(this.dbPath));
+          classifiedPath = join18(realpathSync4(dirname6(this.dbPath)), basename2(this.dbPath));
         } catch {
         }
         this.classifiedPath = classifiedPath;
@@ -11396,6 +11617,7 @@ __export(dist_exports2, {
   AXIS_MIN_RECORD_TERMS: () => AXIS_MIN_RECORD_TERMS,
   AXIS_MIN_TERM_LEN: () => AXIS_MIN_TERM_LEN,
   AXIS_RECORD_TOP_K: () => AXIS_RECORD_TOP_K,
+  BoardSnapshotError: () => BoardSnapshotError,
   ClaimAdoptionIncomplete: () => ClaimAdoptionIncomplete,
   ClaimMovedError: () => ClaimMovedError,
   DECLARED_CAPTURE_OWED_PREFIX: () => DECLARED_CAPTURE_OWED_PREFIX,
@@ -11497,6 +11719,7 @@ __export(dist_exports2, {
   procStartTime: () => procStartTime,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
+  readBoardSnapshot: () => readBoardSnapshot,
   readForeignBoard: () => readForeignBoard,
   readPgCredentials: () => readPgCredentials,
   recordCentralTerms: () => recordCentralTerms,
@@ -11514,14 +11737,14 @@ __export(dist_exports2, {
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { mkdirSync as mkdirSync6, existsSync as existsSync10, statSync as statSync4 } from "node:fs";
-import { dirname as dirname7, join as join18, resolve as resolvePath2 } from "node:path";
+import { dirname as dirname7, join as join19, resolve as resolvePath2 } from "node:path";
 import { randomUUID as randomUUID4 } from "node:crypto";
 function setStoreDriverFactory(factory) {
   storeDriverFactory = factory;
 }
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync4(join18(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync4(join19(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -11893,10 +12116,12 @@ var init_dist2 = __esm({
     init_move_lock();
     init_domain_fit();
     init_registry2();
+    init_board_snapshot();
     init_handoff();
     init_axis();
     init_axis();
     init_handoff();
+    init_board_snapshot();
     init_sqlite_driver();
     init_pg_bridge();
     init_pg_driver();
@@ -14052,14 +14277,51 @@ var init_dist2 = __esm({
        * Hard removal — the P4 path for todos (done = removed by the artifact-write
        * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
        * Removing a SYSTEM-source todo appends to the capped queue drain log
-       * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
+       * (§3.2.7 audit projection — "was X handled?"); user todos are never logged
+       * there.
+       *
+       * `removal` (decision board-remove-records-outcome-and-evidence-in-a-removal-journal)
+       * journals a USER task's end: one board_removal_journal row with the task's
+       * text, slug, objective and priority as they were, the outcome and the
+       * optional evidence and note, inserted in the same transaction as the delete,
+       * so neither lands without the other. It is refused for anything but a live
+       * user todo. The store does not demand it: board_remove is the one
+       * production path that removes user todos (a `resolves` claim takes only
+       * system items) and it requires the outcome.
        */
-      remove(id, drainedAt) {
+      /**
+       * Every board removal journal row, oldest first. A row that fails its schema
+       * throws with its seq: the journal is the only closure record, so a bad row
+       * is never skipped.
+       */
+      boardRemovalJournal() {
+        return this.db.prepare(JOURNAL_SELECT).all().map((row) => {
+          const entry = journalRowToEntry(row);
+          if (typeof entry === "string")
+            throw new Error(`boardRemovalJournal: row ${String(row.seq)} (item ${row.item_id}) is not a journal entry: ${entry}`);
+          return entry;
+        });
+      }
+      remove(id, drainedAt, removal) {
         this.assertWritable("remove");
+        let checkedRemoval;
+        if (removal !== void 0) {
+          const parsed = boardRemovalSchema.safeParse(removal);
+          if (!parsed.success) {
+            throw new Error(`remove: the removal record for '${id}' is refused (${parsed.error.issues.map((i) => `${i.path.join(".") || "removal"}: ${i.message}`).join("; ")}). Nothing was removed.`);
+          }
+          checkedRemoval = parsed.data;
+        }
         this.tx(() => {
           this.assertNoMoveInFlight("remove", [id]);
           const record = this.get(id);
           const isSystemDrain = record && record.type === "todo" && record.source === "system";
+          if (checkedRemoval) {
+            if (!record || record.type !== "todo" || record.source !== "user") {
+              throw new Error(`remove: '${id}' is ${record ? record.type === "todo" ? `a ${record.source ?? "sourceless"} todo` : `a ${record.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);
+            }
+            this.db.prepare("INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, typeof record.slug === "string" && record.slug.length > 0 ? record.slug : null, record.text ?? "", "user", typeof record.objective === "string" && record.objective.length > 0 ? record.objective : null, typeof record.priority === "string" && record.priority.length > 0 ? record.priority : null, checkedRemoval.outcome, checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null, checkedRemoval.note ?? null, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
+          }
           if (isSystemDrain && record) {
             this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);
             this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
@@ -14914,8 +15176,8 @@ __export(agent_coverage_exports, {
   normalizeProjectPath: () => normalizeProjectPath,
   scanAgentCoverage: () => scanAgentCoverage
 });
-import { readdirSync as readdirSync3, readFileSync as readFileSync13, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
-import { join as join19, resolve as resolve8 } from "node:path";
+import { readdirSync as readdirSync3, readFileSync as readFileSync14, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
+import { join as join20, resolve as resolve8 } from "node:path";
 function normalizeProjectPath(p) {
   const raw = resolve8(String(p));
   let real = raw;
@@ -14947,7 +15209,7 @@ function sterlingAgentsIn(agentsDir) {
     if (!f.endsWith(".md")) continue;
     let content;
     try {
-      content = readFileSync13(join19(agentsDir, f), "utf8");
+      content = readFileSync14(join20(agentsDir, f), "utf8");
     } catch (err) {
       damaged.push(`${f} (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -14978,8 +15240,8 @@ function scanAgentCoverage({ roots = [], registeredProjects = [] } = {}) {
       continue;
     }
     for (const name of entries) {
-      const projectDir = join19(root, name);
-      const agentsDir = join19(projectDir, ".claude", "agents");
+      const projectDir = join20(root, name);
+      const agentsDir = join20(projectDir, ".claude", "agents");
       try {
         if (!statSync5(agentsDir).isDirectory()) continue;
       } catch (err) {
@@ -15016,14 +15278,14 @@ var init_agent_coverage = __esm({
 // scripts/update.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { existsSync as existsSync12 } from "node:fs";
-import { dirname as dirname9, join as join21, resolve as resolve9 } from "node:path";
+import { dirname as dirname9, join as join22, resolve as resolve9 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { closeSync as closeSync4, existsSync as existsSync11, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync14, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync7 } from "node:fs";
+import { closeSync as closeSync4, existsSync as existsSync11, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync15, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join20 } from "node:path";
+import { dirname as dirname8, join as join21 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/update-launcher.mjs
@@ -16692,7 +16954,7 @@ function refusalFor(c) {
   return null;
 }
 function stampConsumerRoleIfAbsent(cwd, log) {
-  const configPath = join20(cwd, ".sterling", "config.json");
+  const configPath = join21(cwd, ".sterling", "config.json");
   if (!existsSync11(configPath)) {
     log(
       "\n\u25B8 machine-role stamp \u2014 SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init'd as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER \u2014 declare machine_role explicitly only on the authoring machine."
@@ -16700,7 +16962,7 @@ function stampConsumerRoleIfAbsent(cwd, log) {
     return;
   }
   try {
-    const parsed = JSON.parse(readFileSync14(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync15(configPath, "utf8"));
     if (Object.prototype.hasOwnProperty.call(parsed, "machine_role")) {
       log(`
 \u25B8 machine-role stamp \u2014 already '${parsed.machine_role}', not overwritten`);
@@ -16716,7 +16978,7 @@ function stampConsumerRoleIfAbsent(cwd, log) {
 }
 function readMachineRole(cwd) {
   try {
-    const role = JSON.parse(readFileSync14(join20(cwd, ".sterling", "config.json"), "utf8")).machine_role;
+    const role = JSON.parse(readFileSync15(join21(cwd, ".sterling", "config.json"), "utf8")).machine_role;
     return typeof role === "string" ? role : null;
   } catch {
     return null;
@@ -16729,11 +16991,11 @@ var normPath = (p) => {
 var OLD_TUI_BUNDLE = "packages/tui/bundle/sterling-tui.mjs";
 var SHIPPED_TUI_BUNDLE = "tui/sterling-tui.mjs";
 function warnIfLauncherNamesOldBundle(repoPath2, log) {
-  const launcher = join20(repoPath2, "sterling-launch.sh");
+  const launcher = join21(repoPath2, "sterling-launch.sh");
   if (!existsSync11(launcher)) return;
   let text;
   try {
-    text = readFileSync14(launcher, "utf8");
+    text = readFileSync15(launcher, "utf8");
   } catch (err) {
     log(`\u2717 could not read ${launcher} (${err.code ?? err.message}), so it was not checked for the old TUI bundle path ${OLD_TUI_BUNDLE}. Open it and confirm it runs ${SHIPPED_TUI_BUNDLE}.`);
     return;
@@ -16768,12 +17030,12 @@ var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed
 function preScaleDownMarkers(text) {
   return PRE_SCALE_DOWN_MARKERS.filter((m) => text.includes(m));
 }
-var UPDATE_MARKER_RELATIVE_PATH = join20(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join21(".sterling", "update-complete.json");
 function readUpdateMarker(cwd, log) {
-  const p = join20(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join21(cwd, UPDATE_MARKER_RELATIVE_PATH);
   if (!existsSync11(p)) return null;
   try {
-    const parsed = JSON.parse(readFileSync14(p, "utf8"));
+    const parsed = JSON.parse(readFileSync15(p, "utf8"));
     if (typeof parsed?.sha !== "string" || !parsed.sha) throw new Error('missing or invalid "sha" field');
     return { sha: parsed.sha };
   } catch (err) {
@@ -16783,11 +17045,11 @@ function readUpdateMarker(cwd, log) {
   }
 }
 function writeUpdateMarker(cwd, sha) {
-  const p = join20(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join21(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync7(dirname8(p), { recursive: true });
   writeFileSync7(p, JSON.stringify({ sha, completed_at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2) + "\n");
 }
-var DOMAIN_MAP_PENDING_REL = join20(".sterling", "domain-map-pending");
+var DOMAIN_MAP_PENDING_REL = join21(".sterling", "domain-map-pending");
 function parseDomainProposal(stdout) {
   const map = JSON.parse(stdout);
   if (!Array.isArray(map?.proposal?.add)) throw new Error("the output carries no proposal list");
@@ -16801,7 +17063,7 @@ function handoffRefusalRemedy(repoPath2) {
 function ownPluginRoot() {
   let dir = dirname8(fileURLToPath(new URL("../scripts/lib/update.mjs", import.meta.url).href));
   for (let i = 0; i < 4; i++) {
-    if (existsSync11(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync11(join21(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname8(dir);
   }
   return null;
@@ -16811,11 +17073,11 @@ function installedCopyRefusal(host, { env = process.env, home = homedir7(), root
   return `Sterling is installed ${by} \u2014 update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 function machineStores(cwd) {
-  const stores = [join20(cwd, ".sterling", "sterling.db")];
-  const domains = join20(homedir7(), ".sterling", "domains");
+  const stores = [join21(cwd, ".sterling", "sterling.db")];
+  const domains = join21(homedir7(), ".sterling", "domains");
   if (existsSync11(domains)) {
     for (const name of readdirSync4(domains).sort()) {
-      stores.push(join20(domains, name, "sterling.db"));
+      stores.push(join21(domains, name, "sterling.db"));
     }
   }
   return stores.filter((store) => existsSync11(store));
@@ -16823,7 +17085,7 @@ function machineStores(cwd) {
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
   if (!existsSync11(walPath)) return null;
-  const wal = readFileSync14(walPath);
+  const wal = readFileSync15(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
   if (magic !== 931071618 && magic !== 931071619) return null;
@@ -16870,13 +17132,13 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
   const launcherHistory = launcherHistoryLoader(cwd);
   const projectLaunchers = (repoPath2) => {
     try {
-      if (!existsSync11(join20(repoPath2, ".sterling", "config.json"))) return [];
+      if (!existsSync11(join21(repoPath2, ".sterling", "config.json"))) return [];
       launcherSetup ??= { host: launcherHost({ env }), tools: launcherTools({ env, home }) };
       const { host, tools } = launcherSetup;
       const rows = [];
       const warns = [];
       if (tools.claude || tools.opencode) {
-        const ratio = JSON.parse(readFileSync14(join20(repoPath2, ".sterling", "config.json"), "utf8")).tui_split_ratio;
+        const ratio = JSON.parse(readFileSync15(join21(repoPath2, ".sterling", "config.json"), "utf8")).tui_split_ratio;
         if (ratio !== void 0 && !(typeof ratio === "number" && ratio > 0 && ratio <= 1)) throw new Error(`tui_split_ratio in .sterling/config.json is ${JSON.stringify(ratio)}, not a number in (0, 1]`);
         const r = ensureLaunchers(repoPath2, cwd, { splitPercent: Math.round((ratio ?? 0.35) * 100), host, tools, history: launcherHistory, installedCopy: false });
         rows.push(...r.items);
@@ -16939,9 +17201,9 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         failures++;
         continue;
       }
-      const gitignorePath = join20(p.repo_path, ".gitignore");
+      const gitignorePath = join21(p.repo_path, ".gitignore");
       if (existsSync11(gitignorePath)) {
-        const repaired = withIdentityIgnore(readFileSync14(gitignorePath, "utf8"), { addIfAbsent: false });
+        const repaired = withIdentityIgnore(readFileSync15(gitignorePath, "utf8"), { addIfAbsent: false });
         if (repaired.changed) {
           writeFileSync7(gitignorePath, repaired.text);
           log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
@@ -16967,7 +17229,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         continue;
       }
       let failed = false;
-      const r = exec(nodeBin, [join20(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
+      const r = exec(nodeBin, [join21(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
@@ -16993,7 +17255,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
       }
       if (handoffUnmaintained.length) log(`      \u26A0 ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       try {
-        const knowledge = refreshAgentsMdKnowledgeFile(join20(p.repo_path, "AGENTS.md"), isSterlingClone(p.repo_path, cwd) || handoffEnabled);
+        const knowledge = refreshAgentsMdKnowledgeFile(join21(p.repo_path, "AGENTS.md"), isSterlingClone(p.repo_path, cwd) || handoffEnabled);
         if (knowledge?.refreshed) log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? "on" : "off"})`);
         if (knowledge?.kept) log(`      \u26A0 AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
       } catch (err) {
@@ -17006,7 +17268,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         log(`      skipped \u2014 ${HANDOFF_OFF_DETAIL}`);
         entry.handoff = "skipped";
       } else {
-        const handoff = exec(nodeBin, [join20(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
+        const handoff = exec(nodeBin, [join21(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
         const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
         const handoffLine = handoffOut.split("\n")[0];
         entry.handoff = handoff.status;
@@ -17027,16 +17289,16 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
         }
       }
       if (failed) failures++;
-      if (existsSync11(join20(p.repo_path, ".sterling", "config.json"))) {
+      if (existsSync11(join21(p.repo_path, ".sterling", "config.json"))) {
         try {
-          const dm = exec(nodeBin, [join20(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
+          const dm = exec(nodeBin, [join21(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
           if (dm.status !== 0) throw new Error(`exit ${dm.status}: ${`${dm.stdout}${dm.stderr}`.trim().split("\n").slice(-3).join(" | ")}`);
           const { add } = parseDomainProposal(dm.stdout);
           entry.domain_proposal = add.map((a) => a.domain);
           if (add.length) {
             for (const a of add) log(`      domains: proposes adding '${a.domain}' \u2014 ${a.reason}`);
             log(`      Nothing was applied. Run /sterling:domains in ${p.repo_path} to see the map; it adds a domain only after you agree.`);
-            writeFileSync7(join20(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
+            writeFileSync7(join21(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
           }
         } catch (err) {
@@ -17130,8 +17392,8 @@ AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_
     warnIfLauncherNamesOldBundle(project.repo_path, log);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
-    } else if (existsSync11(join20(cwd, "scripts", "stamp-contract.mjs"))) {
-      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join20(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
+    } else if (existsSync11(join21(cwd, "scripts", "stamp-contract.mjs"))) {
+      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
         show: true,
         tolerate: true
       });
@@ -17205,7 +17467,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
           `  \u26A0 ${coverage.unregistered.length} project(s) carry Sterling agents but are NOT in the shared project registry, so the agent sync never visits them \u2014 their agents are frozen at install date:
 ` + coverage.unregistered.map((u) => `      ${u.path} (${u.agents.join(", ")})`).join("\n") + `
     Register each by running /sterling:init in that project, or refresh one now:
-      node ${join20(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
+      node ${join21(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
         );
       } else if (incomplete) {
         log(`  \u26A0 PARTIAL \u2014 nothing unregistered was found in what could be read, but ${incomplete} item(s) above could NOT be inspected, so coverage under these known roots is UNKNOWN, not clean`);
@@ -17233,10 +17495,10 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
     const lines = [];
     for (const p of [{ name: "Sterling clone", repo_path: cwd, clone: true }, ...list]) {
       if (!p.clone) {
-        const claudePath = join20(p.repo_path, "CLAUDE.md");
+        const claudePath = join21(p.repo_path, "CLAUDE.md");
         try {
           if (existsSync11(claudePath)) {
-            const markers = preScaleDownMarkers(readFileSync14(claudePath, "utf8"));
+            const markers = preScaleDownMarkers(readFileSync15(claudePath, "utf8"));
             if (markers.length) lines.push(`  \u26A0 ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(", ")}) \u2014 run /sterling:init there (${p.repo_path}) to migrate it`);
           }
         } catch (err) {
@@ -17244,11 +17506,11 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
         }
       }
       if (!describe) continue;
-      const configPath = join20(p.repo_path, ".sterling", "config.json");
+      const configPath = join21(p.repo_path, ".sterling", "config.json");
       if (!existsSync11(configPath)) continue;
       let raw;
       try {
-        raw = JSON.parse(readFileSync14(configPath, "utf8"));
+        raw = JSON.parse(readFileSync15(configPath, "utf8"));
       } catch (err) {
         lines.push(`  \u26A0 ${p.name}: unread-config-key check skipped \u2014 .sterling/config.json could not be parsed: ${err?.message ?? err}`);
         continue;
@@ -17299,7 +17561,7 @@ Already current \u2014 nothing to do for the core update at ${before.head_short}
       return report2;
     }
     if (reexec2) {
-      const script = join20(cwd, "scripts", "update.mjs");
+      const script = join21(cwd, "scripts", "update.mjs");
       const failed = (why) => {
         log(`
 \u2717 RE-EXEC of the updated updater FAILED \u2014 ${why}. The fast-forward stands and nothing after it ran; rerun /sterling:update to finish (it resumes from the build step).`);
@@ -17382,15 +17644,15 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         return report2;
       }
       if (version < 2) {
-        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join20(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
+        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join21(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
         log(`  \u25B8 migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough \u2014 MCP servers survive it) before it can write again`);
       }
     }
   } else {
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
-  if (existsSync11(join20(cwd, ".sterling", "config.json"))) {
-    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join20(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
+  if (existsSync11(join21(cwd, ".sterling", "config.json"))) {
+    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join21(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
   } else {
     log(
       "\n\u25B8 re-bake machine artifacts \u2014 SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is committed and arrived with the fast-forward. Run /sterling:init in a project \u2014 not here \u2014 if this machine has never done so."
@@ -17409,7 +17671,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     }
   } else if (opts2.projects !== false && projectList.length) {
     for (const p of projectList) {
-      const projStore = join20(p.repo_path, ".sterling", "sterling.db");
+      const projStore = join21(p.repo_path, ".sterling", "sterling.db");
       if (!existsSync11(projStore)) continue;
       let projVersion;
       try {
@@ -17422,7 +17684,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         continue;
       }
       if (projVersion < 2) {
-        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join20(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
+        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join21(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
         if (!migrated.ok) {
           log(`  \u2717 ${p.name}: store migration FAILED \u2014 this project's store stays unmigrated; continuing with the remaining projects and the agent-sync fan-out below.`);
           report2.migrations.push({ name: p.name, repo_path: p.repo_path, ok: false });
@@ -17446,8 +17708,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync11(join20(cwd, "scripts", "stamp-contract.mjs"))) {
-    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join20(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
+  if (opts2.projects !== false && existsSync11(join21(cwd, "scripts", "stamp-contract.mjs"))) {
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
       show: true,
       tolerate: true
     });

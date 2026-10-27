@@ -19,7 +19,8 @@ export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
  *  marked needs 'user' or 'grill'. waiting_external: it is there and marked
  *  needs 'external', waiting on an outside party (GitHub issue #175). blocked: it is there and at least one of its
  *  blockers is still a live board item in the receiver's store. done: it was
- *  removed and its closure file says so. gone: removed with no closure file (an older
+ *  removed and its closure file says so (its outcome, when the receiver
+ *  gave one, says whether it was finished or dropped). gone: removed with no closure file (an older
  *  receiver, or a hand delete), so completion is unverified. unknown: the
  *  receiver could not be read or its row does not match. unconfirmed: the
  *  receiver's item id was never recorded (delivery did not finish). */
@@ -37,6 +38,8 @@ export interface HandoffStatus {
   to_name?: string;
   /** what the receiver said it did when it closed the item; only on done, and only from a valid sidecar for this hand-off */
   evidence?: HandoffEvidence;
+  /** how the receiver says the item ended (done, dropped, superseded, duplicate), from the same sidecar; only on done. A closure without it is an older receiver's, read as done. */
+  outcome?: string;
 }
 
 /** The sent-handoff metadata of a tracker body, or undefined when the item is not a valid tracker. */
@@ -124,23 +127,23 @@ function evidenceText(e: HandoffEvidence): string {
  * malformed or other hand-off's sidecar is no evidence, never proof and never
  * a reason to doubt the closure. Blank values are dropped.
  */
-function readEvidence(h: SentHandoff & { to_item_id: string }, root: string): HandoffEvidence | undefined {
+function readSidecar(h: SentHandoff & { to_item_id: string }, root: string): { evidence?: HandoffEvidence; outcome?: string } {
   let parsed;
   try {
     const text = readIfPresent(join(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
-    if (text === undefined) return undefined;
+    if (text === undefined) return {};
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
   } catch {
     // An unreadable or unparsable sidecar is no evidence; the closure file alone decides done.
-    return undefined;
+    return {};
   }
-  if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id) return undefined;
+  if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id) return {};
   const out: HandoffEvidence = {};
   for (const [k] of EVIDENCE_LABELS) {
-    const v = parsed.data.evidence[k]?.trim();
+    const v = parsed.data.evidence?.[k]?.trim();
     if (v) out[k] = v;
   }
-  return out;
+  return { ...(Object.keys(out).length ? { evidence: out } : {}), ...(parsed.data.outcome ? { outcome: parsed.data.outcome } : {}) };
 }
 
 const statusText = {
@@ -148,8 +151,10 @@ const statusText = {
   needs_user: (to: string, reason?: string) => `needs user in ${to}${reason ? `: ${reason}` : ''}`,
   waiting_external: (to: string, reason?: string) => `waiting on others in ${to}${reason ? `: ${reason}` : ''}`,
   blocked: (to: string) => `blocked in ${to}`,
-  done: (to: string, closedAt: string, note?: string, milestone?: string, evidence?: HandoffEvidence) => {
-    const head = milestone === undefined ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+  done: (to: string, closedAt: string, note?: string, milestone?: string, evidence?: HandoffEvidence, outcome?: string) => {
+    // A close the receiver gave another outcome than done (dropped, superseded, duplicate) says so first.
+    const verb = outcome === undefined || outcome === 'done' ? 'DONE' : `CLOSED as ${outcome}`;
+    const head = milestone === undefined ? `${verb} in ${to} ${closedAt}` : evidence ? `${verb} in ${to} ${closedAt} (${milestone})` : `${verb} in ${to} ${closedAt}, unverified (${milestone})`;
     const parts = [evidence ? evidenceText(evidence) : undefined, note].filter((p): p is string => p !== undefined && p.length > 0);
     return parts.length ? `${head}: ${parts.join('; ')}` : head;
   },
@@ -192,13 +197,14 @@ function closureStatus(h: SentHandoff & { to_item_id: string }, root: string): H
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  const evidence = readEvidence(h, root);
+  const { evidence, outcome } = readSidecar(h, root);
   return {
     state: 'done',
-    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence, outcome),
     closed_at: c.closed_at,
     ...(c.note ? { note: c.note } : {}),
     ...(evidence ? { evidence } : {}),
+    ...(outcome ? { outcome } : {}),
   };
 }
 
@@ -715,8 +721,8 @@ export function getForeignBoardItem(
   );
 }
 
-/** The parsed board item, or why this build cannot read it. */
-function parseForeignItem(id: string, body: string): Record<string, unknown> | string {
+/** The parsed board item, or why this build cannot read it. Also read by board-snapshot.ts. */
+export function parseForeignItem(id: string, body: string): Record<string, unknown> | string {
   const raw = JSON.parse(body) as unknown;
   const item = todoBoardItemReadSchema.safeParse(raw);
   const issues = (e: { issues: { path: (string | number)[]; message: string }[] }) => e.issues.map((i) => `${i.path.join('.') || '(body)'}: ${i.message}`).join('; ');

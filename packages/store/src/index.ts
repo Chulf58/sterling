@@ -26,6 +26,9 @@ import {
   MAINTENANCE_WORKER_CLAUDE_MODEL,
   OPENCODE_MODEL_REF_RE,
   parseConfig,
+  boardRemovalSchema,
+  type BoardRemoval,
+  type BoardRemovalJournalEntry,
   type BoardNeeds,
   type TodoClaim,
   type DurableRecord,
@@ -38,10 +41,12 @@ export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { acquireMoveLock, releaseMoveLock, MoveLockBusyError, pidIsAlive, procStartTime, type MoveLockHandle, type MoveLockOptions, type MoveLockOwner } from './move-lock.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, resolveReceiverLocation, type RegisterInput, type RenameResult, type MoveResult, type RegistryOccupancy, type RegistrySnapshot, type ReceiverRef, type LocatorRow, MIGRATED_FROM } from './registry.js';
+export { readBoardSnapshot, BoardSnapshotError, type BoardSnapshot, type BoardSnapshotItem, type ReadBoardSnapshotOptions } from './board-snapshot.js';
 export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, readForeignBoard, getForeignBoardItem, type ForeignReadHooks, type ForeignBoardRead, type ForeignBoardLookup, type BoardOrderKey, type ReadForeignBoardOptions, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
 import { sentHandoffOf, type SentHandoff } from './handoff.js';
+import { journalRowToEntry, JOURNAL_SELECT } from './board-snapshot.js';
 export type { StoreDriver, StoreStatement, StoreRunResult, StoreDialect, SqlParam } from './driver.js';
 export {
   SqliteDriver,
@@ -4409,14 +4414,68 @@ export class SterlingStore {
    * Hard removal — the P4 path for todos (done = removed by the artifact-write
    * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
    * Removing a SYSTEM-source todo appends to the capped queue drain log
-   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
+   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged
+   * there.
+   *
+   * `removal` (decision board-remove-records-outcome-and-evidence-in-a-removal-journal)
+   * journals a USER task's end: one board_removal_journal row with the task's
+   * text, slug, objective and priority as they were, the outcome and the
+   * optional evidence and note, inserted in the same transaction as the delete,
+   * so neither lands without the other. It is refused for anything but a live
+   * user todo. The store does not demand it: board_remove is the one
+   * production path that removes user todos (a `resolves` claim takes only
+   * system items) and it requires the outcome.
    */
-  remove(id: string, drainedAt?: string): void {
+  /**
+   * Every board removal journal row, oldest first. A row that fails its schema
+   * throws with its seq: the journal is the only closure record, so a bad row
+   * is never skipped.
+   */
+  boardRemovalJournal(): BoardRemovalJournalEntry[] {
+    return (this.db.prepare(JOURNAL_SELECT).all() as unknown as Parameters<typeof journalRowToEntry>[0][]).map((row) => {
+      const entry = journalRowToEntry(row);
+      if (typeof entry === 'string') throw new Error(`boardRemovalJournal: row ${String(row.seq)} (item ${row.item_id}) is not a journal entry: ${entry}`);
+      return entry;
+    });
+  }
+
+  remove(id: string, drainedAt?: string, removal?: BoardRemoval): void {
     this.assertWritable('remove');
+    let checkedRemoval: BoardRemoval | undefined;
+    if (removal !== undefined) {
+      const parsed = boardRemovalSchema.safeParse(removal);
+      if (!parsed.success) {
+        throw new Error(`remove: the removal record for '${id}' is refused (${parsed.error.issues.map((i) => `${i.path.join('.') || 'removal'}: ${i.message}`).join('; ')}). Nothing was removed.`);
+      }
+      checkedRemoval = parsed.data;
+    }
     this.tx(() => {
       this.assertNoMoveInFlight('remove', [id]);
-      const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
+      const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[]; slug?: string; objective?: string; priority?: string }) | undefined;
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
+      if (checkedRemoval) {
+        if (!record || record.type !== 'todo' || record.source !== 'user') {
+          throw new Error(
+            `remove: '${id}' is ${record ? (record.type === 'todo' ? `a ${record.source ?? 'sourceless'} todo` : `a ${record.type}`) : 'not in this store'}; a removal outcome is journaled for user board tasks only. Nothing was removed.`
+          );
+        }
+        this.db
+          .prepare(
+            'INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          )
+          .run(
+            record.id,
+            typeof record.slug === 'string' && record.slug.length > 0 ? record.slug : null,
+            record.text ?? '',
+            'user',
+            typeof record.objective === 'string' && record.objective.length > 0 ? record.objective : null,
+            typeof record.priority === 'string' && record.priority.length > 0 ? record.priority : null,
+            checkedRemoval.outcome,
+            checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null,
+            checkedRemoval.note ?? null,
+            drainedAt ?? new Date().toISOString()
+          );
+      }
       if (isSystemDrain && record) {
         this.db
           .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)')
