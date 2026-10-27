@@ -24,6 +24,8 @@ export {
   SCOPE_RE,
   envelopeFields,
   refineSupersession,
+  RETIRED_REASONS,
+  type RetiredReason,
   // schema v2 identity pair [stable-identity-design-v2]
   LIFECYCLE_VALUES,
   FRESHNESS_VALUES,

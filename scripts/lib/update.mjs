@@ -32,7 +32,8 @@ import { fileURLToPath } from 'node:url';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
-import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './handoff-projection.mjs';
+import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
+import { refreshAgentsMdKnowledgeFile } from './agents-md-facts.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { workIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -889,6 +890,17 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // they stopped being maintained, so the run names them (sync-agents prints
       // the same line, but its output is relayed only on a failure).
       if (handoffUnmaintained.length) log(`      ⚠ ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
+      // The AGENTS.md Knowledge section names architecture.md/rulings.md only while handoff is on
+      // (GitHub #218); a shipped-wording section is flipped to match, a hand-edited one is left
+      // and named. A Sterling clone has its own projections and keeps the projection wording.
+      try {
+        const knowledge = refreshAgentsMdKnowledgeFile(join(p.repo_path, 'AGENTS.md'), isSterlingClone(p.repo_path, cwd) || handoffEnabled);
+        if (knowledge?.refreshed) log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+        if (knowledge?.kept) log(`      ⚠ AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
+      } catch (err) {
+        if (!isProjectReadRefusal(err)) throw err;
+        log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
+      }
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):
       // refresh the project's committed architecture.md / rulings.md /

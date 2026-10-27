@@ -139,7 +139,7 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     const allowList = {
       '*': 'deny', execute: 'allow', mcp: 'allow', read: 'allow', grep: 'allow', webfetch: 'allow', websearch: 'allow',
       sterling_maintenance_query: 'allow', sterling_knowledge_get: 'allow', sterling_maintenance_remove: 'allow', sterling_knowledge_line_ref_fix: 'allow',
-      sterling_knowledge_update: 'allow', sterling_knowledge_edit: 'allow', sterling_knowledge_append: 'allow', sterling_knowledge_array_remove: 'allow', sterling_knowledge_query: 'allow', sterling_knowledge_schema: 'allow',
+      sterling_knowledge_update: 'allow', sterling_knowledge_edit: 'allow', sterling_knowledge_append: 'allow', sterling_knowledge_array_remove: 'allow', sterling_knowledge_query: 'allow', sterling_knowledge_schema: 'allow', sterling_knowledge_preflight: 'allow',
     };
     const agent = config.agent[OPENCODE_WORKER_AGENT];
     assert.deepEqual(Object.entries(agent.permission), Object.entries(allowList), 'the agent allow-list, in this order');

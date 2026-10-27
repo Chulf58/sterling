@@ -8,7 +8,7 @@ var __export = (target2, all) => {
 
 // scripts/cleanup-plan.mjs
 import { lstatSync as lstatSync4, readFileSync as readFileSync6, realpathSync as realpathSync3 } from "node:fs";
-import { basename as basename2, join as join10, posix } from "node:path";
+import { basename as basename2, isAbsolute, join as join10, posix } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
@@ -4163,12 +4163,23 @@ var envelopeFields = {
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string())
 };
+var RETIRED_REASONS = ["feature_removed"];
 function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
+  const removedTerminus = rec.retired_reason !== void 0;
+  if (rec.status === "superseded" && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === "active" && rec.superseded_by !== null) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
+  }
+  if (removedTerminus && rec.status !== "superseded") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)"
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "retired_reason forbids superseded_by: a removed feature has no successor" });
   }
 }
 
@@ -4326,7 +4337,12 @@ var featureArticleSchema = base.extend({
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
-  last_executed: external_exports.string().datetime().optional()
+  last_executed: external_exports.string().datetime().optional(),
+  // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+  // the article is retired with no successor because its feature is gone.
+  // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+  // status 'superseded' and a null superseded_by.
+  retired_reason: external_exports.enum(RETIRED_REASONS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
@@ -5621,6 +5637,7 @@ var configSchema = external_exports.object({
   // Written by sync and init only.
   applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
+var MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -6150,14 +6167,14 @@ var PgBridge = class {
   txOwnerLabel = "";
   /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
   waitTimeoutMs;
-  constructor(config, options = {}) {
+  constructor(config2, options = {}) {
     this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
-    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config2.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
     for (const [name, v] of [["waitTimeoutMs", this.waitTimeoutMs], ["handshakeTimeoutMs", handshakeTimeoutMs]]) {
       if (!Number.isInteger(v) || v <= 0)
         throw new PgConfigError(`PgBridge: ${name} must be a positive integer`);
     }
-    this.secrets = [config.password];
+    this.secrets = [config2.password];
     this.control = new Int32Array(new SharedArrayBuffer(4));
     const { port1, port2 } = new MessageChannel();
     this.port = port1;
@@ -6167,7 +6184,7 @@ var PgBridge = class {
     this.worker.on("error", () => {
     });
     Atomics.store(this.control, 0, STATE_WAITING);
-    this.worker.postMessage({ control: this.control.buffer, port: port2, config }, [port2]);
+    this.worker.postMessage({ control: this.control.buffer, port: port2, config: config2 }, [port2]);
     this.await(0, "handshake", handshakeTimeoutMs, "the worker did not report ready; it may have died at load, or the server did not answer");
   }
   get closed() {
@@ -6995,10 +7012,10 @@ COMMIT`);
 };
 
 // packages/store/dist/mounted.js
-function resolveDomainMounts(config) {
-  return config.stack_tags.map((name) => ({
+function resolveDomainMounts(config2) {
+  return config2.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join3(domainsHome(), name, "sterling.db")
+    dbPath: config2.domain_paths[name] ?? join3(domainsHome(), name, "sterling.db")
   }));
 }
 function domainsHome() {
@@ -10919,6 +10936,56 @@ var SterlingStore = class _SterlingStore {
     return this.hydrateAll([stored])[0];
   }
   /**
+   * Retire a feature_article WITHOUT a successor because its feature was removed
+   * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire"; it narrows
+   * the in_favor_of-required rule of decision 9948475b for this one shape). The
+   * record is kept: lifecycle retired (served status 'superseded'), no supersedes
+   * edge and so no superseded_by, `retired_reason: 'feature_removed'`, and a
+   * history entry. query() already never serves superseded records.
+   *
+   * `checkEligible` is the caller's eligibility rule (state, files gone on disk,
+   * live dependents: things only the tool layer can see). It runs INSIDE this
+   * write transaction on the record as read under the lock, so a write that
+   * lands between the check and the retirement cannot invalidate the check. It
+   * refuses by throwing; nothing is written then.
+   */
+  retireRemovedFeature(id, at, checkEligible) {
+    this.assertWritable("retireRemovedFeature");
+    let stored;
+    this.tx(() => {
+      this.assertNoMoveInFlight("retireRemovedFeature", [id]);
+      const record = this.get(id);
+      if (!record)
+        throw new Error(`retireRemovedFeature: no record '${id}' in this store`);
+      if (record.type !== "feature_article") {
+        throw new Error(`retireRemovedFeature: '${id}' is a ${record.type}; only a feature_article can be retired as a removed feature`);
+      }
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record.status === "superseded") {
+        throw new Error(`retireRemovedFeature: record '${id}' is already superseded (retired)`);
+      }
+      checkEligible(record);
+      const history = record.history ?? [];
+      const retired = {
+        ...record,
+        status: "superseded",
+        superseded_by: null,
+        lifecycle: "retired",
+        updated_at: at,
+        retired_reason: "feature_removed",
+        history: [...history, { date: at, event: "retired: feature removed (knowledge_retire reason feature_removed; no successor)" }]
+      };
+      stored = _SterlingStore.storableBody(retired);
+      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = NULL, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", at, JSON.stringify(stored), id);
+      if (res.changes === 0) {
+        throw new Error(`retireRemovedFeature: record '${id}' was concurrently superseded \u2014 retry`);
+      }
+      this.logActivity("retired", retired, at);
+    });
+    return this.hydrateAll([stored])[0];
+  }
+  /**
    * Hard removal — the P4 path for todos (done = removed by the artifact-write
    * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
    * Removing a SYSTEM-source todo appends to the capped queue drain log
@@ -11397,11 +11464,11 @@ var SterlingStore = class _SterlingStore {
    * pinned model IDs. No network; no fabrication — day-one entries are the IDs
    * already in use by the installed agents.
    */
-  bootstrapCatalogIfAbsent(config, nowISO) {
+  bootstrapCatalogIfAbsent(config2, nowISO) {
     const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     if (existing.length > 0)
       return;
-    const cfg = config;
+    const cfg = config2;
     const models = cfg.models ?? {};
     const ids = /* @__PURE__ */ new Set();
     for (const v of Object.values(models)) {
@@ -11430,6 +11497,66 @@ var SterlingStore = class _SterlingStore {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
     }, { operation_id: randomUUID3() });
+  }
+  /**
+   * Keep the models catalog covering every model the System tab pickers must offer
+   * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
+   * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
+   * models (each role's `model`, and its `opencode_model` and the maintenance worker's
+   * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
+   * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+   * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
+   * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
+   * edited or removed, and nothing is written when nothing is missing. The read-modify-write
+   * runs in one write transaction, so a refresh committed meanwhile is not overwritten.
+   * No catalog yet is a no-op: bootstrapCatalogIfAbsent seeds it.
+   */
+  ensureCatalogPinnedModels(config2) {
+    const find = () => this.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
+    const cfg = config2;
+    const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
+    const refs = /* @__PURE__ */ new Set();
+    const addPins = (v) => {
+      if (v?.model)
+        claude.add(v.model);
+      if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
+        refs.add(v.opencode_model);
+    };
+    for (const v of Object.values(parseConfig({}).models))
+      addPins(v);
+    for (const v of Object.values(cfg.models ?? {}))
+      addPins(v);
+    addPins({ opencode_model: cfg.maintenance_worker?.opencode_model });
+    const missingIn = (rec) => {
+      const have = new Set(rec.catalog.entries.map((e) => `${e.vendor ?? "anthropic"}/${e.id}`));
+      const out = [];
+      for (const id of claude) {
+        if (have.has(`anthropic/${id}`))
+          continue;
+        have.add(`anthropic/${id}`);
+        out.push({ id, label: id, tier: "unknown", status: "active" });
+      }
+      for (const ref of refs) {
+        if (have.has(ref))
+          continue;
+        have.add(ref);
+        const at = ref.indexOf("/");
+        out.push({ id: ref.slice(at + 1), label: ref.slice(at + 1), tier: "unknown", status: "active", vendor: ref.slice(0, at) });
+      }
+      return out;
+    };
+    const peek = find();
+    if (!peek || missingIn(peek).length === 0)
+      return;
+    this.withTransaction(() => {
+      const rec = find();
+      if (!rec)
+        return;
+      const missing = missingIn(rec);
+      if (missing.length === 0)
+        return;
+      this.updateRecord(rec.id, { ...rec, catalog: { ...rec.catalog, entries: [...rec.catalog.entries, ...missing] } });
+    });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -11752,9 +11879,9 @@ function resolveStoreRoute(root) {
   const read = readConfig(absRoot);
   if (read === null)
     return null;
-  const { config } = read;
+  const { config: config2 } = read;
   if (read.raw.storage !== "postgres") {
-    return { storage: "sqlite", root: absRoot, config, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+    return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
   }
   const shown = absRoot.replace(/\\/g, "/");
   const identity = readProjectIdentity(absRoot);
@@ -11769,11 +11896,11 @@ function resolveStoreRoute(root) {
       throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
     throw e;
   }
-  const names = pgStoreNames(identity.project_id, config.stack_tags);
+  const names = pgStoreNames(identity.project_id, config2.stack_tags);
   return {
     storage: "postgres",
     root: absRoot,
-    config,
+    config: config2,
     projectId: identity.project_id,
     credentialsPath,
     metaSchema: names.metaSchema,
@@ -11783,29 +11910,29 @@ function resolveStoreRoute(root) {
   };
 }
 var bridges = /* @__PURE__ */ new Map();
-function connectionLabel(config) {
-  return `${config.host}:${config.port}/${config.database}`;
+function connectionLabel(config2) {
+  return `${config2.host}:${config2.port}/${config2.database}`;
 }
 function acquireBridge(credentialsPath) {
   const existing = bridges.get(credentialsPath);
   if (existing && !existing.bridge.closed)
     return existing;
   bridges.delete(credentialsPath);
-  let config;
+  let config2;
   try {
-    config = readPgCredentials(credentialsPath);
+    config2 = readPgCredentials(credentialsPath);
   } catch (e) {
     if (e instanceof PgConfigError)
       throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
     throw e;
   }
-  config = { ...config, connectionTimeoutMillis: Math.min(config.connectionTimeoutMillis, ROUTED_CONNECT_TIMEOUT_MS) };
+  config2 = { ...config2, connectionTimeoutMillis: Math.min(config2.connectionTimeoutMillis, ROUTED_CONNECT_TIMEOUT_MS) };
   let bridge;
   try {
-    bridge = new PgBridge(config);
+    bridge = new PgBridge(config2);
   } catch (e) {
     if (e instanceof PgWorkerDiedError || e instanceof PgBridgeTimeoutError)
-      throw new StoreUnreachableError(connectionLabel(config), e.message);
+      throw new StoreUnreachableError(connectionLabel(config2), e.message);
     throw e;
   }
   const entry = { bridge, leases: 0 };
@@ -11943,9 +12070,9 @@ function routeOrDefault(root) {
   const route = resolveStoreRoute(root);
   if (route !== null)
     return route;
-  const config = parseConfig({});
+  const config2 = parseConfig({});
   const absRoot = resolve2(root);
-  return { storage: "sqlite", root: absRoot, config, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+  return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
 }
 function openRoutedStores(root, opts = {}) {
   const route = routeOrDefault(root);
@@ -12176,13 +12303,13 @@ function resolveProject(cwd) {
   }
   if (route?.storage === "postgres") return { storage: "postgres", dbPath, config: route.config };
   if (!existsSync3(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
-  let config;
+  let config2;
   try {
-    config = route ? route.config : parseConfig(existsSync3(configPath) ? JSON.parse(readFileSync5(configPath, "utf8")) : {});
+    config2 = route ? route.config : parseConfig(existsSync3(configPath) ? JSON.parse(readFileSync5(configPath, "utf8")) : {});
   } catch (e) {
     fail(`malformed .sterling/config.json \u2014 failing loud, never half-applying (P5): ${e.message}`);
   }
-  return { storage: "sqlite", dbPath, config };
+  return { storage: "sqlite", dbPath, config: config2 };
 }
 function named(e) {
   return `${e?.constructor?.name ?? e?.name ?? "Error"}: ${e?.message ?? String(e)}`;
@@ -12195,10 +12322,10 @@ function openRouted(cwd, opts) {
   }
 }
 function openProjectReadOnly(cwd = process.cwd()) {
-  const { storage, dbPath, config } = resolveProject(cwd);
+  const { storage, dbPath, config: config2 } = resolveProject(cwd);
   if (storage === "postgres") {
     const store3 = openRouted(cwd, { readOnlySnapshot: true }).store;
-    return { cwd, store: store3, config, close: () => store3.close() };
+    return { cwd, store: store3, config: config2, close: () => store3.close() };
   }
   const dir = mkdtempSync(join9(tmpdir(), "sterling-readonly-"));
   const snapshot = join9(dir, "sterling.db");
@@ -12219,7 +12346,7 @@ function openProjectReadOnly(cwd = process.cwd()) {
     store2.close();
     rmSync3(dir, { recursive: true, force: true });
   };
-  return { cwd, store: store2, config, close: close2 };
+  return { cwd, store: store2, config: config2, close: close2 };
 }
 
 // scripts/cleanup-plan.mjs
@@ -12305,7 +12432,46 @@ function referencesTo(path) {
   }
   return { refs, what: n.what };
 }
-function buildPlan(store2) {
+function treeFor(a, config2) {
+  if (!a.working_tree) return { root: target };
+  const mapped = config2?.working_trees?.[a.working_tree];
+  if (!mapped) return { root: null, why: `working_tree '${a.working_tree}' is not mapped in config.working_trees, so file absence was not checked` };
+  return { root: isAbsolute(mapped) || /^[A-Za-z]:[\\/]/.test(mapped) ? mapped : join10(target, mapped) };
+}
+function parkedRefs(root, path) {
+  const git = (args) => spawnSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: GIT_MAX_BUFFER });
+  const why = (r, what) => `git ${what} failed in ${root} (${firstLine(r.error?.message ?? r.stderr)})`;
+  const inside = git(["rev-parse", "--is-inside-work-tree"]);
+  if (inside.error || inside.status !== 0) return { error: why(inside, "rev-parse") };
+  const entry = (ref) => {
+    const r = git(["ls-tree", "--full-tree", ref, "--", path]);
+    return r.error || r.status !== 0 ? void 0 : r.stdout.trim();
+  };
+  const refs = [];
+  const atHead = entry("HEAD");
+  if (atHead === void 0) return { error: why(git(["ls-tree", "--full-tree", "HEAD", "--", path]), "ls-tree HEAD") };
+  if (atHead) refs.push("HEAD");
+  const heads = git(["for-each-ref", "--format=%(refname)", "refs/heads"]);
+  if (heads.error || heads.status !== 0) return { error: why(heads, "for-each-ref") };
+  for (const ref of heads.stdout.split("\n").filter(Boolean)) {
+    const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+    const held = entry(ref);
+    if (held === void 0) return { error: `git ls-tree ${branch} failed in ${root}` };
+    if (!held) continue;
+    const merged = git(["merge-base", "--is-ancestor", ref, "HEAD"]);
+    if (merged.status === 0) continue;
+    if (merged.error || merged.status !== 1) return { error: why(merged, `merge-base --is-ancestor ${branch} HEAD`) };
+    const base2 = git(["merge-base", "HEAD", ref]);
+    if (base2.status === 0) {
+      const inherited = entry(base2.stdout.trim());
+      if (inherited === void 0) return { error: `git ls-tree of the merge base of HEAD and ${branch} failed in ${root}` };
+      if (inherited === held) continue;
+    } else if (base2.error || base2.status !== 1) return { error: why(base2, `merge-base HEAD ${branch}`) };
+    refs.push(branch);
+  }
+  return { refs };
+}
+function buildPlan(store2, config2) {
   const articles = store2.query({ types: ["feature_article"], cap: ARTICLE_CAP });
   if (articles.length >= ARTICLE_CAP) {
     throw new Error(`cleanup-plan REFUSED: ${articles.length} articles filled the ${ARTICLE_CAP} query window, so the live-owner set may be incomplete`);
@@ -12371,9 +12537,12 @@ function buildPlan(store2) {
     }
     return verdicts;
   };
+  const dependentsOf = (a) => ({
+    active_dependents: articles.filter((other) => other.id !== a.id && isActive(other) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id))).map((d) => ({ id: d.id, slug: d.slug })),
+    active_relied_by: a.dependencies.relied_by.map((ref) => bySlugOrId.get(ref)).filter((d) => d && d.id !== a.id && isActive(d)).map((d) => ({ id: d.id, slug: d.slug }))
+  });
   const candidates = articles.filter((a) => (a.state === "deprecated" || a.state === "dormant") && !a.files.every((f) => isGone(f.path))).map((a) => {
-    const active_dependents = articles.filter((other) => other.id !== a.id && isActive(other) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id))).map((d) => ({ id: d.id, slug: d.slug }));
-    const active_relied_by = a.dependencies.relied_by.map((ref) => bySlugOrId.get(ref)).filter((d) => d && d.id !== a.id && isActive(d)).map((d) => ({ id: d.id, slug: d.slug }));
+    const { active_dependents, active_relied_by } = dependentsOf(a);
     const deletable = active_dependents.length === 0 && active_relied_by.length === 0;
     let buckets = null;
     if (deletable) {
@@ -12400,13 +12569,51 @@ function buildPlan(store2) {
       buckets
     };
   });
+  const retire_candidates = articles.filter((a) => a.state === "deprecated" && a.files.every((f) => isGone(f.path))).map((a) => {
+    const { active_dependents, active_relied_by } = dependentsOf(a);
+    const blockers = [];
+    if (active_dependents.length) blockers.push(`active article(s) ${listed(active_dependents.map((d) => d.slug))} rely on it`);
+    if (active_relied_by.length) blockers.push(`its relied_by names active article(s) ${listed(active_relied_by.map((d) => d.slug))}`);
+    const tree = treeFor(a, config2);
+    const parked = [];
+    if (!tree.root) blockers.push(tree.why);
+    else {
+      for (const path of new Set(a.files.map((f) => f.path))) {
+        let present = true;
+        try {
+          lstatSync4(join10(tree.root, path));
+        } catch (e) {
+          present = e.code !== "ENOENT";
+        }
+        if (present) {
+          blockers.push(`'${path}' is present in ${tree.root}`);
+          continue;
+        }
+        const probe = parkedRefs(tree.root, path);
+        if (probe.error) blockers.push(`'${path}': ${probe.error}`);
+        else for (const ref of probe.refs) parked.push({ path, ref });
+      }
+    }
+    for (const { path, ref } of parked) blockers.push(`'${path}' is parked on ${ref === "HEAD" ? "HEAD (deleted but not committed)" : `branch '${ref}'`}`);
+    return {
+      article: a.id,
+      slug: a.slug,
+      files: a.files.map((f) => f.path),
+      tree: tree.root,
+      active_dependents,
+      active_relied_by,
+      parked,
+      blockers,
+      retirable: blockers.length === 0
+    };
+  });
   const delete_paths = [...new Set(candidates.flatMap((c) => c.buckets ? c.buckets.delete.map((e) => e.path) : []))].sort();
   const queue = store2.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "deletion_candidate").map((t) => ({ id: t.id, text: t.text, file_keys: t.file_keys ?? [] }));
-  return { candidates, delete_paths, queue };
+  return { candidates, retire_candidates, delete_paths, queue };
 }
-var { store, close } = openProjectReadOnly(target);
+var { store, config, close } = openProjectReadOnly(target);
 try {
-  console.log(JSON.stringify(buildPlan(store), null, 2));
+  console.log(JSON.stringify(buildPlan(store, config), null, 2));
 } catch (e) {
   console.error(e.message);
   process.exitCode = 1;

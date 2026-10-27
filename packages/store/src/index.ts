@@ -23,6 +23,9 @@ import {
   displayHandle,
   parseStoreFence,
   STORE_FENCE_KEY,
+  MAINTENANCE_WORKER_CLAUDE_MODEL,
+  OPENCODE_MODEL_REF_RE,
+  parseConfig,
   type BoardNeeds,
   type TodoClaim,
   type DurableRecord,
@@ -4349,6 +4352,60 @@ export class SterlingStore {
   }
 
   /**
+   * Retire a feature_article WITHOUT a successor because its feature was removed
+   * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire"; it narrows
+   * the in_favor_of-required rule of decision 9948475b for this one shape). The
+   * record is kept: lifecycle retired (served status 'superseded'), no supersedes
+   * edge and so no superseded_by, `retired_reason: 'feature_removed'`, and a
+   * history entry. query() already never serves superseded records.
+   *
+   * `checkEligible` is the caller's eligibility rule (state, files gone on disk,
+   * live dependents: things only the tool layer can see). It runs INSIDE this
+   * write transaction on the record as read under the lock, so a write that
+   * lands between the check and the retirement cannot invalidate the check. It
+   * refuses by throwing; nothing is written then.
+   */
+  retireRemovedFeature(id: string, at: string, checkEligible: (record: DurableRecord) => void): DurableRecord {
+    this.assertWritable('retireRemovedFeature');
+    let stored!: Record<string, unknown>;
+    this.tx(() => {
+      this.assertNoMoveInFlight('retireRemovedFeature', [id]);
+      const record = this.get(id);
+      if (!record) throw new Error(`retireRemovedFeature: no record '${id}' in this store`);
+      if (record.type !== 'feature_article') {
+        throw new Error(`retireRemovedFeature: '${id}' is a ${record.type}; only a feature_article can be retired as a removed feature`);
+      }
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === 'retired' || record.status === 'superseded') {
+        throw new Error(`retireRemovedFeature: record '${id}' is already superseded (retired)`);
+      }
+      checkEligible(record);
+      const history = (record as unknown as { history?: unknown[] }).history ?? [];
+      const retired = {
+        ...record,
+        status: 'superseded' as const,
+        superseded_by: null,
+        lifecycle: 'retired',
+        updated_at: at,
+        retired_reason: 'feature_removed',
+        history: [...history, { date: at, event: 'retired: feature removed (knowledge_retire reason feature_removed; no successor)' }],
+      };
+      stored = SterlingStore.storableBody(retired as unknown as Record<string, unknown>);
+      const res = this.db
+        .prepare(
+          `UPDATE records SET status = ?, superseded_by = NULL, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`
+        )
+        .run('superseded', at, JSON.stringify(stored), id);
+      if (res.changes === 0) {
+        throw new Error(`retireRemovedFeature: record '${id}' was concurrently superseded — retry`);
+      }
+      this.logActivity('retired', retired as unknown as DurableRecord, at);
+    });
+    return this.hydrateAll([stored as DurableRecord])[0];
+  }
+
+  /**
    * Hard removal — the P4 path for todos (done = removed by the artifact-write
    * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
    * Removing a SYSTEM-source todo appends to the capped queue drain log
@@ -5018,6 +5075,71 @@ export class SterlingStore {
         entries: [...ids].map((id) => ({ id, label: id, tier: 'unknown', status: 'active' })),
       },
     }, { operation_id: randomUUID() });
+  }
+
+  /**
+   * Keep the models catalog covering every model the System tab pickers must offer
+   * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
+   * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
+   * models (each role's `model`, and its `opencode_model` and the maintenance worker's
+   * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
+   * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+   * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
+   * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
+   * edited or removed, and nothing is written when nothing is missing. The read-modify-write
+   * runs in one write transaction, so a refresh committed meanwhile is not overwritten.
+   * No catalog yet is a no-op: bootstrapCatalogIfAbsent seeds it.
+   */
+  ensureCatalogPinnedModels(config: unknown): void {
+    type Entry = { id: string; label: string; tier: string; status: string; vendor?: string };
+    type CatalogRecord = DurableRecord & { catalog: { entries: Entry[] } };
+    const find = () =>
+      this.query({ types: ['reference_material'], cap: 200 }).find((r) => (r as Record<string, unknown>).catalog) as unknown as
+        | CatalogRecord
+        | undefined;
+
+    const cfg = config as {
+      models?: Record<string, { model?: string; opencode_model?: string } | null | undefined>;
+      maintenance_worker?: { opencode_model?: unknown } | null;
+    };
+    const claude = new Set<string>([MAINTENANCE_WORKER_CLAUDE_MODEL]);
+    const refs = new Set<string>();
+    const addPins = (v: { model?: string; opencode_model?: unknown } | null | undefined): void => {
+      if (v?.model) claude.add(v.model);
+      if (typeof v?.opencode_model === 'string' && OPENCODE_MODEL_REF_RE.test(v.opencode_model)) refs.add(v.opencode_model);
+    };
+    for (const v of Object.values(parseConfig({}).models)) addPins(v);
+    for (const v of Object.values(cfg.models ?? {})) addPins(v);
+    addPins({ opencode_model: cfg.maintenance_worker?.opencode_model });
+
+    const missingIn = (rec: CatalogRecord): Entry[] => {
+      const have = new Set(rec.catalog.entries.map((e) => `${e.vendor ?? 'anthropic'}/${e.id}`));
+      const out: Entry[] = [];
+      for (const id of claude) {
+        if (have.has(`anthropic/${id}`)) continue;
+        have.add(`anthropic/${id}`);
+        out.push({ id, label: id, tier: 'unknown', status: 'active' });
+      }
+      for (const ref of refs) {
+        if (have.has(ref)) continue; // also skips an anthropic/ ref a Claude pin just planned
+        have.add(ref);
+        const at = ref.indexOf('/');
+        out.push({ id: ref.slice(at + 1), label: ref.slice(at + 1), tier: 'unknown', status: 'active', vendor: ref.slice(0, at) });
+      }
+      return out;
+    };
+
+    // Cheap unlocked check first: the common case (nothing missing) takes no write lock.
+    const peek = find();
+    if (!peek || missingIn(peek).length === 0) return;
+
+    this.withTransaction(() => {
+      const rec = find(); // re-read under the write lock so a concurrent refresh is merged, not lost
+      if (!rec) return;
+      const missing = missingIn(rec);
+      if (missing.length === 0) return;
+      this.updateRecord(rec.id, { ...rec, catalog: { ...rec.catalog, entries: [...rec.catalog.entries, ...missing] } });
+    });
   }
 
   /**

@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z, ZodError } from 'zod';
-import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, handoffEvidenceSchema } from '@sterling/schemas';
+import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, handoffEvidenceSchema, RETIRED_REASONS } from '@sterling/schemas';
 import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
@@ -622,13 +622,21 @@ export function createSterlingServer(
     'knowledge_retire',
     {
       description:
-        "Retire a genuine DUPLICATE in favour of a surviving record: status=superseded, superseded_by=in_favor_of, no new row; it stays fetchable by id and its links survive, but queries stop serving it. Not for a merely wrong record — fix that with knowledge_update. in_favor_of is required and must be live. todos are refused (use board_remove / maintenance_remove).",
+        "Retire a record so queries stop serving it. It stays fetchable by id and its links survive; no new row is written. Pass exactly one of in_favor_of or reason. " +
+        "With in_favor_of: retire a genuine DUPLICATE in favour of its live survivor (status=superseded, superseded_by=in_favor_of). " +
+        "With reason 'feature_removed' and no in_favor_of: retire a feature_article whose feature is gone, with no successor; knowledge_get then shows 'retired: feature removed'. " +
+        "That form needs the full uuid and is refused unless the article is deprecated, held by the project store, has every files[] path absent from its working tree and not parked on another branch, and no active article relies on it. " +
+        "Not for a merely wrong record: fix that with knowledge_update. todos are refused (use board_remove / maintenance_remove).",
       inputSchema: strict({
-        id: z.string().describe(`the duplicate to retire: ${ID_LADDER}`),
-        in_favor_of: z.string().describe(`the live surviving record: ${ID_LADDER}`),
+        id: z.string().describe(`the record to retire: ${ID_LADDER}; the reason form needs the full uuid`),
+        in_favor_of: z.string().describe(`the live surviving record of a duplicate: ${ID_LADDER}`).optional(),
+        reason: z
+          .enum(RETIRED_REASONS)
+          .describe("'feature_removed': retire a deprecated feature_article whose files are all gone, with no successor")
+          .optional(),
       }),
     },
-    ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of))
+    ({ id, in_favor_of, reason }) => json(tools.knowledgeRetire(id, in_favor_of, reason))
   );
 
   server.registerTool(

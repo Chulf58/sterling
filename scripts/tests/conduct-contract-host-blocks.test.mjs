@@ -66,7 +66,7 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // reviews on `gpt-5.6-sol` because the Codex MCP route is frozen at client 0.153.4 and cannot reach
 // `gpt-6.1-sol`; on a refusal it says so, reviews on Opus and names the Codex login, with no retry
 // on another Sol id (decision claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'a0d09c7133c78e88dcc598cee550734c830900422b9d560e7a7a0b5ddf78e486';
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '122d1c920b0f0b5d1f6fcfde115da6344bad18c44027e6b35368879579b2df68';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);

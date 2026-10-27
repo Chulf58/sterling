@@ -17384,12 +17384,23 @@ var envelopeFields = {
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string())
 };
+var RETIRED_REASONS = ["feature_removed"];
 function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
+  const removedTerminus = rec.retired_reason !== void 0;
+  if (rec.status === "superseded" && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === "active" && rec.superseded_by !== null) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
+  }
+  if (removedTerminus && rec.status !== "superseded") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)"
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "retired_reason forbids superseded_by: a removed feature has no successor" });
   }
 }
 
@@ -17547,7 +17558,12 @@ var featureArticleSchema = base.extend({
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
-  last_executed: external_exports.string().datetime().optional()
+  last_executed: external_exports.string().datetime().optional(),
+  // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+  // the article is retired with no successor because its feature is gone.
+  // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+  // status 'superseded' and a null superseded_by.
+  retired_reason: external_exports.enum(RETIRED_REASONS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
@@ -18664,6 +18680,10 @@ function recordFieldConditions(type) {
         for (const field of needed)
           out.push([field, `Required when state is '${state}'.`]);
       }
+      out.push([
+        "retired_reason",
+        `Written only by knowledge_retire(id, reason: '${RETIRED_REASONS.join("' | '")}'); accepted only with status 'superseded' and no superseded_by, refused on a live record.`
+      ]);
       return out;
     }
     case "todo": {
@@ -19435,6 +19455,7 @@ var configSchema = external_exports.object({
   // Written by sync and init only.
   applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
+var MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -25938,6 +25959,56 @@ var SterlingStore = class _SterlingStore {
     return this.hydrateAll([stored])[0];
   }
   /**
+   * Retire a feature_article WITHOUT a successor because its feature was removed
+   * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire"; it narrows
+   * the in_favor_of-required rule of decision 9948475b for this one shape). The
+   * record is kept: lifecycle retired (served status 'superseded'), no supersedes
+   * edge and so no superseded_by, `retired_reason: 'feature_removed'`, and a
+   * history entry. query() already never serves superseded records.
+   *
+   * `checkEligible` is the caller's eligibility rule (state, files gone on disk,
+   * live dependents: things only the tool layer can see). It runs INSIDE this
+   * write transaction on the record as read under the lock, so a write that
+   * lands between the check and the retirement cannot invalidate the check. It
+   * refuses by throwing; nothing is written then.
+   */
+  retireRemovedFeature(id, at, checkEligible) {
+    this.assertWritable("retireRemovedFeature");
+    let stored;
+    this.tx(() => {
+      this.assertNoMoveInFlight("retireRemovedFeature", [id]);
+      const record2 = this.get(id);
+      if (!record2)
+        throw new Error(`retireRemovedFeature: no record '${id}' in this store`);
+      if (record2.type !== "feature_article") {
+        throw new Error(`retireRemovedFeature: '${id}' is a ${record2.type}; only a feature_article can be retired as a removed feature`);
+      }
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record2.status === "superseded") {
+        throw new Error(`retireRemovedFeature: record '${id}' is already superseded (retired)`);
+      }
+      checkEligible(record2);
+      const history = record2.history ?? [];
+      const retired = {
+        ...record2,
+        status: "superseded",
+        superseded_by: null,
+        lifecycle: "retired",
+        updated_at: at,
+        retired_reason: "feature_removed",
+        history: [...history, { date: at, event: "retired: feature removed (knowledge_retire reason feature_removed; no successor)" }]
+      };
+      stored = _SterlingStore.storableBody(retired);
+      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = NULL, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", at, JSON.stringify(stored), id);
+      if (res.changes === 0) {
+        throw new Error(`retireRemovedFeature: record '${id}' was concurrently superseded \u2014 retry`);
+      }
+      this.logActivity("retired", retired, at);
+    });
+    return this.hydrateAll([stored])[0];
+  }
+  /**
    * Hard removal — the P4 path for todos (done = removed by the artifact-write
    * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
    * Removing a SYSTEM-source todo appends to the capped queue drain log
@@ -26449,6 +26520,66 @@ var SterlingStore = class _SterlingStore {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
     }, { operation_id: randomUUID4() });
+  }
+  /**
+   * Keep the models catalog covering every model the System tab pickers must offer
+   * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
+   * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
+   * models (each role's `model`, and its `opencode_model` and the maintenance worker's
+   * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
+   * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+   * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
+   * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
+   * edited or removed, and nothing is written when nothing is missing. The read-modify-write
+   * runs in one write transaction, so a refresh committed meanwhile is not overwritten.
+   * No catalog yet is a no-op: bootstrapCatalogIfAbsent seeds it.
+   */
+  ensureCatalogPinnedModels(config2) {
+    const find = () => this.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
+    const cfg = config2;
+    const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
+    const refs = /* @__PURE__ */ new Set();
+    const addPins = (v) => {
+      if (v?.model)
+        claude.add(v.model);
+      if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
+        refs.add(v.opencode_model);
+    };
+    for (const v of Object.values(parseConfig({}).models))
+      addPins(v);
+    for (const v of Object.values(cfg.models ?? {}))
+      addPins(v);
+    addPins({ opencode_model: cfg.maintenance_worker?.opencode_model });
+    const missingIn = (rec) => {
+      const have = new Set(rec.catalog.entries.map((e) => `${e.vendor ?? "anthropic"}/${e.id}`));
+      const out = [];
+      for (const id of claude) {
+        if (have.has(`anthropic/${id}`))
+          continue;
+        have.add(`anthropic/${id}`);
+        out.push({ id, label: id, tier: "unknown", status: "active" });
+      }
+      for (const ref of refs) {
+        if (have.has(ref))
+          continue;
+        have.add(ref);
+        const at = ref.indexOf("/");
+        out.push({ id: ref.slice(at + 1), label: ref.slice(at + 1), tier: "unknown", status: "active", vendor: ref.slice(0, at) });
+      }
+      return out;
+    };
+    const peek = find();
+    if (!peek || missingIn(peek).length === 0)
+      return;
+    this.withTransaction(() => {
+      const rec = find();
+      if (!rec)
+        return;
+      const missing = missingIn(rec);
+      if (missing.length === 0)
+        return;
+      this.updateRecord(rec.id, { ...rec, catalog: { ...rec.catalog, entries: [...rec.catalog.entries, ...missing] } });
+    });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -32245,6 +32376,16 @@ function decodeBoardCursor(surface, cursor) {
   return { updated_at: rec.updated_at, id: rec.id, identity: rec.identity };
 }
 var PARKED_REF_PROBE_CAP = 40;
+var ParkProbeInconclusive = class extends Error {
+};
+function gitFailure(r) {
+  if (!r)
+    return "git could not be started";
+  if (r.error)
+    return r.error.message;
+  const err = typeof r.stderr === "string" ? r.stderr.trim().split("\n")[0] : "";
+  return err || `exit ${r.status}`;
+}
 var PROVENANCE_WALK_COMMIT_CAP = 2e3;
 var DRIFT_ITEMS_PER_READ = 3;
 var PLANNED_CREDIBLE_BYTES = 2e3;
@@ -32277,6 +32418,9 @@ var WRITE_REFUSED_FIELDS = [
   "lifecycle",
   "freshness",
   "file_baselines",
+  // A removed-feature terminus (GitHub #217): written only by
+  // knowledge_retire(id, reason: 'feature_removed') after its eligibility check.
+  "retired_reason",
   // R9 (board 8c8b6d78): the attestation map is drift PROVENANCE — "the close of
   // maintenance item X attested that this article's prose already describes these
   // bytes, observed against commit Y". It is minted only by the attestation branch
@@ -32863,8 +33007,19 @@ var SterlingTools = class _SterlingTools {
    * the classic reconcile_needed reading) even though no live tip holds it. A
    * probe that could not run proved nothing, so it gets the old, safer reading
    * rather than the new, more assertive one.
+   *
+   * STRICT (`{ strict: true }`, used only by knowledge_retire's feature_removed
+   * eligibility, GitHub #217): that caller retires a record on a "not parked"
+   * answer, so a best-effort answer is not enough. The strict probe scans EVERY
+   * local branch (no PARKED_REF_PROBE_CAP), addresses each by its full refname
+   * so a same-named tag cannot answer for it, reads presence with ls-tree (exit
+   * 0 with no entry is absent; cat-file -e cannot tell absent from a failure),
+   * and turns every git result that is neither yes nor no into probe_failed with
+   * a `detail` naming the command. The read paths call it without the option
+   * and keep the behaviour described above.
    */
-  parkedOnRef(rel, treeRoot) {
+  parkedOnRef(rel, treeRoot, opts = {}) {
+    const strict2 = opts.strict === true;
     const run = (args2) => {
       try {
         return spawnSync2("git", ["-C", treeRoot, ...args2], { encoding: "utf8", windowsHide: true });
@@ -32873,9 +33028,20 @@ var SterlingTools = class _SterlingTools {
       }
     };
     const repoCheck = run(["rev-parse", "--is-inside-work-tree"]);
-    if (repoCheck?.status !== 0)
-      return { status: "probe_failed" };
-    const has = (ref) => run(["cat-file", "-e", `${ref}:${rel}`])?.status === 0;
+    if (repoCheck?.status !== 0) {
+      return strict2 ? { status: "probe_failed", detail: `git rev-parse in ${treeRoot}: ${gitFailure(repoCheck)}` } : { status: "probe_failed" };
+    }
+    const inconclusive = (what, r) => {
+      throw new ParkProbeInconclusive(`git ${what}: ${gitFailure(r)}`);
+    };
+    const has = (ref) => {
+      if (!strict2)
+        return run(["cat-file", "-e", `${ref}:${rel}`])?.status === 0;
+      const r = run(["ls-tree", "--full-tree", ref, "--", rel]);
+      if (r?.status !== 0 || typeof r.stdout !== "string")
+        return inconclusive(`ls-tree ${ref}`, r);
+      return r.stdout.trim().length > 0;
+    };
     const resolveBase = () => {
       const symbolic = run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
       if (symbolic?.status === 0 && typeof symbolic.stdout === "string") {
@@ -32893,18 +33059,22 @@ var SterlingTools = class _SterlingTools {
     };
     const isMergedIntoBase = (branch, base2) => {
       const r = run(["merge-base", "--is-ancestor", branch, base2]);
+      if (strict2 && r?.status !== 0 && r?.status !== 1)
+        return inconclusive(`merge-base --is-ancestor ${branch} ${base2}`, r);
       return r?.status === 0;
     };
     const treeEntry = (ref) => {
       const r = run(["ls-tree", "--full-tree", ref, "--", rel]);
       if (r?.status !== 0 || typeof r.stdout !== "string")
-        return void 0;
+        return strict2 ? inconclusive(`ls-tree ${ref}`, r) : void 0;
       const line = r.stdout.split("\n")[0] ?? "";
       const tab = line.indexOf("	");
       return tab > 0 ? line.slice(0, tab) : void 0;
     };
     const inheritedFromMergeBase = (branch) => {
       const mb = run(["merge-base", "HEAD", branch]);
+      if (strict2 && mb?.status !== 0 && mb?.status !== 1)
+        return inconclusive(`merge-base HEAD ${branch}`, mb);
       if (mb?.status !== 0 || typeof mb.stdout !== "string")
         return false;
       const sha = mb.stdout.trim();
@@ -32918,26 +33088,31 @@ var SterlingTools = class _SterlingTools {
     try {
       if (has("HEAD"))
         return { status: "parked", ref: "HEAD" };
-      const refs = run(["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+      const refs = run(["for-each-ref", `--format=${strict2 ? "%(refname)" : "%(refname:short)"}`, "refs/heads"]);
       if (refs?.status !== 0 || typeof refs.stdout !== "string")
-        return { status: "probe_failed" };
-      const branches = refs.stdout.split("\n").map((s2) => s2.trim()).filter(Boolean).slice(0, PARKED_REF_PROBE_CAP);
+        return strict2 ? inconclusive("for-each-ref refs/heads", refs) : { status: "probe_failed" };
+      const listed = refs.stdout.split("\n").map((s2) => s2.trim()).filter(Boolean);
+      const branches = strict2 ? listed : listed.slice(0, PARKED_REF_PROBE_CAP);
       const base2 = resolveBase();
-      for (const b of branches) {
-        if (!has(b))
+      for (const listedRef of branches) {
+        const ref = listedRef;
+        const b = strict2 && listedRef.startsWith("refs/heads/") ? listedRef.slice("refs/heads/".length) : listedRef;
+        if (!has(ref))
           continue;
-        if (base2 !== void 0 && b !== base2 && isMergedIntoBase(b, base2))
+        if (base2 !== void 0 && b !== base2 && isMergedIntoBase(ref, base2))
           continue;
-        if (inheritedFromMergeBase(b))
+        if (inheritedFromMergeBase(ref))
           continue;
         return { status: "parked", ref: b };
       }
       const history = run(["rev-list", "--all", "--", rel]);
       if (history?.status !== 0 || typeof history.stdout !== "string")
-        return { status: "probe_failed" };
+        return strict2 ? inconclusive("rev-list --all", history) : { status: "probe_failed" };
       return { status: history.stdout.trim().length > 0 ? "confirmed_absent" : "never_tracked" };
-    } catch {
-      return { status: "probe_failed" };
+    } catch (err) {
+      if (strict2 && err instanceof ParkProbeInconclusive)
+        return { status: "probe_failed", detail: err.message };
+      return strict2 ? { status: "probe_failed", detail: err.message } : { status: "probe_failed" };
     }
   }
   /**
@@ -35992,7 +36167,7 @@ var SterlingTools = class _SterlingTools {
     } else if (record2.status === "superseded") {
       const terminus = this.store.resolveTerminus(record2.id);
       if (terminus)
-        full = { ...record2, terminus };
+        full = { ...record2, terminus: this.withRemovedFeatureLabel(record2, terminus) };
     }
     let served = full;
     if (options?.version === void 0 && options?.field === void 0) {
@@ -36006,6 +36181,23 @@ var SterlingTools = class _SterlingTools {
       served = { ...served, unreadable_domains: unreadable };
     }
     return this.projectFieldWindow(served, options);
+  }
+  /**
+   * Adds `retired: 'feature removed'` to a terminus that ENDS at an intentional
+   * removed-feature retirement (GitHub #217): the walk reached its end (not
+   * truncated) at a superseded record that has no successor and carries
+   * retired_reason 'feature_removed'. A truncated walk (cycle, hop cap, or a
+   * successor no readable store holds) and a superseded record with no successor
+   * and no reason (a broken chain) are left unlabelled.
+   */
+  withRemovedFeatureLabel(record2, terminus) {
+    if (terminus.truncated || terminus.status !== "superseded")
+      return terminus;
+    const end = terminus.id === record2.id ? record2 : this.store.get(terminus.id);
+    const reason = end?.retired_reason;
+    if (!end || end.superseded_by !== null || reason !== "feature_removed")
+      return terminus;
+    return { ...terminus, retired: "feature removed" };
   }
   /** knowledge_render's ids[] bound (board efe6f3fc): 1–20, refused loudly naming the bound. */
   static RENDER_MAX_IDS = 20;
@@ -40204,8 +40396,25 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * thing and the reader needs to be sent to the survivor. Requiring the survivor
    * means a retired record always forwards somewhere, so an old citation lands on
    * the right record instead of dangling.
+   *
+   * The one exception is `reason: 'feature_removed'` with NO in_favor_of
+   * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire", which
+   * narrows decision 9948475b for this shape only): a deprecated feature_article
+   * whose feature is gone and that nothing live relies on. There is no survivor
+   * to send the reader to, so the record ends at a disclosed "retired: feature
+   * removed" terminus instead (see knowledgeRetireRemovedFeature). The two forms
+   * are mutually exclusive.
    */
-  knowledgeRetire(id, inFavorOf) {
+  knowledgeRetire(id, inFavorOf, reason) {
+    if (inFavorOf !== void 0 && reason !== void 0) {
+      throw new Error(`knowledge_retire: pass in_favor_of OR reason, never both. in_favor_of retires a duplicate into its survivor; reason 'feature_removed' retires a removed feature with no successor. Nothing was written.`);
+    }
+    if (inFavorOf === void 0 && reason === void 0) {
+      throw new Error(`knowledge_retire: pass in_favor_of (the live survivor of a duplicate) or reason 'feature_removed' (a deprecated feature_article whose files are all gone). A merely wrong record is fixed with knowledge_update. Nothing was written.`);
+    }
+    if (reason !== void 0)
+      return this.knowledgeRetireRemovedFeature(id, reason);
+    inFavorOf = inFavorOf;
     if (id === inFavorOf)
       throw new Error(`knowledge_retire: a record cannot be retired in favour of itself ('${id}')`);
     const record2 = this.resolveRecordId(id, "knowledge_retire");
@@ -40236,6 +40445,107 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     }
     const retired = this.store.retireInFavorOf(record2.id, survivor.id, this.now());
     return { retired };
+  }
+  /** The cap on the feature_article window the dependency check reads; a full
+   *  window refuses, because a dependent the window dropped would be missed. */
+  static REMOVED_FEATURE_ARTICLE_CAP = 1e4;
+  /**
+   * knowledge_retire(id, reason: 'feature_removed'): retire a deprecated
+   * feature_article with no successor (GitHub #217). Full uuid only, because
+   * this path has no survivor to catch a wrong target. The record must be held
+   * by the PROJECT store, asked of the storage layer (projectStoreHolds), never
+   * read from the body's `scope` (anti_pattern
+   * record-body-scope-is-not-physical-store-identity). Every other condition is
+   * checked by removedFeatureFailures INSIDE the project store's write
+   * transaction (SterlingStore.retireRemovedFeature), on the record as read
+   * under the lock.
+   */
+  knowledgeRetireRemovedFeature(id, reason) {
+    if (!RETIRED_REASONS.includes(reason)) {
+      throw new Error(`knowledge_retire: reason '${reason}' is not one of ${RETIRED_REASONS.join(" | ")}. Nothing was written.`);
+    }
+    if (!_SterlingTools.FULL_UUID_RE.test(id)) {
+      throw new Error(`knowledge_retire: reason '${reason}' needs the record's full uuid, and '${id}' is not one. This form retires a record with no successor, so a slug or prefix that could resolve to a different record is refused. Nothing was written.`);
+    }
+    const record2 = this.resolveRecordId(id, "knowledge_retire");
+    if (record2.id !== id) {
+      throw new Error(`knowledge_retire: '${id}' resolves to record '${record2.id}'; pass that full uuid. Nothing was written.`);
+    }
+    if (record2.type !== "feature_article") {
+      throw new Error(`knowledge_retire: reason '${reason}' is only for a deprecated feature_article, and '${id}' is a ${record2.type}. A duplicate is retired with in_favor_of; a wrong record is fixed with knowledge_update. Nothing was written.`);
+    }
+    if (record2.status === "superseded") {
+      throw new Error(`knowledge_retire: '${id}' is already superseded (retired). Nothing was written.`);
+    }
+    if (!this.store.projectStoreHolds(record2.id)) {
+      throw new Error(`knowledge_retire: '${id}' is held by the '${this.store.scopeOfHolder(record2.id)}' store, not the project store. reason '${reason}' checks the project's working tree and the project's articles, so it retires project-held articles only. Nothing was written.`);
+    }
+    const project = this.store instanceof MountedStores ? this.store.project : this.store instanceof SterlingStore ? this.store : void 0;
+    if (!project) {
+      throw new Error(`knowledge_retire: this tool surface has no project SterlingStore to run the retirement transaction on. Nothing was written.`);
+    }
+    const retired = project.retireRemovedFeature(record2.id, this.now(), (fresh) => {
+      const failures = this.removedFeatureFailures(fresh);
+      if (failures.length) {
+        throw new Error(`knowledge_retire: '${id}' (${fresh.slug ?? "no slug"}) cannot be retired as a removed feature: ${failures.join("; ")}. Nothing was written.`);
+      }
+    });
+    return { retired };
+  }
+  /**
+   * Why a feature_article is NOT eligible for a removed-feature retirement, one
+   * entry per failed condition; empty means eligible. The conditions: state
+   * deprecated; every files[].path absent in the article's RESOLVED tree
+   * (treeRootFor; an unresolved working_tree refuses); no absent path parked on
+   * another ref (parkedOnRef; a probe that could not run refuses too, because it
+   * proved nothing); and no ACTIVE article relying on it in either direction,
+   * with "active" defined as scripts/cleanup-plan.mjs defines it (not deprecated
+   * or dormant; superseded articles are never in query() results).
+   */
+  removedFeatureFailures(record2) {
+    const a = record2;
+    const failures = [];
+    if (a.state !== "deprecated")
+      failures.push(`its state is '${a.state}', not 'deprecated'`);
+    const tree = this.treeRootFor(record2);
+    if (tree.unresolved || !tree.root) {
+      failures.push(`its working_tree '${a.working_tree}' does not resolve to a tree (not mapped in config.working_trees), so file absence cannot be checked`);
+    } else {
+      for (const rel of new Set(a.files.map((f) => f.path))) {
+        let present;
+        try {
+          present = lstatSync5(join14(tree.root, rel), { throwIfNoEntry: false }) !== void 0;
+        } catch (err) {
+          failures.push(`'${rel}' could not be checked in ${tree.root} (${err.code ?? err.message})`);
+          continue;
+        }
+        if (present) {
+          failures.push(`'${rel}' is still present in ${tree.root}`);
+          continue;
+        }
+        const probe = this.parkedOnRef(rel, tree.root, { strict: true });
+        if (probe.status === "parked")
+          failures.push(`'${rel}' is absent here but parked on branch '${probe.ref}'`);
+        else if (probe.status === "probe_failed") {
+          failures.push(`'${rel}' is absent, but git could not prove it is not parked on another branch (${probe.detail ?? "no detail"})`);
+        }
+      }
+    }
+    const cap = _SterlingTools.REMOVED_FEATURE_ARTICLE_CAP;
+    const articles = this.store.query({ types: ["feature_article"], cap });
+    if (articles.length >= cap) {
+      failures.push(`${articles.length} articles filled the ${cap} query window, so a live dependent could be missing from it`);
+      return failures;
+    }
+    const isActive = (o) => o.state !== "deprecated" && o.state !== "dormant";
+    const dependents = articles.filter((o) => o.id !== a.id && isActive(o) && (o.dependencies.relies_on.includes(a.slug) || o.dependencies.relies_on.includes(a.id))).map((o) => o.slug);
+    if (dependents.length)
+      failures.push(`active article(s) ${dependents.join(", ")} rely on it (relies_on)`);
+    const bySlugOrId = new Map(articles.flatMap((o) => [[o.slug, o], [o.id, o]]));
+    const reliedBy = a.dependencies.relied_by.map((ref) => bySlugOrId.get(ref)).filter((o) => o !== void 0 && o.id !== a.id && isActive(o)).map((o) => o.slug);
+    if (reliedBy.length)
+      failures.push(`its relied_by names active article(s) ${[...new Set(reliedBy)].join(", ")}`);
+    return failures;
   }
   // -- knowledge_supersede (decision foreign_e17794ea, board 0b33c27b) ----------------
   /** old-record types knowledge_supersede accepts — see the class comment above.
@@ -41044,12 +41354,13 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER).optional() })
   }, ({ id }) => json(tools.knowledgeStats(id)));
   server.registerTool("knowledge_retire", {
-    description: "Retire a genuine DUPLICATE in favour of a surviving record: status=superseded, superseded_by=in_favor_of, no new row; it stays fetchable by id and its links survive, but queries stop serving it. Not for a merely wrong record \u2014 fix that with knowledge_update. in_favor_of is required and must be live. todos are refused (use board_remove / maintenance_remove).",
+    description: "Retire a record so queries stop serving it. It stays fetchable by id and its links survive; no new row is written. Pass exactly one of in_favor_of or reason. With in_favor_of: retire a genuine DUPLICATE in favour of its live survivor (status=superseded, superseded_by=in_favor_of). With reason 'feature_removed' and no in_favor_of: retire a feature_article whose feature is gone, with no successor; knowledge_get then shows 'retired: feature removed'. That form needs the full uuid and is refused unless the article is deprecated, held by the project store, has every files[] path absent from its working tree and not parked on another branch, and no active article relies on it. Not for a merely wrong record: fix that with knowledge_update. todos are refused (use board_remove / maintenance_remove).",
     inputSchema: strict({
-      id: external_exports.string().describe(`the duplicate to retire: ${ID_LADDER}`),
-      in_favor_of: external_exports.string().describe(`the live surviving record: ${ID_LADDER}`)
+      id: external_exports.string().describe(`the record to retire: ${ID_LADDER}; the reason form needs the full uuid`),
+      in_favor_of: external_exports.string().describe(`the live surviving record of a duplicate: ${ID_LADDER}`).optional(),
+      reason: external_exports.enum(RETIRED_REASONS).describe("'feature_removed': retire a deprecated feature_article whose files are all gone, with no successor").optional()
     })
-  }, ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of)));
+  }, ({ id, in_favor_of, reason }) => json(tools.knowledgeRetire(id, in_favor_of, reason)));
   server.registerTool("knowledge_supersede", {
     description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. An open_question or disconfirmed_hypothesis whose subject is gone is closed the same way, with the same two closing types; one that still applies is updated with knowledge_update, and an answered open_question is closed there with resolution_status 'closed' and closed_into. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
     inputSchema: strict({

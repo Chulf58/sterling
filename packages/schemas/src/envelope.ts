@@ -96,12 +96,36 @@ export const envelopeFields = {
   stack_tags: z.array(z.string()),
 };
 
-/** superseded_by is set iff status is superseded (spec §3.2). */
-export function refineSupersession(rec: { status: string; superseded_by: string | null }, ctx: z.RefinementCtx): void {
-  if (rec.status === 'superseded' && rec.superseded_by === null) {
+// Why a record was retired WITHOUT a successor (GitHub #217, user-ruled
+// 2026-10-27 "Gated no-successor retire"): only knowledge_retire(id, reason)
+// writes it, and only on a deprecated feature_article whose files are all gone
+// and that nothing live relies on. It is the one shape where status
+// 'superseded' carries no superseded_by: the reader is told the feature was
+// removed instead of being forwarded. feature_article is the only schema that
+// declares the field, so every other type keeps the strict pairing below.
+export const RETIRED_REASONS = ['feature_removed'] as const;
+export type RetiredReason = (typeof RETIRED_REASONS)[number];
+
+/** superseded_by is set iff status is superseded (spec §3.2), except for a
+ *  removed-feature terminus (retired_reason), which is superseded with none. */
+export function refineSupersession(
+  rec: { status: string; superseded_by: string | null; retired_reason?: string },
+  ctx: z.RefinementCtx
+): void {
+  const removedTerminus = rec.retired_reason !== undefined;
+  if (rec.status === 'superseded' && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === 'active' && rec.superseded_by !== null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
+  }
+  if (removedTerminus && rec.status !== 'superseded') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)",
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'retired_reason forbids superseded_by: a removed feature has no successor' });
   }
 }

@@ -369,6 +369,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'turns ended with fixes uncommitted or review threads open until the user asked again).\n',
     after: 'turns ended with fixes uncommitted or review threads open until the user asked again).\n- Run any shell command expected to take more than about 20 seconds (a test suite, a build, a deploy, a review wait, a setup chain) as a background shell (`background: true` on OpenCode, `run_in_background` on Claude Code); never wait in the foreground with `sleep`, `sleep N; tail …` or a polling loop. While it runs, report, dispatch or prep other work, and act when its completion notice arrives (AGENTS.md rule "Start every subagent and every long shell command in the background"; finding `why-do-customer-hub-ch-conductors-sit-waiting-while-shells-r`: Customer Hub conductors ran 29 foreground shells over 60 s and 110 foreground `sleep`/`tail` polls in five days).\n',
   },
+  {
+    commit: 'board 0961aa29',
+    date: '2026-10-27',
+    reason: 'while lanes run and one is free, read-only researcher lanes prepare the next not-yet-startable board items and return per-item briefs (user-ruled 2026-10-27 through the question form, GitHub #214)',
+    before: 'ready-items-for-auto-start`). Serializing',
+    after: 'ready-items-for-auto-start`). While lanes run and a lane is still free, prepare the next items that cannot start yet (blocked, or `needs` of `user` or `grill`) in parallel: send one read-only researcher lane per item or small group, which edits nothing and writes nothing to the store, so it adds no writer and counts against the same ceiling. Each returns a brief per item (the ask, the governing records by slug and id8, the files, the questions for the user, whether it is ready) and may propose a queue order; you decide the order, which stays unblock-first (decision `slice-ordering-is-unblock-first-pick-the-slice-that-most-wid`), and put the user\'s questions through the question form early, so their answers are in before the item\'s turn (user-ruled 2026-10-27 through the question form, GitHub #214). Serializing',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
