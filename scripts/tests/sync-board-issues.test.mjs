@@ -325,6 +325,35 @@ test('an objective label over 50 characters is cut to 33 characters, ~ and 6 hex
   assert.equal(objectiveLabel('x'.repeat(41)).length, 50);
 });
 
+test('objectives that differ only in case share one label: one ensure_label, both issues labelled with its first spelling', () => {
+  const r = plan({ project: P, snapshot: snap({ items: [item(1, { objective: 'API' }), item(2, { objective: 'api' })] }), issues: [], labels: [] });
+  assert.deepEqual(r.actions.filter((a) => a.kind === 'ensure_label').map((a) => a.name), ['objective:API']);
+  assert.deepEqual(r.actions.filter((a) => a.kind === 'create').map((a) => a.labels), [['objective:API'], ['objective:API']]);
+  const open = plan({ project: P, snapshot: snap({ items: [item(3, { objective: 'API' }), item(4, { objective: 'api' })] }), issues: [mirrored(5, 3), mirrored(6, 4)], labels: [] });
+  assert.deepEqual(open.actions.filter((a) => a.kind === 'ensure_label').map((a) => a.name), ['objective:API']);
+});
+
+test('the 50-character label limit counts code points: 49, 50 and 51 non-BMP characters in the objective', () => {
+  const emoji = (n) => '😀'.repeat(n);
+  assert.equal(objectiveLabel(emoji(40)), `objective:${emoji(40)}`, 'objective: plus 40 code points is exactly 50');
+  assert.equal(objectiveLabel(emoji(39)), `objective:${emoji(39)}`);
+  const cut = objectiveLabel(emoji(41));
+  assert.match(cut, new RegExp(`^objective:(😀){33}~[0-9a-f]{6}$`, 'u'));
+  assert.equal(Array.from(cut).length, 50);
+});
+
+test('a label that cannot exist on a task the ceiling leaves out does not block the plan; the pending close still runs', () => {
+  const others = Array.from({ length: 198 }, (_, i) => ({ number: i + 1, state: 'closed', body: 'not ours', labels: [] }));
+  const r = plan({
+    project: P,
+    snapshot: snap({ items: [item(2, { handoff: { ...received, from_name: 'x'.repeat(60) } })] }),
+    issues: [...others, mirrored(300, 1), mirrored(301, 3)],
+  });
+  assert.ok(kinds(r.actions).includes('close'), 'the close of the task that left the board is planned');
+  assert.deepEqual(r.ceiling.skipped_items.map((s) => s.key), [uuid(2)]);
+  assert.throws(() => plan({ project: P, snapshot: snap({ items: [item(2, { handoff: { ...received, from_name: 'x'.repeat(60) } })] }), issues: [] }), PlanError);
+});
+
 test('at the ceiling, new issues go by priority (high, normal, low) then oldest first; the left-out tasks are listed in that order', () => {
   const others = Array.from({ length: 196 }, (_, i) => ({ number: i + 1, state: 'closed', body: 'not ours', labels: [] }));
   const at = (d) => `2026-10-${String(d).padStart(2, '0')}T08:00:00.000Z`;
