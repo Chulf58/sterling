@@ -6181,6 +6181,7 @@ var ISSUE_CEILING = 200;
 var LABEL_IN_PROGRESS = "in-progress";
 var LABEL_BLOCKED = "blocked";
 var FROM_LABEL_PREFIX = "from:";
+var OBJECTIVE_LABEL_PREFIX = "objective:";
 var LABEL_NAME_MAX = 50;
 var TITLE_MAX = 120;
 var BODY_TEXT_MAX = 6e4;
@@ -6188,6 +6189,7 @@ var LABEL_STYLE = {
   [LABEL_IN_PROGRESS]: { color: "fbca04", description: "Sterling board: a session holds this task" },
   [LABEL_BLOCKED]: { color: "b60205", description: "Sterling board: blocked or waiting" }
 };
+var OBJECTIVE_LABEL_STYLE = { color: "bfd4f2", description: "Sterling board: the objective this task belongs to" };
 var FROM_LABEL_STYLE = { color: "c5def5", description: "Sterling board: task handed over from another project" };
 var keyMarker = (id) => `<!-- sterling-key: board:${id} -->`;
 var projectMarker = (identity) => `<!-- sterling-project: ${identity} -->`;
@@ -6245,6 +6247,15 @@ function receivedFromText(text) {
   for (const m of String(text ?? "").matchAll(RECEIVED_TEXT_RE)) name = m[1];
   return name;
 }
+function objectiveLabel(objective) {
+  if (typeof objective !== "string" || !objective.trim()) return null;
+  const name = `${OBJECTIVE_LABEL_PREFIX}${objective}`;
+  if (Array.from(name).length <= LABEL_NAME_MAX) return name;
+  const hash = createHash("sha256").update(objective, "utf8").digest("hex").slice(0, 6);
+  return `${OBJECTIVE_LABEL_PREFIX}${Array.from(objective).slice(0, 33).join("")}~${hash}`;
+}
+var PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
+var priorityRank = (p) => PRIORITY_RANK[p] ?? PRIORITY_RANK.normal;
 function fromLabel(project) {
   const name = `${FROM_LABEL_PREFIX}${project}`;
   if (name.length > LABEL_NAME_MAX) {
@@ -6316,7 +6327,12 @@ function plan({ snapshot, issues, project, labels = [], receipts = /* @__PURE__ 
   const creates = [];
   const warnings = [...foreignWarnings];
   const drift = [];
-  const wanted = /* @__PURE__ */ new Set();
+  const wanted = /* @__PURE__ */ new Map();
+  const want = (name) => {
+    const k = name.toLowerCase();
+    if (!wanted.has(k)) wanted.set(k, name);
+    return wanted.get(k);
+  };
   const heldElsewhere = (key) => {
     const list = foreign.get(key);
     if (!list) return false;
@@ -6352,9 +6368,15 @@ function plan({ snapshot, issues, project, labels = [], receipts = /* @__PURE__ 
         const label = fromLabel(from);
         if (!hasLabel(names2, label)) add.push(label);
       }
+      const objective = objectiveLabel(item.record.objective);
+      if (objective !== null && !hasLabel(names2, objective)) add.push(objective);
+      for (const held of names2) {
+        if (held.toLowerCase().startsWith(OBJECTIVE_LABEL_PREFIX) && held.toLowerCase() !== objective?.toLowerCase()) {
+          labelActions.push({ kind: "remove_label", number: issue.number, label: held });
+        }
+      }
       if (add.length) {
-        add.forEach((l) => wanted.add(l));
-        labelActions.push({ kind: "add_labels", number: issue.number, labels: add });
+        labelActions.push({ kind: "add_labels", number: issue.number, labels: add.map(want) });
       }
       continue;
     }
@@ -6382,36 +6404,55 @@ function plan({ snapshot, issues, project, labels = [], receipts = /* @__PURE__ 
     room--;
     return true;
   };
+  const candidates = [];
   for (const item of snapshot.items) {
     const id = String(item.record.id);
     if (isTrackerItem(item) || byKey.has(id) || heldElsewhere(id)) continue;
     const text = String(item.record.text ?? "");
-    if (!take(id, text)) continue;
-    const labelsFor = [];
-    if (item.readiness?.claim?.state === "held") labelsFor.push(LABEL_IN_PROGRESS);
-    if (item.readiness?.state === "blocked" || item.readiness?.state === "waiting") labelsFor.push(LABEL_BLOCKED);
-    const from = receivedFrom(item);
-    if (from !== void 0) labelsFor.push(fromLabel(from));
-    labelsFor.forEach((l) => wanted.add(l));
-    creates.push({ kind: "create", key: id, title: titleOf(text, id), body: bodyOf(id, text, project.marker), labels: labelsFor });
+    const labelsOf = () => {
+      const labelsFor = [];
+      if (item.readiness?.claim?.state === "held") labelsFor.push(LABEL_IN_PROGRESS);
+      if (item.readiness?.state === "blocked" || item.readiness?.state === "waiting") labelsFor.push(LABEL_BLOCKED);
+      const from = receivedFrom(item);
+      if (from !== void 0) labelsFor.push(fromLabel(from));
+      const objective = objectiveLabel(item.record.objective);
+      if (objective !== null) labelsFor.push(objective);
+      return labelsFor;
+    };
+    candidates.push({ key: id, text, priority: item.record.priority, at: item.record.created_at, labelsOf, action: { kind: "create", key: id, title: titleOf(text, id), body: bodyOf(id, text, project.marker) } });
   }
   for (const entry of snapshot.journal) {
     if (entry.source !== "user" || byKey.has(entry.item_id) || live.has(entry.item_id)) continue;
     const handoff = journalHandoff(entry);
     if (handoff.tracker || heldElsewhere(entry.item_id)) continue;
-    if (!take(entry.item_id, entry.text)) continue;
-    const labelsFor = handoff.from !== void 0 ? [fromLabel(handoff.from)] : [];
-    labelsFor.forEach((l) => wanted.add(l));
-    creates.push({
-      kind: "create",
+    const labelsOf = () => {
+      const labelsFor = handoff.from !== void 0 ? [fromLabel(handoff.from)] : [];
+      const objective = objectiveLabel(entry.objective);
+      if (objective !== null) labelsFor.push(objective);
+      return labelsFor;
+    };
+    candidates.push({
       key: entry.item_id,
-      title: titleOf(entry.text, entry.item_id),
-      body: bodyOf(entry.item_id, entry.text, project.marker),
-      labels: labelsFor,
-      then: { comment: closeComment(entry.item_id, entry), state_reason: stateReasonOf(entry), outcome: entry.outcome }
+      text: entry.text,
+      priority: entry.priority,
+      at: entry.removed_at,
+      labelsOf,
+      action: {
+        kind: "create",
+        key: entry.item_id,
+        title: titleOf(entry.text, entry.item_id),
+        body: bodyOf(entry.item_id, entry.text, project.marker),
+        then: { comment: closeComment(entry.item_id, entry), state_reason: stateReasonOf(entry), outcome: entry.outcome }
+      }
     });
   }
-  const ensure = [...wanted].filter((name) => !labels.some((l) => l.toLowerCase() === name.toLowerCase())).sort().map((name) => ({ kind: "ensure_label", name, ...LABEL_STYLE[name] ?? FROM_LABEL_STYLE }));
+  const atOf = (c) => typeof c.at === "string" && c.at ? Date.parse(c.at) : Infinity;
+  candidates.sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority) || (atOf(a) === atOf(b) ? 0 : atOf(a) < atOf(b) ? -1 : 1));
+  for (const c of candidates) {
+    if (!take(c.key, c.text)) continue;
+    creates.push({ ...c.action, labels: c.labelsOf().map(want) });
+  }
+  const ensure = [...wanted.values()].filter((name) => !labels.some((l) => l.toLowerCase() === name.toLowerCase())).sort().map((name) => ({ kind: "ensure_label", name, ...LABEL_STYLE[name] ?? (name.startsWith(OBJECTIVE_LABEL_PREFIX) ? OBJECTIVE_LABEL_STYLE : FROM_LABEL_STYLE) }));
   return { actions: [...ensure, ...closes, ...labelActions, ...creates], warnings, drift, ceiling: { limit: ceiling, count: genuine.length, skipped: skipped.length, skipped_items: skipped } };
 }
 function describe(action) {
@@ -6687,12 +6728,14 @@ var launchedAs = process.argv[1] && resolve3(process.argv[1]);
 if (launchedAs === fileURLToPath(new URL("../scripts/sync-board-issues.mjs", import.meta.url).href) || launchedAs === fileURLToPath(new URL("../bin/sync-board-issues.mjs", new URL("../scripts/sync-board-issues.mjs", import.meta.url).href))) main();
 export {
   BODY_TEXT_MAX,
+  FOOTER_RE,
   FROM_LABEL_PREFIX,
   GhError,
   ISSUE_CEILING,
   LABEL_BLOCKED,
   LABEL_IN_PROGRESS,
   LABEL_NAME_MAX,
+  OBJECTIVE_LABEL_PREFIX,
   PlanError,
   TITLE_MAX,
   USAGE,
@@ -6708,6 +6751,7 @@ export {
   keyMarker,
   lockPathFor,
   makeGh,
+  objectiveLabel,
   parseArgs,
   plan,
   projectIdentityOf,

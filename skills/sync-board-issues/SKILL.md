@@ -24,9 +24,33 @@ Run with `--dry-run` before the first real run in a project, and show the user w
 - Changes only issues that carry this project's marker. When several projects mirror into one repo, an issue whose footer names another project is left alone and named in a `WARNING` line, and no second issue is created for a task whose key such an issue already carries. An issue that shows a key outside a footer is also left alone and named. The title and body are never edited afterwards. When the task text changes, the run prints a `text drift` line and leaves the issue as it is.
 - Skips hand-off trackers (tasks handed to another project); the receiving project mirrors the task instead. A received task gets the label `from:<sending project>`. For a task already removed from the board, the removal journal says whether it was a tracker or a received task. Only journal entries written by Sterling 0.19.130, before the journal kept that, are judged from the hand-off lines Sterling writes into a hand-off's text.
 - Keeps two labels in step with the board, `in-progress` while a session holds a live claim on the task, and `blocked` while the board's readiness says blocked or waiting. Labels are the only thing a rerun changes on an open issue. A missing label is created; when the account may not create it, the run stops and says so.
+- Labels a task that has a board objective `objective:<objective>`, and none when it has no objective. A run adds the label, and removes a stale `objective:*` label when the objective changed or was cleared. A closed issue keeps it, like `from:`. GitHub limits a label name to 50 characters, counted in Unicode code points, not UTF-16 units. A longer `objective:<objective>` becomes `objective:` + the first 33 code points of the objective + `~` + the first 6 hex digits of the SHA-256 (UTF-8) of the whole objective, 50 in all, so another tool can compute the same name. GitHub compares label names without regard to case, so label names that differ only in case share one label, spelled as the first one the run met. Two long objectives that differ only in case still get two labels, because the hash is taken over the objective as written.
 - Closes the issue of a task that left the board. Outcome `done` closes it as completed, with one comment listing the evidence (commit, PR, deploy or URL). Outcomes `dropped`, `superseded` and `duplicate` close it as not planned, with a comment naming the outcome. A task that left the board with no journal entry also closes as not planned. Each closing comment carries `<!-- sterling-close: board:<uuid> -->`, and a rerun looks for it first, so a run cut off between the comment and the close never comments twice. Closing removes `in-progress` and `blocked` and keeps `from:`.
 - A task that was added and removed between two runs gets an issue that is created and closed in the same run, so short tasks still reach the done list.
 - Stops creating issues once the repo holds 200 issues (all states, pull requests not counted), because Clear View rejects a repo past that cap. Closing and labelling still run. The run then prints a `CEILING` line and exits 3.
+- Under the ceiling, new issues are created for `high` tasks first, then `normal` (also a task with no priority), then `low`, and within a priority the oldest first (the task's `created_at`). Tasks left out are listed in that order, as `skipped (ceiling)` lines, or `would skip (ceiling)` in a dry run. A task that was added and removed between runs ranks the same way, using the priority on its journal row; the journal keeps no creation time, so its `removed_at` stands in for age. A task with no time sorts last in its priority, and ties keep board order.
+
+## Stable contract (for tools that read the issues)
+
+Every issue body ends with this footer, three consecutive lines, written once and never edited:
+
+```
+<!-- sterling-key: board:<board item uuid> -->
+<!-- sterling-project: <project identity> -->
+<!-- sterling-text: sha256:<first 16 hex digits of the SHA-256 of the task text> -->
+```
+
+- Read markers only from the last complete footer in a body. A marker anywhere else is not the mirror's.
+- The task text above the footer is copied with every `<!--` followed by `sterling-` broken by a zero-width space (U+200B) after `sterling`, so quoted text cannot form a marker or a second footer.
+- On an issue the mirror created, the mirror owns every label that starts with `objective:` (compared without case). It adds, changes and removes them to match the board, so an `objective:*` label added by hand is treated as stale and removed on the next run. Use another prefix for your own labels.
+- The project identity has no `<`, `>`, line break or `-->`, and no surrounding spaces.
+- This JavaScript regex matches a footer; use `matchAll` and take the last match. Group 1 is the board uuid, group 2 the project identity, group 3 the text hash:
+
+```
+<!-- sterling-key: board:([^\s>]+) -->\r?\n<!-- sterling-project: ([^\r\n]+?) -->\r?\n<!-- sterling-text: sha256:([0-9a-f]{16}) -->
+```
+
+The script exports the same regex as `FOOTER_RE` (global flag) and the reader `footerOf(body)`, and a test checks that the regex above is the exported one.
 
 ## 4. What it never does
 

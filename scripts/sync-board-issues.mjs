@@ -42,6 +42,7 @@ export const ISSUE_CEILING = 200;
 export const LABEL_IN_PROGRESS = 'in-progress';
 export const LABEL_BLOCKED = 'blocked';
 export const FROM_LABEL_PREFIX = 'from:';
+export const OBJECTIVE_LABEL_PREFIX = 'objective:';
 /** GitHub refuses a label name longer than this. */
 export const LABEL_NAME_MAX = 50;
 export const TITLE_MAX = 120;
@@ -52,6 +53,7 @@ const LABEL_STYLE = {
   [LABEL_IN_PROGRESS]: { color: 'fbca04', description: 'Sterling board: a session holds this task' },
   [LABEL_BLOCKED]: { color: 'b60205', description: 'Sterling board: blocked or waiting' },
 };
+const OBJECTIVE_LABEL_STYLE = { color: 'bfd4f2', description: 'Sterling board: the objective this task belongs to' };
 const FROM_LABEL_STYLE = { color: 'c5def5', description: 'Sterling board: task handed over from another project' };
 
 export const keyMarker = (id) => `<!-- sterling-key: board:${id} -->`;
@@ -65,7 +67,7 @@ const KEY_RE = /<!-- sterling-key: board:([^\s>]+) -->/;
 // such footer in a body, never from a marker standing anywhere else, and the
 // copied task text has its marker sequences broken (escapeMarkers), so text
 // that quotes a marker can neither claim, disown nor duplicate an issue.
-const FOOTER_RE = /<!-- sterling-key: board:([^\s>]+) -->\r?\n<!-- sterling-project: ([^\r\n]+?) -->\r?\n<!-- sterling-text: sha256:([0-9a-f]{16}) -->/g;
+export const FOOTER_RE = /<!-- sterling-key: board:([^\s>]+) -->\r?\n<!-- sterling-project: ([^\r\n]+?) -->\r?\n<!-- sterling-text: sha256:([0-9a-f]{16}) -->/g;
 
 /** The last generated footer in a body as { key, project, hash }, or null. */
 export function footerOf(body) {
@@ -145,6 +147,24 @@ function receivedFromText(text) {
   for (const m of String(text ?? '').matchAll(RECEIVED_TEXT_RE)) name = m[1];
   return name;
 }
+
+/**
+ * The label for a board objective, or null when the task has none:
+ * `objective:<objective>`. GitHub allows 50 characters, counted in code points;
+ * a longer name is the
+ * first 33 characters (code points) of the objective, then '~', then the first
+ * 6 hex digits of the SHA-256 of the whole objective (UTF-8), 50 in all.
+ */
+export function objectiveLabel(objective) {
+  if (typeof objective !== 'string' || !objective.trim()) return null;
+  const name = `${OBJECTIVE_LABEL_PREFIX}${objective}`;
+  if (Array.from(name).length <= LABEL_NAME_MAX) return name;
+  const hash = createHash('sha256').update(objective, 'utf8').digest('hex').slice(0, 6);
+  return `${OBJECTIVE_LABEL_PREFIX}${Array.from(objective).slice(0, 33).join('')}~${hash}`;
+}
+
+const PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
+const priorityRank = (p) => PRIORITY_RANK[p] ?? PRIORITY_RANK.normal;
 
 function fromLabel(project) {
   const name = `${FROM_LABEL_PREFIX}${project}`;
@@ -246,7 +266,14 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
   const creates = [];
   const warnings = [...foreignWarnings];
   const drift = [];
-  const wanted = new Set();
+  // Labels the run needs, by lowercase name (GitHub compares names without case):
+  // the first spelling seen is the canonical one every action then uses.
+  const wanted = new Map();
+  const want = (name) => {
+    const k = name.toLowerCase();
+    if (!wanted.has(k)) wanted.set(k, name);
+    return wanted.get(k);
+  };
   /** True when an issue outside this project's markers already carries the key: no second issue is made beside it. */
   const heldElsewhere = (key) => {
     const list = foreign.get(key);
@@ -284,9 +311,15 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
         const label = fromLabel(from);
         if (!hasLabel(names, label)) add.push(label);
       }
+      const objective = objectiveLabel(item.record.objective);
+      if (objective !== null && !hasLabel(names, objective)) add.push(objective);
+      for (const held of names) {
+        if (held.toLowerCase().startsWith(OBJECTIVE_LABEL_PREFIX) && held.toLowerCase() !== objective?.toLowerCase()) {
+          labelActions.push({ kind: 'remove_label', number: issue.number, label: held });
+        }
+      }
       if (add.length) {
-        add.forEach((l) => wanted.add(l));
-        labelActions.push({ kind: 'add_labels', number: issue.number, labels: add });
+        labelActions.push({ kind: 'add_labels', number: issue.number, labels: add.map(want) });
       }
       continue;
     }
@@ -315,40 +348,65 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
     room--;
     return true;
   };
+  // Candidates for a new issue, live tasks then journal-only ones, ordered for
+  // the ceiling: priority (high, normal, low; none counts as normal), then
+  // oldest first. A live task's age is its created_at; a journal row keeps no
+  // creation time, so its removed_at stands in for it. A missing time sorts
+  // last. The sort is stable, so ties keep board order, then journal order.
+  const candidates = [];
   for (const item of snapshot.items) {
     const id = String(item.record.id);
     if (isTrackerItem(item) || byKey.has(id) || heldElsewhere(id)) continue;
     const text = String(item.record.text ?? '');
-    if (!take(id, text)) continue;
-    const labelsFor = [];
-    if (item.readiness?.claim?.state === 'held') labelsFor.push(LABEL_IN_PROGRESS);
-    if (item.readiness?.state === 'blocked' || item.readiness?.state === 'waiting') labelsFor.push(LABEL_BLOCKED);
-    const from = receivedFrom(item);
-    if (from !== undefined) labelsFor.push(fromLabel(from));
-    labelsFor.forEach((l) => wanted.add(l));
-    creates.push({ kind: 'create', key: id, title: titleOf(text, id), body: bodyOf(id, text, project.marker), labels: labelsFor });
+    // Labels are built, and so validated, only for an admitted create: a task the ceiling leaves out never blocks the plan.
+    const labelsOf = () => {
+      const labelsFor = [];
+      if (item.readiness?.claim?.state === 'held') labelsFor.push(LABEL_IN_PROGRESS);
+      if (item.readiness?.state === 'blocked' || item.readiness?.state === 'waiting') labelsFor.push(LABEL_BLOCKED);
+      const from = receivedFrom(item);
+      if (from !== undefined) labelsFor.push(fromLabel(from));
+      const objective = objectiveLabel(item.record.objective);
+      if (objective !== null) labelsFor.push(objective);
+      return labelsFor;
+    };
+    candidates.push({ key: id, text, priority: item.record.priority, at: item.record.created_at, labelsOf, action: { kind: 'create', key: id, title: titleOf(text, id), body: bodyOf(id, text, project.marker) } });
   }
   for (const entry of snapshot.journal) {
     if (entry.source !== 'user' || byKey.has(entry.item_id) || live.has(entry.item_id)) continue;
     const handoff = journalHandoff(entry);
     if (handoff.tracker || heldElsewhere(entry.item_id)) continue;
-    if (!take(entry.item_id, entry.text)) continue;
-    const labelsFor = handoff.from !== undefined ? [fromLabel(handoff.from)] : [];
-    labelsFor.forEach((l) => wanted.add(l));
-    creates.push({
-      kind: 'create',
+    const labelsOf = () => {
+      const labelsFor = handoff.from !== undefined ? [fromLabel(handoff.from)] : [];
+      const objective = objectiveLabel(entry.objective);
+      if (objective !== null) labelsFor.push(objective);
+      return labelsFor;
+    };
+    candidates.push({
       key: entry.item_id,
-      title: titleOf(entry.text, entry.item_id),
-      body: bodyOf(entry.item_id, entry.text, project.marker),
-      labels: labelsFor,
-      then: { comment: closeComment(entry.item_id, entry), state_reason: stateReasonOf(entry), outcome: entry.outcome },
+      text: entry.text,
+      priority: entry.priority,
+      at: entry.removed_at,
+      labelsOf,
+      action: {
+        kind: 'create',
+        key: entry.item_id,
+        title: titleOf(entry.text, entry.item_id),
+        body: bodyOf(entry.item_id, entry.text, project.marker),
+        then: { comment: closeComment(entry.item_id, entry), state_reason: stateReasonOf(entry), outcome: entry.outcome },
+      },
     });
   }
+  const atOf = (c) => (typeof c.at === 'string' && c.at ? Date.parse(c.at) : Infinity);
+  candidates.sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority) || (atOf(a) === atOf(b) ? 0 : atOf(a) < atOf(b) ? -1 : 1));
+  for (const c of candidates) {
+    if (!take(c.key, c.text)) continue;
+    creates.push({ ...c.action, labels: c.labelsOf().map(want) });
+  }
 
-  const ensure = [...wanted]
+  const ensure = [...wanted.values()]
     .filter((name) => !labels.some((l) => l.toLowerCase() === name.toLowerCase()))
     .sort()
-    .map((name) => ({ kind: 'ensure_label', name, ...(LABEL_STYLE[name] ?? FROM_LABEL_STYLE) }));
+    .map((name) => ({ kind: 'ensure_label', name, ...(LABEL_STYLE[name] ?? (name.startsWith(OBJECTIVE_LABEL_PREFIX) ? OBJECTIVE_LABEL_STYLE : FROM_LABEL_STYLE)) }));
   return { actions: [...ensure, ...closes, ...labelActions, ...creates], warnings, drift, ceiling: { limit: ceiling, count: genuine.length, skipped: skipped.length, skipped_items: skipped } };
 }
 
