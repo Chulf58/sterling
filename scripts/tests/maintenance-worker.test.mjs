@@ -303,7 +303,7 @@ test('builds the probed claude argv: Sonnet 5.5, medium effort, the worker agent
     assert.deepEqual(WORKER_TOOLS, [
       'mcp__sterling__maintenance_query', 'mcp__sterling__knowledge_get', 'mcp__sterling__maintenance_remove',
       ...both('knowledge_line_ref_fix'),
-      ...['knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove', 'knowledge_query', 'knowledge_schema'].flatMap(both),
+      ...['knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove', 'knowledge_query', 'knowledge_schema', 'knowledge_preflight'].flatMap(both),
       'Read', 'Grep', 'WebSearch', 'WebFetch',
     ], '[finding 3] no board_update');
     for (const banned of ['--bare', 'bypassPermissions', '--plugin-dir', '--dangerously-skip-permissions']) {

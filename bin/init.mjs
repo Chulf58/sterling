@@ -4294,14 +4294,24 @@ var init_source_extensions = __esm({
 
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
+  const removedTerminus = rec.retired_reason !== void 0;
+  if (rec.status === "superseded" && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === "active" && rec.superseded_by !== null) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
   }
+  if (removedTerminus && rec.status !== "superseded") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)"
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "retired_reason forbids superseded_by: a removed feature has no successor" });
+  }
 }
-var LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, LIFECYCLE_VALUES, FRESHNESS_VALUES, envelopeFields;
+var LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, LIFECYCLE_VALUES, FRESHNESS_VALUES, envelopeFields, RETIRED_REASONS;
 var init_envelope = __esm({
   "packages/schemas/dist/envelope.js"() {
     "use strict";
@@ -4343,6 +4353,7 @@ var init_envelope = __esm({
       scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
       stack_tags: external_exports.array(external_exports.string())
     };
+    RETIRED_REASONS = ["feature_removed"];
   }
 });
 
@@ -4537,7 +4548,12 @@ var init_records = __esm({
       // Board 6a8507f8: when an instrument-describing article's probe script was
       // last actually RUN — distinct from updated_at (when the record was
       // edited). Optional: most articles describe no probe at all.
-      last_executed: external_exports.string().datetime().optional()
+      last_executed: external_exports.string().datetime().optional(),
+      // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+      // the article is retired with no successor because its feature is gone.
+      // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+      // status 'superseded' and a null superseded_by.
+      retired_reason: external_exports.enum(RETIRED_REASONS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
@@ -5489,7 +5505,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, MAINTENANCE_WORKER_CLAUDE_MODEL, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6027,6 +6043,7 @@ var init_config = __esm({
       // Written by sync and init only.
       applied_config_migrations: external_exports.array(external_exports.string()).optional()
     });
+    MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
     RETIRED_MODEL_KEYS = [
       "coder",
       "coder_hard",
@@ -12835,6 +12852,56 @@ var init_dist2 = __esm({
         return this.hydrateAll([stored])[0];
       }
       /**
+       * Retire a feature_article WITHOUT a successor because its feature was removed
+       * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire"; it narrows
+       * the in_favor_of-required rule of decision 9948475b for this one shape). The
+       * record is kept: lifecycle retired (served status 'superseded'), no supersedes
+       * edge and so no superseded_by, `retired_reason: 'feature_removed'`, and a
+       * history entry. query() already never serves superseded records.
+       *
+       * `checkEligible` is the caller's eligibility rule (state, files gone on disk,
+       * live dependents: things only the tool layer can see). It runs INSIDE this
+       * write transaction on the record as read under the lock, so a write that
+       * lands between the check and the retirement cannot invalidate the check. It
+       * refuses by throwing; nothing is written then.
+       */
+      retireRemovedFeature(id, at, checkEligible) {
+        this.assertWritable("retireRemovedFeature");
+        let stored;
+        this.tx(() => {
+          this.assertNoMoveInFlight("retireRemovedFeature", [id]);
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireRemovedFeature: no record '${id}' in this store`);
+          if (record.type !== "feature_article") {
+            throw new Error(`retireRemovedFeature: '${id}' is a ${record.type}; only a feature_article can be retired as a removed feature`);
+          }
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireRemovedFeature: record '${id}' is already superseded (retired)`);
+          }
+          checkEligible(record);
+          const history = record.history ?? [];
+          const retired = {
+            ...record,
+            status: "superseded",
+            superseded_by: null,
+            lifecycle: "retired",
+            updated_at: at,
+            retired_reason: "feature_removed",
+            history: [...history, { date: at, event: "retired: feature removed (knowledge_retire reason feature_removed; no successor)" }]
+          };
+          stored = _SterlingStore.storableBody(retired);
+          const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = NULL, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", at, JSON.stringify(stored), id);
+          if (res.changes === 0) {
+            throw new Error(`retireRemovedFeature: record '${id}' was concurrently superseded \u2014 retry`);
+          }
+          this.logActivity("retired", retired, at);
+        });
+        return this.hydrateAll([stored])[0];
+      }
+      /**
        * Hard removal — the P4 path for todos (done = removed by the artifact-write
        * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
        * Removing a SYSTEM-source todo appends to the capped queue drain log
@@ -13346,6 +13413,66 @@ var init_dist2 = __esm({
             entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
           }
         }, { operation_id: randomUUID4() });
+      }
+      /**
+       * Keep the models catalog covering every model the System tab pickers must offer
+       * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
+       * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
+       * models (each role's `model`, and its `opencode_model` and the maintenance worker's
+       * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
+       * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+       * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
+       * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
+       * edited or removed, and nothing is written when nothing is missing. The read-modify-write
+       * runs in one write transaction, so a refresh committed meanwhile is not overwritten.
+       * No catalog yet is a no-op: bootstrapCatalogIfAbsent seeds it.
+       */
+      ensureCatalogPinnedModels(config) {
+        const find = () => this.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
+        const cfg = config;
+        const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
+        const refs = /* @__PURE__ */ new Set();
+        const addPins = (v) => {
+          if (v?.model)
+            claude.add(v.model);
+          if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
+            refs.add(v.opencode_model);
+        };
+        for (const v of Object.values(parseConfig({}).models))
+          addPins(v);
+        for (const v of Object.values(cfg.models ?? {}))
+          addPins(v);
+        addPins({ opencode_model: cfg.maintenance_worker?.opencode_model });
+        const missingIn = (rec) => {
+          const have = new Set(rec.catalog.entries.map((e) => `${e.vendor ?? "anthropic"}/${e.id}`));
+          const out = [];
+          for (const id of claude) {
+            if (have.has(`anthropic/${id}`))
+              continue;
+            have.add(`anthropic/${id}`);
+            out.push({ id, label: id, tier: "unknown", status: "active" });
+          }
+          for (const ref of refs) {
+            if (have.has(ref))
+              continue;
+            have.add(ref);
+            const at = ref.indexOf("/");
+            out.push({ id: ref.slice(at + 1), label: ref.slice(at + 1), tier: "unknown", status: "active", vendor: ref.slice(0, at) });
+          }
+          return out;
+        };
+        const peek = find();
+        if (!peek || missingIn(peek).length === 0)
+          return;
+        this.withTransaction(() => {
+          const rec = find();
+          if (!rec)
+            return;
+          const missing2 = missingIn(rec);
+          if (missing2.length === 0)
+            return;
+          this.updateRecord(rec.id, { ...rec, catalog: { ...rec.catalog, entries: [...rec.catalog.entries, ...missing2] } });
+        });
       }
       /**
        * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -19070,10 +19197,60 @@ function refreshAgentsMdFacts(text, { stackTags, domainPaths = {} }) {
   }
   return { text: lines.map((l) => l.content + l.eol).join(""), refreshed, kept, absent };
 }
+var KNOWLEDGE_VARIANTS = {
+  projected: {
+    heading: "## Knowledge (generated projections)",
+    body: "- **The knowledge base is projected into the repo.** `architecture.md` says what each area does and which files it owns; `rulings.md` lists every decision and anti-pattern that governs the code. Read the entries for an area before touching it. Both are generated by the Sterling operator and never hand-edited; if you find them wrong, say so in your commit message rather than editing them."
+  },
+  store: {
+    heading: "## Knowledge",
+    body: "- **The knowledge base is the Sterling store.** Read it through the Sterling MCP tools before touching an area: `knowledge_query` finds the records for the area, `knowledge_get` reads one record in full."
+  }
+};
+var renderKnowledge = (v) => `${v.heading}
+
+${v.body}`;
+var renderKnowledgeSection = (templateText, projected) => projected ? templateText : templateText.replace(renderKnowledge(KNOWLEDGE_VARIANTS.projected), renderKnowledge(KNOWLEDGE_VARIANTS.store));
+function refreshAgentsMdKnowledge(text, projected) {
+  const lines = [];
+  const re = /\r\n|\n/g;
+  let start = 0;
+  let m;
+  while (m = re.exec(text)) {
+    lines.push({ content: text.slice(start, m.index), eol: m[0] });
+    start = re.lastIndex;
+  }
+  lines.push({ content: text.slice(start), eol: "" });
+  const headings = Object.values(KNOWLEDGE_VARIANTS).map((v) => v.heading);
+  const at = lines.map((l, i) => headings.includes(l.content) ? i : -1).filter((i) => i !== -1);
+  if (!at.length) return { text, refreshed: false, kept: null, absent: true };
+  if (at.length > 1) return { text, refreshed: false, kept: "the heading appears more than once", absent: false };
+  const h = at[0];
+  let end = lines.findIndex((l, i) => i > h && l.content.startsWith("## "));
+  if (end === -1) end = lines.length;
+  const body = lines.slice(h + 1, end).map((l) => l.content);
+  while (body.length && body[0] === "") body.shift();
+  while (body.length && body[body.length - 1] === "") body.pop();
+  const want = KNOWLEDGE_VARIANTS[projected ? "projected" : "store"];
+  const current = Object.values(KNOWLEDGE_VARIANTS).find((v) => v.heading === lines[h].content);
+  if (current === want && body.length === 1 && body[0] === want.body) return { text, refreshed: false, kept: null, absent: false };
+  const shipped = Object.values(KNOWLEDGE_VARIANTS).some((v) => v.heading === lines[h].content && body.length === 1 && body[0] === v.body);
+  if (!shipped) return { text, refreshed: false, kept: "the section was edited by hand", absent: false };
+  const eol = lines[h].eol || "\n";
+  const lastBody = lines.slice(h + 1, end).reduce((last, l, i) => l.content === "" ? last : h + 1 + i, h);
+  lines.splice(h, lastBody - h + 1, { content: want.heading, eol }, { content: "", eol }, { content: want.body, eol: lines[lastBody].eol });
+  return { text: lines.map((l) => l.content + l.eol).join(""), refreshed: true, kept: null, absent: false };
+}
 function describeAgentsMdRefresh({ refreshed, kept }, { stackTags, domainPaths = {} }) {
   const parts = [];
-  if (refreshed.length) parts.push(`rewrote the ${refreshed.join(" and ")} line${refreshed.length > 1 ? "s" : ""} from .sterling/config.json`);
+  const lineNames = refreshed.filter((n) => n !== "Knowledge section");
+  if (lineNames.length) parts.push(`rewrote the ${lineNames.join(" and ")} line${lineNames.length > 1 ? "s" : ""} from .sterling/config.json`);
+  if (refreshed.includes("Knowledge section")) parts.push("rewrote the Knowledge section to match the handoff setting");
   for (const k of kept) {
+    if (k.name === "Knowledge section") {
+      parts.push(`left the Knowledge section alone (${k.reason}); with handoff files on it points at architecture.md and rulings.md, with them off at the Sterling store`);
+      continue;
+    }
     const want = k.name === "Stack tags" ? renderStackTags(stackTags) : renderDomains(stackTags, domainPaths);
     parts.push(`left the ${k.name} line alone (${k.reason}); config says: ${want}`);
   }
@@ -19181,6 +19358,15 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 // scripts/init-impl.mjs
 var pluginRoot = resolve10(dirname13(fileURLToPath4(new URL("../scripts/init-impl.mjs", import.meta.url).href)), "..");
 var pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`usage: node scripts/init.mjs --target <dir> [--project-name <name>]
+  [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
+  [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
+  [--invoking-project <dir>] [--domain-description <domain>=<text>]...
+  [--update-ensure] [--help]
+--target defaults to the current directory. Declaration flags are required only when no recorded config exists.`);
+  process.exit(0);
+}
 var target = resolve10(arg("--target") ?? process.cwd());
 var projectNameFlag = arg("--project-name");
 var stackTagsFlag = (arg("--stack-tags") ?? "").split(",").filter(Boolean);
@@ -19520,7 +19706,16 @@ assertNoDeadTerms(
   "AGENTS.md (template)",
   agentsMdTemplateRaw.slice(0, agentsMdConventionsIdx) + agentsMdTemplateRaw.slice(agentsMdConventionsIdx + CONVENTIONS_TOKEN.length)
 );
-var renderAgentsMd = (conventionsSection) => agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection);
+var knowledgeProjected = null;
+try {
+  knowledgeProjected = isSterlingClone(target, pluginRoot) || readHandoffEnabled(target);
+} catch (err) {
+  if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
+}
+var renderAgentsMd = (conventionsSection) => renderKnowledgeSection(
+  agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection),
+  knowledgeProjected !== false
+);
 var DEFAULT_CONVENTIONS = "(grows only via architecture-altering decision records \u2014 nothing yet)";
 var expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
 var expectedClaudeMd = assertNoDeadTerms("CLAUDE.md", renderClaudeText(readFileSync22(join30(pluginRoot, "templates", "target-claude-md.md"), "utf8"), "templates/target-claude-md.md").replaceAll("{{PROJECT_NAME}}", eff.projectName));
@@ -19714,6 +19909,10 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
     const agentsMdRaw = readFileSync22(agentsMdPath, "utf8");
     const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
     const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
+    const knowledge = knowledgeProjected === null ? { text: refresh.text, refreshed: false, kept: null } : refreshAgentsMdKnowledge(refresh.text, knowledgeProjected);
+    if (knowledge.refreshed) refresh.refreshed.push("Knowledge section");
+    if (knowledge.kept) refresh.kept.push({ name: "Knowledge section", reason: knowledge.kept });
+    refresh.text = knowledge.text;
     if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
     if (refresh.kept.length) {
       items.push({ item: "AGENTS.md", status: "kept", detail: describeAgentsMdRefresh(refresh, facts) });

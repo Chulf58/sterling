@@ -17,7 +17,7 @@
 // tools write on both hosts. An event is weighed once: its key is remembered
 // in DUTIES_REL until it leaves the register.
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
@@ -44,7 +44,7 @@ import {
   systemTodo,
   unmetConceptFamilies,
 } from '../../../scripts/hooks/lib/session-duties.mjs';
-import { gitTouches, loadGeneratedProjections, mintSettlementReconcile, writeGitSettled, writeInitialGitSettled } from '../../../scripts/hooks/lib/settlement.mjs';
+import { gitTouches, hashFile, loadGeneratedProjections, mintSettlementReconcile, writeGitSettled, writeInitialGitSettled } from '../../../scripts/hooks/lib/settlement.mjs';
 import { dispatchState, readDispatchState, readRegister } from '../../../scripts/lib/dispatch-register.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice, pruneShownNotices } from './notices.mjs';
@@ -283,6 +283,39 @@ export function heldKey(why) {
   return `snapshot-not-advanced:${why.replace(/^\d+ /, '').replace(/ \([^()]*\)$/, '')}`;
 }
 
+export const MINTED_REL = '.sterling/transient/settle-minted.json';
+
+/** Identifies the settled snapshot a minted map belongs to, whoever advanced it (this plugin or a Claude Code Stop). */
+const settledId = (settled) => createHash('sha256').update(JSON.stringify(settled)).digest('hex');
+
+/** The path -> content hash map minted while `settled` was held; empty when absent, unreadable or from another snapshot. */
+function readMinted(root, settled) {
+  try {
+    const m = JSON.parse(readFileSync(join(root, MINTED_REL), 'utf8'));
+    return m && m.settled === settledId(settled) && m.paths && typeof m.paths === 'object' && !Array.isArray(m.paths) ? m.paths : {};
+  } catch (e) {
+    if (e?.code !== 'ENOENT') logLine(root, `settle: ${MINTED_REL} could not be read (${errText(e)}); treating it as empty`);
+    return {};
+  }
+}
+
+/**
+ * While a live dispatch holds the snapshot, every settlement sees the same
+ * candidates again. This is idempotence, not relevance (decision
+ * maintenance-queue-noise-keep-mint-on-live-drift-order-triage rejects
+ * relevance judgment at mint): a candidate whose path and content hash were
+ * already minted since the snapshot last advanced is not minted or noticed
+ * again; a changed hash is a new change and mints. The map is kept to the
+ * current candidates, removed when this plugin advances the snapshot, and
+ * ignored when it names another settled snapshot (a Claude Code Stop advanced it).
+ */
+function dedupeHeld(root, git) {
+  const prior = readMinted(root, git.settled);
+  const hashes = new Map(git.candidates.map((c) => [c.path, hashFile(root, c.path) ?? null]));
+  const candidates = git.candidates.filter((c) => !(Object.hasOwn(prior, c.path) && prior[c.path] === hashes.get(c.path)));
+  return { git: { ...git, candidates }, skipped: git.candidates.length - candidates.length, record: { settled: settledId(git.settled), paths: Object.fromEntries(hashes) } };
+}
+
 /** The settle step for one execution; `launchWorkerFor(root, at)` runs after a settlement that did not fail. */
 export function createSettle({ openStore, now, launchWorkerFor }) {
   async function settle(root) {
@@ -301,9 +334,16 @@ export function createSettle({ openStore, now, launchWorkerFor }) {
     let store;
     try {
       store = openStore(join(root, '.sterling', 'sterling.db'));
-      const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
-      const duties = settleDuties(store, root, git, at, { opener: openStore });
-      if (!dispatch.live) writeGitSettled(root, git.next);
+      const held = dispatch.live ? dedupeHeld(root, git) : null;
+      const view = held ? held.git : git;
+      if (held) logLine(root, `settle: snapshot held (${dispatch.why}); ${git.candidates.length} candidate path(s), ${held.skipped} already minted at the same content and skipped`);
+      const minted = mintSettlementReconcile(store, root, view.candidates.map((c) => c.path), at);
+      const duties = settleDuties(store, root, view, at, { opener: openStore });
+      if (held) writeJsonAtomic(join(root, MINTED_REL), held.record);
+      else {
+        writeGitSettled(root, git.next);
+        rmSync(join(root, MINTED_REL), { force: true });
+      }
       if (minted.length) {
         const lines = minted.map((m) => {
           const a = store.get(m.article_id);

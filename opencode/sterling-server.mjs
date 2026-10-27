@@ -4383,14 +4383,24 @@ var init_source_extensions = __esm({
 
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
+  const removedTerminus = rec.retired_reason !== void 0;
+  if (rec.status === "superseded" && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === "active" && rec.superseded_by !== null) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
   }
+  if (removedTerminus && rec.status !== "superseded") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)"
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "retired_reason forbids superseded_by: a removed feature has no successor" });
+  }
 }
-var LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, LIFECYCLE_VALUES, FRESHNESS_VALUES, envelopeFields;
+var LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, LIFECYCLE_VALUES, FRESHNESS_VALUES, envelopeFields, RETIRED_REASONS;
 var init_envelope = __esm({
   "packages/schemas/dist/envelope.js"() {
     "use strict";
@@ -4432,6 +4442,7 @@ var init_envelope = __esm({
       scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
       stack_tags: external_exports.array(external_exports.string())
     };
+    RETIRED_REASONS = ["feature_removed"];
   }
 });
 
@@ -4626,7 +4637,12 @@ var init_records = __esm({
       // Board 6a8507f8: when an instrument-describing article's probe script was
       // last actually RUN — distinct from updated_at (when the record was
       // edited). Optional: most articles describe no probe at all.
-      last_executed: external_exports.string().datetime().optional()
+      last_executed: external_exports.string().datetime().optional(),
+      // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+      // the article is retired with no successor because its feature is gone.
+      // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+      // status 'superseded' and a null superseded_by.
+      retired_reason: external_exports.enum(RETIRED_REASONS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
@@ -5491,7 +5507,7 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6032,6 +6048,7 @@ var init_config = __esm({
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
     OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
     MAINTENANCE_WORKER_ROLE = "maintenance-worker";
+    MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
     DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -12409,6 +12426,56 @@ var init_dist2 = __esm({
         return this.hydrateAll([stored])[0];
       }
       /**
+       * Retire a feature_article WITHOUT a successor because its feature was removed
+       * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire"; it narrows
+       * the in_favor_of-required rule of decision 9948475b for this one shape). The
+       * record is kept: lifecycle retired (served status 'superseded'), no supersedes
+       * edge and so no superseded_by, `retired_reason: 'feature_removed'`, and a
+       * history entry. query() already never serves superseded records.
+       *
+       * `checkEligible` is the caller's eligibility rule (state, files gone on disk,
+       * live dependents: things only the tool layer can see). It runs INSIDE this
+       * write transaction on the record as read under the lock, so a write that
+       * lands between the check and the retirement cannot invalidate the check. It
+       * refuses by throwing; nothing is written then.
+       */
+      retireRemovedFeature(id, at, checkEligible) {
+        this.assertWritable("retireRemovedFeature");
+        let stored;
+        this.tx(() => {
+          this.assertNoMoveInFlight("retireRemovedFeature", [id]);
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireRemovedFeature: no record '${id}' in this store`);
+          if (record.type !== "feature_article") {
+            throw new Error(`retireRemovedFeature: '${id}' is a ${record.type}; only a feature_article can be retired as a removed feature`);
+          }
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireRemovedFeature: record '${id}' is already superseded (retired)`);
+          }
+          checkEligible(record);
+          const history = record.history ?? [];
+          const retired = {
+            ...record,
+            status: "superseded",
+            superseded_by: null,
+            lifecycle: "retired",
+            updated_at: at,
+            retired_reason: "feature_removed",
+            history: [...history, { date: at, event: "retired: feature removed (knowledge_retire reason feature_removed; no successor)" }]
+          };
+          stored = _SterlingStore.storableBody(retired);
+          const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = NULL, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", at, JSON.stringify(stored), id);
+          if (res.changes === 0) {
+            throw new Error(`retireRemovedFeature: record '${id}' was concurrently superseded \u2014 retry`);
+          }
+          this.logActivity("retired", retired, at);
+        });
+        return this.hydrateAll([stored])[0];
+      }
+      /**
        * Hard removal — the P4 path for todos (done = removed by the artifact-write
        * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
        * Removing a SYSTEM-source todo appends to the capped queue drain log
@@ -12920,6 +12987,66 @@ var init_dist2 = __esm({
             entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
           }
         }, { operation_id: randomUUID4() });
+      }
+      /**
+       * Keep the models catalog covering every model the System tab pickers must offer
+       * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
+       * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
+       * models (each role's `model`, and its `opencode_model` and the maintenance worker's
+       * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
+       * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+       * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
+       * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
+       * edited or removed, and nothing is written when nothing is missing. The read-modify-write
+       * runs in one write transaction, so a refresh committed meanwhile is not overwritten.
+       * No catalog yet is a no-op: bootstrapCatalogIfAbsent seeds it.
+       */
+      ensureCatalogPinnedModels(config) {
+        const find = () => this.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
+        const cfg = config;
+        const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
+        const refs = /* @__PURE__ */ new Set();
+        const addPins = (v) => {
+          if (v?.model)
+            claude.add(v.model);
+          if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
+            refs.add(v.opencode_model);
+        };
+        for (const v of Object.values(parseConfig({}).models))
+          addPins(v);
+        for (const v of Object.values(cfg.models ?? {}))
+          addPins(v);
+        addPins({ opencode_model: cfg.maintenance_worker?.opencode_model });
+        const missingIn = (rec) => {
+          const have = new Set(rec.catalog.entries.map((e) => `${e.vendor ?? "anthropic"}/${e.id}`));
+          const out = [];
+          for (const id of claude) {
+            if (have.has(`anthropic/${id}`))
+              continue;
+            have.add(`anthropic/${id}`);
+            out.push({ id, label: id, tier: "unknown", status: "active" });
+          }
+          for (const ref of refs) {
+            if (have.has(ref))
+              continue;
+            have.add(ref);
+            const at = ref.indexOf("/");
+            out.push({ id: ref.slice(at + 1), label: ref.slice(at + 1), tier: "unknown", status: "active", vendor: ref.slice(0, at) });
+          }
+          return out;
+        };
+        const peek = find();
+        if (!peek || missingIn(peek).length === 0)
+          return;
+        this.withTransaction(() => {
+          const rec = find();
+          if (!rec)
+            return;
+          const missing = missingIn(rec);
+          if (missing.length === 0)
+            return;
+          this.updateRecord(rec.id, { ...rec, catalog: { ...rec.catalog, entries: [...rec.catalog.entries, ...missing] } });
+        });
       }
       /**
        * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -17780,7 +17907,7 @@ var WORKER_TOOLS = [
   mcp("maintenance_remove"),
   mcp("knowledge_line_ref_fix"),
   mcpPlugin("knowledge_line_ref_fix"),
-  ...[...WRITE_GRANT, "knowledge_query", "knowledge_schema"].flatMap((t) => [mcp(t), mcpPlugin(t)]),
+  ...[...WRITE_GRANT, "knowledge_query", "knowledge_schema", "knowledge_preflight"].flatMap((t) => [mcp(t), mcpPlugin(t)]),
   "Read",
   "Grep",
   "WebSearch",
@@ -18230,7 +18357,7 @@ var OPENCODE_ALLOWED_TOOLS = [
   "grep",
   "webfetch",
   "websearch",
-  ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix", "knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove", "knowledge_query", "knowledge_schema"].map((v) => `${SERVER2}_${v}`)
+  ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix", "knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove", "knowledge_query", "knowledge_schema", "knowledge_preflight"].map((v) => `${SERVER2}_${v}`)
 ];
 var WORKER_EFFORT_ENV = "STERLING_MAINTENANCE_WORKER_EFFORT";
 var WORKER_EFFORT_MODEL_ENV = "STERLING_MAINTENANCE_WORKER_EFFORT_MODEL";
@@ -26082,7 +26209,7 @@ ${line}`;
 
 // packages/opencode-plugin/src/settle.mjs
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash10, randomUUID as randomUUID13 } from "node:crypto";
 import { existsSync as existsSync30, mkdirSync as mkdirSync22, readFileSync as readFileSync30, renameSync as renameSync12, rmSync as rmSync15, writeFileSync as writeFileSync16 } from "node:fs";
 import { dirname as dirname20, join as join49 } from "node:path";
 init_dist();
@@ -26685,6 +26812,23 @@ function liveDispatch(root) {
 function heldKey(why) {
   return `snapshot-not-advanced:${why.replace(/^\d+ /, "").replace(/ \([^()]*\)$/, "")}`;
 }
+var MINTED_REL = ".sterling/transient/settle-minted.json";
+var settledId = (settled) => createHash10("sha256").update(JSON.stringify(settled)).digest("hex");
+function readMinted(root, settled) {
+  try {
+    const m = JSON.parse(readFileSync30(join49(root, MINTED_REL), "utf8"));
+    return m && m.settled === settledId(settled) && m.paths && typeof m.paths === "object" && !Array.isArray(m.paths) ? m.paths : {};
+  } catch (e) {
+    if (e?.code !== "ENOENT") logLine(root, `settle: ${MINTED_REL} could not be read (${errText2(e)}); treating it as empty`);
+    return {};
+  }
+}
+function dedupeHeld(root, git) {
+  const prior = readMinted(root, git.settled);
+  const hashes = new Map(git.candidates.map((c) => [c.path, hashFile(root, c.path) ?? null]));
+  const candidates = git.candidates.filter((c) => !(Object.hasOwn(prior, c.path) && prior[c.path] === hashes.get(c.path)));
+  return { git: { ...git, candidates }, skipped: git.candidates.length - candidates.length, record: { settled: settledId(git.settled), paths: Object.fromEntries(hashes) } };
+}
 function createSettle({ openStore, now, launchWorkerFor }) {
   async function settle(root) {
     pruneShownNotices(root);
@@ -26702,9 +26846,16 @@ function createSettle({ openStore, now, launchWorkerFor }) {
     let store;
     try {
       store = openStore(join49(root, ".sterling", "sterling.db"));
-      const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
-      const duties = settleDuties(store, root, git, at, { opener: openStore });
-      if (!dispatch.live) writeGitSettled(root, git.next);
+      const held = dispatch.live ? dedupeHeld(root, git) : null;
+      const view = held ? held.git : git;
+      if (held) logLine(root, `settle: snapshot held (${dispatch.why}); ${git.candidates.length} candidate path(s), ${held.skipped} already minted at the same content and skipped`);
+      const minted = mintSettlementReconcile(store, root, view.candidates.map((c) => c.path), at);
+      const duties = settleDuties(store, root, view, at, { opener: openStore });
+      if (held) writeJsonAtomic2(join49(root, MINTED_REL), held.record);
+      else {
+        writeGitSettled(root, git.next);
+        rmSync15(join49(root, MINTED_REL), { force: true });
+      }
       if (minted.length) {
         const lines = minted.map((m) => {
           const a = store.get(m.article_id);

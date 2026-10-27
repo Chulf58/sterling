@@ -61,7 +61,7 @@ export const OPENCODE_ALLOWED_TOOLS = [
   'grep',
   'webfetch',
   'websearch',
-  ...['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix', 'knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove', 'knowledge_query', 'knowledge_schema'].map((v) => `${SERVER}_${v}`),
+  ...['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix', 'knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove', 'knowledge_query', 'knowledge_schema', 'knowledge_preflight'].map((v) => `${SERVER}_${v}`),
 ];
 /** The allow-list: '*' denied first, then each allowed key (last match wins),
  *  so a tool OpenCode adds later is denied by default. */
@@ -75,7 +75,7 @@ export const OPENCODE_PROMPT_NOTE =
 /** The tools sentence of templates/maintenance-worker-prompt.md, which the
  *  claude host sends unchanged. */
 export const CLAUDE_TOOLS_LINE =
-  'Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__knowledge_query, mcp__sterling__knowledge_schema, mcp__sterling__maintenance_remove, mcp__sterling__knowledge_update, mcp__sterling__knowledge_edit, mcp__sterling__knowledge_append, mcp__sterling__knowledge_array_remove, mcp__sterling__knowledge_line_ref_fix, Read, Grep, WebSearch and WebFetch. Nothing else is granted, so do not try other tools.';
+  'Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__knowledge_query, mcp__sterling__knowledge_schema, mcp__sterling__knowledge_preflight, mcp__sterling__maintenance_remove, mcp__sterling__knowledge_update, mcp__sterling__knowledge_edit, mcp__sterling__knowledge_append, mcp__sterling__knowledge_array_remove, mcp__sterling__knowledge_line_ref_fix, Read, Grep, WebSearch and WebFetch. Nothing else is granted, so do not try other tools.';
 /** Its OpenCode replacement. The model sees no mcp__sterling__* tool here, only
  *  `execute`: told "nothing else is granted" with the execute route mentioned
  *  only in the trailing note, openai/gpt-6-luna made no tool call in 2 of 2 live
@@ -85,7 +85,7 @@ export const CLAUDE_TOOLS_LINE =
  *  seconds later, with or without the worker agent; a model that trusts the
  *  first view reports the tools missing, so the line says to retry. */
 export const OPENCODE_TOOLS_LINE =
-  "Tools you may use: OpenCode's `execute` tool, which is the one permitted way to reach the Sterling tools. Inside execute, call them as tools.sterling.maintenance_query, tools.sterling.knowledge_get, tools.sterling.knowledge_query, tools.sterling.knowledge_schema, tools.sterling.maintenance_remove, tools.sterling.knowledge_update, tools.sterling.knowledge_edit, tools.sterling.knowledge_append, tools.sterling.knowledge_array_remove and tools.sterling.knowledge_line_ref_fix, one Sterling call per execute call; the mcp__sterling__<name> names below are these same tools. The Sterling tools load a few seconds after the session starts, so if execute reports no Code Mode tools, read one of the item's file_keys first and then call execute again; never conclude they are unavailable before that. Read is the read tool ({ path }), Grep is the grep tool ({ pattern, path }), WebFetch is the webfetch tool and WebSearch is the websearch tool. Nothing else is granted, so do not try other tools.";
+  "Tools you may use: OpenCode's `execute` tool, which is the one permitted way to reach the Sterling tools. Inside execute, call them as tools.sterling.maintenance_query, tools.sterling.knowledge_get, tools.sterling.knowledge_query, tools.sterling.knowledge_schema, tools.sterling.knowledge_preflight, tools.sterling.maintenance_remove, tools.sterling.knowledge_update, tools.sterling.knowledge_edit, tools.sterling.knowledge_append, tools.sterling.knowledge_array_remove and tools.sterling.knowledge_line_ref_fix, one Sterling call per execute call; the mcp__sterling__<name> names below are these same tools. The Sterling tools load a few seconds after the session starts, so if execute reports no Code Mode tools, read one of the item's file_keys first and then call execute again; never conclude they are unavailable before that. Read is the read tool ({ path }), Grep is the grep tool ({ pattern, path }), WebFetch is the webfetch tool and WebSearch is the websearch tool. Nothing else is granted, so do not try other tools.";
 
 /** The OpenCode prompt: the shipped prompt with its tools line rewritten for
  *  this host, plus the host note. A prompt without the shipped tools line is

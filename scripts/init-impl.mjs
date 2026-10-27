@@ -55,7 +55,7 @@ import { setupOpenCode } from './lib/opencode-install.mjs';
 import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
 import { renderClaudeText } from './lib/agent-fences.mjs';
-import { renderStackTags, renderDomains, refreshAgentsMdFacts, describeAgentsMdRefresh } from './lib/agents-md-facts.mjs';
+import { renderStackTags, renderDomains, refreshAgentsMdFacts, describeAgentsMdRefresh, renderKnowledgeSection, refreshAgentsMdKnowledge } from './lib/agents-md-facts.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,6 +70,15 @@ const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // '' must behave as unset too (matches STERLING_CODEX_PROBE's falsy convention) —
 // ?? alone would let '' survive and silently disable the plugin-repo branch.
 const pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log(`usage: node scripts/init.mjs --target <dir> [--project-name <name>]
+  [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
+  [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
+  [--invoking-project <dir>] [--domain-description <domain>=<text>]...
+  [--update-ensure] [--help]
+--target defaults to the current directory. Declaration flags are required only when no recorded config exists.`);
+  process.exit(0);
+}
 const target = resolve(arg('--target') ?? process.cwd());
 const projectNameFlag = arg('--project-name');
 const stackTagsFlag = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
@@ -597,7 +606,20 @@ assertNoDeadTerms(
   'AGENTS.md (template)',
   agentsMdTemplateRaw.slice(0, agentsMdConventionsIdx) + agentsMdTemplateRaw.slice(agentsMdConventionsIdx + CONVENTIONS_TOKEN.length),
 );
-const renderAgentsMd = (conventionsSection) => agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection);
+// The Knowledge section points at architecture.md/rulings.md only when those files are projected:
+// handoff on, or the Sterling clone (own projections). Handoff off says the knowledge is in the
+// store (GitHub #218). A setting that cannot be read leaves the template's
+// projection wording and the refresh alone; the handoff gate below refuses it as a row.
+let knowledgeProjected = null;
+try {
+  knowledgeProjected = isSterlingClone(target, pluginRoot) || readHandoffEnabled(target);
+} catch (err) {
+  if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
+}
+const renderAgentsMd = (conventionsSection) => renderKnowledgeSection(
+  agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection),
+  knowledgeProjected !== false,
+);
 const DEFAULT_CONVENTIONS = '(grows only via architecture-altering decision records — nothing yet)';
 const expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
 
@@ -854,6 +876,13 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
     const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
     const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
     const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
+    // The Knowledge section follows the handoff setting the same way, never over a hand edit.
+    const knowledge = knowledgeProjected === null
+      ? { text: refresh.text, refreshed: false, kept: null }
+      : refreshAgentsMdKnowledge(refresh.text, knowledgeProjected);
+    if (knowledge.refreshed) refresh.refreshed.push('Knowledge section');
+    if (knowledge.kept) refresh.kept.push({ name: 'Knowledge section', reason: knowledge.kept });
+    refresh.text = knowledge.text;
     if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
     if (refresh.kept.length) {
       items.push({ item: 'AGENTS.md', status: 'kept', detail: describeAgentsMdRefresh(refresh, facts) });

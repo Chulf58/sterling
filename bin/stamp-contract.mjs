@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync3, realpathSync as realpathSync3 } from "node:fs";
-import { join as join7, dirname as dirname2, resolve as resolve3 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync4, realpathSync as realpathSync4 } from "node:fs";
+import { join as join9, dirname as dirname3, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -4153,12 +4153,23 @@ var envelopeFields = {
   scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
   stack_tags: external_exports.array(external_exports.string())
 };
+var RETIRED_REASONS = ["feature_removed"];
 function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
+  const removedTerminus = rec.retired_reason !== void 0;
+  if (rec.status === "superseded" && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === "active" && rec.superseded_by !== null) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
+  }
+  if (removedTerminus && rec.status !== "superseded") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)"
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "retired_reason forbids superseded_by: a removed feature has no successor" });
   }
 }
 
@@ -4316,7 +4327,12 @@ var featureArticleSchema = base.extend({
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
-  last_executed: external_exports.string().datetime().optional()
+  last_executed: external_exports.string().datetime().optional(),
+  // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+  // the article is retired with no successor because its feature is gone.
+  // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+  // status 'superseded' and a null superseded_by.
+  retired_reason: external_exports.enum(RETIRED_REASONS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
@@ -6214,7 +6230,13 @@ function historicalVariants({
   git = (args) => spawnSync("git", args, { cwd: repoRoot2, encoding: "utf8" })
 }) {
   const fromGit = gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git });
-  if (fromGit) return fromGit;
+  if (fromGit) {
+    const shipped = loadSnapshot(join5(repoRoot2, CONTRACT_HISTORY_REL));
+    if (shipped.ok) {
+      for (const lead of leads) for (const block of shipped.blocks[lead] ?? []) fromGit.get(lead).add(block);
+    }
+    return fromGit;
+  }
   const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
   const snapshot = loadSnapshot(join5(repoRoot2, CONTRACT_HISTORY_REL));
   if (!snapshot.ok) {
@@ -6230,9 +6252,53 @@ function historicalVariants({
   return variants2;
 }
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync3, realpathSync as realpathSync3, statSync } from "node:fs";
+import { basename, dirname as dirname2, join as join7, resolve as resolve3 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join6 } from "node:path";
+var CONFIG_REL = join6(".sterling", "config.json");
+var STORE_DB_REL = join6(".sterling", "sterling.db");
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve3(cwd, gitDir));
+  const commonReal = real(resolve3(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve3(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname2(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+
 // scripts/lib/contract-bullets.mjs
 import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join8 } from "node:path";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -6546,7 +6612,7 @@ function extractTemplateBlock(text, lead) {
   return extractBlock(renderClaudeText(text, "template"), lead);
 }
 function readTemplateBullets(repoRoot2) {
-  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join6(repoRoot2, rel), "utf8")]));
+  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join8(repoRoot2, rel), "utf8")]));
   const leadLayer2 = /* @__PURE__ */ new Map();
   const current2 = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
@@ -6559,15 +6625,40 @@ function readTemplateBullets(repoRoot2) {
 }
 
 // scripts/stamp-contract.mjs
+var USAGE = "usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...] [--help]";
+var KNOWN_FLAGS = /* @__PURE__ */ new Set(["--apply", "--apply-inserts", "--verbose", "--project"]);
+var argv = process.argv.slice(2);
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(USAGE);
+  process.exit(0);
+}
+for (const a of argv) {
+  if (a.startsWith("-") && !KNOWN_FLAGS.has(a)) {
+    console.error(`stamp-contract: unknown option ${a}
+${USAGE}`);
+    process.exit(2);
+  }
+}
 var APPLY = process.argv.includes("--apply");
 var APPLY_INSERTS = !APPLY && process.argv.includes("--apply-inserts");
 var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve3(process.argv[++i]));
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve4(process.argv[++i]));
 }
-var repoRoot = join7(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var realOrResolved = (path) => {
+  try {
+    return realpathSync4(path);
+  } catch {
+    return resolve4(path);
+  }
+};
+var projectTargets = onlyProjects.map((value) => {
+  const linked = resolveLinkedWorktree(value);
+  return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
+});
+var repoRoot = join9(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
 function withOriginalEols(raw, finalLf) {
   const pieces = raw.split("\n");
@@ -6636,9 +6727,10 @@ try {
 } finally {
   registry.close();
 }
-var selfPath = realpathSync3(repoRoot);
+var selfPath = realpathSync4(repoRoot);
 var results = [];
 var drift = 0;
+var matchedProjects = /* @__PURE__ */ new Set();
 var inSync = 0;
 function record(r) {
   results.push(r);
@@ -6664,23 +6756,31 @@ function record(r) {
   }
 }
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
-for (const p of projects) {
-  const repo = p.repo_path;
-  if (onlyProjects.length && !onlyProjects.includes(resolve3(repo))) continue;
-  if (!existsSync3(repo)) {
-    record({ project: p.name, status: "missing_path", detail: repo });
+function stampDirs(p) {
+  if (!onlyProjects.length) return [p.repo_path];
+  const hits = projectTargets.filter((t) => t.match === resolve4(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  for (const t of hits) matchedProjects.add(t.value);
+  if (!hits.length) return null;
+  const worktrees = hits.filter((t) => t.worktree);
+  return worktrees.length ? worktrees.map((t) => t.dir) : [p.repo_path];
+}
+var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
+for (const { p, dir: repo } of work) {
+  const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
+  if (!existsSync4(repo)) {
+    record({ project: projectLabel, status: "missing_path", detail: repo });
     continue;
   }
-  if (realpathSync3(repo) === selfPath) continue;
-  const agentsMd = join7(repo, "AGENTS.md");
-  const claudeMd = join7(repo, "CLAUDE.md");
-  if (!existsSync3(agentsMd)) {
-    record({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
+  if (realpathSync4(repo) === selfPath) continue;
+  const agentsMd = join9(repo, "AGENTS.md");
+  const claudeMd = join9(repo, "CLAUDE.md");
+  if (!existsSync4(agentsMd)) {
+    record({ project: projectLabel, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
-  if (!existsSync3(claudeMd)) {
-    record({ project: p.name, status: "no_claude_md", detail: claudeMd });
+  if (!existsSync4(claudeMd)) {
+    record({ project: projectLabel, status: "no_claude_md", detail: claudeMd });
     drift++;
     continue;
   }
@@ -6825,13 +6925,18 @@ for (const p of projects) {
       }
     }
   }
-  record({ project: p.name, status: "processed", file: `${agentsMd} + ${claudeMd}`, actions });
+  record({ project: projectLabel, status: "processed", file: `${agentsMd} + ${claudeMd}`, actions });
 }
 var processed = results.filter((r) => r.status === "processed").length;
 console.log(
   `
 ${APPLY ? "APPLIED" : APPLY_INSERTS ? "INSERTS APPLIED (new text only; existing wording is never replaced without --apply)" : "DRY-RUN (no writes; pass --apply)"} \u2014 ${processed} project(s) processed, ${inSync} already in sync, ${drift} refusal(s).` + (!VERBOSE && inSync ? " Pass --verbose to list the in-sync bullets." : "")
 );
+var unmatched = onlyProjects.filter((p) => !matchedProjects.has(p));
+if (unmatched.length) {
+  console.error(`stamp-contract: --project matched no registered project: ${unmatched.join(", ")} (the value must equal a registered repo_path)`);
+  process.exit(2);
+}
 if (drift) {
   console.error("stamp-contract: refused above \u2014 resolve each by hand (sibling text that differs from every template version, a missing anchor, or a file that could not be written) and re-run.");
   process.exit(2);

@@ -1107,6 +1107,135 @@ test('AC8 bootstrap BOUNDARY: empty config.models never throws, fabricates no ID
   }
 });
 
+// --- ensureCatalogPinnedModels (GitHub #208) -------------------------------
+
+/** create() requires reference_material dates, which the status-only fixture omits. */
+function withDates<T extends object>(rec: T): T & { source_date: string; capture_date: string } {
+  return { ...rec, source_date: NOW.slice(0, 10), capture_date: NOW.slice(0, 10) };
+}
+
+test('#208 ensure: a pinned id missing from an existing catalog is appended; existing entries are untouched', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(withDates(catalogRecordAt(NOW, [{ id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' }])) as never);
+    store.ensureCatalogPinnedModels({ models: { coder: { model: 'claude-opus-4-8' }, scout: { model: 'claude-zzz-9' } } });
+
+    const cats = catalogRecords(store);
+    assert.equal(cats.length, 1, 'the catalog is updated in place, not duplicated');
+    const entries = (cats[0].catalog as { entries: Record<string, unknown>[] }).entries;
+    assert.deepEqual(entries[0], { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' }, 'existing entry is not edited');
+    assert.deepEqual(entries.find((e) => e.id === 'claude-zzz-9'), { id: 'claude-zzz-9', label: 'claude-zzz-9', tier: 'unknown', status: 'active' });
+    assert.ok(entries.some((e) => e.id === 'claude-sonnet-5-5'), 'the maintenance worker model is always covered');
+    assert.equal(new Set(entries.map((e) => e.id)).size, entries.length, 'nothing duplicated');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#208 ensure: a project that overrides every role still gets the shipped default ids', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(withDates(catalogRecordAt(NOW, [])) as never);
+    store.ensureCatalogPinnedModels({ models: { implementor: { model: 'claude-zzz-9' } } });
+    const entries = (catalogRecords(store)[0].catalog as { entries: { id: string; vendor?: string }[] }).entries;
+    for (const id of ['claude-opus-5-5', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-zzz-9']) {
+      assert.ok(entries.some((e) => e.id === id && e.vendor === undefined), `${id} is offered`);
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#208 ensure: OpenCode pins (role and maintenance worker) are added as vendor entries, once', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(withDates(catalogRecordAt(NOW, [{ id: 'gpt-6-astra', label: 'Astra', tier: 'x', status: 'active', vendor: 'openai' } as never])) as never);
+    store.ensureCatalogPinnedModels({
+      models: { implementor: { model: 'claude-sonnet-5-5', opencode_model: 'openai/gpt-5.6-terra' } },
+      maintenance_worker: { opencode_model: 'openai/gpt-5.6-mini' },
+    });
+    const entries = (catalogRecords(store)[0].catalog as { entries: { id: string; vendor?: string; label: string }[] }).entries;
+    const openai = entries.filter((e) => e.vendor === 'openai').map((e) => e.id).sort();
+    assert.deepEqual(openai, ['gpt-5.6-mini', 'gpt-5.6-terra', 'gpt-6-astra', 'gpt-6.1-sol'], 'shipped reviewer/sparring pins plus configured ones; the existing astra entry is not duplicated');
+    assert.equal(entries.find((e) => e.id === 'gpt-6-astra')?.label, 'Astra', 'existing vendor entry untouched');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#208 ensure: a Claude pin and an anthropic/ OpenCode pin for the same model yield one entry', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(withDates(catalogRecordAt(NOW, [])) as never);
+    store.ensureCatalogPinnedModels({ models: { implementor: { model: 'claude-sonnet-5-5', opencode_model: 'anthropic/claude-sonnet-5-5' } } });
+    const entries = (catalogRecords(store)[0].catalog as { entries: { id: string }[] }).entries;
+    assert.equal(entries.filter((e) => e.id === 'claude-sonnet-5-5').length, 1, 'one identity, one entry');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#208 ensure: an update committed between the read and the write is merged, not overwritten', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(withDates(catalogRecordAt(NOW, [])) as never);
+    // After the first catalog read (the unlocked peek), a refresh commits a new entry.
+    const realQuery = store.query.bind(store);
+    let interleaved = false;
+    (store as unknown as { query: typeof store.query }).query = ((...a: Parameters<typeof store.query>) => {
+      const out = realQuery(...a);
+      if (!interleaved) {
+        interleaved = true;
+        const rec = (out as unknown as Record<string, unknown>[]).find((r) => r.catalog) as Record<string, unknown>;
+        store.updateRecord(rec.id as string, { ...rec, catalog: { entries: [...(rec.catalog as { entries: unknown[] }).entries, { id: 'claude-refreshed-1', label: 'R', tier: 't', status: 'active' }] } });
+      }
+      return out;
+    }) as typeof store.query;
+    store.ensureCatalogPinnedModels({ models: {} });
+    (store as unknown as { query: typeof store.query }).query = realQuery;
+
+    assert.ok(interleaved, 'the interleaving ran');
+    const ids = (catalogRecords(store)[0].catalog as { entries: { id: string }[] }).entries.map((e) => e.id);
+    assert.ok(ids.includes('claude-refreshed-1'), 'the interleaved refresh entry survives');
+    assert.ok(ids.includes('claude-opus-5-5'), 'and the pinned ids were still added');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#208 ensure: a second call writes nothing (no new version)', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(withDates(catalogRecordAt(NOW)) as never);
+    const config = { models: { coder: { model: 'claude-zzz-9' } } };
+    store.ensureCatalogPinnedModels(config);
+    const first = catalogRecords(store)[0];
+    store.ensureCatalogPinnedModels(config);
+    const second = catalogRecords(store)[0];
+    assert.equal(second.version, first.version, 'no write when every pinned id is already present');
+    assert.deepEqual(second.catalog, first.catalog);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#208 ensure: with no catalog it is a no-op (bootstrap owns seeding)', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.ensureCatalogPinnedModels({ models: MODELS });
+    assert.equal(catalogRecords(store).length, 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- enqueueRefreshReferenceOnce ------------------------------------------
 
 test('AC8 enqueue: creates exactly ONE refresh_reference system maintenance item', () => {

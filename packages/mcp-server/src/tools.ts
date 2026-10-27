@@ -50,6 +50,7 @@ import {
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
+import { RETIRED_REASONS } from '@sterling/schemas';
 import { HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, handoffEvidenceSchema, todoHandoffSchema, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
@@ -1187,7 +1188,22 @@ const PARKED_REF_PROBE_CAP = 40;
 // confirmation of anything — it degrades to the same reconcile_needed reading
 // as 'confirmed_absent', never to the new, more assertive deletion_candidate
 // lane, because a failed probe proves nothing.
-type MissingFileProbe = { status: 'parked'; ref: string } | { status: 'never_tracked' | 'confirmed_absent' | 'probe_failed' };
+type MissingFileProbe =
+  | { status: 'parked'; ref: string }
+  | { status: 'never_tracked' | 'confirmed_absent' }
+  // `detail` is set only by the strict probe (parkedOnRef's strict option): what git could not answer.
+  | { status: 'probe_failed'; detail?: string };
+
+/** Thrown inside parkedOnRef's strict probe when git gives neither a yes nor a no. */
+class ParkProbeInconclusive extends Error {}
+
+/** One line saying why a git call did not answer: the spawn error, its stderr, or its exit status. */
+function gitFailure(r: { status: number | null; stderr?: string | Buffer; error?: Error } | undefined): string {
+  if (!r) return 'git could not be started';
+  if (r.error) return r.error.message;
+  const err = typeof r.stderr === 'string' ? r.stderr.trim().split('\n')[0] : '';
+  return err || `exit ${r.status}`;
+}
 // board-provenance-measured-at-head: the ONE git log --name-only walk
 // board_query runs per call (never per item) is bounded by this many commits
 // back from HEAD, so a repo with a long history cannot turn one query into an
@@ -1504,6 +1520,9 @@ export const WRITE_REFUSED_FIELDS: readonly string[] = [
   'lifecycle',
   'freshness',
   'file_baselines',
+  // A removed-feature terminus (GitHub #217): written only by
+  // knowledge_retire(id, reason: 'feature_removed') after its eligibility check.
+  'retired_reason',
   // R9 (board 8c8b6d78): the attestation map is drift PROVENANCE — "the close of
   // maintenance item X attested that this article's prose already describes these
   // bytes, observed against commit Y". It is minted only by the attestation branch
@@ -2373,8 +2392,19 @@ export class SterlingTools {
    * the classic reconcile_needed reading) even though no live tip holds it. A
    * probe that could not run proved nothing, so it gets the old, safer reading
    * rather than the new, more assertive one.
+   *
+   * STRICT (`{ strict: true }`, used only by knowledge_retire's feature_removed
+   * eligibility, GitHub #217): that caller retires a record on a "not parked"
+   * answer, so a best-effort answer is not enough. The strict probe scans EVERY
+   * local branch (no PARKED_REF_PROBE_CAP), addresses each by its full refname
+   * so a same-named tag cannot answer for it, reads presence with ls-tree (exit
+   * 0 with no entry is absent; cat-file -e cannot tell absent from a failure),
+   * and turns every git result that is neither yes nor no into probe_failed with
+   * a `detail` naming the command. The read paths call it without the option
+   * and keep the behaviour described above.
    */
-  private parkedOnRef(rel: string, treeRoot: string): MissingFileProbe {
+  private parkedOnRef(rel: string, treeRoot: string, opts: { strict?: boolean } = {}): MissingFileProbe {
+    const strict = opts.strict === true;
     const run = (args: string[]) => {
       try {
         return spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
@@ -2389,8 +2419,18 @@ export class SterlingTools {
     // the old reconcile_needed reading, the second is what earns the new
     // deletion_candidate lane.
     const repoCheck = run(['rev-parse', '--is-inside-work-tree']);
-    if (repoCheck?.status !== 0) return { status: 'probe_failed' };
-    const has = (ref: string): boolean => run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
+    if (repoCheck?.status !== 0) {
+      return strict ? { status: 'probe_failed', detail: `git rev-parse in ${treeRoot}: ${gitFailure(repoCheck)}` } : { status: 'probe_failed' };
+    }
+    const inconclusive = (what: string, r: ReturnType<typeof run>): never => {
+      throw new ParkProbeInconclusive(`git ${what}: ${gitFailure(r)}`);
+    };
+    const has = (ref: string): boolean => {
+      if (!strict) return run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
+      const r = run(['ls-tree', '--full-tree', ref, '--', rel]);
+      if (r?.status !== 0 || typeof r.stdout !== 'string') return inconclusive(`ls-tree ${ref}`, r);
+      return r.stdout.trim().length > 0;
+    };
     const resolveBase = (): string | undefined => {
       const symbolic = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
       if (symbolic?.status === 0 && typeof symbolic.stdout === 'string') {
@@ -2405,6 +2445,7 @@ export class SterlingTools {
     };
     const isMergedIntoBase = (branch: string, base: string): boolean => {
       const r = run(['merge-base', '--is-ancestor', branch, base]);
+      if (strict && r?.status !== 0 && r?.status !== 1) return inconclusive(`merge-base --is-ancestor ${branch} ${base}`, r);
       return r?.status === 0;
     };
     // INHERITED COPY, NOT A PARK (GitHub #121). If the merge base of HEAD and
@@ -2424,13 +2465,15 @@ export class SterlingTools {
     // drop it.
     const treeEntry = (ref: string): string | undefined => {
       const r = run(['ls-tree', '--full-tree', ref, '--', rel]);
-      if (r?.status !== 0 || typeof r.stdout !== 'string') return undefined;
+      if (r?.status !== 0 || typeof r.stdout !== 'string') return strict ? inconclusive(`ls-tree ${ref}`, r) : undefined;
       const line = r.stdout.split('\n')[0] ?? '';
       const tab = line.indexOf('\t');
       return tab > 0 ? line.slice(0, tab) : undefined; // "<mode> <type> <object id>"
     };
     const inheritedFromMergeBase = (branch: string): boolean => {
       const mb = run(['merge-base', 'HEAD', branch]);
+      // Exit 1 is git's "no merge base" (unrelated histories): a definite answer that keeps the park.
+      if (strict && mb?.status !== 0 && mb?.status !== 1) return inconclusive(`merge-base HEAD ${branch}`, mb);
       if (mb?.status !== 0 || typeof mb.stdout !== 'string') return false;
       const sha = mb.stdout.trim();
       if (!sha) return false;
@@ -2440,18 +2483,25 @@ export class SterlingTools {
     };
     try {
       if (has('HEAD')) return { status: 'parked', ref: 'HEAD' };
-      const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
-      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return { status: 'probe_failed' };
-      const branches = refs.stdout
+      // strict lists FULL refnames and uses them unchanged in every git call: a
+      // branch that shares its name with a tag prints as 'heads/<name>' under
+      // :short, so rebuilding a full name from the short form addresses a ref
+      // that does not exist. The short name is only for display and the base
+      // comparison.
+      const refs = run(['for-each-ref', `--format=${strict ? '%(refname)' : '%(refname:short)'}`, 'refs/heads']);
+      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return strict ? inconclusive('for-each-ref refs/heads', refs) : { status: 'probe_failed' };
+      const listed = refs.stdout
         .split('\n')
         .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, PARKED_REF_PROBE_CAP);
+        .filter(Boolean);
+      const branches = strict ? listed : listed.slice(0, PARKED_REF_PROBE_CAP);
       const base = resolveBase();
-      for (const b of branches) {
-        if (!has(b)) continue;
-        if (base !== undefined && b !== base && isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
-        if (inheritedFromMergeBase(b)) continue; // deleted on this line of history — the deletion lands with it (#121)
+      for (const listedRef of branches) {
+        const ref = listedRef;
+        const b = strict && listedRef.startsWith('refs/heads/') ? listedRef.slice('refs/heads/'.length) : listedRef;
+        if (!has(ref)) continue;
+        if (base !== undefined && b !== base && isMergedIntoBase(ref, base)) continue; // fully merged into base — not a park
+        if (inheritedFromMergeBase(ref)) continue; // deleted on this line of history — the deletion lands with it (#121)
         return { status: 'parked', ref: b }; // base or an unmerged branch added it after the lines diverged
       }
       // NOT parked on any ref TIP scanned. A tip-only scan cannot tell "deleted,
@@ -2470,10 +2520,11 @@ export class SterlingTools {
       // a real deletion finding) — never inflate into a false never_tracked).
       // One subprocess per already-rare missing file is the accepted cost here.
       const history = run(['rev-list', '--all', '--', rel]);
-      if (history?.status !== 0 || typeof history.stdout !== 'string') return { status: 'probe_failed' };
+      if (history?.status !== 0 || typeof history.stdout !== 'string') return strict ? inconclusive('rev-list --all', history) : { status: 'probe_failed' };
       return { status: history.stdout.trim().length > 0 ? 'confirmed_absent' : 'never_tracked' };
-    } catch {
-      return { status: 'probe_failed' };
+    } catch (err) {
+      if (strict && err instanceof ParkProbeInconclusive) return { status: 'probe_failed', detail: err.message };
+      return strict ? { status: 'probe_failed', detail: (err as Error).message } : { status: 'probe_failed' };
     }
   }
 
@@ -7012,7 +7063,7 @@ export class SterlingTools {
       full = this.archivedVersion(record, options.version) as DurableRecord;
     } else if (record.status === 'superseded') {
       const terminus = this.store.resolveTerminus(record.id);
-      if (terminus) full = { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
+      if (terminus) full = { ...record, terminus: this.withRemovedFeatureLabel(record, terminus) } as DurableRecord & { terminus: typeof terminus };
     }
 
     // Additive INBOUND supersedes disclosure (board c6e3561f part (a)):
@@ -7044,6 +7095,25 @@ export class SterlingTools {
     }
 
     return this.projectFieldWindow(served, options);
+  }
+
+  /**
+   * Adds `retired: 'feature removed'` to a terminus that ENDS at an intentional
+   * removed-feature retirement (GitHub #217): the walk reached its end (not
+   * truncated) at a superseded record that has no successor and carries
+   * retired_reason 'feature_removed'. A truncated walk (cycle, hop cap, or a
+   * successor no readable store holds) and a superseded record with no successor
+   * and no reason (a broken chain) are left unlabelled.
+   */
+  private withRemovedFeatureLabel<T extends { id: string; status: string; truncated?: boolean }>(
+    record: DurableRecord,
+    terminus: T
+  ): T | (T & { retired: 'feature removed' }) {
+    if (terminus.truncated || terminus.status !== 'superseded') return terminus;
+    const end = terminus.id === record.id ? record : this.store.get(terminus.id);
+    const reason = (end as unknown as { retired_reason?: unknown } | undefined)?.retired_reason;
+    if (!end || end.superseded_by !== null || reason !== 'feature_removed') return terminus;
+    return { ...terminus, retired: 'feature removed' as const };
   }
 
   /** knowledge_render's ids[] bound (board efe6f3fc): 1–20, refused loudly naming the bound. */
@@ -13349,8 +13419,30 @@ export class SterlingTools {
    * thing and the reader needs to be sent to the survivor. Requiring the survivor
    * means a retired record always forwards somewhere, so an old citation lands on
    * the right record instead of dangling.
+   *
+   * The one exception is `reason: 'feature_removed'` with NO in_favor_of
+   * (GitHub #217, user-ruled 2026-10-27 "Gated no-successor retire", which
+   * narrows decision 9948475b for this shape only): a deprecated feature_article
+   * whose feature is gone and that nothing live relies on. There is no survivor
+   * to send the reader to, so the record ends at a disclosed "retired: feature
+   * removed" terminus instead (see knowledgeRetireRemovedFeature). The two forms
+   * are mutually exclusive.
    */
-  knowledgeRetire(id: string, inFavorOf: string): { retired: DurableRecord } {
+  knowledgeRetire(id: string, inFavorOf?: string, reason?: string): { retired: DurableRecord } {
+    if (inFavorOf !== undefined && reason !== undefined) {
+      throw new Error(
+        `knowledge_retire: pass in_favor_of OR reason, never both. in_favor_of retires a duplicate into its survivor; ` +
+          `reason 'feature_removed' retires a removed feature with no successor. Nothing was written.`
+      );
+    }
+    if (inFavorOf === undefined && reason === undefined) {
+      throw new Error(
+        `knowledge_retire: pass in_favor_of (the live survivor of a duplicate) or reason 'feature_removed' (a deprecated feature_article ` +
+          `whose files are all gone). A merely wrong record is fixed with knowledge_update. Nothing was written.`
+      );
+    }
+    if (reason !== undefined) return this.knowledgeRetireRemovedFeature(id, reason);
+    inFavorOf = inFavorOf as string;
     if (id === inFavorOf) throw new Error(`knowledge_retire: a record cannot be retired in favour of itself ('${id}')`);
     // Only the id BEING RETIRED resolves through the shared contract
     // (slug/prefix/uuid) — in_favor_of stays a plain lookup, unchanged.
@@ -13430,6 +13522,134 @@ export class SterlingTools {
     // channel is for.
     const retired = this.store.retireInFavorOf(record.id, survivor.id, this.now());
     return { retired };
+  }
+
+  /** The cap on the feature_article window the dependency check reads; a full
+   *  window refuses, because a dependent the window dropped would be missed. */
+  private static readonly REMOVED_FEATURE_ARTICLE_CAP = 10000;
+
+  /**
+   * knowledge_retire(id, reason: 'feature_removed'): retire a deprecated
+   * feature_article with no successor (GitHub #217). Full uuid only, because
+   * this path has no survivor to catch a wrong target. The record must be held
+   * by the PROJECT store, asked of the storage layer (projectStoreHolds), never
+   * read from the body's `scope` (anti_pattern
+   * record-body-scope-is-not-physical-store-identity). Every other condition is
+   * checked by removedFeatureFailures INSIDE the project store's write
+   * transaction (SterlingStore.retireRemovedFeature), on the record as read
+   * under the lock.
+   */
+  private knowledgeRetireRemovedFeature(id: string, reason: string): { retired: DurableRecord } {
+    if (!(RETIRED_REASONS as readonly string[]).includes(reason)) {
+      throw new Error(`knowledge_retire: reason '${reason}' is not one of ${RETIRED_REASONS.join(' | ')}. Nothing was written.`);
+    }
+    if (!SterlingTools.FULL_UUID_RE.test(id)) {
+      throw new Error(
+        `knowledge_retire: reason '${reason}' needs the record's full uuid, and '${id}' is not one. This form retires a record with ` +
+          `no successor, so a slug or prefix that could resolve to a different record is refused. Nothing was written.`
+      );
+    }
+    const record = this.resolveRecordId(id, 'knowledge_retire');
+    if (record.id !== id) {
+      throw new Error(`knowledge_retire: '${id}' resolves to record '${record.id}'; pass that full uuid. Nothing was written.`);
+    }
+    if (record.type !== 'feature_article') {
+      throw new Error(
+        `knowledge_retire: reason '${reason}' is only for a deprecated feature_article, and '${id}' is a ${record.type}. ` +
+          `A duplicate is retired with in_favor_of; a wrong record is fixed with knowledge_update. Nothing was written.`
+      );
+    }
+    if (record.status === 'superseded') {
+      throw new Error(`knowledge_retire: '${id}' is already superseded (retired). Nothing was written.`);
+    }
+    if (!this.store.projectStoreHolds(record.id)) {
+      throw new Error(
+        `knowledge_retire: '${id}' is held by the '${this.store.scopeOfHolder(record.id)}' store, not the project store. ` +
+          `reason '${reason}' checks the project's working tree and the project's articles, so it retires project-held articles only. ` +
+          `Nothing was written.`
+      );
+    }
+    const project = this.store instanceof MountedStores ? this.store.project : this.store instanceof SterlingStore ? this.store : undefined;
+    if (!project) {
+      throw new Error(`knowledge_retire: this tool surface has no project SterlingStore to run the retirement transaction on. Nothing was written.`);
+    }
+    const retired = project.retireRemovedFeature(record.id, this.now(), (fresh) => {
+      const failures = this.removedFeatureFailures(fresh);
+      if (failures.length) {
+        throw new Error(
+          `knowledge_retire: '${id}' (${(fresh as unknown as { slug?: string }).slug ?? 'no slug'}) cannot be retired as a removed feature: ` +
+            `${failures.join('; ')}. Nothing was written.`
+        );
+      }
+    });
+    return { retired };
+  }
+
+  /**
+   * Why a feature_article is NOT eligible for a removed-feature retirement, one
+   * entry per failed condition; empty means eligible. The conditions: state
+   * deprecated; every files[].path absent in the article's RESOLVED tree
+   * (treeRootFor; an unresolved working_tree refuses); no absent path parked on
+   * another ref (parkedOnRef; a probe that could not run refuses too, because it
+   * proved nothing); and no ACTIVE article relying on it in either direction,
+   * with "active" defined as scripts/cleanup-plan.mjs defines it (not deprecated
+   * or dormant; superseded articles are never in query() results).
+   */
+  private removedFeatureFailures(record: DurableRecord): string[] {
+    const a = record as unknown as {
+      id: string;
+      slug: string;
+      state: string;
+      working_tree?: string;
+      files: { path: string }[];
+      dependencies: { relies_on: string[]; relied_by: string[] };
+    };
+    const failures: string[] = [];
+    if (a.state !== 'deprecated') failures.push(`its state is '${a.state}', not 'deprecated'`);
+    const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
+    if (tree.unresolved || !tree.root) {
+      failures.push(
+        `its working_tree '${a.working_tree}' does not resolve to a tree (not mapped in config.working_trees), so file absence cannot be checked`
+      );
+    } else {
+      for (const rel of new Set(a.files.map((f) => f.path))) {
+        let present: boolean;
+        try {
+          present = lstatSync(join(tree.root, rel), { throwIfNoEntry: false }) !== undefined;
+        } catch (err) {
+          failures.push(`'${rel}' could not be checked in ${tree.root} (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})`);
+          continue;
+        }
+        if (present) {
+          failures.push(`'${rel}' is still present in ${tree.root}`);
+          continue;
+        }
+        // strict: every local branch, and any git answer that is not a clean yes or no refuses
+        const probe = this.parkedOnRef(rel, tree.root, { strict: true });
+        if (probe.status === 'parked') failures.push(`'${rel}' is absent here but parked on branch '${probe.ref}'`);
+        else if (probe.status === 'probe_failed') {
+          failures.push(`'${rel}' is absent, but git could not prove it is not parked on another branch (${probe.detail ?? 'no detail'})`);
+        }
+      }
+    }
+    const cap = SterlingTools.REMOVED_FEATURE_ARTICLE_CAP;
+    const articles = this.store.query({ types: ['feature_article'], cap }) as unknown as (typeof a)[];
+    if (articles.length >= cap) {
+      failures.push(`${articles.length} articles filled the ${cap} query window, so a live dependent could be missing from it`);
+      return failures;
+    }
+    const isActive = (o: typeof a) => o.state !== 'deprecated' && o.state !== 'dormant';
+    const dependents = articles
+      .filter((o) => o.id !== a.id && isActive(o) && (o.dependencies.relies_on.includes(a.slug) || o.dependencies.relies_on.includes(a.id)))
+      .map((o) => o.slug);
+    if (dependents.length) failures.push(`active article(s) ${dependents.join(', ')} rely on it (relies_on)`);
+    const bySlugOrId = new Map(articles.flatMap((o) => [[o.slug, o], [o.id, o]] as [string, typeof a][]));
+    const reliedBy = a.dependencies.relied_by
+      .map((ref) => bySlugOrId.get(ref))
+      .filter((o): o is typeof a => o !== undefined && o.id !== a.id && isActive(o))
+      .map((o) => o.slug);
+    if (reliedBy.length) failures.push(`its relied_by names active article(s) ${[...new Set(reliedBy)].join(', ')}`);
+    return failures;
   }
 
   // -- knowledge_supersede (decision foreign_e17794ea, board 0b33c27b) ----------------

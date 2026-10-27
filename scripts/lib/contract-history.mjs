@@ -94,7 +94,16 @@ export function historicalVariants({
   git = (args) => spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' }),
 }) {
   const fromGit = gitVariants({ repoRoot, templateRels, leads, extractBlock, git });
-  if (fromGit) return fromGit;
+  if (fromGit) {
+    // A shallow clone's git log holds one commit, so the walk alone misses older versions;
+    // the shipped snapshot (built from the full history) is unioned in. A missing or bad
+    // snapshot adds nothing here and is not announced: a full clone needs no snapshot.
+    const shipped = loadSnapshot(join(repoRoot, CONTRACT_HISTORY_REL));
+    if (shipped.ok) {
+      for (const lead of leads) for (const block of shipped.blocks[lead] ?? []) fromGit.get(lead).add(block);
+    }
+    return fromGit;
+  }
   const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
   const snapshot = loadSnapshot(join(repoRoot, CONTRACT_HISTORY_REL));
   if (!snapshot.ok) {
