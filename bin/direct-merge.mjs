@@ -4836,7 +4836,13 @@ var init_records = __esm({
       outcome: boardRemovalOutcomeSchema,
       evidence: handoffEvidenceSchema.optional(),
       note: external_exports.string().min(1).optional(),
-      removed_at: external_exports.string().min(1)
+      removed_at: external_exports.string().min(1),
+      // The removed todo's hand-off role ('none' for a task that was no
+      // hand-off) and, for a received item, the sending project
+      // (todoHandoffSchema's role and from_name). Both are absent only on rows
+      // journaled before the store kept them (Sterling 0.19.130).
+      handoff_role: external_exports.enum(["sent", "received", "none"]).optional(),
+      handoff_from_name: external_exports.string().min(1).optional()
     }).strict();
     handoffEvidenceFileSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
@@ -6830,8 +6836,12 @@ CREATE TABLE IF NOT EXISTS ${s2}.board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
+ALTER TABLE ${s2}.board_removal_journal ADD COLUMN IF NOT EXISTS handoff_role TEXT;
+ALTER TABLE ${s2}.board_removal_journal ADD COLUMN IF NOT EXISTS handoff_from_name TEXT;
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON ${s2}.board_removal_journal (item_id);
 `;
 }
@@ -8494,9 +8504,15 @@ function journalRowToEntry(row) {
     outcome: row.outcome,
     ...evidence !== void 0 ? { evidence } : {},
     ...row.note !== null ? { note: row.note } : {},
-    removed_at: row.removed_at
+    removed_at: row.removed_at,
+    ...row.handoff_role !== null ? { handoff_role: row.handoff_role } : {},
+    ...row.handoff_from_name !== null ? { handoff_from_name: row.handoff_from_name } : {}
   });
   return parsed.success ? parsed.data : parsed.error.issues.map((i) => `${i.path.join(".") || "(row)"}: ${i.message}`).join("; ");
+}
+function journalSelect(withHandoff = true) {
+  const handoff = withHandoff ? "handoff_role, handoff_from_name" : "NULL AS handoff_role, NULL AS handoff_from_name";
+  return `SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, ${handoff} FROM board_removal_journal ORDER BY seq ASC`;
 }
 var JOURNAL_SELECT;
 var init_board_snapshot = __esm({
@@ -8505,7 +8521,7 @@ var init_board_snapshot = __esm({
     init_dist();
     init_handoff();
     init_dist2();
-    JOURNAL_SELECT = "SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at FROM board_removal_journal ORDER BY seq ASC";
+    JOURNAL_SELECT = journalSelect();
   }
 });
 
@@ -8641,7 +8657,11 @@ CREATE TABLE IF NOT EXISTS store_meta (
 -- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
 -- removed user task, written in remove()'s transaction and never pruned.
 -- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
--- user_version bump. evidence is JSON text or NULL.
+-- user_version bump. evidence is JSON text or NULL. handoff_role ('sent',
+-- 'received', or 'none' for a task that was no hand-off) and handoff_from_name
+-- (the sending project, received items only) copy the removed todo's handoff
+-- field; both are NULL only on rows written before the columns existed
+-- (createSchema adds them to a table made by 0.19.130).
 CREATE TABLE IF NOT EXISTS board_removal_journal (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id TEXT NOT NULL,
@@ -8653,7 +8673,9 @@ CREATE TABLE IF NOT EXISTS board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
@@ -8878,6 +8900,18 @@ CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journ
         } catch {
         }
         this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
+        const journalColumns = () => new Set(this.db.prepare("PRAGMA table_info(board_removal_journal)").all().map((c) => c.name));
+        const present = journalColumns();
+        for (const column of ["handoff_role", "handoff_from_name"]) {
+          if (present.has(column))
+            continue;
+          try {
+            this.db.exec(`ALTER TABLE board_removal_journal ADD COLUMN ${column} TEXT`);
+          } catch (e) {
+            if (!journalColumns().has(column))
+              throw e;
+          }
+        }
       }
       /**
        * PRAGMA journal_mode=WAL on a fresh file, which several openers may try at
@@ -11455,7 +11489,10 @@ var init_dist2 = __esm({
             if (!record || record.type !== "todo" || record.source !== "user") {
               throw new Error(`remove: '${id}' is ${record ? record.type === "todo" ? `a ${record.source ?? "sourceless"} todo` : `a ${record.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);
             }
-            this.db.prepare("INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, typeof record.slug === "string" && record.slug.length > 0 ? record.slug : null, record.text ?? "", "user", typeof record.objective === "string" && record.objective.length > 0 ? record.objective : null, typeof record.priority === "string" && record.priority.length > 0 ? record.priority : null, checkedRemoval.outcome, checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null, checkedRemoval.note ?? null, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
+            const handoff = record.handoff;
+            const handoffRole = handoff?.role === "sent" || handoff?.role === "received" ? handoff.role : "none";
+            const handoffFrom = handoffRole === "received" && typeof handoff?.from_name === "string" && handoff.from_name.length > 0 ? handoff.from_name : null;
+            this.db.prepare("INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, handoff_role, handoff_from_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, typeof record.slug === "string" && record.slug.length > 0 ? record.slug : null, record.text ?? "", "user", typeof record.objective === "string" && record.objective.length > 0 ? record.objective : null, typeof record.priority === "string" && record.priority.length > 0 ? record.priority : null, checkedRemoval.outcome, checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null, checkedRemoval.note ?? null, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), handoffRole, handoffFrom);
           }
           if (isSystemDrain && record) {
             this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);
@@ -12252,8 +12289,8 @@ var init_dist2 = __esm({
 
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync10, readFileSync as readFileSync13, realpathSync as realpathSync5 } from "node:fs";
-import { join as join19, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync11, readFileSync as readFileSync13, realpathSync as realpathSync5 } from "node:fs";
+import { join as join20, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -13940,15 +13977,15 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync8, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { delimiter, dirname as dirname10, join as join17 } from "node:path";
-function gh(cwd, args, timeoutMs2 = 12e4) {
-  return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
-}
-var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
-function resolveGhPath() {
+import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname10, join as join18 } from "node:path";
+
+// scripts/lib/gh-path.mjs
+import { existsSync as existsSync8 } from "node:fs";
+import { delimiter, join as join17 } from "node:path";
+function resolveGhPath(env = process.env) {
   const names = process.platform === "win32" ? ["gh.exe", "gh.cmd", "gh"] : ["gh", "gh.exe"];
-  for (const dir of String(process.env.PATH ?? "").split(delimiter)) {
+  for (const dir of String(env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
       const candidate = join17(dir, name);
@@ -13957,6 +13994,12 @@ function resolveGhPath() {
   }
   return null;
 }
+
+// scripts/lib/work-pr.mjs
+function gh(cwd, args, timeoutMs2 = 12e4) {
+  return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+}
+var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 var compareUrl = (repo, base2, branch2) => `https://${repo}/compare/${base2.split("/").map(encodeURIComponent).join("/")}...${branch2.split("/").map(encodeURIComponent).join("/")}?expand=1`;
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
@@ -14267,8 +14310,8 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
-var prLoopPath = (root) => join17(root, PR_LOOP_REL);
-var prLoopFile = (root, prNumber) => join17(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
+var prLoopPath = (root) => join18(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber) => join18(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
   mkdirSync6(dirname10(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
@@ -14279,7 +14322,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: "owed" };
   writeAtomic(prLoopFile(root, pr_number), state);
   const legacy = prLoopPath(root);
-  if (existsSync8(legacy)) {
+  if (existsSync9(legacy)) {
     let old = null;
     try {
       old = parsePrLoopFile(legacy, PR_LOOP_REL);
@@ -14340,8 +14383,8 @@ function parsePrLoopFileOrThrow(file, rel) {
 
 // scripts/lib/attestation-inspection.mjs
 init_dist();
-import { existsSync as existsSync9, readFileSync as readFileSync12 } from "node:fs";
-import { join as join18 } from "node:path";
+import { existsSync as existsSync10, readFileSync as readFileSync12 } from "node:fs";
+import { join as join19 } from "node:path";
 import { DatabaseSync as DatabaseSync6 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
@@ -14357,8 +14400,8 @@ function parseNulPathList(stdout) {
 function readAttestationGlobs(projectRoot2) {
   const dropped = { invalid_container: false, non_string: 0, empty: 0, duplicates: [] };
   try {
-    const configPath = join18(projectRoot2, ".sterling", "config.json");
-    if (!existsSync9(configPath)) return { globs: [], dropped };
+    const configPath = join19(projectRoot2, ".sterling", "config.json");
+    if (!existsSync10(configPath)) return { globs: [], dropped };
     const raw = JSON.parse(readFileSync12(configPath, "utf8"));
     const declared = raw && typeof raw === "object" ? raw.attestation_path_globs : void 0;
     if (declared !== void 0 && !Array.isArray(declared)) {
@@ -14428,8 +14471,8 @@ function inspectAttestations({ projectRoot: projectRoot2, touchedPaths, declared
       return { available: false, reason: `could not read attestations from ${label}: ${e?.message ?? e}` };
     }
   } else {
-    const dbPath = join18(projectRoot2, ".sterling", "sterling.db");
-    if (!existsSync9(dbPath)) {
+    const dbPath = join19(projectRoot2, ".sterling", "sterling.db");
+    if (!existsSync10(dbPath)) {
       return { available: false, reason: `no Sterling store at ${dbPath} \u2014 nothing to compare against` };
     }
     try {
@@ -14574,19 +14617,19 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
-if (linkedWorktree && !existsSync10(join19(storeRoot, CONFIG_REL4))) {
+if (linkedWorktree && !existsSync11(join20(storeRoot, CONFIG_REL4))) {
   fail2(
-    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join19(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join19(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join20(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join20(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
     2
   );
 }
-if (!linkedWorktree && !existsSync10(join19(target, CONFIG_REL4))) {
+if (!linkedWorktree && !existsSync11(join20(target, CONFIG_REL4))) {
   const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
   if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join19(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join20(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
@@ -14922,7 +14965,7 @@ direct-merge: RECONCILE DEBT DISCLOSED \u2014 ${headline} cover files this branc
 stage("version");
 var GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 var pluginManifestRel = ".claude-plugin/plugin.json";
-if (existsSync10(join19(target, pluginManifestRel))) {
+if (existsSync11(join20(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
   if (substantive.length > 0 && !process.argv.includes("--allow-same-version")) {
     const readVersion = (raw, label) => {
@@ -14932,9 +14975,9 @@ if (existsSync10(join19(target, pluginManifestRel))) {
         fail2(`direct-merge: could not parse ${label} while checking the version bump`);
       }
     };
-    const pkgPath = join19(target, "package.json");
-    const branchPlugin = readVersion(readFileSync13(join19(target, pluginManifestRel), "utf8"), pluginManifestRel);
-    const branchPkg = existsSync10(pkgPath) ? readVersion(readFileSync13(pkgPath, "utf8"), "package.json") : null;
+    const pkgPath = join20(target, "package.json");
+    const branchPlugin = readVersion(readFileSync13(join20(target, pluginManifestRel), "utf8"), pluginManifestRel);
+    const branchPkg = existsSync11(pkgPath) ? readVersion(readFileSync13(pkgPath, "utf8"), "package.json") : null;
     const baseShow = spawnSync8("git", ["show", `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
@@ -14952,8 +14995,8 @@ The version is the clone-currency signal consumers read: bump BOTH ${pluginManif
   }
 }
 stage("battery");
-var pkgJsonPath = join19(target, "package.json");
-var hasCheck = existsSync10(pkgJsonPath) && !!JSON.parse(readFileSync13(pkgJsonPath, "utf8")).scripts?.check;
+var pkgJsonPath = join20(target, "package.json");
+var hasCheck = existsSync11(pkgJsonPath) && !!JSON.parse(readFileSync13(pkgJsonPath, "utf8")).scripts?.check;
 if (hasCheck) {
   console.error("direct-merge: running the consistency-check battery (npm run check)\u2026");
   const check = defaultExec("npm", ["run", "check"], { cwd: target, timeout: 3e5 });
@@ -15007,8 +15050,8 @@ try {
 merged.attestation_disclosure = attestationDisclosure;
 try {
   if (changed.size > 0) {
-    const dbPath = join19(storeRoot, ".sterling", "sterling.db");
-    if (!existsSync10(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
+    const dbPath = join20(storeRoot, ".sterling", "sterling.db");
+    if (!existsSync11(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;
     try {
@@ -15047,8 +15090,8 @@ try {
   );
   emit({ ...merged, branches_swept: null, sweep_failed: true }, 1);
 }
-var bundleChecker = join19(target, "scripts", "check-bundles-fresh.mjs");
-if (existsSync10(bundleChecker)) {
+var bundleChecker = join20(target, "scripts", "check-bundles-fresh.mjs");
+if (existsSync11(bundleChecker)) {
   console.error("direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source\u2026");
   const rebuilt = defaultExec("npm", ["run", "build"], { cwd: target, timeout: 6e5 });
   if (rebuilt.status !== 0) {
@@ -15090,7 +15133,7 @@ try {
     for (const t of post.query({ types: ["todo"], cap: 1e3 })) {
       if (t.source !== "system" || t.system_reason !== "file_parked") continue;
       const paths = t.file_keys ?? [];
-      if (parkedItemResolved(paths, deletedSet, (k) => existsSync10(join19(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync11(join20(target, k)))) {
         post.remove(t.id, (/* @__PURE__ */ new Date()).toISOString());
         parkedClosed += 1;
       }

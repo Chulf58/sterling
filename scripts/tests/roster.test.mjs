@@ -178,6 +178,7 @@ test('skills ship with live file references and pass the skill linter', () => {
     'pr-review-loop/SKILL.md',
     'record-audit/SKILL.md',
     'review-brief/SKILL.md',
+    'sync-board-issues/SKILL.md',
   ]);
   for (const s of skills) assert.deepEqual(lintSkill(s.content, s.file, root), []);
   assert.ok(existsSync(join(root, 'skills', 'debug', 'SKILL.md')));

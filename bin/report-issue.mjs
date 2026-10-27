@@ -3,9 +3,9 @@ import { createRequire as __cr } from "node:module"; const require = __cr(import
 
 // scripts/report-issue.mjs
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync as existsSync4, readFileSync as readFileSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync as existsSync5, readFileSync as readFileSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename, delimiter, join as join5 } from "node:path";
+import { basename, join as join6 } from "node:path";
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync } from "node:fs";
@@ -25,15 +25,30 @@ function walkUpPluginRoot(moduleUrl) {
   return null;
 }
 
+// scripts/lib/gh-path.mjs
+import { existsSync as existsSync2 } from "node:fs";
+import { delimiter, join as join2 } from "node:path";
+function resolveGhPath(env = process.env) {
+  const names = process.platform === "win32" ? ["gh.exe", "gh.cmd", "gh"] : ["gh", "gh.exe"];
+  for (const dir of String(env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = join2(dir, name);
+      if (existsSync2(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync3 } from "node:fs";
+import { existsSync as existsSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync2, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync as existsSync3, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join as join2, resolve, sep } from "node:path";
+import { join as join3, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -210,7 +225,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync2, readFileSync, readdirSync, join2, homedir);
+)(existsSync3, readFileSync, readdirSync, join3, homedir);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -285,7 +300,7 @@ var loaded = new Function(
   "homedir",
   `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
 return { openCodeCacheKey, openCodeLoadedSterling };`
-)(createHash, existsSync2, readFileSync, readdirSync, join2, homedir);
+)(createHash, existsSync3, readFileSync, readdirSync, join3, homedir);
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function canonical(p) {
@@ -309,13 +324,13 @@ function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync3(join3(root, ".git"))) return true;
+  if (!existsSync4(join4(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
 
 // scripts/lib/store-path.mjs
 import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
-import { join as join4, resolve as resolve2, sep as sep2 } from "node:path";
+import { join as join5, resolve as resolve2, sep as sep2 } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -358,7 +373,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep2)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join4(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join5(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -366,7 +381,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join4(cursor, part);
+    const next = join5(cursor, part);
     let st2;
     try {
       st2 = lstatSync(next);
@@ -431,7 +446,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join4(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join5(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep2)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -713,17 +728,6 @@ function parseArgs(argv) {
   if (yes2 && mode2 !== "apply-labels") refuse("report-issue: --yes belongs to --apply-labels only.");
   return { mode: mode2, values: values2, yes: yes2 };
 }
-function resolveGhPath() {
-  const names = process.platform === "win32" ? ["gh.exe", "gh.cmd", "gh"] : ["gh", "gh.exe"];
-  for (const dir of String(process.env.PATH ?? "").split(delimiter)) {
-    if (!dir) continue;
-    for (const name of names) {
-      const candidate = join5(dir, name);
-      if (existsSync4(candidate)) return candidate;
-    }
-  }
-  return null;
-}
 var TransportError = class extends Error {
   constructor(message, status = null) {
     super(message);
@@ -778,10 +782,10 @@ try {
 } catch (e) {
   refuse(`report-issue: ${e.message}`);
 }
-if (!existsSync4(sterlingDir)) refuse(`report-issue: ${projectRoot} is not a Sterling project (.sterling/ missing). Run it from the project root.`);
+if (!existsSync5(sterlingDir)) refuse(`report-issue: ${projectRoot} is not a Sterling project (.sterling/ missing). Run it from the project root.`);
 function projectName() {
-  const configPath = join5(sterlingDir, "config.json");
-  if (!existsSync4(configPath)) return basename(projectRoot);
+  const configPath = join6(sterlingDir, "config.json");
+  if (!existsSync5(configPath)) return basename(projectRoot);
   let config;
   try {
     config = JSON.parse(readFileSync2(configPath, "utf8"));
@@ -795,11 +799,11 @@ function stamps() {
   if (!root) refuse("report-issue: cannot find the Sterling plugin root (.claude-plugin/plugin.json above this script), so the report cannot be stamped.");
   let version;
   try {
-    version = JSON.parse(readFileSync2(join5(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    version = JSON.parse(readFileSync2(join6(root, ".claude-plugin", "plugin.json"), "utf8")).version;
   } catch (e) {
-    refuse(`report-issue: cannot read the Sterling version from ${join5(root, ".claude-plugin", "plugin.json")} (${e.message}).`);
+    refuse(`report-issue: cannot read the Sterling version from ${join6(root, ".claude-plugin", "plugin.json")} (${e.message}).`);
   }
-  if (typeof version !== "string" || !version) refuse(`report-issue: ${join5(root, ".claude-plugin", "plugin.json")} has no version.`);
+  if (typeof version !== "string" || !version) refuse(`report-issue: ${join6(root, ".claude-plugin", "plugin.json")} has no version.`);
   let head = null;
   if (!isInstalledCopy(root)) {
     const r = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
@@ -808,7 +812,7 @@ function stamps() {
   return { root, version, head, host: detectHost(process.env), projectName: projectName() };
 }
 function readQueue() {
-  if (!existsSync4(queuePath)) return [];
+  if (!existsSync5(queuePath)) return [];
   const lines = readFileSync2(queuePath, "utf8").split("\n");
   const entries = [];
   lines.forEach((line, i) => {
@@ -1161,7 +1165,7 @@ if (mode === "flush") {
   process.exit(0);
 }
 var st = stamps();
-var scrubCtx = { projectRoot, home: homedir3(), sterlingPathExists: (rel) => existsSync4(join5(st.root, rel)) };
+var scrubCtx = { projectRoot, home: homedir3(), sterlingPathExists: (rel) => existsSync5(join6(st.root, rel)) };
 var report;
 try {
   report = validateReport(values, scrubCtx);

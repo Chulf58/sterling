@@ -132,7 +132,11 @@ CREATE TABLE IF NOT EXISTS store_meta (
 -- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
 -- removed user task, written in remove()'s transaction and never pruned.
 -- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
--- user_version bump. evidence is JSON text or NULL.
+-- user_version bump. evidence is JSON text or NULL. handoff_role ('sent',
+-- 'received', or 'none' for a task that was no hand-off) and handoff_from_name
+-- (the sending project, received items only) copy the removed todo's handoff
+-- field; both are NULL only on rows written before the columns existed
+-- (createSchema adds them to a table made by 0.19.130).
 CREATE TABLE IF NOT EXISTS board_removal_journal (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id TEXT NOT NULL,
@@ -144,7 +148,9 @@ CREATE TABLE IF NOT EXISTS board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
@@ -525,6 +531,25 @@ export class SqliteDriver implements StoreDriver {
       /* column already exists */
     }
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)');
+    // Additive (decision board-issue-mirror-skips-trackers-labels-origin-and-label-lifecycle):
+    // board_removal_journal as 0.19.130 created it gains the removed todo's
+    // hand-off role and sending project, so the GitHub issue mirror can skip a
+    // removed tracker and label a removed received task. Rows already there keep NULL.
+    // Each column is added only when PRAGMA table_info lacks it. The check and
+    // the ALTER are not atomic, so another opener can add the column in
+    // between; a failed ALTER is therefore forgiven only when a fresh
+    // table_info read shows the column now exists, and every other failure
+    // propagates (the older additive columns above swallow every error).
+    const journalColumns = () => new Set((this.db.prepare('PRAGMA table_info(board_removal_journal)').all() as { name: string }[]).map((c) => c.name));
+    const present = journalColumns();
+    for (const column of ['handoff_role', 'handoff_from_name']) {
+      if (present.has(column)) continue;
+      try {
+        this.db.exec(`ALTER TABLE board_removal_journal ADD COLUMN ${column} TEXT`);
+      } catch (e) {
+        if (!journalColumns().has(column)) throw e;
+      }
+    }
   }
 
   /**

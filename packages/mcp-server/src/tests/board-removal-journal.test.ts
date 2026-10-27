@@ -70,6 +70,8 @@ test('board_remove journals a user task with its outcome, evidence and note, as 
         evidence: { commit: '1a2b3c', pr: '#12' },
         note: 'shipped in 1a2b3c',
         removed_at: NOW,
+        // a plain task (no hand-off) is journaled with role 'none'; only a 0.19.130 row has no role
+        handoff_role: 'none',
       },
     ]);
     const second = h.tools.boardAdd({ text: 'Old idea\nsee src/b.ts:1', source: 'user', objective: 'exports' }).record;

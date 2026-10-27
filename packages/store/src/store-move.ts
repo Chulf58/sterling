@@ -203,7 +203,7 @@ export const MOVE_TABLES: readonly TableSpec[] = [
   spec('activity_log', 'seq:int at verb type record_id title', ['seq']),
   spec('queue_drain_log', 'seq:int drained_at system_reason text file_keys record_id', ['seq']),
   spec('store_meta', 'key value updated_at', ['key']),
-  spec('board_removal_journal', 'seq:int item_id slug text source objective priority outcome evidence note removed_at', ['seq']),
+  spec('board_removal_journal', 'seq:int item_id slug text source objective priority outcome evidence note removed_at handoff_role handoff_from_name', ['seq']),
   spec('runs', 'id machine_state pending_exit body updated_at', ['id']),
   spec('handoffs', 'run_id phase_id agent_role body created_at', null, 'rowid'),
   spec('check_skipped', 'seq:int run_id check_name reason at', ['seq']),
