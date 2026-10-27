@@ -4373,7 +4373,7 @@ function validateRecord(input2) {
   }
   return entry.schema.parse(input2);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4843,15 +4843,37 @@ var init_records = __esm({
     hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
     EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
     handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+    BOARD_REMOVAL_OUTCOMES = ["done", "dropped", "superseded", "duplicate"];
+    boardRemovalOutcomeSchema = external_exports.enum(BOARD_REMOVAL_OUTCOMES);
+    boardRemovalSchema = external_exports.object({
+      outcome: boardRemovalOutcomeSchema,
+      evidence: handoffEvidenceSchema.optional(),
+      note: external_exports.string().refine((v) => v.trim().length > 0, "note must not be blank").optional()
+    }).strict();
+    boardRemovalJournalEntrySchema = external_exports.object({
+      seq: external_exports.number().int().positive(),
+      item_id: external_exports.string().min(1),
+      slug: external_exports.string().min(1).optional(),
+      text: external_exports.string(),
+      source: external_exports.literal("user"),
+      objective: external_exports.string().min(1).optional(),
+      priority: external_exports.string().min(1).optional(),
+      outcome: boardRemovalOutcomeSchema,
+      evidence: handoffEvidenceSchema.optional(),
+      note: external_exports.string().min(1).optional(),
+      removed_at: external_exports.string().min(1)
+    }).strict();
     handoffEvidenceFileSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
-      evidence: handoffEvidenceSchema
-    }).strict();
+      evidence: handoffEvidenceSchema.optional(),
+      outcome: boardRemovalOutcomeSchema.optional()
+    }).strict().refine((f) => f.evidence !== void 0 || f.outcome !== void 0, "the evidence file needs evidence, an outcome or both");
     handoffEvidenceFileReadSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
-      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY).optional(),
+      outcome: external_exports.string().min(1).optional()
     });
     needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
     todoWaitFieldsReadSchema = external_exports.object({
@@ -6850,6 +6872,20 @@ CREATE TABLE IF NOT EXISTS ${s2}.store_meta (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ${s2}.board_removal_journal (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  slug TEXT,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  objective TEXT,
+  priority TEXT,
+  outcome TEXT NOT NULL,
+  evidence TEXT,
+  note TEXT,
+  removed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON ${s2}.board_removal_journal (item_id);
 `;
 }
 function pgSearchQuery(terms, matchAll) {
@@ -6988,7 +7024,8 @@ var init_pg_driver = __esm({
       "selection",
       "queue_drain_log",
       "activity_log",
-      "store_meta"
+      "store_meta",
+      "board_removal_journal"
     ]);
     PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
     DEFAULT_PG_RANKING = "bm25";
@@ -8790,25 +8827,25 @@ function readIfPresent(p) {
 function evidenceText(e) {
   return EVIDENCE_LABELS.filter(([k]) => e[k] !== void 0).map(([k, label]) => `${label} ${e[k]}`).join(", ");
 }
-function readEvidence(h, root) {
+function readSidecar(h, root) {
   let parsed;
   try {
     const text = readIfPresent(join7(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
     if (text === void 0)
-      return void 0;
+      return {};
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
   } catch {
-    return void 0;
+    return {};
   }
   if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id)
-    return void 0;
+    return {};
   const out = {};
   for (const [k] of EVIDENCE_LABELS) {
-    const v = parsed.data.evidence[k]?.trim();
+    const v = parsed.data.evidence?.[k]?.trim();
     if (v)
       out[k] = v;
   }
-  return out;
+  return { ...Object.keys(out).length ? { evidence: out } : {}, ...parsed.data.outcome ? { outcome: parsed.data.outcome } : {} };
 }
 function unknown(reason) {
   return { state: "unknown", text: statusText.unknown(reason) };
@@ -8841,13 +8878,14 @@ function closureStatus(h, root) {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  const evidence = readEvidence(h, root);
+  const { evidence, outcome } = readSidecar(h, root);
   return {
     state: "done",
-    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence, outcome),
     closed_at: c.closed_at,
     ...c.note ? { note: c.note } : {},
-    ...evidence ? { evidence } : {}
+    ...evidence ? { evidence } : {},
+    ...outcome ? { outcome } : {}
   };
 }
 function rowStatus(db, root, trackerId, h, budget) {
@@ -9043,8 +9081,9 @@ var init_handoff = __esm({
       needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
       waiting_external: (to, reason) => `waiting on others in ${to}${reason ? `: ${reason}` : ""}`,
       blocked: (to) => `blocked in ${to}`,
-      done: (to, closedAt, note, milestone, evidence) => {
-        const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+      done: (to, closedAt, note, milestone, evidence, outcome) => {
+        const verb = outcome === void 0 || outcome === "done" ? "DONE" : `CLOSED as ${outcome}`;
+        const head = milestone === void 0 ? `${verb} in ${to} ${closedAt}` : evidence ? `${verb} in ${to} ${closedAt} (${milestone})` : `${verb} in ${to} ${closedAt}, unverified (${milestone})`;
         const parts = [evidence ? evidenceText(evidence) : void 0, note].filter((p) => p !== void 0 && p.length > 0);
         return parts.length ? `${head}: ${parts.join("; ")}` : head;
       },
@@ -9052,6 +9091,42 @@ var init_handoff = __esm({
       unknown: (reason) => `status unknown: ${reason}`,
       unconfirmed: () => "delivery unconfirmed"
     };
+  }
+});
+
+// packages/store/dist/board-snapshot.js
+function journalRowToEntry(row) {
+  let evidence;
+  if (row.evidence !== null) {
+    try {
+      evidence = JSON.parse(row.evidence);
+    } catch {
+      return "its evidence is not valid JSON";
+    }
+  }
+  const parsed = boardRemovalJournalEntrySchema.safeParse({
+    seq: Number(row.seq),
+    item_id: row.item_id,
+    ...row.slug !== null ? { slug: row.slug } : {},
+    text: row.text,
+    source: row.source,
+    ...row.objective !== null ? { objective: row.objective } : {},
+    ...row.priority !== null ? { priority: row.priority } : {},
+    outcome: row.outcome,
+    ...evidence !== void 0 ? { evidence } : {},
+    ...row.note !== null ? { note: row.note } : {},
+    removed_at: row.removed_at
+  });
+  return parsed.success ? parsed.data : parsed.error.issues.map((i) => `${i.path.join(".") || "(row)"}: ${i.message}`).join("; ");
+}
+var JOURNAL_SELECT;
+var init_board_snapshot = __esm({
+  "packages/store/dist/board-snapshot.js"() {
+    "use strict";
+    init_dist();
+    init_handoff();
+    init_dist2();
+    JOURNAL_SELECT = "SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at FROM board_removal_journal ORDER BY seq ASC";
   }
 });
 
@@ -9183,6 +9258,25 @@ CREATE TABLE IF NOT EXISTS store_meta (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+-- Board removal journal (decision
+-- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
+-- removed user task, written in remove()'s transaction and never pruned.
+-- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
+-- user_version bump. evidence is JSON text or NULL.
+CREATE TABLE IF NOT EXISTS board_removal_journal (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL,
+  slug TEXT,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  objective TEXT,
+  priority TEXT,
+  outcome TEXT NOT NULL,
+  evidence TEXT,
+  note TEXT,
+  removed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
     JournalDemotionRefusedError = class extends Error {
       dbPath;
@@ -9808,10 +9902,12 @@ var init_dist2 = __esm({
     init_move_lock();
     init_domain_fit();
     init_registry2();
+    init_board_snapshot();
     init_handoff();
     init_axis();
     init_axis();
     init_handoff();
+    init_board_snapshot();
     init_sqlite_driver();
     init_pg_bridge();
     init_pg_driver();
@@ -11966,14 +12062,51 @@ var init_dist2 = __esm({
        * Hard removal — the P4 path for todos (done = removed by the artifact-write
        * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
        * Removing a SYSTEM-source todo appends to the capped queue drain log
-       * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
+       * (§3.2.7 audit projection — "was X handled?"); user todos are never logged
+       * there.
+       *
+       * `removal` (decision board-remove-records-outcome-and-evidence-in-a-removal-journal)
+       * journals a USER task's end: one board_removal_journal row with the task's
+       * text, slug, objective and priority as they were, the outcome and the
+       * optional evidence and note, inserted in the same transaction as the delete,
+       * so neither lands without the other. It is refused for anything but a live
+       * user todo. The store does not demand it: board_remove is the one
+       * production path that removes user todos (a `resolves` claim takes only
+       * system items) and it requires the outcome.
        */
-      remove(id, drainedAt) {
+      /**
+       * Every board removal journal row, oldest first. A row that fails its schema
+       * throws with its seq: the journal is the only closure record, so a bad row
+       * is never skipped.
+       */
+      boardRemovalJournal() {
+        return this.db.prepare(JOURNAL_SELECT).all().map((row) => {
+          const entry = journalRowToEntry(row);
+          if (typeof entry === "string")
+            throw new Error(`boardRemovalJournal: row ${String(row.seq)} (item ${row.item_id}) is not a journal entry: ${entry}`);
+          return entry;
+        });
+      }
+      remove(id, drainedAt, removal) {
         this.assertWritable("remove");
+        let checkedRemoval;
+        if (removal !== void 0) {
+          const parsed = boardRemovalSchema.safeParse(removal);
+          if (!parsed.success) {
+            throw new Error(`remove: the removal record for '${id}' is refused (${parsed.error.issues.map((i) => `${i.path.join(".") || "removal"}: ${i.message}`).join("; ")}). Nothing was removed.`);
+          }
+          checkedRemoval = parsed.data;
+        }
         this.tx(() => {
           this.assertNoMoveInFlight("remove", [id]);
           const record = this.get(id);
           const isSystemDrain = record && record.type === "todo" && record.source === "system";
+          if (checkedRemoval) {
+            if (!record || record.type !== "todo" || record.source !== "user") {
+              throw new Error(`remove: '${id}' is ${record ? record.type === "todo" ? `a ${record.source ?? "sourceless"} todo` : `a ${record.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);
+            }
+            this.db.prepare("INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, typeof record.slug === "string" && record.slug.length > 0 ? record.slug : null, record.text ?? "", "user", typeof record.objective === "string" && record.objective.length > 0 ? record.objective : null, typeof record.priority === "string" && record.priority.length > 0 ? record.priority : null, checkedRemoval.outcome, checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null, checkedRemoval.note ?? null, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
+          }
           if (isSystemDrain && record) {
             this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);
             this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();

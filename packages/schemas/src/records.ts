@@ -781,24 +781,75 @@ export const handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvi
 export type HandoffEvidence = z.infer<typeof handoffEvidenceSchema>;
 
 /**
+ * How a user board task ended, given to board_remove (decision
+ * board-remove-records-outcome-and-evidence-in-a-removal-journal). The GitHub
+ * issue mirror closes a 'done' task as completed and every other outcome as
+ * not planned.
+ */
+export const BOARD_REMOVAL_OUTCOMES = ['done', 'dropped', 'superseded', 'duplicate'] as const;
+export const boardRemovalOutcomeSchema = z.enum(BOARD_REMOVAL_OUTCOMES);
+export type BoardRemovalOutcome = z.infer<typeof boardRemovalOutcomeSchema>;
+
+/** What the store journals with a user task's removal: the outcome, plus optional evidence and note. */
+export const boardRemovalSchema = z
+  .object({
+    outcome: boardRemovalOutcomeSchema,
+    evidence: handoffEvidenceSchema.optional(),
+    note: z.string().refine((v) => v.trim().length > 0, 'note must not be blank').optional(),
+  })
+  .strict();
+export type BoardRemoval = z.infer<typeof boardRemovalSchema>;
+
+/**
+ * One row of the board removal journal: a user task as it was when it was
+ * removed, with how it ended. Written in the same transaction as the removal
+ * and never pruned, so a reader that never saw the task still has its text.
+ */
+export const boardRemovalJournalEntrySchema = z
+  .object({
+    seq: z.number().int().positive(),
+    item_id: z.string().min(1),
+    slug: z.string().min(1).optional(),
+    text: z.string(),
+    source: z.literal('user'),
+    objective: z.string().min(1).optional(),
+    priority: z.string().min(1).optional(),
+    outcome: boardRemovalOutcomeSchema,
+    evidence: handoffEvidenceSchema.optional(),
+    note: z.string().min(1).optional(),
+    removed_at: z.string().min(1),
+  })
+  .strict();
+export type BoardRemovalJournalEntry = z.infer<typeof boardRemovalJournalEntrySchema>;
+
+/**
  * The sidecar `<root>/.sterling/handoffs/<transfer_id>.evidence.json` the
  * receiver's board_remove writes BEFORE the closure file, so the closure file
  * keeps the shape an older sender reads. transfer_id and item_id let the
- * sender check it belongs to its hand-off.
+ * sender check it belongs to its hand-off. It carries the evidence, the
+ * outcome, or both; the closure file itself never gains a field, because
+ * senders older than GitHub issue #108 read it strictly.
  */
 export const handoffEvidenceFileSchema = z
   .object({
     transfer_id: z.string().uuid(),
     item_id: z.string().uuid(),
-    evidence: handoffEvidenceSchema,
+    evidence: handoffEvidenceSchema.optional(),
+    outcome: boardRemovalOutcomeSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((f) => f.evidence !== undefined || f.outcome !== undefined, 'the evidence file needs evidence, an outcome or both');
 
-/** The sidecar shape for READING: unknown keys are dropped, known fields still checked. */
+/**
+ * The sidecar shape for READING: unknown keys are dropped, known fields still
+ * checked. The outcome is read as text, so an outcome a newer receiver adds
+ * still shows instead of hiding the evidence beside it.
+ */
 export const handoffEvidenceFileReadSchema = z.object({
   transfer_id: z.string().uuid(),
   item_id: z.string().uuid(),
-  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY),
+  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY).optional(),
+  outcome: z.string().min(1).optional(),
 });
 
 export type HandoffEvidenceFile = z.infer<typeof handoffEvidenceFileSchema>;

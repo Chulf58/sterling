@@ -68,7 +68,7 @@ test('N28: board_remove no-evidence note claims exactly what was checked — a k
   const { tools, cleanup } = harness();
   try {
     const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never-touched.ts'] }) as { record: { id: string } }).record;
-    const abandoned = tools.boardRemove(bare.id) as { note?: string };
+    const abandoned = tools.boardRemove(bare.id, { outcome: 'done' }) as { note?: string };
     assert.ok(abandoned.note, 'a note is disclosed when no evidence was found');
     // The old wording ("no fulfilling artifact-write found") reads as a claim
     // about ALL possible fulfilling work, including a git commit — but the
@@ -330,7 +330,7 @@ test('N28: a KEYLESS item with no citing record gets the could-not-run wording, 
   const { tools, cleanup } = harness();
   try {
     const keyless = (tools.boardAdd({ text: 'free-floating idea', source: 'user' }) as { record: { id: string } }).record;
-    const r = tools.boardRemove(keyless.id) as { artifact_evidence: unknown[]; note?: string };
+    const r = tools.boardRemove(keyless.id, { outcome: 'done' }) as { artifact_evidence: unknown[]; note?: string };
     assert.deepEqual(r.artifact_evidence, []);
     assert.match(r.note ?? '', /no file_keys.*could not run/i);
     // The load-bearing arm: regressing to the unconditional wording goes red.

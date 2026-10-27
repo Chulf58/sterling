@@ -203,6 +203,7 @@ export const MOVE_TABLES: readonly TableSpec[] = [
   spec('activity_log', 'seq:int at verb type record_id title', ['seq']),
   spec('queue_drain_log', 'seq:int drained_at system_reason text file_keys record_id', ['seq']),
   spec('store_meta', 'key value updated_at', ['key']),
+  spec('board_removal_journal', 'seq:int item_id slug text source objective priority outcome evidence note removed_at', ['seq']),
   spec('runs', 'id machine_state pending_exit body updated_at', ['id']),
   spec('handoffs', 'run_id phase_id agent_role body created_at', null, 'rowid'),
   spec('check_skipped', 'seq:int run_id check_name reason at', ['seq']),
@@ -210,7 +211,7 @@ export const MOVE_TABLES: readonly TableSpec[] = [
 ];
 
 /** Postgres identity columns that a copy fills explicitly; their sequences are moved past the copied maximum. */
-const PG_IDENTITY_SEQ_TABLES = ['activity_log', 'queue_drain_log', 'check_skipped'];
+const PG_IDENTITY_SEQ_TABLES = ['activity_log', 'queue_drain_log', 'check_skipped', 'board_removal_journal'];
 
 /** A value in canonical form: integers as bigint, text as string. */
 type Val = string | bigint | null;
@@ -1290,6 +1291,7 @@ const RECORD_ID_COLUMN: Record<string, string> = {
   record_file_keys: 'record_id',
   activity_log: 'record_id',
   queue_drain_log: 'record_id',
+  board_removal_journal: 'item_id',
   selection: 'record_id',
 };
 

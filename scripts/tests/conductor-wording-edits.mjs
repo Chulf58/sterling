@@ -376,6 +376,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'ready-items-for-auto-start`). Serializing',
     after: 'ready-items-for-auto-start`). While lanes run and a lane is still free, prepare the next items that cannot start yet (blocked, or `needs` of `user` or `grill`) in parallel: send one read-only researcher lane per item or small group, which edits nothing and writes nothing to the store, so it adds no writer and counts against the same ceiling. Each returns a brief per item (the ask, the governing records by slug and id8, the files, the questions for the user, whether it is ready) and may propose a queue order; you decide the order, which stays unblock-first (decision `slice-ordering-is-unblock-first-pick-the-slice-that-most-wid`), and put the user\'s questions through the question form early, so their answers are in before the item\'s turn (user-ruled 2026-10-27 through the question form, GitHub #214). Serializing',
   },
+  {
+    commit: 'board 2460ad0a',
+    date: '2026-10-27',
+    reason: 'a handed-over item closes with its outcome, which board_remove now requires for every user task (decision board-issue-mirror-design-required-outcome-snapshot-read-single-writer)',
+    before: 'close it with `board_remove` and a `note`, plus `evidence`',
+    after: 'close it with `board_remove`, its `outcome` and a `note`, plus `evidence`',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

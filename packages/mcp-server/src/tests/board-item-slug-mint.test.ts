@@ -74,7 +74,7 @@ interface ToolsView {
   boardAdd(fields: Loose): { record: Loose };
   boardGet(id: string): Loose;
   boardUpdate(id: string, patch: Loose): Loose;
-  boardRemove(id: string): Loose;
+  boardRemove(id: string, close?: { outcome?: string; note?: string; evidence?: unknown }): Loose;
   boardQuery(filter: Loose): Loose[];
   maintenanceEnqueue(fields: Loose): { record: Loose };
   maintenanceRemove(id: string): Loose;
@@ -177,7 +177,7 @@ function seedLegacySluglessItem(store: SterlingStore, tools: ToolsView, text: st
   delete legacy.slug;
   legacy.id = randomUUID();
   store.create(legacy as unknown as Parameters<SterlingStore['create']>[0]);
-  tools.boardRemove(modern.id as string); // full uuid — the permitted address form
+  tools.boardRemove(modern.id as string, { outcome: 'done' }); // full uuid — the permitted address form
   return legacy.id as string;
 }
 
@@ -494,7 +494,7 @@ test('E0 CONTROL (must pass for the OPPOSITE reason, and passes at HEAD): board_
   const { tools, cleanup } = harness();
   try {
     const item = boardAdd(tools, { text: 'REMOVE ME BY MY FULL UUID.\n\nbody.', source: 'user' });
-    const removed = tools.boardRemove(item.id as string) as { removed?: string; id?: string };
+    const removed = tools.boardRemove(item.id as string, { outcome: 'done' }) as { removed?: string; id?: string };
     assert.equal(removed.removed ?? removed.id, item.id, 'the full uuid removes the board item directly');
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'it is gone');
 
@@ -519,7 +519,7 @@ test('E1 THE LOAD-BEARING PIN: board_remove REFUSES a minted slug — naming the
     const slug = requireSlug(tools, item, 'the item must mint a handle for the destroying call to refuse');
 
     assert.throws(
-      () => tools.boardRemove(slug),
+      () => tools.boardRemove(slug, { outcome: 'done' }),
       (err: Error) => {
         assert.match(err.message, FULL_UUID_REQUIRED, `the refusal must name the full-uuid requirement — got: "${err.message}"`);
         assert.match(
@@ -553,7 +553,7 @@ test('E2 REGRESSION PIN: board_remove still refuses an unambiguous 8-char prefix
     const prefix = (item.id as string).slice(0, 8);
 
     assert.throws(
-      () => tools.boardRemove(prefix),
+      () => tools.boardRemove(prefix, { outcome: 'done' }),
       (err: Error) => {
         assert.match(err.message, FULL_UUID_REQUIRED, `names the full-uuid requirement — got: "${err.message}"`);
         assert.match(err.message, HARD_DELETE_REASON, `names the hard-delete reason — got: "${err.message}"`);
@@ -563,7 +563,7 @@ test('E2 REGRESSION PIN: board_remove still refuses an unambiguous 8-char prefix
     );
 
     assert.equal(tools.boardQuery({ source: 'user' }).length, 1, 'the item survives');
-    tools.boardRemove(item.id as string);
+    tools.boardRemove(item.id as string, { outcome: 'done' });
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'and the full uuid still removes it');
   } finally {
     cleanup();
@@ -637,7 +637,7 @@ test('F1 LEGACY (green before AND after — the migration-free pin de1a7329 set)
     assert.equal(updated.id, legacyId, 'and still updates in place, id stable');
     assert.equal(updated.priority, 'low', 'the update landed');
 
-    tools.boardRemove(legacyId);
+    tools.boardRemove(legacyId, { outcome: 'done' });
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'and still removes by its exact full uuid — no migration required');
   } finally {
     cleanup();

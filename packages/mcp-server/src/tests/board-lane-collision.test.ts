@@ -94,7 +94,7 @@ interface ToolsView {
   // — the same `boardRemove` the sibling raw-row idiom
   // (board-item-slug-mint.test.ts / board-item-name-render.test.ts) uses to
   // discard the placeholder item cloned before mutation.
-  boardRemove(id: string): Loose;
+  boardRemove(id: string, close?: { outcome?: string; note?: string; evidence?: unknown }): Loose;
 }
 
 function harness() {
@@ -542,7 +542,7 @@ function seedLegacySluglessItemWithFields(store: SterlingStore, tools: ToolsView
   legacy.id = randomUUID();
   Object.assign(legacy, overrides);
   store.create(legacy as unknown as Parameters<SterlingStore['create']>[0]);
-  tools.boardRemove(modern.id as string); // full uuid — the permitted address form
+  tools.boardRemove(modern.id as string, { outcome: 'done' }); // full uuid — the permitted address form
   return legacy.id as string;
 }
 

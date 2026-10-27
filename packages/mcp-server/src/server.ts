@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z, ZodError } from 'zod';
-import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, handoffEvidenceSchema, RETIRED_REASONS } from '@sterling/schemas';
+import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, BOARD_REMOVAL_OUTCOMES, handoffEvidenceSchema, RETIRED_REASONS } from '@sterling/schemas';
 import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
@@ -858,14 +858,15 @@ export function createSterlingServer(
     'board_remove',
     {
       description:
-        "Remove a board or queue item — the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.json, which the sending project reads as done; `note` (handed-over items only) is carried in that file, and a failed write refuses the removal. `evidence` (handed-over items only: commit, pr, deploy, url, at least one non-blank) is written first to .sterling/handoffs/<transfer_id>.evidence.json, which the sending project shows on its DONE status; a failed write refuses the removal.",
+        "Remove a board or queue item — the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). A user board task needs `outcome`: done (finished), dropped (will not be done), superseded (replaced by other work) or duplicate (the same as another task); a removal without one is refused. The outcome, with optional `evidence` and `note`, is written to the board removal journal in the same transaction as the removal, and the GitHub issue mirror reads it from there. A maintenance-queue item takes the id alone. The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.evidence.json with the outcome and any evidence, then .sterling/handoffs/<transfer_id>.json, which carries the note; the sending project reads both and shows the item as done, or as closed with its other outcome. A failed write of either file refuses the removal.",
       inputSchema: strict({
         id: z.string().describe(ID_EXACT_DESTROY),
-        note: z.string().describe('handed-over items only: what was done, sent back to the project the task came from').optional(),
-        evidence: cloneZod(handoffEvidenceSchema).describe('handed-over items only: what the work shipped as; at least one non-blank value of commit, pr, deploy or url').optional(),
+        outcome: z.enum(BOARD_REMOVAL_OUTCOMES).describe('user board tasks: required. done, dropped, superseded or duplicate').optional(),
+        note: z.string().describe('user board tasks only: what was done or why it ended; journaled, and sent back to the project a handed-over task came from').optional(),
+        evidence: cloneZod(handoffEvidenceSchema).describe('user board tasks only: what the work shipped as; at least one non-blank value of commit, pr, deploy or url').optional(),
       }),
     },
-    ({ id, note, evidence }) => json(tools.boardRemove(id, note, evidence))
+    ({ id, outcome, note, evidence }) => json(tools.boardRemove(id, { outcome, note, evidence }))
   );
 
   server.registerTool(

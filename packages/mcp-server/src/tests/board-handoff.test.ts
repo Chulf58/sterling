@@ -173,14 +173,14 @@ test('board_remove of a received item writes the closure file first; the sender 
     const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { transfer_id: string; tracker: { id: string }; delivered: { id: string } };
     const b = h.betaTools();
     try {
-      const res = b.tools.boardRemove(d.delivered.id, 'shipped in 1a2b3c');
+      const res = b.tools.boardRemove(d.delivered.id, { outcome: 'done', note: 'shipped in 1a2b3c' });
       const file = join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.json`);
       assert.equal(res.handoff_closure, file);
       assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { transfer_id: d.transfer_id, item_id: d.delivered.id, closed_at: NOW, note: 'shipped in 1a2b3c' });
     } finally {
       b.close();
     }
-    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: shipped in 1a2b3c`, closed_at: NOW, note: 'shipped in 1a2b3c' });
+    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: shipped in 1a2b3c`, closed_at: NOW, note: 'shipped in 1a2b3c', outcome: 'done' });
   } finally {
     h.cleanup();
   }
@@ -190,11 +190,12 @@ test('board_remove of a received item is refused when the closure file cannot be
   const h = harness();
   try {
     const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { tracker: { id: string }; delivered: { id: string } };
-    // A file where the handoffs directory belongs makes the write fail.
-    writeFileSync(join(h.beta, '.sterling', 'handoffs'), 'not a directory');
+    // A directory where the closure file belongs makes its rename fail (the
+    // evidence sidecar, written first, succeeds).
+    mkdirSync(join(h.beta, '.sterling', 'handoffs', `${(d as unknown as { transfer_id: string }).transfer_id}.json`, 'x'), { recursive: true });
     const b = h.betaTools();
     try {
-      assert.throws(() => b.tools.boardRemove(d.delivered.id), /was handed over from another project, .* that file could not be written \(.*\)\. Nothing was removed\./);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done' }), /was handed over from another project, .* that file could not be written \(.*\)\. Nothing was removed\./);
       assert.ok(b.tools.boardGet(d.delivered.id), 'the item is still on the board');
     } finally {
       b.close();
@@ -205,11 +206,11 @@ test('board_remove of a received item is refused when the closure file cannot be
   }
 });
 
-test('board_remove: a note on an item that was not handed over is refused; a received item removed by an old server reads gone', () => {
+test('board_remove: a note without an outcome is refused; a received item removed by an old server reads gone', () => {
   const h = harness();
   try {
     const plain = h.tools.boardAdd({ text: 'Plain\nsee src/a.ts:1', source: 'user', objective: 'standalone' }).record.id;
-    assert.throws(() => h.tools.boardRemove(plain, 'done'), /'note' is sent back to the project a task came from/);
+    assert.throws(() => h.tools.boardRemove(plain, { note: 'done' }), /'outcome' is required to remove the user board task/);
     assert.ok(h.tools.boardGet(plain));
     const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { tracker: { id: string }; delivered: { id: string } };
     // An older Sterling removes the row without a closure file.
@@ -274,7 +275,7 @@ test('blocked in the receiving project (#107): a live blocker reads blocked; rem
       const blocker = b.tools.boardAdd({ text: 'First this\nsee src/b.ts:1', source: 'user', objective: 'standalone' }).record;
       b.tools.boardUpdate(d.delivered.id, { blocked_by: [blocker.id] });
       assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'blocked', text: 'blocked in beta' });
-      b.tools.boardRemove(blocker.id);
+      b.tools.boardRemove(blocker.id, { outcome: 'done' });
       assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'open', text: 'open in beta' });
     } finally {
       b.close();
@@ -311,17 +312,17 @@ test('milestone (#108): kept on the tracker, written into the receiver text only
   }
 });
 
-test('evidence (#108): refused when empty or blank or on an item not handed over, with nothing removed', () => {
+test('evidence (#108): refused when empty or blank, or given without an outcome, with nothing removed', () => {
   const h = harness();
   try {
     const plain = h.tools.boardAdd({ text: 'Plain\nsee src/a.ts:1', source: 'user', objective: 'standalone' }).record.id;
-    assert.throws(() => h.tools.boardRemove(plain, undefined, { commit: 'abc' }), /'evidence' is sent back to the project a task came from/);
+    assert.throws(() => h.tools.boardRemove(plain, { evidence: { commit: 'abc' } }), /'outcome' is required to remove the user board task/);
     const d = handOver(h);
     const b = h.betaTools();
     try {
-      assert.throws(() => b.tools.boardRemove(d.delivered.id, undefined, {}), /evidence is refused \(evidence needs at least one non-blank value/);
-      assert.throws(() => b.tools.boardRemove(d.delivered.id, undefined, { commit: ' ' }), /evidence is refused/);
-      assert.throws(() => b.tools.boardRemove(d.delivered.id, undefined, { sha: 'abc' }), /evidence is refused/);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', evidence: {} }), /evidence is refused \(evidence needs at least one non-blank value/);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', evidence: { commit: ' ' } }), /evidence is refused/);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', evidence: { sha: 'abc' } }), /evidence is refused/);
       assert.ok(b.tools.boardGet(d.delivered.id));
       assert.equal(existsSync(join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.json`)), false);
     } finally {
@@ -341,12 +342,12 @@ test('evidence (#108): with a milestone the sender reads DONE with the evidence;
     const plain = handOver(h);
     const b = h.betaTools();
     try {
-      const res = b.tools.boardRemove(withEv.delivered.id, 'all good', { commit: ' 1a2b3c ', pr: '#12', url: '' });
+      const res = b.tools.boardRemove(withEv.delivered.id, { outcome: 'done', note: 'all good', evidence: { commit: ' 1a2b3c ', pr: '#12', url: '' } });
       const sidecar = join(h.beta, '.sterling', 'handoffs', `${withEv.transfer_id}.evidence.json`);
       assert.equal(res.handoff_evidence, sidecar);
-      assert.deepEqual(JSON.parse(readFileSync(sidecar, 'utf8')), { transfer_id: withEv.transfer_id, item_id: withEv.delivered.id, evidence: { commit: '1a2b3c', pr: '#12' } });
-      b.tools.boardRemove(without.delivered.id);
-      b.tools.boardRemove(plain.delivered.id, undefined, { deploy: 'prod 2026-10-15' });
+      assert.deepEqual(JSON.parse(readFileSync(sidecar, 'utf8')), { transfer_id: withEv.transfer_id, item_id: withEv.delivered.id, evidence: { commit: '1a2b3c', pr: '#12' }, outcome: 'done' });
+      b.tools.boardRemove(without.delivered.id, { outcome: 'done' });
+      b.tools.boardRemove(plain.delivered.id, { outcome: 'done', evidence: { deploy: 'prod 2026-10-15' } });
     } finally {
       b.close();
     }
@@ -356,10 +357,11 @@ test('evidence (#108): with a milestone the sender reads DONE with the evidence;
       closed_at: NOW,
       note: 'all good',
       evidence: { commit: '1a2b3c', pr: '#12' },
+      outcome: 'done',
       milestone: 'merged',
     });
-    assert.deepEqual(statusOf(h.tools, without.tracker.id), { state: 'done', text: `DONE in beta ${NOW}, unverified (deployed to prod)`, closed_at: NOW, milestone: 'deployed to prod' });
-    assert.deepEqual(statusOf(h.tools, plain.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: deploy prod 2026-10-15`, closed_at: NOW, evidence: { deploy: 'prod 2026-10-15' } });
+    assert.deepEqual(statusOf(h.tools, without.tracker.id), { state: 'done', text: `DONE in beta ${NOW}, unverified (deployed to prod)`, closed_at: NOW, outcome: 'done', milestone: 'deployed to prod' });
+    assert.deepEqual(statusOf(h.tools, plain.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: deploy prod 2026-10-15`, closed_at: NOW, evidence: { deploy: 'prod 2026-10-15' }, outcome: 'done' });
   } finally {
     h.cleanup();
   }
@@ -372,8 +374,8 @@ test('evidence (#108): a malformed or other hand-off sidecar is no evidence, nev
     const c = handOver(h, { milestone: 'merged' });
     const b = h.betaTools();
     try {
-      b.tools.boardRemove(a.delivered.id);
-      b.tools.boardRemove(c.delivered.id);
+      b.tools.boardRemove(a.delivered.id, { outcome: 'done' });
+      b.tools.boardRemove(c.delivered.id, { outcome: 'done' });
     } finally {
       b.close();
     }
@@ -398,7 +400,7 @@ test('evidence (#108): a failed evidence write keeps the item and writes no clos
     mkdirSync(join(dir, `${d.transfer_id}.evidence.json`), { recursive: true });
     const b = h.betaTools();
     try {
-      assert.throws(() => b.tools.boardRemove(d.delivered.id, undefined, { commit: 'abc' }), /its evidence file could not be written \(.*\)\. Nothing was removed\./);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', evidence: { commit: 'abc' } }), /its evidence file could not be written \(.*\)\. Nothing was removed\./);
       assert.ok(b.tools.boardGet(d.delivered.id), 'the item is still on the board');
     } finally {
       b.close();
@@ -416,7 +418,7 @@ test('skew (#108): the closure file written alongside evidence parses with the o
     const d = handOver(h, { milestone: 'merged' });
     const b = h.betaTools();
     try {
-      b.tools.boardRemove(d.delivered.id, 'shipped', { commit: 'abc' });
+      b.tools.boardRemove(d.delivered.id, { outcome: 'done', note: 'shipped', evidence: { commit: 'abc' } });
     } finally {
       b.close();
     }
@@ -429,31 +431,31 @@ test('skew (#108): the closure file written alongside evidence parses with the o
   }
 });
 
-test('evidence (#108 review): a refused close leaves no sidecar, and a retry without evidence reads DONE, unverified', () => {
+test('evidence (#108 review): a refused close leaves no sidecar, and a retry without evidence overwrites a leftover one and reads DONE, unverified', () => {
   const h = harness();
   try {
     const d = handOver(h, { milestone: 'merged' });
     const sidecar = join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.evidence.json`);
     const b = h.betaTools();
     try {
-      assert.throws(() => b.tools.boardRemove(d.delivered.id, ' ', { deploy: 'old' }), /the note is blank/);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', note: ' ', evidence: { deploy: 'old' } }), /the note is blank/);
       assert.equal(existsSync(sidecar), false, 'the refused close wrote no evidence file');
       // A sidecar left behind by an earlier close that failed after writing it.
       mkdirSync(join(h.beta, '.sterling', 'handoffs'), { recursive: true });
       writeFileSync(sidecar, JSON.stringify({ transfer_id: d.transfer_id, item_id: d.delivered.id, evidence: { deploy: 'old' } }));
-      const res = b.tools.boardRemove(d.delivered.id);
-      assert.equal(res.handoff_evidence, undefined);
-      assert.equal(existsSync(sidecar), false, 'a close without evidence deletes a leftover sidecar');
+      const res = b.tools.boardRemove(d.delivered.id, { outcome: 'done' });
+      assert.equal(res.handoff_evidence, sidecar);
+      assert.deepEqual(JSON.parse(readFileSync(sidecar, 'utf8')), { transfer_id: d.transfer_id, item_id: d.delivered.id, outcome: 'done' }, 'a close without evidence replaces a leftover sidecar with its outcome alone');
     } finally {
       b.close();
     }
-    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'done', text: `DONE in beta ${NOW}, unverified (merged)`, closed_at: NOW, milestone: 'merged' });
+    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'done', text: `DONE in beta ${NOW}, unverified (merged)`, closed_at: NOW, outcome: 'done', milestone: 'merged' });
   } finally {
     h.cleanup();
   }
 });
 
-test('evidence (#108 review): a leftover sidecar that cannot be deleted refuses the close, and the item stays', () => {
+test('evidence (#108 review): a leftover sidecar that cannot be replaced refuses the close, and the item stays', () => {
   const h = harness();
   try {
     const d = handOver(h, { milestone: 'merged' });
@@ -462,7 +464,7 @@ test('evidence (#108 review): a leftover sidecar that cannot be deleted refuses 
     mkdirSync(join(dir, `${d.transfer_id}.evidence.json`, 'x'), { recursive: true });
     const b = h.betaTools();
     try {
-      assert.throws(() => b.tools.boardRemove(d.delivered.id), /the evidence file .* left by an earlier close could not be deleted \(.*\); .* Nothing was removed\./);
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done' }), /its evidence file could not be written \(.*\)\. Nothing was removed\./);
       assert.ok(b.tools.boardGet(d.delivered.id), 'the item is still on the board');
     } finally {
       b.close();
@@ -668,7 +670,7 @@ test('board_query/board_get target_project: blocked_by_state and unblocks agains
     assert.deepEqual(h.tools.foreignBoardGet(String(waiter.id), 'beta').blocked_by_state, [{ slug: blocker.slug, state: 'open' }]);
     const b2 = h.betaTools();
     try {
-      b2.tools.boardRemove(String(blocker.id));
+      b2.tools.boardRemove(String(blocker.id), { outcome: 'done' });
     } finally {
       b2.close();
     }
@@ -854,18 +856,19 @@ test('a receiver moved with --move resolves at its new path: open stays open, cl
     assert.deepEqual(statusOf(h.tools, open.tracker.id), { state: 'open', text: 'open in beta' });
     const b = receiverTools(moved);
     try {
-      assert.equal(b.tools.boardRemove(noted.delivered.id, 'shipped in 1a2b3c').handoff_closure, join(moved, '.sterling', 'handoffs', `${noted.transfer_id}.json`));
-      b.tools.boardRemove(evidenced.delivered.id, undefined, { commit: '1a2b3c' });
+      assert.equal(b.tools.boardRemove(noted.delivered.id, { outcome: 'done', note: 'shipped in 1a2b3c' }).handoff_closure, join(moved, '.sterling', 'handoffs', `${noted.transfer_id}.json`));
+      b.tools.boardRemove(evidenced.delivered.id, { outcome: 'done', evidence: { commit: '1a2b3c' } });
     } finally {
       b.close();
     }
     assert.deepEqual(statusOf(h.tools, open.tracker.id), { state: 'open', text: 'open in beta' });
-    assert.deepEqual(statusOf(h.tools, noted.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: shipped in 1a2b3c`, closed_at: NOW, note: 'shipped in 1a2b3c' });
+    assert.deepEqual(statusOf(h.tools, noted.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: shipped in 1a2b3c`, closed_at: NOW, note: 'shipped in 1a2b3c', outcome: 'done' });
     assert.deepEqual(statusOf(h.tools, evidenced.tracker.id), {
       state: 'done',
       text: `DONE in beta ${NOW} (merged): commit 1a2b3c`,
       closed_at: NOW,
       evidence: { commit: '1a2b3c' },
+      outcome: 'done',
       milestone: 'merged',
     });
     assert.equal((h.tools.boardGet(open.tracker.id) as unknown as Loose).handoff_status !== undefined, true);
@@ -916,14 +919,14 @@ test('a receiver renamed in the registry reads under its current name in handoff
     const done = handOver(h);
     const closed = h.betaTools();
     try {
-      closed.tools.boardRemove(done.delivered.id, 'shipped');
+      closed.tools.boardRemove(done.delivered.id, { outcome: 'done', note: 'shipped' });
     } finally {
       closed.close();
     }
     assert.equal(registry.renameIfUnique(h.beta, 'Beta Renamed').status, 'renamed');
 
     assert.deepEqual(statusOf(h.tools, open.tracker.id), { state: 'open', text: 'open in Beta Renamed', to_name: 'Beta Renamed' });
-    assert.deepEqual(statusOf(h.tools, done.tracker.id), { state: 'done', text: `DONE in Beta Renamed ${NOW}: shipped`, closed_at: NOW, note: 'shipped', to_name: 'Beta Renamed' });
+    assert.deepEqual(statusOf(h.tools, done.tracker.id), { state: 'done', text: `DONE in Beta Renamed ${NOW}: shipped`, closed_at: NOW, note: 'shipped', outcome: 'done', to_name: 'Beta Renamed' });
     assert.equal((h.tools.boardGet(open.tracker.id) as unknown as Loose).readiness, 'delegated');
     assert.deepEqual((h.tools.boardGet(open.tracker.id) as unknown as Loose).handoff, { role: 'sent', transfer_id: open.transfer_id, to_root: h.beta, to_name: 'beta', to_item_id: open.delivered.id }, 'the stored tracker is never rewritten');
   } finally {
@@ -961,6 +964,43 @@ test("board_query handoff_to_item_id (#175): finds the tracker by the receiver's
     const waiting = h.tools.foreignBoardQuery({ target_project: 'beta', readiness: ['waiting'] }).records as Loose[];
     assert.deepEqual(waiting.map((r) => r.id), [d.delivered.id]);
     assert.ok(foreign.filter((r) => r.readiness === 'ready').length >= 1, 'the other handed-over item is ready there');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('outcome (removal journal): a received item closed as dropped reads CLOSED as dropped at the sender; the sidecar carries the outcome and a #108-era sender still reads its evidence', () => {
+  const h = harness();
+  try {
+    const dropped = handOver(h, { milestone: 'merged' });
+    const evidenced = handOver(h);
+    const b = h.betaTools();
+    try {
+      b.tools.boardRemove(dropped.delivered.id, { outcome: 'dropped', note: 'not needed after the redesign' });
+      b.tools.boardRemove(evidenced.delivered.id, { outcome: 'done', evidence: { commit: 'abc' } });
+    } finally {
+      b.close();
+    }
+    const dir = join(h.beta, '.sterling', 'handoffs');
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, `${dropped.transfer_id}.evidence.json`), 'utf8')), { transfer_id: dropped.transfer_id, item_id: dropped.delivered.id, outcome: 'dropped' });
+    assert.deepEqual(statusOf(h.tools, dropped.tracker.id), {
+      state: 'done',
+      text: `CLOSED as dropped in beta ${NOW}, unverified (merged): not needed after the redesign`,
+      closed_at: NOW,
+      note: 'not needed after the redesign',
+      outcome: 'dropped',
+      milestone: 'merged',
+    });
+    // The #108 sidecar read shape, copied verbatim so a later change to the shared schema cannot make this pass.
+    const evidenceShape = z.object({ commit: z.string().optional(), pr: z.string().optional(), deploy: z.string().optional(), url: z.string().optional() });
+    const has = (e: Record<string, string | undefined>) => Object.values(e).some((v) => typeof v === 'string' && v.trim().length > 0);
+    const oldRead = z.object({ transfer_id: z.string().uuid(), item_id: z.string().uuid(), evidence: evidenceShape.refine(has) });
+    const old = oldRead.safeParse(JSON.parse(readFileSync(join(dir, `${evidenced.transfer_id}.evidence.json`), 'utf8')));
+    assert.equal(old.success, true);
+    assert.deepEqual(old.success && old.data.evidence, { commit: 'abc' });
+    // the closure file keeps the old strict shape
+    const oldClosure = z.object({ transfer_id: z.string().uuid(), item_id: z.string().uuid(), closed_at: z.string().min(1), note: z.string().min(1).optional() }).strict();
+    assert.equal(oldClosure.safeParse(JSON.parse(readFileSync(join(dir, `${dropped.transfer_id}.json`), 'utf8'))).success, true);
   } finally {
     h.cleanup();
   }

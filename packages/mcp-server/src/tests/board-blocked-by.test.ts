@@ -187,7 +187,7 @@ test('blocker state: board_get reports each blocker open, and a REMOVED blocker 
       { slug: a.slug, state: 'open' },
       { slug: b.slug, state: 'open' },
     ]);
-    tools.boardRemove(a.id as string);
+    tools.boardRemove(a.id as string, { outcome: 'done' });
     got = tools.boardGet(d.id as string) as unknown as Loose;
     assert.deepEqual(got.blocked_by, [a.slug, b.slug], 'the stored list is unchanged by the removal');
     assert.deepEqual(got.blocked_by_state, [
@@ -215,7 +215,7 @@ test('blocker state: board_query text and full projections carry blocked_by and 
   try {
     const a = userItem(tools, 'Define the schema');
     const d = userItem(tools, 'Wire the consumer', { blocked_by: [a.slug] });
-    tools.boardRemove(a.id as string);
+    tools.boardRemove(a.id as string, { outcome: 'done' });
     for (const projection of ['text', 'full'] as const) {
       const rows = tools.boardQueryResult({ source: 'user', projection }).records as unknown as Loose[];
       const row = rows.find((r) => r.id === d.id);

@@ -8,6 +8,7 @@
   "- **Ask, don't guess — through the AskUserQuestion tool.**": [],
   "- **Close-on-commit: a commit that fulfils a board item pays it**": [
     "- **Close-on-commit: a commit that fulfils a board item pays it** — `board_remove` in the same breath, citing the commit. A fulfilled item left open sends a later session at work that does not need doing.",
+    "- **Close-on-commit: a commit that fulfils a board item pays it** — `board_remove` in the same breath, citing the commit. A fulfilled item left open sends a later session at work that does not need doing. A user-ask item records the user's words verbatim and its acceptance, and leaves the board the same way, through the commit that fulfils it; a partly-done item is rewritten, never removed. When work leaves the main tree (a worktree or PR branch), the item text names the branch, so a session after a crash can resume it.",
     "- **Close-on-commit: a commit that fulfils a board item pays it** — `board_remove` in the same breath, citing the commit. A fulfilled item left open sends a later session at work that does not need doing; the board's fiction is missing closes, not missing surfacing."
   ],
   "- **Close-on-commit:**": [],

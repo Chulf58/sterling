@@ -65,7 +65,7 @@ interface ToolsView {
   boardAdd(fields: Loose): { record: Loose };
   boardGet(id: string): Loose;
   boardUpdate(id: string, patch: Loose): Loose;
-  boardRemove(id: string): Loose;
+  boardRemove(id: string, close?: { outcome?: string; note?: string; evidence?: unknown }): Loose;
   /** THE PROJECTION-APPLYING READ — the one the MCP tool surface calls, and the
    *  only board read that honours `projection`. Same shape the frozen
    *  read-surface-wave.test.ts arms use: {matched_filter, returned, records}. */
@@ -167,7 +167,7 @@ function seedLegacySluglessItem(store: SterlingStore, tools: ToolsView, text: st
   delete legacy.slug;
   legacy.id = randomUUID();
   store.create(legacy as unknown as Parameters<SterlingStore['create']>[0]);
-  tools.boardRemove(modern.id as string); // full uuid — the permitted address form
+  tools.boardRemove(modern.id as string, { outcome: 'done' }); // full uuid — the permitted address form
   return legacy.id as string;
 }
 
@@ -338,11 +338,13 @@ test('H3 IDS NEVER CLIP — THE REGRESSION PIN: the headline keeps its FULL uuid
     // takes off a headline listing must satisfy the destroying call's exact-id
     // rule. An 8-char form is refused, which is exactly why the full one must
     // survive the projection.
+    // The outcome is given, so the only reason left to refuse is the address.
     assert.throws(
-      () => tools.boardRemove(id8(h.id as string)),
+      () => tools.boardRemove(id8(h.id as string), { outcome: 'done' }),
+      /this tool addresses items by their EXACT full uuid only/,
       'precondition (S1 E2): the destroying call refuses the 8-char form — so a headline that only showed id8 would be undeletable'
     );
-    tools.boardRemove(h.id as string);
+    tools.boardRemove(h.id as string, { outcome: 'done' });
     assert.equal(fullRecords(tools).length, 0, 'the full id read off the headline IS a working address — the reference the reader was shown stays actionable');
   } finally {
     cleanup();
@@ -397,7 +399,7 @@ test('H4 CLIPPING, BOTH SIDES OF THE BOUNDARY: a 48-character name renders WHOLE
     assert.ok(!String(hOn.name).includes(ELLIPSIS), 'a name at the boundary carries no ellipsis — clipping starts PAST the budget, not at it');
     assert.equal(expectedOn.length, 59, 'self-check on the stated derivation: 48 name chars + 11 for " (id8)" = 59');
     assert.ok(expectedOn.length <= 60, 'and the whole handle fits inside the 60-character budget the mint already uses');
-    tools.boardRemove(onBoundary.id as string);
+    tools.boardRemove(onBoundary.id as string, { outcome: 'done' });
 
     // --- one past the boundary, clipped -------------------------------------
     const overBoundary = boardAdd(tools, { text: `${SLUG_49}\n\nbody.`, source: 'user', slug: 'h4-over-boundary' });
