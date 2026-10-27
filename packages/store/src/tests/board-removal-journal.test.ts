@@ -294,3 +294,74 @@ test('snapshot refusals name why: Postgres storage, no database, wrong schema ve
     p.cleanup();
   }
 });
+
+const RECEIVED = { role: 'received', transfer_id: randomUUID(), from_root: '/elsewhere/CH.Hub', from_name: 'CH.Hub', from_item_id: randomUUID() };
+const SENT = { role: 'sent', transfer_id: randomUUID(), to_root: '/elsewhere/Other', to_name: 'Other', to_item_id: null };
+
+/** The journal table exactly as 0.19.130 created it, before the hand-off columns. */
+const JOURNAL_0_19_130 = `CREATE TABLE board_removal_journal (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL, slug TEXT, text TEXT NOT NULL, source TEXT NOT NULL,
+  objective TEXT, priority TEXT, outcome TEXT NOT NULL, evidence TEXT, note TEXT, removed_at TEXT NOT NULL
+)`;
+
+test('the journal row records the removed todo\'s hand-off role, and the sending project for a received item', SQLITE, () => {
+  const p = project();
+  try {
+    const recv = mk(p.store, { text: 'From CH.Hub: a task', handoff: RECEIVED });
+    const tracker = mk(p.store, { text: "Handed to project 'Other': a task", handoff: SENT });
+    const plain = mk(p.store, { text: 'A task' });
+    for (const t of [recv, tracker, plain]) p.store.remove(t.id, NOW, { outcome: 'done' });
+    const byId = new Map(p.store.boardRemovalJournal().map((e) => [e.item_id, e]));
+    assert.equal(byId.get(recv.id)?.handoff_role, 'received');
+    assert.equal(byId.get(recv.id)?.handoff_from_name, 'CH.Hub');
+    assert.equal(byId.get(tracker.id)?.handoff_role, 'sent');
+    assert.equal(byId.get(tracker.id)?.handoff_from_name, undefined, 'a tracker names no sending project');
+    assert.equal('handoff_role' in byId.get(plain.id)!, false);
+    assert.equal('handoff_from_name' in byId.get(plain.id)!, false);
+    const snap = new Map(readBoardSnapshot(p.root).journal.map((e) => [e.item_id, e]));
+    assert.deepEqual(snap.get(recv.id), byId.get(recv.id));
+    assert.deepEqual(snap.get(tracker.id), byId.get(tracker.id));
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('additive: a 0.19.130 journal table gains the hand-off columns on the next writable open, keeping its rows; the snapshot reads it before that', SQLITE, () => {
+  const p = project();
+  try {
+    p.store.close();
+    const db = new DatabaseSync(p.dbPath);
+    db.exec('DROP TABLE board_removal_journal');
+    db.exec(JOURNAL_0_19_130);
+    db.exec(`INSERT INTO board_removal_journal (item_id, text, source, outcome, removed_at) VALUES ('${randomUUID()}', 'Old task', 'user', 'dropped', '${NOW}')`);
+    const before = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    db.close();
+    const old = readBoardSnapshot(p.root).journal;
+    assert.equal(old.length, 1);
+    assert.equal(old[0].text, 'Old task');
+    assert.equal('handoff_role' in old[0], false, 'a read-only snapshot of the old table reads the missing columns as absent');
+
+    p.store = new SterlingStore(p.dbPath);
+    const cols = new DatabaseSync(p.dbPath, { readOnly: true });
+    try {
+      const names = (cols.prepare('PRAGMA table_info(board_removal_journal)').all() as { name: string }[]).map((c) => c.name);
+      assert.ok(names.includes('handoff_role') && names.includes('handoff_from_name'), names.join(', '));
+      assert.equal((cols.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, before);
+    } finally {
+      cols.close();
+    }
+    const recv = mk(p.store, { text: 'Received', handoff: RECEIVED });
+    p.store.remove(recv.id, NOW, { outcome: 'done' });
+    const journal = p.store.boardRemovalJournal();
+    assert.equal(journal.length, 2);
+    assert.equal(journal[0].text, 'Old task');
+    assert.equal('handoff_role' in journal[0], false);
+    assert.equal(journal[1].handoff_role, 'received');
+    assert.equal(journal[1].handoff_from_name, 'CH.Hub');
+    p.store.close();
+    p.store = new SterlingStore(p.dbPath);
+    assert.equal(p.store.boardRemovalJournal().length, 2, 'a second open finds the columns already there');
+  } finally {
+    p.cleanup();
+  }
+});

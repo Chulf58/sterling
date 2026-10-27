@@ -13,7 +13,8 @@
 // finds no open PR, pushes again (a no-op) and creates it.
 import { spawnSync } from 'node:child_process';
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { delimiter, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { resolveGhPath } from './gh-path.mjs';
 
 function gh(cwd, args, timeoutMs = 120_000) {
   return spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
@@ -37,20 +38,6 @@ function callTimeoutMs(deadline) {
 }
 
 const streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? '')).trim();
-
-/** Where `gh` resolves on PATH (the first hit), or null. Reported when a gh
- * call fails, because on WSL the one that runs is often a Windows gh.exe. */
-function resolveGhPath() {
-  const names = process.platform === 'win32' ? ['gh.exe', 'gh.cmd', 'gh'] : ['gh', 'gh.exe'];
-  for (const dir of String(process.env.PATH ?? '').split(delimiter)) {
-    if (!dir) continue;
-    for (const name of names) {
-      const candidate = join(dir, name);
-      if (existsSync(candidate)) return candidate;
-    }
-  }
-  return null;
-}
 
 /** The web page that opens a PR for `branch` into `base` by hand. */
 const compareUrl = (repo, base, branch) => `https://${repo}/compare/${base.split('/').map(encodeURIComponent).join('/')}...${branch.split('/').map(encodeURIComponent).join('/')}?expand=1`;

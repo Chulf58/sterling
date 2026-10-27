@@ -132,7 +132,11 @@ CREATE TABLE IF NOT EXISTS store_meta (
 -- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
 -- removed user task, written in remove()'s transaction and never pruned.
 -- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
--- user_version bump. evidence is JSON text or NULL.
+-- user_version bump. evidence is JSON text or NULL. handoff_role ('sent' or
+-- 'received') and handoff_from_name (the sending project, received items only)
+-- copy the removed todo's handoff field; NULL for a task that was no hand-off
+-- and for every row written before the columns existed (createSchema adds them
+-- to a table made by 0.19.130).
 CREATE TABLE IF NOT EXISTS board_removal_journal (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id TEXT NOT NULL,
@@ -144,7 +148,9 @@ CREATE TABLE IF NOT EXISTS board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
@@ -525,6 +531,17 @@ export class SqliteDriver implements StoreDriver {
       /* column already exists */
     }
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)');
+    // Additive (decision board-issue-mirror-skips-trackers-labels-origin-and-label-lifecycle):
+    // board_removal_journal as 0.19.130 created it gains the removed todo's
+    // hand-off role and sending project, so the GitHub issue mirror can skip a
+    // removed tracker and label a removed received task. Rows already there keep NULL.
+    for (const column of ['handoff_role', 'handoff_from_name']) {
+      try {
+        this.db.exec(`ALTER TABLE board_removal_journal ADD COLUMN ${column} TEXT`);
+      } catch {
+        /* column already exists */
+      }
+    }
   }
 
   /**

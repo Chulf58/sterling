@@ -392,6 +392,8 @@ export const BIN_ENTRIES = {
   'rotation-note': 'scripts/rotation-note.mjs',
   'stamp-contract': 'scripts/stamp-contract.mjs',
   'sync-agents': 'scripts/sync-agents.mjs',
+  // the one-way board-to-GitHub-issues mirror skills/sync-board-issues/SKILL.md runs in any consumer project
+  'sync-board-issues': 'scripts/sync-board-issues.mjs',
   update: 'scripts/update.mjs',
 };
 

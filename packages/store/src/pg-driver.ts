@@ -528,8 +528,12 @@ CREATE TABLE IF NOT EXISTS ${s}.board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
+ALTER TABLE ${s}.board_removal_journal ADD COLUMN IF NOT EXISTS handoff_role TEXT;
+ALTER TABLE ${s}.board_removal_journal ADD COLUMN IF NOT EXISTS handoff_from_name TEXT;
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON ${s}.board_removal_journal (item_id);
 `;
 }

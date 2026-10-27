@@ -4459,9 +4459,13 @@ export class SterlingStore {
             `remove: '${id}' is ${record ? (record.type === 'todo' ? `a ${record.source ?? 'sourceless'} todo` : `a ${record.type}`) : 'not in this store'}; a removal outcome is journaled for user board tasks only. Nothing was removed.`
           );
         }
+        // The todo's handoff field as stored (todoHandoffSchema): the role, and for a received item the sending project.
+        const handoff = (record as { handoff?: { role?: unknown; from_name?: unknown } }).handoff;
+        const handoffRole = handoff?.role === 'sent' || handoff?.role === 'received' ? handoff.role : null;
+        const handoffFrom = handoffRole === 'received' && typeof handoff?.from_name === 'string' && handoff.from_name.length > 0 ? handoff.from_name : null;
         this.db
           .prepare(
-            'INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, handoff_role, handoff_from_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           )
           .run(
             record.id,
@@ -4473,7 +4477,9 @@ export class SterlingStore {
             checkedRemoval.outcome,
             checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null,
             checkedRemoval.note ?? null,
-            drainedAt ?? new Date().toISOString()
+            drainedAt ?? new Date().toISOString(),
+            handoffRole,
+            handoffFrom
           );
       }
       if (isSystemDrain && record) {

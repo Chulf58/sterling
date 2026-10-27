@@ -818,6 +818,11 @@ export const boardRemovalJournalEntrySchema = z
     evidence: handoffEvidenceSchema.optional(),
     note: z.string().min(1).optional(),
     removed_at: z.string().min(1),
+    // The removed todo's hand-off role and, for a received item, the sending
+    // project (todoHandoffSchema's role and from_name). Absent for a task that
+    // was no hand-off and for rows written before the store kept them.
+    handoff_role: z.enum(['sent', 'received']).optional(),
+    handoff_from_name: z.string().min(1).optional(),
   })
   .strict();
 export type BoardRemovalJournalEntry = z.infer<typeof boardRemovalJournalEntrySchema>;
