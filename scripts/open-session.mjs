@@ -1,8 +1,8 @@
 // /sterling:session: open an extra parallel session in ANY Sterling project, one git
 // worktree per session (decision
 // parallel-sessions-in-one-project-run-one-per-git-worktree-sh).
-//   node scripts/open-session.mjs [--target <project>] [--name <label>]
-//   node scripts/open-session.mjs [--target <project>] --remove <label>
+//   node scripts/open-session.mjs [--target <project-name|path>] [--name <label>] [--create-session]
+//   node scripts/open-session.mjs [--target <project-name|path>] --remove <label>
 // Create: `git worktree add -b session/<label> <main>/../<project>.worktrees/<label>
 // <default branch>`, then the same OpenCode setup /sterling:update runs (setupOpenCode),
 // aimed at the worktree, then print the command that starts OpenCode IN it. A session is
@@ -15,7 +15,9 @@
 // worktree shows up as untracked content of the main checkout and makes every
 // "which checkout am I in" lookup resolve to the wrong one.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { ProjectRegistry } from '@sterling/store';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
@@ -165,8 +167,86 @@ export function removeSession({ target, name }) {
   return { path, branch, branchKept };
 }
 
+/** The registered projects of this machine (the registry /sterling:projects lists). */
+function registeredProjects() {
+  const registry = new ProjectRegistry();
+  try {
+    return registry.list();
+  } finally {
+    registry.close();
+  }
+}
+
+const isDirectory = (p) => existsSync(p) && statSync(p).isDirectory();
+
+/**
+ * --target is a project registry name or a path. An existing directory is a path; else a
+ * registered name gives that project's root. A bare name that is both an existing
+ * directory here and a registered project elsewhere is ambiguous and refused; a value
+ * with a path separator (or . and ..) is explicitly a path and wins. Neither: refused,
+ * naming both readings. `projects` is injectable for tests.
+ */
+export function resolveTarget(value, { cwd = process.cwd(), projects = registeredProjects } = {}) {
+  const asPath = resolve(cwd, value);
+  const dir = isDirectory(asPath);
+  const explicitPath = /[\\/]/.test(value) || value === '.' || value === '..';
+  if (dir && explicitPath) return asPath;
+  const matches = projects().filter((r) => r.name === value);
+  const roots = [...new Set(matches.map((r) => r.repo_path))];
+  if (dir) {
+    const other = roots.filter((root) => !isDirectory(root) || realpathSync(root) !== realpathSync(asPath));
+    if (other.length === 0) return asPath;
+    throw new SessionRefusal(`REFUSED: --target '${value}' is both a directory here (${asPath}) and a registered project (${other.join(', ')}); pass a path with a separator (./${value}) or the registered root to say which`);
+  }
+  if (roots.length === 1) return roots[0];
+  if (roots.length > 1) throw new SessionRefusal(`REFUSED: --target '${value}' names ${roots.length} registered projects (${roots.join(', ')}); pass the path of the one you mean`);
+  throw new SessionRefusal(`REFUSED: --target '${value}' is neither a directory (no such directory: ${asPath}) nor a registered project (no such registered project; run list-projects.mjs to see them)`);
+}
+
+/** Run the opencode CLI: PATH first, then ~/.opencode/bin/opencode. Returns { status, stdout, stderr, error }. */
+export function runOpencode(args) {
+  let last;
+  for (const bin of ['opencode', join(homedir(), '.opencode', 'bin', 'opencode')]) {
+    last = spawnSync(bin, args, { encoding: 'utf8', timeout: 30_000 });
+    if (last.error?.code !== 'ENOENT') break;
+  }
+  return { status: last.status, stdout: last.stdout ?? '', stderr: last.stderr ?? '', error: last.error };
+}
+
+const AGENT = 'sterling/conductor';
+
+/**
+ * Create an OpenCode session located in the worktree (`opencode api POST /api/session`), so
+ * the session has an id before anyone types. `run` is injectable (a test never reaches a
+ * server). Exactly one POST per call, never retried: a retry after a lost response could
+ * create a second session. Returns { id } or throws SessionRefusal.
+ */
+export function createOpencodeSession({ path, title, run = runOpencode }) {
+  const body = { location: { directory: path }, title, agent: AGENT };
+  const r = run(['api', 'POST', '/api/session', '-d', JSON.stringify(body)]);
+  const serverText = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim();
+  let why;
+  let uncertain = false;
+  if (r.error) why = `${r.error.code ?? r.error.message}${r.error.code ? ` (${r.error.message})` : ''}${serverText ? `: ${serverText}` : ''}`;
+  else if (r.status !== 0) why = `exit ${r.status}${serverText ? `: ${serverText}` : ''}`;
+  else {
+    uncertain = true; // the server answered success, so a session may exist whatever the body says
+    let id;
+    try {
+      id = JSON.parse(r.stdout)?.data?.id;
+    } catch (e) {
+      why = `the response was not JSON (${e.message})${serverText ? `: ${serverText}` : ''}`;
+    }
+    if (why === undefined) {
+      if (typeof id === 'string' && id) return { id };
+      why = `the response has no data.id${serverText ? `: ${serverText}` : ''}`;
+    }
+  }
+  throw new SessionRefusal(`REFUSED: --create-session could not create the OpenCode session (${why}). The worktree ${path} was created and is kept.${uncertain ? ' The server answered success, so a session MAY have been created anyway: check the OpenCode session list before retrying.' : ''} Start the OpenCode server with \`opencode service start\` and retry, or start it by hand: cd "${path}" && opencode`);
+}
+
 function usage(msg) {
-  console.error(`open-session: ${msg}\nusage: open-session.mjs [--target <project>] [--name <label>]\n       open-session.mjs [--target <project>] --remove <label>`);
+  console.error(`open-session: ${msg}\nusage: open-session.mjs [--target <project-name|path>] [--name <label>] [--create-session]\n       open-session.mjs [--target <project-name|path>] --remove <label>`);
   process.exit(1);
 }
 
@@ -174,15 +254,21 @@ function parseArgs(argv) {
   // Exact-token parsing (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser):
   // `--flag value` and `--flag=value` both work, a repeated flag is refused, never last-wins.
   const known = ['--target', '--name', '--remove'];
+  const bool = ['--create-session'];
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if (!tok.startsWith('--')) usage(`unexpected argument '${tok}'`);
     const flag = tok.split('=')[0];
+    if (bool.includes(flag)) {
+      if (tok.includes('=')) usage(`${flag} takes no value`);
+      continue;
+    }
     if (!known.includes(flag)) usage(`unrecognized argument '${tok}'`);
     if (!tok.includes('=')) i++; // the split-form value, checked by arg() below
   }
-  const opts = { target: process.cwd(), name: undefined, remove: undefined };
+  const opts = { target: process.cwd(), name: undefined, remove: undefined, createSession: false };
   try {
+    opts.createSession = hasFlag('--create-session', argv);
     for (const flag of known) {
       const value = arg(flag, argv);
       if (value === undefined) {
@@ -190,14 +276,19 @@ function parseArgs(argv) {
         continue;
       }
       if (value === '') usage(`${flag} requires a value`);
-      if (flag === '--target') opts.target = resolve(value);
+      if (flag === '--target') opts.target = resolveTarget(value);
       else if (flag === '--name') opts.name = value;
       else opts.remove = value;
     }
   } catch (err) {
+    if (err instanceof SessionRefusal) {
+      console.error(err.message);
+      process.exit(err.exit);
+    }
     usage(err.message);
   }
   if (opts.remove !== undefined && opts.name !== undefined) usage('--remove and --name cannot be combined');
+  if (opts.remove !== undefined && opts.createSession) usage('--remove and --create-session cannot be combined');
   return opts;
 }
 
@@ -221,7 +312,13 @@ function main() {
       console.error(`The worktree exists but OpenCode is NOT ready in it. Fix the above, then run --remove ${label} and open the session again.`);
       process.exit(2);
     }
-    console.log(`\nStart the session in the worktree (never move an existing session into it):\n  cd "${path}" && opencode`);
+    let startCmd = 'opencode';
+    if (opts.createSession) {
+      const made = createOpencodeSession({ path, title: `${basename(mainRoot)} ${label}` });
+      console.log(`session: ${made.id}`);
+      startCmd = `opencode --session ${made.id}`;
+    }
+    console.log(`\nStart the session in the worktree (never move an existing session into it):\n  cd "${path}" && ${startCmd}`);
     console.log('Parallel sessions share the main checkout\'s board: claim a board task before working on it, so another session does not take the same one.');
     console.log(`When the session is finished and its work is merged: node "${join(pluginRoot, 'bin', 'open-session.mjs')}" --target "${mainRoot}" --remove ${label}`);
   } catch (err) {

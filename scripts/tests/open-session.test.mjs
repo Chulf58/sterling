@@ -9,7 +9,8 @@ import { join, resolve, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setupOpenCode } from '../lib/opencode-install.mjs';
-import { openSession, removeSession, worktreePathFor, SessionRefusal } from '../open-session.mjs';
+import { openSession, removeSession, worktreePathFor, resolveTarget, createOpencodeSession, SessionRefusal } from '../open-session.mjs';
+import { ProjectRegistry } from '@sterling/store';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = join(repoRoot, 'scripts', 'open-session.mjs');
@@ -273,6 +274,138 @@ test('CLI: an OpenCode setup that did not run leaves the worktree, exits 2 and s
     assert.match(gone.stdout, /removed worktree: /);
     assert.equal(basename(worktreePathFor(f.main, 'nooc')), 'nooc');
     assert.ok(!existsSync(worktreePathFor(f.main, 'nooc')));
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('resolveTarget: a registered name gives its root, a path stays a path', () => {
+  const f = fixture();
+  try {
+    const projects = () => [{ name: 'CH.Core', repo_path: f.main }];
+    assert.equal(resolveTarget('CH.Core', { cwd: f.home, projects }), f.main);
+    assert.equal(resolveTarget(f.main, { cwd: f.home, projects: () => assert.fail('registry read for an explicit path') }), f.main);
+    assert.equal(resolveTarget('proj', { cwd: f.base, projects: () => [] }), f.main, 'a bare directory name with no registry match is a path');
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('resolveTarget: neither reading matches, the refusal names both', () => {
+  const f = fixture();
+  try {
+    assert.throws(() => resolveTarget('Nope', { cwd: f.home, projects: () => [] }),
+      (e) => e instanceof SessionRefusal && e.exit === 2 && /no such directory/.test(e.message) && /no such registered project/.test(e.message) && e.message.includes('Nope'));
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('resolveTarget: a bare name that is a directory here and a registered project elsewhere is ambiguous; a separator picks the path', () => {
+  const f = fixture();
+  try {
+    const elsewhere = join(f.base, 'elsewhere');
+    mkdirSync(elsewhere);
+    const projects = () => [{ name: 'proj', repo_path: elsewhere }];
+    assert.throws(() => resolveTarget('proj', { cwd: f.base, projects }), (e) => e instanceof SessionRefusal && /both a directory here/.test(e.message));
+    assert.equal(resolveTarget('./proj', { cwd: f.base, projects }), f.main);
+    assert.equal(resolveTarget('proj', { cwd: f.base, projects: () => [{ name: 'proj', repo_path: f.main }] }), f.main, 'the same place is not ambiguous');
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('CLI: --target <registry name> run from another folder opens the session in that project', () => {
+  const f = fixture();
+  try {
+    const regDb = join(f.base, 'registry.db');
+    const reg = new ProjectRegistry(regDb);
+    reg.register({ repo_path: f.main, name: 'CH.Core', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    reg.close();
+    const other = join(f.base, 'other');
+    mkdirSync(other);
+    const env = cleanEnv({ HOME: f.home, STERLING_OPENCODE_SETUP_DISABLE: '1', STERLING_REGISTRY_DB: regDb });
+    const made = spawnSync(process.execPath, [script, '--target', 'CH.Core', '--name', 'viareg'], { encoding: 'utf8', env, cwd: other });
+    assert.match(made.stdout, /created worktree: /, made.stderr);
+    assert.ok(existsSync(worktreePathFor(f.main, 'viareg')));
+    const bad = spawnSync(process.execPath, [script, '--target', 'Missing'], { encoding: 'utf8', env, cwd: other });
+    assert.equal(bad.status, 2);
+    assert.match(bad.stderr, /no such directory/);
+    assert.match(bad.stderr, /no such registered project/);
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+const okRun = (calls) => (args) => {
+  calls.push(args);
+  return { status: 0, stdout: JSON.stringify({ data: { id: 'ses_abc', location: { directory: '/w' } } }), stderr: '' };
+};
+
+test('createOpencodeSession: posts the worktree location, title and agent, and returns the id', () => {
+  const calls = [];
+  const r = createOpencodeSession({ path: '/w/proj.worktrees/s', title: 'proj s', run: okRun(calls) });
+  assert.deepEqual(r, { id: 'ses_abc' });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(0, 3), ['api', 'POST', '/api/session']);
+  assert.deepEqual(JSON.parse(calls[0][4]), { location: { directory: '/w/proj.worktrees/s' }, title: 'proj s', agent: 'sterling/conductor' });
+});
+
+test('createOpencodeSession: every failure shape refuses after exactly one POST, naming opencode service start and the server text', () => {
+  const bad = [
+    [{ status: 1, stdout: '', stderr: 'connection refused' }, /connection refused/, false],
+    [{ status: 0, stdout: 'not json', stderr: '' }, /not JSON/, true],
+    [{ status: 0, stdout: '{"data":{}}', stderr: '' }, /no data\.id/, true],
+    [{ status: null, stdout: '', stderr: '', error: new Error('spawn opencode ENOENT') }, /ENOENT/, false],
+  ];
+  for (const [result, why, maybeCreated] of bad) {
+    let posts = 0;
+    assert.throws(() => createOpencodeSession({ path: '/w', title: 't', run: () => (posts++, result) }),
+      (e) => e instanceof SessionRefusal && e.exit === 2 && /opencode service start/.test(e.message) && /kept/.test(e.message) && why.test(e.message) && /MAY have been created/.test(e.message) === maybeCreated);
+    assert.equal(posts, 1, 'no retry');
+  }
+});
+
+test('createOpencodeSession: a spawn error keeps the server text captured before it and its error code', () => {
+  let posts = 0;
+  const err = Object.assign(new Error('spawnSync opencode ETIMEDOUT'), { code: 'ETIMEDOUT' });
+  const run = () => (posts++, { status: null, stdout: '', stderr: 'database is locked', error: err });
+  assert.throws(() => createOpencodeSession({ path: '/w', title: 't', run }),
+    (e) => e instanceof SessionRefusal && e.exit === 2 && /ETIMEDOUT/.test(e.message) && /database is locked/.test(e.message) && /opencode service start/.test(e.message));
+  assert.equal(posts, 1);
+});
+
+test('CLI: --create-session makes exactly one API call and prints the id; without it no API call is made', () => {
+  const f = fixture();
+  try {
+    const bin = join(f.base, 'bin');
+    mkdirSync(bin);
+    const log = join(f.base, 'calls.log');
+    // the version probe (setup needs it) is told apart from the API call and not logged
+    writeFileSync(join(bin, 'opencode'), `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 2.0.21; exit 0; fi
+if [ "$1" = "api" ]; then echo "$@" >> "${log}"; echo '{"data":{"id":"ses_fake1"}}'; exit 0; fi
+exit 0
+`, { mode: 0o755 });
+    // a real setup must run: the suite environment may carry STERLING_OPENCODE_SETUP_DISABLE=1
+    const env = cleanEnv({ HOME: f.home, PATH: `${bin}:${process.env.PATH}` });
+    delete env.STERLING_OPENCODE_SETUP_DISABLE;
+    const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env, cwd: f.main });
+    const plain = run(['--name', 'nocall']);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.ok(!existsSync(log), 'no API call without the flag');
+    assert.doesNotMatch(plain.stdout, /session: /);
+    const made = run(['--name', 'withid', '--create-session']);
+    assert.equal(made.status, 0, made.stderr);
+    const calls = readFileSync(log, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /^api POST \/api\/session /);
+    assert.match(calls[0], /sterling\/conductor/);
+    assert.match(made.stdout, /^session: ses_fake1$/m);
+    assert.match(made.stdout, /&& opencode --session ses_fake1/);
+    const both = run(['--remove', 'nocall', '--create-session']);
+    assert.equal(both.status, 1);
+    assert.match(both.stderr, /cannot be combined/);
   } finally {
     rmSync(f.base, { recursive: true, force: true });
   }

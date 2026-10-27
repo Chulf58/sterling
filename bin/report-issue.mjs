@@ -529,7 +529,7 @@ function isToolNameList(token) {
   const parts = token.replace(/[.,:;!?]+$/, "").split("/");
   return parts.length > 1 && parts.every((p) => TOOL_NAMES.includes(p));
 }
-var PROSE_WORDS = ["and", "or", "read", "write", "true", "false", "yes", "no", "on", "off", "pass", "fail", "success", "failure", "enable", "disable", "before", "after", "add", "remove", "get", "set", "push", "pull", "in", "out", "up", "down", "either", "he", "she", "his", "her"];
+var PROSE_WORDS = ["and", "or", "read", "write", "true", "false", "yes", "no", "on", "off", "pass", "fail", "success", "failure", "enable", "disable", "before", "after", "add", "remove", "get", "set", "push", "pull", "in", "out", "up", "down", "either", "he", "she", "his", "her", "planned", "unverified"];
 function isProsePair(token) {
   const parts = token.replace(/[.,:;!?]+$/, "").split("/");
   return parts.length === 2 && parts.every((p) => /^\d{1,2}(?:\.\d+)?%?$/.test(p) || /^[A-Za-z]$/.test(p) || PROSE_WORDS.includes(p.toLowerCase()));
@@ -616,11 +616,11 @@ function parseLabelsLine(body) {
 }
 function reportLabels(body) {
   const tokens = parseLabelsLine(body);
-  if (!tokens || tokens.length !== 3) return null;
+  if (!tokens || tokens.length < 2 || tokens.length > 3) return null;
   const report2 = tokens.filter((l) => l === "sterling-report");
   const severity = tokens.filter((l) => /^severity:(?:blocked|workaround|friction)$/.test(l));
   const project = tokens.filter((l) => /^project:[a-z0-9._-]{1,40}$/.test(l));
-  return report2.length === 1 && severity.length === 1 && project.length === 1 ? [report2[0], severity[0], project[0]] : null;
+  return report2.length === 1 && severity.length === 1 && project.length === tokens.length - 2 ? [report2[0], severity[0], ...project] : null;
 }
 function withLabelsLine(body, labels, fp) {
   const lines = body.split("\n");
@@ -659,7 +659,7 @@ function renderBody(report2, stamps2, { recursAfter } = {}) {
     `Severity: ${report2.severity}`,
     `Sterling version: ${stamps2.version}${stamps2.head ? ` (HEAD ${stamps2.head})` : ""}`,
     `Host: ${stamps2.host}`,
-    `Project: ${stamps2.project}`,
+    ...stamps2.project === null ? [] : [`Project: ${stamps2.project}`],
     "",
     "### Observed",
     fence(report2.observed),
@@ -687,7 +687,8 @@ function projectSlug(name) {
   return slug || "unnamed";
 }
 function labelsFor(severity, projectName2) {
-  return ["sterling-report", `severity:${severity.toLowerCase()}`, `project:${projectSlug(projectName2)}`];
+  const labels = ["sterling-report", `severity:${severity.toLowerCase()}`];
+  return projectName2 === null ? labels : [...labels, `project:${projectSlug(projectName2)}`];
 }
 
 // scripts/report-issue.mjs
@@ -703,18 +704,20 @@ function parseArgs(argv) {
   const values2 = { evidence: [] };
   const modes = /* @__PURE__ */ new Set();
   let yes2 = false;
+  let anonymous2 = false;
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     const m = tok.match(/^--([a-z-]+)(?:=([\s\S]*))?$/);
     if (!m) refuse(`report-issue: unexpected argument '${tok}'. Every value follows its flag, e.g. --title "<text>".`);
     const [, name, inline] = m;
-    if (MODE_FLAGS.includes(name) || name === "yes") {
+    if (MODE_FLAGS.includes(name) || name === "yes" || name === "anonymous") {
       if (inline !== void 0) refuse(`report-issue: --${name} takes no value.`);
       if (name === "yes") yes2 = true;
+      else if (name === "anonymous") anonymous2 = true;
       else modes.add(name);
       continue;
     }
-    if (!VALUE_FLAGS.includes(name)) refuse(`report-issue: unknown flag --${name}. Flags: ${[...VALUE_FLAGS, ...MODE_FLAGS, "yes"].map((f) => `--${f}`).join(" ")}`);
+    if (!VALUE_FLAGS.includes(name)) refuse(`report-issue: unknown flag --${name}. Flags: ${[...VALUE_FLAGS, ...MODE_FLAGS, "yes", "anonymous"].map((f) => `--${f}`).join(" ")}`);
     const value = inline ?? argv[++i];
     if (value === void 0) refuse(`report-issue: --${name} needs a value.`);
     if (name === "evidence") values2.evidence.push(value);
@@ -726,7 +729,8 @@ function parseArgs(argv) {
   const given = Object.keys(values2).filter((k) => k === "evidence" ? values2.evidence.length > 0 : true);
   if ((mode2 === "flush" || mode2 === "list" || mode2 === "apply-labels") && given.length > 0) refuse(`report-issue: --${mode2} takes no report fields (got --${given.join(", --")}).`);
   if (yes2 && mode2 !== "apply-labels") refuse("report-issue: --yes belongs to --apply-labels only.");
-  return { mode: mode2, values: values2, yes: yes2 };
+  if (anonymous2 && mode2 !== "file" && mode2 !== "dry-run") refuse("report-issue: --anonymous belongs to filing a report (or --dry-run) only.");
+  return { mode: mode2, values: values2, yes: yes2, anonymous: anonymous2 };
 }
 var TransportError = class extends Error {
   constructor(message, status = null) {
@@ -794,7 +798,7 @@ function projectName() {
   }
   return typeof config?.project_name === "string" && config.project_name.trim() ? config.project_name : basename(projectRoot);
 }
-function stamps() {
+function stamps(anonymous2) {
   const root = pluginRoot(new URL("../scripts/report-issue.mjs", import.meta.url).href);
   if (!root) refuse("report-issue: cannot find the Sterling plugin root (.claude-plugin/plugin.json above this script), so the report cannot be stamped.");
   let version;
@@ -809,7 +813,7 @@ function stamps() {
     const r = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
     head = r.status === 0 && r.stdout.trim() ? r.stdout.trim() : "unknown (git rev-parse failed)";
   }
-  return { root, version, head, host: detectHost(process.env), projectName: projectName() };
+  return { root, version, head, host: detectHost(process.env), projectName: anonymous2 ? null : projectName() };
 }
 function readQueue() {
   if (!existsSync5(queuePath)) return [];
@@ -965,7 +969,7 @@ function flush(gh2) {
   }
   return null;
 }
-var { mode, values, yes } = parseArgs(process.argv.slice(2));
+var { mode, values, yes, anonymous } = parseArgs(process.argv.slice(2));
 var SEARCH_PAGE_SIZE = 100;
 var SEARCH_MAX_PAGES = 5;
 function openReports(gh2) {
@@ -1080,7 +1084,7 @@ if (mode === "apply-labels") {
         console.error(`report-issue: #${issue.number} skipped: it has no Labels line directly above its Fingerprint line; label it by hand on GitHub if it needs labels.`);
         continue;
       }
-      console.error(`report-issue: #${issue.number} skipped: its Labels line is not exactly sterling-report, one severity and one project label; nothing was created or set for it.`);
+      console.error(`report-issue: #${issue.number} skipped: its Labels line is not exactly sterling-report, one severity and at most one project label; nothing was created or set for it.`);
       continue;
     }
     const have = new Set(labelNames(issue).map((l) => l.toLowerCase()));
@@ -1164,7 +1168,7 @@ if (mode === "flush") {
   console.log(`report-issue: flushed ${pending.length} report(s).`);
   process.exit(0);
 }
-var st = stamps();
+var st = stamps(anonymous);
 var scrubCtx = { projectRoot, home: homedir3(), sterlingPathExists: (rel) => existsSync5(join6(st.root, rel)) };
 var report;
 try {
@@ -1176,7 +1180,7 @@ try {
 if (report.title !== values.title.trim()) {
   console.error(`report-issue: warning: the title changed in the scrub, so it will be sent as '${report.title}'. Reword the title if that no longer says what you meant.`);
 }
-var stamped = { ...st, project: projectSlug(scrub(st.projectName, scrubCtx)) };
+var stamped = { ...st, project: anonymous ? null : projectSlug(scrub(st.projectName, scrubCtx)) };
 var entry = {
   v: 1,
   queued_at: (/* @__PURE__ */ new Date()).toISOString(),

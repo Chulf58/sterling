@@ -147,7 +147,7 @@ function isToolNameList(token) {
  * list, not a word shape: lib/x and Clients/Acme have the same shape and are paths.
  * Nouns that real directories are named after (client, server, input, output, src,
  * lib) stay off it. */
-const PROSE_WORDS = ['and', 'or', 'read', 'write', 'true', 'false', 'yes', 'no', 'on', 'off', 'pass', 'fail', 'success', 'failure', 'enable', 'disable', 'before', 'after', 'add', 'remove', 'get', 'set', 'push', 'pull', 'in', 'out', 'up', 'down', 'either', 'he', 'she', 'his', 'her'];
+const PROSE_WORDS = ['and', 'or', 'read', 'write', 'true', 'false', 'yes', 'no', 'on', 'off', 'pass', 'fail', 'success', 'failure', 'enable', 'disable', 'before', 'after', 'add', 'remove', 'get', 'set', 'push', 'pull', 'in', 'out', 'up', 'down', 'either', 'he', 'she', 'his', 'her', 'planned', 'unverified'];
 
 /** A slash-joined pair that is prose or a figure, not a path: exactly two
  * parts, each a PROSE_WORDS word, one letter ("A/B", "I/O") or a number of at
@@ -292,16 +292,17 @@ export function parseLabelsLine(body) {
 }
 
 /** The labels a report carries when its Labels line is exactly `sterling-report`,
- * one `severity:` label and one `project:` label (any order), returned in that
- * order; null for any other line. --apply-labels acts on nothing else, because
- * the body it reads is text anyone could have written. */
+ * one `severity:` label and at most one `project:` label (any order; an
+ * anonymous report has none), returned in that order; null for any other line.
+ * --apply-labels acts on nothing else, because the body it reads is text anyone
+ * could have written. */
 export function reportLabels(body) {
   const tokens = parseLabelsLine(body);
-  if (!tokens || tokens.length !== 3) return null;
+  if (!tokens || tokens.length < 2 || tokens.length > 3) return null;
   const report = tokens.filter((l) => l === 'sterling-report');
   const severity = tokens.filter((l) => /^severity:(?:blocked|workaround|friction)$/.test(l));
   const project = tokens.filter((l) => /^project:[a-z0-9._-]{1,40}$/.test(l));
-  return report.length === 1 && severity.length === 1 && project.length === 1 ? [report[0], severity[0], project[0]] : null;
+  return report.length === 1 && severity.length === 1 && project.length === tokens.length - 2 ? [report[0], severity[0], ...project] : null;
 }
 
 /** `body` with a `Labels:` line directly above its fingerprint line (or at the
@@ -342,14 +343,14 @@ function inlineCode(text) {
   return `${d}${pad}${t}${pad}${d}`;
 }
 
-/** The issue body. stamps: { version, head (null on an installed copy), host, project }. */
+/** The issue body. stamps: { version, head (null on an installed copy), host, project (null for an anonymous report: no Project line) }. */
 export function renderBody(report, stamps, { recursAfter } = {}) {
   const body = [
     `Component: ${inlineCode(report.component)}`,
     `Severity: ${report.severity}`,
     `Sterling version: ${stamps.version}${stamps.head ? ` (HEAD ${stamps.head})` : ''}`,
     `Host: ${stamps.host}`,
-    `Project: ${stamps.project}`,
+    ...(stamps.project === null ? [] : [`Project: ${stamps.project}`]),
     '',
     '### Observed',
     fence(report.observed),
@@ -383,6 +384,8 @@ export function projectSlug(name) {
   return slug || 'unnamed';
 }
 
+/** An anonymous report passes null for projectName and carries no project label. */
 export function labelsFor(severity, projectName) {
-  return ['sterling-report', `severity:${severity.toLowerCase()}`, `project:${projectSlug(projectName)}`];
+  const labels = ['sterling-report', `severity:${severity.toLowerCase()}`];
+  return projectName === null ? labels : [...labels, `project:${projectSlug(projectName)}`];
 }

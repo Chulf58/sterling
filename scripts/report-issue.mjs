@@ -84,18 +84,20 @@ function parseArgs(argv) {
   const values = { evidence: [] };
   const modes = new Set();
   let yes = false;
+  let anonymous = false;
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     const m = tok.match(/^--([a-z-]+)(?:=([\s\S]*))?$/);
     if (!m) refuse(`report-issue: unexpected argument '${tok}'. Every value follows its flag, e.g. --title "<text>".`);
     const [, name, inline] = m;
-    if (MODE_FLAGS.includes(name) || name === 'yes') {
+    if (MODE_FLAGS.includes(name) || name === 'yes' || name === 'anonymous') {
       if (inline !== undefined) refuse(`report-issue: --${name} takes no value.`);
       if (name === 'yes') yes = true;
+      else if (name === 'anonymous') anonymous = true;
       else modes.add(name);
       continue;
     }
-    if (!VALUE_FLAGS.includes(name)) refuse(`report-issue: unknown flag --${name}. Flags: ${[...VALUE_FLAGS, ...MODE_FLAGS, 'yes'].map((f) => `--${f}`).join(' ')}`);
+    if (!VALUE_FLAGS.includes(name)) refuse(`report-issue: unknown flag --${name}. Flags: ${[...VALUE_FLAGS, ...MODE_FLAGS, 'yes', 'anonymous'].map((f) => `--${f}`).join(' ')}`);
     const value = inline ?? argv[++i];
     if (value === undefined) refuse(`report-issue: --${name} needs a value.`);
     if (name === 'evidence') values.evidence.push(value);
@@ -107,7 +109,8 @@ function parseArgs(argv) {
   const given = Object.keys(values).filter((k) => (k === 'evidence' ? values.evidence.length > 0 : true));
   if ((mode === 'flush' || mode === 'list' || mode === 'apply-labels') && given.length > 0) refuse(`report-issue: --${mode} takes no report fields (got --${given.join(', --')}).`);
   if (yes && mode !== 'apply-labels') refuse('report-issue: --yes belongs to --apply-labels only.');
-  return { mode, values, yes };
+  if (anonymous && mode !== 'file' && mode !== 'dry-run') refuse('report-issue: --anonymous belongs to filing a report (or --dry-run) only.');
+  return { mode, values, yes, anonymous };
 }
 
 // ---------- gh ----------
@@ -187,7 +190,8 @@ function projectName() {
   return typeof config?.project_name === 'string' && config.project_name.trim() ? config.project_name : basename(projectRoot);
 }
 
-function stamps() {
+/** anonymous: the project name is not read at all (so no warning can carry it) and projectName is null. */
+function stamps(anonymous) {
   const root = pluginRoot(import.meta.url);
   if (!root) refuse('report-issue: cannot find the Sterling plugin root (.claude-plugin/plugin.json above this script), so the report cannot be stamped.');
   let version;
@@ -202,7 +206,7 @@ function stamps() {
     const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000 });
     head = r.status === 0 && r.stdout.trim() ? r.stdout.trim() : 'unknown (git rev-parse failed)';
   }
-  return { root, version, head, host: detectHost(process.env), projectName: projectName() };
+  return { root, version, head, host: detectHost(process.env), projectName: anonymous ? null : projectName() };
 }
 
 // ---------- queue ----------
@@ -392,7 +396,7 @@ function flush(gh) {
 
 // ---------- modes ----------
 
-const { mode, values, yes } = parseArgs(process.argv.slice(2));
+const { mode, values, yes, anonymous } = parseArgs(process.argv.slice(2));
 
 const SEARCH_PAGE_SIZE = 100;
 const SEARCH_MAX_PAGES = 5;
@@ -529,7 +533,7 @@ if (mode === 'apply-labels') {
         console.error(`report-issue: #${issue.number} skipped: it has no Labels line directly above its Fingerprint line; label it by hand on GitHub if it needs labels.`);
         continue;
       }
-      console.error(`report-issue: #${issue.number} skipped: its Labels line is not exactly sterling-report, one severity and one project label; nothing was created or set for it.`);
+      console.error(`report-issue: #${issue.number} skipped: its Labels line is not exactly sterling-report, one severity and at most one project label; nothing was created or set for it.`);
       continue;
     }
     const have = new Set(labelNames(issue).map((l) => l.toLowerCase()));
@@ -615,7 +619,7 @@ if (mode === 'flush') {
   process.exit(0);
 }
 
-const st = stamps();
+const st = stamps(anonymous);
 const scrubCtx = { projectRoot, home: homedir(), sterlingPathExists: (rel) => existsSync(join(st.root, rel)) };
 let report;
 try {
@@ -629,7 +633,7 @@ if (report.title !== values.title.trim()) {
 }
 // The project name feeds the Project line and the project label. It takes the same scrub as the report fields BEFORE it is
 // slugged: slugging first would turn a path into words and cut a UUID short enough to escape the scrub.
-const stamped = { ...st, project: projectSlug(scrub(st.projectName, scrubCtx)) };
+const stamped = { ...st, project: anonymous ? null : projectSlug(scrub(st.projectName, scrubCtx)) };
 const entry = {
   v: 1,
   queued_at: new Date().toISOString(),

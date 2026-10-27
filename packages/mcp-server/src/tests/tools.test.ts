@@ -2340,6 +2340,91 @@ test('a file that exists on NO ref is classified deletion_candidate, never the u
   }
 });
 
+// A planned article may name a file it has not written yet, flagged
+// unverified:true. Never having existed is that file's expected state, so it
+// is not a deletion candidate. Every other shape keeps its verdict.
+const mkPlannedArticle = (tools: SterlingTools, state: string, unverified: boolean, path = 'src/not-yet.ts') =>
+  tools.knowledgeCreate('feature_article', {
+    slug: `planned-${state}-${unverified}`,
+    title: 'planned file',
+    what_it_does: 'does',
+    intended_behavior: 'b',
+    files: [{ path, role: 'impl', unverified }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state,
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+  }).record;
+
+const countReasons = (tools: SterlingTools) => {
+  const queue = systemQueue(tools);
+  return {
+    deletion: queue.filter((t) => t.system_reason === 'deletion_candidate').length,
+    reconcile: queue.filter((t) => t.system_reason === 'reconcile_needed').length,
+  };
+};
+
+test('a planned article with an unverified path that never existed mints no deletion_candidate and no reconcile_needed', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    mkPlannedArticle(tools, 'planned', true);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(countReasons(tools), { deletion: 0, reconcile: 0 });
+  } finally {
+    cleanup();
+  }
+});
+
+test('the planned exemption needs unverified:true — a planned article with unverified:false still mints deletion_candidate', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    mkPlannedArticle(tools, 'planned', false);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(countReasons(tools), { deletion: 1, reconcile: 0 });
+  } finally {
+    cleanup();
+  }
+});
+
+test('the planned exemption needs state planned — an active article with unverified:true still mints deletion_candidate', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    mkPlannedArticle(tools, 'active', true);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(countReasons(tools), { deletion: 1, reconcile: 0 });
+  } finally {
+    cleanup();
+  }
+});
+
+test('a planned unverified path that WAS committed and then removed is still flagged (reconcile_needed, as before)', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'not-yet.ts'), 'export const n = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add');
+    git('rm', '-q', 'src/not-yet.ts');
+    git('commit', '-qm', 'remove');
+    mkPlannedArticle(tools, 'planned', true);
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(countReasons(tools), { deletion: 0, reconcile: 1 });
+  } finally {
+    cleanup();
+  }
+});
+
 test('a file present in HEAD but deleted from the working tree parks against HEAD', () => {
   const { dir, tools, git, cleanup } = gitRepo();
   try {

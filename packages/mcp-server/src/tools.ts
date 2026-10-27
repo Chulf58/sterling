@@ -76,7 +76,7 @@ export interface SkippedCheck {
 type BoardDerivedFields = {
   blocked_by_state?: BlockerState[];
   unblocks?: string[];
-  readiness?: BoardReadinessState;
+  readiness?: ReportedReadiness;
   blockers_open?: string[];
   shares_write_path_with?: string[];
   handoff_status?: HandoffStatus;
@@ -84,8 +84,26 @@ type BoardDerivedFields = {
   claim_state?: BoardClaimView;
 };
 
-/** Every readiness state, for the board_query readiness filter (GitHub issue #175). */
-export const BOARD_READINESS_STATES = ['ready', 'research', 'waiting', 'blocked', 'delegated'] as const satisfies readonly BoardReadinessState[];
+/**
+ * The readiness board_query/board_get REPORT: the store's state, except that an
+ * item carrying a claim (held or expired) reads 'in_progress', so a reader
+ * filtering on 'ready' never treats a claimed item as free. The store's own
+ * state is unchanged and claim_state still carries the claim's detail.
+ */
+export type ReportedReadiness = BoardReadinessState | 'in_progress';
+
+/** Every reported readiness state, for the board_query readiness filter (GitHub issue #175). */
+export const BOARD_READINESS_STATES = ['ready', 'research', 'waiting', 'blocked', 'delegated', 'in_progress'] as const satisfies readonly ReportedReadiness[];
+
+/**
+ * The ONE place a claim turns into 'in_progress'; the output fields, both
+ * filters and the overlap inputs read it. The claim passed in is the RETURNED
+ * ROW's own (claimStateOf), never the one on a second whole-board read, so a
+ * row's readiness and its claim_state always describe the same snapshot.
+ */
+function reportedReadiness(state: BoardReadinessState, claim: BoardClaimView | undefined): ReportedReadiness {
+  return claim ? 'in_progress' : state;
+}
 
 /**
  * One item's readiness fields for board_query/board_get (GitHub issue #175):
@@ -93,10 +111,11 @@ export const BOARD_READINESS_STATES = ['ready', 'research', 'waiting', 'blocked'
  * other READY items sharing a file_keys path. `overlaps` comes from
  * boardWriteOverlaps over the WHOLE ready set, never one page.
  */
-function readinessFields(r: BoardItemReadiness, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with'> {
-  const shares = r.state === 'ready' ? overlaps.get(r.id) : undefined;
+function readinessFields(r: BoardItemReadiness, rowClaim: BoardClaimView | undefined, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with'> {
+  const reported = reportedReadiness(r.state, rowClaim);
+  const shares = reported === 'ready' ? overlaps.get(r.id) : undefined;
   return {
-    readiness: r.state,
+    readiness: reported,
     ...(r.blockers_open.length ? { blockers_open: r.blockers_open } : {}),
     ...(shares?.length ? { shares_write_path_with: shares } : {}),
   };
@@ -296,7 +315,7 @@ export interface BoardFilter {
    * paging, so a blocker outside the page can never make an item read as
    * ready. Part of the cursor identity. System items never match.
    */
-  readiness?: BoardReadinessState[];
+  readiness?: ReportedReadiness[];
   /**
    * Find the sender's tracker for a handoff by the RECEIVER's item id
    * (handoff.role 'sent', handoff.to_item_id; GitHub issue #175). Part of the
@@ -4710,7 +4729,8 @@ export class SterlingTools {
         const a = record as unknown as {
           id: string;
           slug: string;
-          files?: { path: string; role?: string }[];
+          state?: string;
+          files?: { path: string; role?: string; unverified?: boolean }[];
           file_baselines?: Record<string, string>;
           baseline_attestations?: Record<string, unknown>;
           absence_attestations?: Record<string, unknown>;
@@ -4772,6 +4792,10 @@ export class SterlingTools {
             continue;
           }
           if (verdict.kind === 'deletion_candidate') {
+            // A PLANNED article's path flagged unverified:true is a declared
+            // intention, not a claim that the file exists; never having existed
+            // is its expected state, so it is not a deletion candidate.
+            if (a.state === 'planned' && f.unverified === true) continue;
             drifts.push({ path: f.path, missing: true, neverTracked: true });
             continue;
           }
@@ -10753,7 +10777,7 @@ export class SterlingTools {
     // is computed directly rather than left without fields.
     const claimOpts = this.claimReadOptions();
     const whole = this.store.boardReadiness(undefined, claimOpts);
-    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
+    const overlaps = boardWriteOverlaps(whole.filter((r) => reportedReadiness(r.state, r.claim) === 'ready'));
     const byId = new Map(whole.map((r) => [r.id, r]));
     const missing = users.filter((u) => !byId.has(u.id));
     const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...(missing.length ? this.store.boardReadiness(missing, claimOpts) : [])];
@@ -10767,12 +10791,13 @@ export class SterlingTools {
     const rows = new Map(users.map((u) => [u.id, u as unknown as { claim?: unknown }]));
     for (const r of readiness) {
       const status = statuses.get(r.id);
+      const rowClaim = claimStateOf(rows.get(r.id) ?? {}, claimOpts);
       out.set(r.id, {
         ...(r.blockers.length ? { blocked_by_state: r.blockers } : {}),
         ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
-        ...readinessFields(r, overlaps),
+        ...readinessFields(r, rowClaim.claim_state, overlaps),
         ...(status ? { handoff_status: status } : {}),
-        ...claimStateOf(rows.get(r.id) ?? {}, claimOpts),
+        ...rowClaim,
       });
     }
     return out;
@@ -11064,8 +11089,13 @@ export class SterlingTools {
     if (filter.readiness !== undefined && filter.readiness.length > 0) {
       // The whole board's readiness, read before paging (GitHub issue #175).
       const wanted = new Set<string>(filter.readiness);
-      const states = new Map(this.store.boardReadiness().map((r) => [r.id, r.state]));
-      filtered = filtered.filter((t) => wanted.has(states.get(t.id) ?? ''));
+      const claimOpts = this.claimReadOptions();
+      const states = new Map(this.store.boardReadiness(undefined, claimOpts).map((r) => [r.id, r.state]));
+      // The claim comes from the row being filtered, the one the page returns.
+      filtered = filtered.filter((t) => {
+        const state = states.get(t.id);
+        return state !== undefined && wanted.has(reportedReadiness(state, claimStateOf(t as unknown as { claim?: unknown }, claimOpts).claim_state));
+      });
     }
     if (filter.handoff_to_item_id !== undefined) {
       const wanted = filter.handoff_to_item_id;
@@ -12031,12 +12061,12 @@ export class SterlingTools {
     const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], holder, claimOpts);
     const byRow = new Map(page.map((row) => [String(row.id), row as { claim?: unknown }]));
     const whole = boardReadinessOf(read.items as unknown as Input[], read.items as unknown as Input[], holder, claimOpts);
-    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
+    const overlaps = boardWriteOverlaps(whole.filter((r) => reportedReadiness(r.state, r.claim) === 'ready'));
     for (const r of readiness) {
       out.set(r.id, {
         ...(r.blockers.length ? { blocked_by_state: r.blockers } : {}),
         ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
-        ...readinessFields(r, overlaps),
+        ...readinessFields(r, claimStateOf(byRow.get(r.id) ?? {}, claimOpts).claim_state, overlaps),
         ...(r.state === 'delegated' ? { handoff_status: FOREIGN_UNAVAILABLE } : {}),
         ...claimStateOf(byRow.get(r.id) ?? {}, claimOpts),
       });
@@ -12087,8 +12117,12 @@ export class SterlingTools {
       type Input = Parameters<typeof boardReadinessOf>[0][number];
       const all = read.items as unknown as Input[];
       const wanted = new Set<string>(filter.readiness);
+      const claimOpts = this.claimReadOptions();
       const states = new Map(boardReadinessOf(all, all, (slug) => read.slugHolders.get(slug)).map((r) => [r.id, r.state]));
-      matching = matching.filter((t) => wanted.has(states.get(String(t.id)) ?? ''));
+      matching = matching.filter((t) => {
+        const state = states.get(String(t.id));
+        return state !== undefined && wanted.has(reportedReadiness(state, claimStateOf(t, claimOpts).claim_state));
+      });
     }
     if (filter.handoff_to_item_id !== undefined) {
       const wanted = filter.handoff_to_item_id;

@@ -14607,9 +14607,11 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
 
 // scripts/hooks/lib/board-ready.mjs
 var BOARD_GROUP_CAP = 8;
+var isExpired = (r) => r.claim?.state === "expired";
 function boardGroups(readiness) {
   const all = [...readiness].sort(compareBoardReadiness);
-  const inProgress = all.filter((r) => r.claim && r.state !== "delegated");
+  const claimed = all.filter((r) => r.claim && r.state !== "delegated");
+  const inProgress = [...claimed.filter(isExpired), ...claimed.filter((r) => !isExpired(r))];
   const sorted = all.filter((r) => !r.claim || r.state === "delegated");
   return {
     inProgress,

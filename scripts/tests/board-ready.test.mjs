@@ -614,6 +614,53 @@ test('claims: claimed items leave READY for IN PROGRESS; an expired claim is fla
   }
 });
 
+// Pilot defect: the IN PROGRESS cap hid an expired claim's check-owner line.
+function claimedBoard(p, { expired, held }) {
+  const t0 = Date.parse('2026-10-25T09:00:00.000Z');
+  const iso = (m) => new Date(t0 + m * 60_000).toISOString();
+  // Expired claims are made first (oldest), so the listing order puts them last.
+  const stale = Array.from({ length: expired }, (_, i) => mk(p.store, { text: `Stale ${i}` }));
+  const live = Array.from({ length: held }, (_, i) => mk(p.store, { text: `Held ${i}` }));
+  stale.forEach((r) => p.store.claimTodo(r.id, { session: 'gone', checkout: 'wt-gone', now: iso(0) }));
+  live.forEach((r) => p.store.claimTodo(r.id, { session: 'other', checkout: 'wt-other', now: iso(100) }));
+  const now = t0 + 110 * 60_000;
+  const readiness = p.store.boardReadiness(undefined, { now, leaseMinutes: 60 });
+  const text = lib.renderBoardReadiness({ readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 5 }, now, session: 'me', lease: { value: 60 } });
+  return { text, lines: text.split('\n'), stale, live };
+}
+
+test('claims: expired claims sort first in IN PROGRESS and are never hidden by the cap', () => {
+  const p = project();
+  try {
+    const { lines, stale, live } = claimedBoard(p, { expired: 3, held: 7 });
+    const at = lines.findIndex((l) => l.startsWith('IN PROGRESS (10,'));
+    assert.ok(at >= 0, lines.join('\n'));
+    const shown = lines.slice(at + 1, at + 9);
+    for (const r of stale) assert.ok(shown.some((l) => l.startsWith(`- ${h(`Stale ${stale.indexOf(r)}`, r)} — ⚠ check owner`)), `expired ${r.id} visible`);
+    assert.ok(lines.slice(at + 1, at + 4).every((l) => l.includes('check owner')), 'expired lead the group');
+    const heldShown = shown.slice(3);
+    assert.equal(heldShown.length, 5);
+    assert.ok(heldShown.every((l) => !l.includes('check owner') && live.some((r) => l.includes(r.id.slice(0, 8)))), 'held items follow the expired ones');
+    // 2 held items overflow; none of the hidden ones is expired, so the note adds no expired count.
+    assert.equal(lines[at + 9], '  … 2 more IN PROGRESS (board_query)');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('claims: the IN PROGRESS overflow note counts the hidden expired claims', () => {
+  const p = project();
+  try {
+    const { lines } = claimedBoard(p, { expired: 12, held: 0 });
+    const at = lines.findIndex((l) => l.startsWith('IN PROGRESS (12,'));
+    assert.ok(at >= 0, lines.join('\n'));
+    assert.equal(lines.slice(at + 1, at + 9).filter((l) => l.includes('check owner')).length, 8);
+    assert.equal(lines[at + 9], '  … 4 more IN PROGRESS (4 expired, check owner) (board_query)');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('H1 end to end: a claimed item is listed under IN PROGRESS, not READY, using the configured lease', () => {
   const p = project({ board_claims: { lease_minutes: 5 } });
   try {
