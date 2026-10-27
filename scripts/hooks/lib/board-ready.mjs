@@ -22,6 +22,14 @@ import { deliverySessionDir } from './delivery.mjs';
 export const BOARD_GROUP_CAP = 8;
 const DECISION = 'decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start';
 
+const isExpired = (r) => r.claim?.state === 'expired';
+
+/** How many hidden IN PROGRESS items are expired claims; silent when none. */
+function expiredOmitted(omitted) {
+  const n = omitted.filter(isExpired).length;
+  return n ? ` (${n} expired, check owner)` : '';
+}
+
 /**
  * The printed groups, each in the one listing order (priority, then most
  * recently updated). Blocked items are counted apart. Delegated items are
@@ -34,7 +42,10 @@ export function boardGroups(readiness) {
   // board-task-claims-for-parallel-sessions-claim-generation-ren): never READY,
   // whoever holds it, and an expired claim waits for a takeover. A delegated
   // tracker stays delegated; its work runs in the other project.
-  const inProgress = all.filter((r) => r.claim && r.state !== 'delegated');
+  // Expired claims lead (stable partition, the listing order kept inside each
+  // subset) so the line cap never hides a check-owner line.
+  const claimed = all.filter((r) => r.claim && r.state !== 'delegated');
+  const inProgress = [...claimed.filter(isExpired), ...claimed.filter((r) => !isExpired(r))];
   const sorted = all.filter((r) => !r.claim || r.state === 'delegated');
   return {
     inProgress,
@@ -183,7 +194,7 @@ export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GRO
       (omitted) => oldestOmittedWait(omitted, now)
     ),
     ...groupLines('DELEGATED TO OTHER PROJECTS ({n}, not run here)', g.delegated, cap, (r) => `- ${r.name} — ${delegatedStatus(r, handoffStatus)}`),
-    ...groupLines('IN PROGRESS ({n}, claimed; not READY)', g.inProgress, cap, (r) => `- ${r.name} — ${claimText(r.claim, session, now)}`),
+    ...groupLines('IN PROGRESS ({n}, claimed; not READY)', g.inProgress, cap, (r) => `- ${r.name} — ${claimText(r.claim, session, now)}`, expiredOmitted),
   ];
   return lines.join('\n');
 }

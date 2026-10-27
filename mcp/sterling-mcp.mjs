@@ -32408,11 +32408,15 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
 }
 
 // packages/mcp-server/dist/tools.js
-var BOARD_READINESS_STATES = ["ready", "research", "waiting", "blocked", "delegated"];
-function readinessFields(r, overlaps) {
-  const shares = r.state === "ready" ? overlaps.get(r.id) : void 0;
+var BOARD_READINESS_STATES = ["ready", "research", "waiting", "blocked", "delegated", "in_progress"];
+function reportedReadiness(state, claim) {
+  return claim ? "in_progress" : state;
+}
+function readinessFields(r, rowClaim, overlaps) {
+  const reported = reportedReadiness(r.state, rowClaim);
+  const shares = reported === "ready" ? overlaps.get(r.id) : void 0;
   return {
-    readiness: r.state,
+    readiness: reported,
     ...r.blockers_open.length ? { blockers_open: r.blockers_open } : {},
     ...shares?.length ? { shares_write_path_with: shares } : {}
   };
@@ -34823,6 +34827,8 @@ var SterlingTools = class _SterlingTools {
             continue;
           }
           if (verdict.kind === "deletion_candidate") {
+            if (a.state === "planned" && f.unverified === true)
+              continue;
             drifts.push({ path: f.path, missing: true, neverTracked: true });
             continue;
           }
@@ -38717,7 +38723,7 @@ ${JSON.stringify(entry)}
       return out;
     const claimOpts = this.claimReadOptions();
     const whole = this.store.boardReadiness(void 0, claimOpts);
-    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
+    const overlaps = boardWriteOverlaps(whole.filter((r) => reportedReadiness(r.state, r.claim) === "ready"));
     const byId = new Map(whole.map((r) => [r.id, r]));
     const missing = users.filter((u) => !byId.has(u.id));
     const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...missing.length ? this.store.boardReadiness(missing, claimOpts) : []];
@@ -38726,12 +38732,13 @@ ${JSON.stringify(entry)}
     const rows = new Map(users.map((u) => [u.id, u]));
     for (const r of readiness) {
       const status = statuses.get(r.id);
+      const rowClaim = claimStateOf(rows.get(r.id) ?? {}, claimOpts);
       out.set(r.id, {
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
         ...r.unblocks.length ? { unblocks: r.unblocks } : {},
-        ...readinessFields(r, overlaps),
+        ...readinessFields(r, rowClaim.claim_state, overlaps),
         ...status ? { handoff_status: status } : {},
-        ...claimStateOf(rows.get(r.id) ?? {}, claimOpts)
+        ...rowClaim
       });
     }
     return out;
@@ -38925,8 +38932,12 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     }
     if (filter.readiness !== void 0 && filter.readiness.length > 0) {
       const wanted = new Set(filter.readiness);
-      const states = new Map(this.store.boardReadiness().map((r) => [r.id, r.state]));
-      filtered = filtered.filter((t) => wanted.has(states.get(t.id) ?? ""));
+      const claimOpts = this.claimReadOptions();
+      const states = new Map(this.store.boardReadiness(void 0, claimOpts).map((r) => [r.id, r.state]));
+      filtered = filtered.filter((t) => {
+        const state = states.get(t.id);
+        return state !== void 0 && wanted.has(reportedReadiness(state, claimStateOf(t, claimOpts).claim_state));
+      });
     }
     if (filter.handoff_to_item_id !== void 0) {
       const wanted = filter.handoff_to_item_id;
@@ -39602,12 +39613,12 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const readiness = boardReadinessOf(page, read.items, holder, claimOpts);
     const byRow = new Map(page.map((row) => [String(row.id), row]));
     const whole = boardReadinessOf(read.items, read.items, holder, claimOpts);
-    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
+    const overlaps = boardWriteOverlaps(whole.filter((r) => reportedReadiness(r.state, r.claim) === "ready"));
     for (const r of readiness) {
       out.set(r.id, {
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
         ...r.unblocks.length ? { unblocks: r.unblocks } : {},
-        ...readinessFields(r, overlaps),
+        ...readinessFields(r, claimStateOf(byRow.get(r.id) ?? {}, claimOpts).claim_state, overlaps),
         ...r.state === "delegated" ? { handoff_status: FOREIGN_UNAVAILABLE } : {},
         ...claimStateOf(byRow.get(r.id) ?? {}, claimOpts)
       });
@@ -39647,8 +39658,12 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       }
       const all = read.items;
       const wanted = new Set(filter.readiness);
+      const claimOpts = this.claimReadOptions();
       const states = new Map(boardReadinessOf(all, all, (slug) => read.slugHolders.get(slug)).map((r) => [r.id, r.state]));
-      matching = matching.filter((t) => wanted.has(states.get(String(t.id)) ?? ""));
+      matching = matching.filter((t) => {
+        const state = states.get(String(t.id));
+        return state !== void 0 && wanted.has(reportedReadiness(state, claimStateOf(t, claimOpts).claim_state));
+      });
     }
     if (filter.handoff_to_item_id !== void 0) {
       const wanted = filter.handoff_to_item_id;
@@ -41641,7 +41656,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), claim_state on a claimed item (held, expired = check owner, or unreadable, with holder_session, checkout, generation and minutes_since_renewal; absent means nobody holds it; also on digest rows, not on headline rows), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, ready, research, waiting, blocked, delegated or in_progress; in_progress is any claimed item, held or expired, and ready excludes them; computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked, delegated or in_progress; the session-start rule, except that any item carrying a claim, held or expired, reads in_progress and never ready, with claim_state giving the detail), claim_state on a claimed item (held, expired = check owner, or unreadable, with holder_session, checkout, generation and minutes_since_renewal; absent means nobody holds it; also on digest rows, not on headline rows), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),

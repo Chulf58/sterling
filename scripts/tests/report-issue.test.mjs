@@ -818,12 +818,14 @@ test('labels line: reportLabels accepts exactly sterling-report, one severity an
   assert.deepEqual(ok('Labels: project:acme, severity:blocked, sterling-report'), ['sterling-report', 'severity:blocked', 'project:acme'], 'order does not matter');
   const many = `Labels: sterling-report, severity:friction, ${Array.from({ length: 150 }, (_, i) => `project:spam-${i}`).join(', ')}`;
   assert.equal(ok(many), null, 'many project labels');
+  assert.deepEqual(ok('Labels: sterling-report, severity:friction'), ['sterling-report', 'severity:friction'], 'an anonymous report has no project label');
   for (const bad of [
     'Labels: sterling-report, severity:friction, severity:blocked, project:a',
     'Labels: sterling-report, severity:friction, project:a, project:b',
     'Labels: sterling-report, sterling-report, severity:friction, project:a',
     'Labels: severity:friction, project:a',
-    'Labels: sterling-report, severity:friction',
+    'Labels: sterling-report, project:a',
+    'Labels: sterling-report, severity:friction, bug',
     'Labels: sterling-report, severity:friction, project:a, bug',
     'Labels: sterling-report, severity:urgent, project:a',
     'Labels: sterling-report, severity:friction, project:a b',
@@ -846,6 +848,43 @@ test('cli --dry-run: the printed body carries the Labels line', () =>
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.includes(`${LABELS}\nFingerprint: sterling-fp-`), r.stdout);
   }));
+
+test('cli --anonymous --dry-run: no Project line, no project label, the project name appears nowhere', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.project, '.sterling', 'config.json'), JSON.stringify({ project_name: 'AcmeCorp-Secret' }));
+    const r = run(p, ['--dry-run', '--anonymous', ...reportArgs()]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!/Project:/.test(r.stdout) && !/project:/.test(r.stdout), r.stdout);
+    assert.ok(!/acmecorp/i.test(r.stdout + r.stderr), r.stdout + r.stderr);
+    assert.match(r.stdout, /^Labels: sterling-report, severity:friction\nFingerprint: sterling-fp-/m);
+    const plain = run(p, ['--dry-run', ...reportArgs()]);
+    assert.match(plain.stdout, /^Project: acmecorp-secret$/m, 'without the flag the Project line stays');
+  }));
+
+test('cli --anonymous: an unparseable config.json is never read', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.project, '.sterling', 'config.json'), '{ not json AcmeCorp');
+    const r = run(p, ['--dry-run', '--anonymous', ...reportArgs()]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!/acmecorp/i.test(r.stdout + r.stderr));
+  }));
+
+test('cli --anonymous: refused with --flush, --list and --apply-labels', () =>
+  withSetup((p) => {
+    for (const m of ['--flush', '--list', '--apply-labels']) assert.equal(run(p, [m, '--anonymous']).status, 2, m);
+  }));
+
+test('scrub: planned/unverified survives, Clients/Acme is still scrubbed', () => {
+  assert.equal(scrub('state: planned/unverified here', ctx), 'state: planned/unverified here');
+  assert.equal(scrub('saw Clients/Acme here', ctx), 'saw <project-path> here');
+});
+
+test('labels: an anonymous report (null project) has no project label and renders no Project line', () => {
+  assert.deepEqual(labelsFor('FRICTION', null), ['sterling-report', 'severity:friction']);
+  const body = renderBody(validateReport(good(), ctx), { version: '1', head: null, host: 'claude-code', project: null });
+  assert.ok(!/Project:|project:/.test(body), body);
+  assert.deepEqual(reportLabels(body), ['sterling-report', 'severity:friction']);
+});
 
 test('cli: a project named like a UUID cannot put the UUID in the Labels or Project line', () =>
   withSetup((p) => {
@@ -1113,6 +1152,19 @@ test('cli --apply-labels: by default it prints what it would do and writes nothi
     assert.match(r.stdout, /report-issue: DRY RUN: would create 4 label\(s\) and set labels on 2 of 2 open report\(s\)\./);
   }));
 
+test('cli --apply-labels and --list: a report with no project label is labelled and listed', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ['sterling-report']);
+    seed(p, [unlabelled(1, 'Labels: sterling-report, severity:friction')]);
+    const listed = run(p, ['--list']);
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /#1 \[labels in body, not applied: sterling-report, severity:friction\] Report 1/);
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(issues(p)[0].labels, ['sterling-report', 'severity:friction']);
+    assert.ok(!r.stdout.includes('project:'), r.stdout);
+  }));
+
 test('cli --apply-labels --yes: creates the missing labels, sets them on each unlabelled report, never edits a body', () =>
   withSetup((p) => {
     setRepoLabels(p, ['bug', 'sterling-report']);
@@ -1140,7 +1192,7 @@ test('cli --apply-labels: a body naming many labels is skipped loudly and nothin
     for (const args of [['--apply-labels'], ['--apply-labels', '--yes']]) {
       const r = run(p, args);
       assert.equal(r.status, 0, r.stdout + r.stderr);
-      assert.match(r.stderr, /report-issue: #1 skipped: its Labels line is not exactly sterling-report, one severity and one project label; nothing was created or set for it\./);
+      assert.match(r.stderr, /report-issue: #1 skipped: its Labels line is not exactly sterling-report, one severity and at most one project label; nothing was created or set for it\./);
       assert.ok(!r.stdout.includes('spam') && !r.stderr.includes('spam'));
     }
     assert.deepEqual(repoLabels(p).sort(), ALL.slice().sort(), 'only the valid report labels exist');
@@ -1154,7 +1206,7 @@ test('cli --apply-labels --yes: a Labels line with two labels of one kind, or a 
     seed(p, [
       unlabelled(1, 'Labels: sterling-report, severity:friction, severity:blocked, project:a'),
       unlabelled(2, 'Labels: sterling-report, severity:friction, project:a, project:b'),
-      unlabelled(3, 'Labels: sterling-report, severity:friction'),
+      unlabelled(3, 'Labels: sterling-report, project:a'),
     ]);
     const r = run(p, ['--apply-labels', '--yes']);
     assert.equal(r.status, 0, r.stdout + r.stderr);

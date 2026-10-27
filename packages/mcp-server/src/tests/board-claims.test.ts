@@ -182,6 +182,171 @@ test('a cross-project read (target_project) shows the other board claim state', 
   }
 });
 
+test('a claimed item reads readiness in_progress, held or expired, and the readiness filter follows it', () => {
+  const h = harness(60);
+  try {
+    const free = addItem(h.tools, 'Free task\nsee src/free.ts');
+    const item = addItem(h.tools, 'Claimed task\nsee src/claimed.ts');
+    const readinessOf = (id: string) => (h.tools.boardGet(id) as unknown as Loose).readiness;
+    const ids = (readiness: ('ready' | 'in_progress')[]) =>
+      (h.tools.boardQueryResult({ source: 'user', readiness }).records as unknown as Loose[]).map((r) => r.id).sort();
+    assert.equal(readinessOf(item.id), 'ready', 'unclaimed it is ready');
+
+    h.tools.boardClaim(item.id, 'sess-A', 'main');
+    for (const [minutes, state] of [[10, 'held'], [120, 'expired']] as const) {
+      h.clock.now = at(minutes);
+      assert.equal(claimOf(h.tools, item.id)?.state, state);
+      assert.equal(readinessOf(item.id), 'in_progress', `${state}: board_get`);
+      const rows = h.tools.boardQueryResult({ source: 'user' }).records as unknown as Loose[];
+      assert.equal(rows.find((r) => r.id === item.id)?.readiness, 'in_progress', `${state}: board_query`);
+      assert.equal(rows.find((r) => r.id === free.id)?.readiness, 'ready', 'an unclaimed item still reads ready');
+      assert.deepEqual(ids(['ready']), [free.id], `${state}: ready excludes the claimed item`);
+      assert.deepEqual(ids(['in_progress']), [item.id], `${state}: in_progress returns it`);
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('target_project: a claimed item reads in_progress and the readiness filter follows it', () => {
+  const h = harness(60);
+  try {
+    const betaStore = new SterlingStore(join(h.beta, '.sterling', 'sterling.db'));
+    let claimedId: string;
+    let freeId: string;
+    try {
+      const betaTools = new SterlingTools({ store: betaStore, repoRoot: h.beta, now: () => T0 });
+      claimedId = addItem(betaTools, 'Beta claimed\nsee src/bc.ts').id;
+      freeId = addItem(betaTools, 'Beta free\nsee src/bf.ts').id;
+      betaStore.claimTodo(claimedId, { session: 'beta-sess', checkout: 'beta-main', now: T0 });
+    } finally {
+      betaStore.close();
+    }
+    const query = (readiness?: ('ready' | 'in_progress')[]) =>
+      h.tools.foreignBoardQuery({ target_project: 'beta', ...(readiness ? { readiness } : {}) }).records as Loose[];
+    for (const minutes of [30, 120]) {
+      h.clock.now = at(minutes);
+      assert.equal(h.tools.foreignBoardGet(claimedId, 'beta').readiness, 'in_progress', `+${minutes}m: board_get`);
+      const rows = query();
+      assert.equal(rows.find((r) => r.id === claimedId)?.readiness, 'in_progress');
+      assert.equal(rows.find((r) => r.id === freeId)?.readiness, 'ready');
+      assert.deepEqual(query(['ready']).map((r) => r.id), [freeId]);
+      assert.deepEqual(query(['in_progress']).map((r) => r.id), [claimedId]);
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+// Review fix A: readiness comes from the returned row's own claim, never from a
+// second whole-board read. The seam is the store's boardReadiness: the wrapper
+// releases the claim just before the FIRST whole-board read, so that read sees
+// an unclaimed item while the row fetched earlier still carries the claim.
+test('a claim released between the row read and the readiness read never gives readiness ready beside a held claim_state', () => {
+  const h = harness(60);
+  try {
+    const item = addItem(h.tools, 'Raced task\nsee src/raced.ts');
+    const original = h.store.boardReadiness.bind(h.store);
+    let armed = false;
+    h.store.boardReadiness = ((...args: Parameters<typeof original>) => {
+      if (armed) {
+        armed = false;
+        h.store.releaseClaim(item.id, { session: 'sess-A', generation: claimOf(h.tools, item.id)!.generation!, now: T0 });
+      }
+      return original(...args);
+    }) as typeof h.store.boardReadiness;
+    // Claim, then release just before the first whole-board read of the next call.
+    const raced = <T>(call: () => T): T => {
+      h.tools.boardClaim(item.id, 'sess-A', 'main');
+      armed = true;
+      try {
+        return call();
+      } finally {
+        armed = false;
+        if (claimOf(h.tools, item.id)) h.store.releaseClaim(item.id, { session: 'sess-A', generation: claimOf(h.tools, item.id)!.generation!, now: T0 });
+      }
+    };
+    const pair = (row: Loose) => ({ readiness: row.readiness, claim: (row.claim_state as ClaimState | undefined)?.state });
+
+    assert.deepEqual(pair(raced(() => h.tools.boardGet(item.id) as unknown as Loose)), { readiness: 'in_progress', claim: 'held' }, 'board_get');
+    assert.deepEqual(
+      pair(raced(() => (h.tools.boardQueryResult({ source: 'user' }).records as unknown as Loose[])[0])),
+      { readiness: 'in_progress', claim: 'held' },
+      'board_query'
+    );
+    assert.deepEqual(
+      raced(() => (h.tools.boardQueryResult({ source: 'user', readiness: ['ready'] }).records as unknown as Loose[]).map((r) => r.id)),
+      [],
+      'the filter judges the row it returns: a row still carrying the claim is not ready'
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('target_project: readiness follows the returned row claim even when the whole-board read disagrees', () => {
+  const h = harness(60);
+  try {
+    const row = (claimed: boolean) => ({
+      id: 'id-1',
+      type: 'todo',
+      slug: 'one',
+      source: 'user',
+      text: 'One',
+      updated_at: T0,
+      file_keys: [],
+      ...(claimed ? { claim: { holder_session: 's', checkout: 'c', generation: 1, claimed_at: T0, renewed_at: T0 } } : {}),
+    });
+    type Derive = (read: unknown, page: unknown[], opts: { now: number; leaseMinutes: number }) => Map<string, Record<string, unknown>>;
+    const derive = (SterlingTools as unknown as { foreignDerived: Derive }).foreignDerived;
+    const read = { items: [row(false)], slugHolders: new Map(), truncated: false, unreadable: [] };
+    const got = derive(read, [row(true)], { now: Date.parse(T0), leaseMinutes: 60 }).get('id-1')!;
+    assert.deepEqual({ readiness: got.readiness, claim: (got.claim_state as ClaimState).state }, { readiness: 'in_progress', claim: 'held' });
+  } finally {
+    h.cleanup();
+  }
+});
+
+// Review fix B: shares_write_path_with is built from reported-READY items, so a
+// free item never lists a claimed peer, held or expired.
+test('a free item does not list a held or expired claimed peer in shares_write_path_with, locally and through target_project', () => {
+  const h = harness(60);
+  try {
+    const add = (tools: SterlingTools, text: string) =>
+      (tools.boardAdd({ text, source: 'user', objective: 'standalone', file_keys: ['src/shared.ts'] }) as unknown as { record: { id: string } }).record.id;
+    const freeA = add(h.tools, 'Free A');
+    const freeB = add(h.tools, 'Free B');
+    const peer = add(h.tools, 'Claimed peer');
+    const sharesOf = (rows: Loose[], id: string) => rows.find((r) => r.id === id)?.shares_write_path_with as string[] | undefined;
+    const local = () => h.tools.boardQueryResult({ source: 'user' }).records as unknown as Loose[];
+    assert.equal(sharesOf(local(), freeA)?.length, 2, 'unclaimed, all three share the path');
+
+    const betaStore = new SterlingStore(join(h.beta, '.sterling', 'sterling.db'));
+    let betaIds: string[];
+    try {
+      const betaTools = new SterlingTools({ store: betaStore, repoRoot: h.beta, now: () => T0 });
+      betaIds = ['Free A', 'Free B', 'Claimed peer'].map((t) => add(betaTools, t));
+      betaStore.claimTodo(betaIds[2], { session: 'beta-sess', checkout: 'beta-main', now: T0 });
+    } finally {
+      betaStore.close();
+    }
+    h.tools.boardClaim(peer, 'sess-A', 'main');
+
+    for (const minutes of [10, 120]) {
+      h.clock.now = at(minutes);
+      const l = local();
+      assert.equal(sharesOf(l, freeA)?.length, 1, `+${minutes}m local: only the other free item`);
+      assert.equal(sharesOf(l, peer), undefined, 'the claimed peer lists nothing');
+      const f = h.tools.foreignBoardQuery({ target_project: 'beta' }).records as Loose[];
+      assert.equal(sharesOf(f, betaIds[0])?.length, 1, `+${minutes}m foreign: only the other free item`);
+      assert.equal(sharesOf(f, betaIds[2]), undefined);
+    }
+    void freeB;
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('generic knowledge writes cannot set or restore a claim: A to B takeover, then knowledge_update naming A is refused', () => {
   const h = harness(60);
   try {
