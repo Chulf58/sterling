@@ -17578,9 +17578,15 @@ init_dist2();
 init_dist();
 var BOARD_GROUP_CAP = 8;
 var DECISION = "decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start";
+var isExpired = (r) => r.claim?.state === "expired";
+function expiredOmitted(omitted) {
+  const n = omitted.filter(isExpired).length;
+  return n ? ` (${n} expired, check owner)` : "";
+}
 function boardGroups(readiness) {
   const all = [...readiness].sort(compareBoardReadiness);
-  const inProgress = all.filter((r) => r.claim && r.state !== "delegated");
+  const claimed = all.filter((r) => r.claim && r.state !== "delegated");
+  const inProgress = [...claimed.filter(isExpired), ...claimed.filter((r) => !isExpired(r))];
   const sorted = all.filter((r) => !r.claim || r.state === "delegated");
   return {
     inProgress,
@@ -17676,7 +17682,7 @@ function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP,
       (omitted) => oldestOmittedWait(omitted, now)
     ),
     ...groupLines("DELEGATED TO OTHER PROJECTS ({n}, not run here)", g.delegated, cap, (r) => `- ${r.name} \u2014 ${delegatedStatus(r, handoffStatus2)}`),
-    ...groupLines("IN PROGRESS ({n}, claimed; not READY)", g.inProgress, cap, (r) => `- ${r.name} \u2014 ${claimText(r.claim, session, now)}`)
+    ...groupLines("IN PROGRESS ({n}, claimed; not READY)", g.inProgress, cap, (r) => `- ${r.name} \u2014 ${claimText(r.claim, session, now)}`, expiredOmitted)
   ];
   return lines.join("\n");
 }

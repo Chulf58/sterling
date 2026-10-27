@@ -8,1501 +8,7 @@ var __export = (target, all) => {
 
 // scripts/open-session.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync4, readFileSync as readFileSync7, realpathSync as realpathSync5 } from "node:fs";
-import { basename as basename4, dirname as dirname4, join as join10, resolve as resolve7 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-
-// scripts/lib/opencode-install.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
-import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { basename as basename3, dirname as dirname3, isAbsolute, join as join9, resolve as resolve6 } from "node:path";
-import { fileURLToPath } from "node:url";
-
-// node_modules/js-yaml/dist/js-yaml.mjs
-var NOT_RESOLVED = /* @__PURE__ */ Symbol("NOT_RESOLVED");
-function defineScalarTag(tagName, options) {
-  return {
-    tagName,
-    nodeKind: "scalar",
-    implicit: options.implicit ?? false,
-    matchByTagPrefix: options.matchByTagPrefix ?? false,
-    implicitFirstChars: options.implicitFirstChars ?? null,
-    resolve: options.resolve,
-    identify: options.identify,
-    represent: options.represent ?? ((data) => String(data)),
-    representTagName: options.representTagName ?? (() => tagName)
-  };
-}
-function defineSequenceTag(tagName, options) {
-  const carrierIsResult = options.finalize === void 0;
-  return {
-    tagName,
-    nodeKind: "sequence",
-    implicit: false,
-    matchByTagPrefix: options.matchByTagPrefix ?? false,
-    create: options.create,
-    addItem: options.addItem,
-    finalize: options.finalize ?? ((carrier) => carrier),
-    carrierIsResult,
-    identify: options.identify,
-    represent: options.represent ?? ((data) => data),
-    representTagName: options.representTagName ?? (() => tagName)
-  };
-}
-function defineMappingTag(tagName, options) {
-  const carrierIsResult = options.finalize === void 0;
-  return {
-    tagName,
-    nodeKind: "mapping",
-    implicit: false,
-    matchByTagPrefix: options.matchByTagPrefix ?? false,
-    create: options.create,
-    addPair: options.addPair,
-    has: options.has,
-    keys: options.keys,
-    get: options.get,
-    finalize: options.finalize ?? ((carrier) => carrier),
-    carrierIsResult,
-    identify: options.identify,
-    represent: options.represent ?? ((data) => data),
-    representTagName: options.representTagName ?? (() => tagName)
-  };
-}
-var strTag = defineScalarTag("tag:yaml.org,2002:str", {
-  resolve: (source) => source,
-  identify: (data) => typeof data === "string"
-});
-var NULL_VALUES$1 = [
-  "",
-  "~",
-  "null",
-  "Null",
-  "NULL"
-];
-var nullCoreTag = defineScalarTag("tag:yaml.org,2002:null", {
-  implicit: true,
-  implicitFirstChars: [
-    "",
-    "~",
-    "n",
-    "N"
-  ],
-  resolve: (source) => {
-    if (NULL_VALUES$1.indexOf(source) !== -1) return null;
-    return NOT_RESOLVED;
-  },
-  identify: (object) => object === null,
-  represent: () => "null"
-});
-var nullJsonTag = defineScalarTag("tag:yaml.org,2002:null", {
-  implicit: true,
-  implicitFirstChars: ["n"],
-  resolve: (source, isExplicit) => {
-    if (source === "null" || isExplicit && source === "") return null;
-    return NOT_RESOLVED;
-  },
-  identify: (object) => object === null,
-  represent: () => "null"
-});
-var NULL_VALUES = [
-  "",
-  "~",
-  "null",
-  "Null",
-  "NULL"
-];
-var nullYaml11Tag = defineScalarTag("tag:yaml.org,2002:null", {
-  implicit: true,
-  implicitFirstChars: [
-    "",
-    "~",
-    "n",
-    "N"
-  ],
-  resolve: (source) => {
-    if (NULL_VALUES.indexOf(source) !== -1) return null;
-    return NOT_RESOLVED;
-  },
-  identify: (object) => object === null,
-  represent: () => "null"
-});
-var TRUE_VALUES$2 = [
-  "true",
-  "True",
-  "TRUE"
-];
-var FALSE_VALUES$2 = [
-  "false",
-  "False",
-  "FALSE"
-];
-var boolCoreTag = defineScalarTag("tag:yaml.org,2002:bool", {
-  implicit: true,
-  implicitFirstChars: [
-    "t",
-    "T",
-    "f",
-    "F"
-  ],
-  resolve: (source) => {
-    if (TRUE_VALUES$2.indexOf(source) !== -1) return true;
-    if (FALSE_VALUES$2.indexOf(source) !== -1) return false;
-    return NOT_RESOLVED;
-  },
-  identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
-  represent: (object) => object ? "true" : "false"
-});
-var TRUE_VALUES$1 = ["true"];
-var FALSE_VALUES$1 = ["false"];
-var boolJsonTag = defineScalarTag("tag:yaml.org,2002:bool", {
-  implicit: true,
-  implicitFirstChars: ["t", "f"],
-  resolve: (source) => {
-    if (TRUE_VALUES$1.indexOf(source) !== -1) return true;
-    if (FALSE_VALUES$1.indexOf(source) !== -1) return false;
-    return NOT_RESOLVED;
-  },
-  identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
-  represent: (object) => object ? "true" : "false"
-});
-var TRUE_VALUES = [
-  "true",
-  "True",
-  "TRUE",
-  "y",
-  "Y",
-  "yes",
-  "Yes",
-  "YES",
-  "on",
-  "On",
-  "ON"
-];
-var FALSE_VALUES = [
-  "false",
-  "False",
-  "FALSE",
-  "n",
-  "N",
-  "no",
-  "No",
-  "NO",
-  "off",
-  "Off",
-  "OFF"
-];
-var boolYaml11Tag = defineScalarTag("tag:yaml.org,2002:bool", {
-  implicit: true,
-  implicitFirstChars: [
-    "y",
-    "Y",
-    "n",
-    "N",
-    "t",
-    "T",
-    "f",
-    "F",
-    "o",
-    "O"
-  ],
-  resolve: (source) => {
-    if (TRUE_VALUES.indexOf(source) !== -1) return true;
-    if (FALSE_VALUES.indexOf(source) !== -1) return false;
-    return NOT_RESOLVED;
-  },
-  identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
-  represent: (object) => object ? "true" : "false"
-});
-var YAML_INTEGER_IMPLICIT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:0o[0-7]+|0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
-var YAML_INTEGER_EXPLICIT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
-function parseYamlInteger$2(source) {
-  let value = source;
-  let sign = 1;
-  if (value[0] === "-" || value[0] === "+") {
-    if (value[0] === "-") sign = -1;
-    value = value.slice(1);
-  }
-  if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
-  if (value.startsWith("0o")) return sign * parseInt(value.slice(2), 8);
-  if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
-  return sign * parseInt(value, 10);
-}
-function resolveYamlInteger$2(source, isExplicit) {
-  if (isExplicit) {
-    if (!YAML_INTEGER_EXPLICIT_PATTERN$1.test(source)) return NOT_RESOLVED;
-  } else if (!YAML_INTEGER_IMPLICIT_PATTERN$1.test(source)) return NOT_RESOLVED;
-  const result = parseYamlInteger$2(source);
-  return Number.isFinite(result) ? result : NOT_RESOLVED;
-}
-var intCoreTag = defineScalarTag("tag:yaml.org,2002:int", {
-  implicit: true,
-  implicitFirstChars: [
-    "-",
-    "+",
-    ..."0123456789"
-  ],
-  resolve: resolveYamlInteger$2,
-  identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
-  represent: (object) => object.toString(10)
-});
-var YAML_INTEGER_IMPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^-?(?:0|[1-9][0-9]*)$");
-var YAML_INTEGER_EXPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
-function parseYamlInteger$1(source) {
-  let value = source;
-  let sign = 1;
-  if (value[0] === "-" || value[0] === "+") {
-    if (value[0] === "-") sign = -1;
-    value = value.slice(1);
-  }
-  if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
-  if (value.startsWith("0o")) return sign * parseInt(value.slice(2), 8);
-  if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
-  return sign * parseInt(value, 10);
-}
-function resolveYamlInteger$1(source, isExplicit) {
-  if (isExplicit) {
-    if (!YAML_INTEGER_EXPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
-  } else if (!YAML_INTEGER_IMPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
-  const result = parseYamlInteger$1(source);
-  return Number.isFinite(result) ? result : NOT_RESOLVED;
-}
-var intJsonTag = defineScalarTag("tag:yaml.org,2002:int", {
-  implicit: true,
-  implicitFirstChars: ["-", ..."0123456789"],
-  resolve: resolveYamlInteger$1,
-  identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
-  represent: (object) => object.toString(10)
-});
-var YAML_INTEGER_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+|[-+]?(?:0|[1-9][0-9_]*))$");
-function parseYamlInteger(source) {
-  let value = source.replace(/_/g, "");
-  let sign = 1;
-  if (value[0] === "-" || value[0] === "+") {
-    if (value[0] === "-") sign = -1;
-    value = value.slice(1);
-  }
-  if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
-  if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
-  if (value.includes(":")) {
-    let result = 0;
-    for (const part of value.split(":")) result = result * 60 + Number(part);
-    return sign * result;
-  }
-  if (value !== "0" && value[0] === "0") return sign * parseInt(value, 8);
-  return sign * parseInt(value, 10);
-}
-function resolveYamlInteger(source) {
-  if (!YAML_INTEGER_PATTERN.test(source)) return NOT_RESOLVED;
-  const result = parseYamlInteger(source);
-  return Number.isFinite(result) ? result : NOT_RESOLVED;
-}
-var intYaml11Tag = defineScalarTag("tag:yaml.org,2002:int", {
-  implicit: true,
-  implicitFirstChars: [
-    "-",
-    "+",
-    ..."0123456789"
-  ],
-  resolve: resolveYamlInteger,
-  identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
-  represent: (object) => object.toString(10)
-});
-var YAML_FLOAT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?[0-9]+(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?|[-+]?\\.[0-9]+(?:[eE][-+]?[0-9]+)?|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
-var YAML_FLOAT_SPECIAL_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
-function resolveYamlFloat$2(source) {
-  if (!YAML_FLOAT_PATTERN$1.test(source)) return NOT_RESOLVED;
-  let value = source.toLowerCase();
-  const sign = value[0] === "-" ? -1 : 1;
-  if ("+-".includes(value[0])) value = value.slice(1);
-  if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-  if (value === ".nan") return NaN;
-  const result = sign * parseFloat(value);
-  if (Number.isFinite(result) || YAML_FLOAT_SPECIAL_PATTERN$1.test(source)) return result;
-  return NOT_RESOLVED;
-}
-function representYamlFloat$2(object) {
-  if (isNaN(object)) return ".nan";
-  if (object === Number.POSITIVE_INFINITY) return ".inf";
-  if (object === Number.NEGATIVE_INFINITY) return "-.inf";
-  if (Object.is(object, -0)) return "-0.0";
-  const result = object.toString(10);
-  return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
-}
-var floatCoreTag = defineScalarTag("tag:yaml.org,2002:float", {
-  implicit: true,
-  implicitFirstChars: [
-    "-",
-    "+",
-    ".",
-    ..."0123456789"
-  ],
-  resolve: resolveYamlFloat$2,
-  identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
-  represent: representYamlFloat$2
-});
-var YAML_FLOAT_IMPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?$");
-var YAML_FLOAT_EXPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?[0-9]+(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?|[-+]?\\.[0-9]+(?:[eE][-+]?[0-9]+)?|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
-function resolveYamlFloat$1(source, isExplicit) {
-  if (isExplicit) {
-    if (!YAML_FLOAT_EXPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
-    let value = source.toLowerCase();
-    const sign = value[0] === "-" ? -1 : 1;
-    if ("+-".includes(value[0])) value = value.slice(1);
-    if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-    if (value === ".nan") return NaN;
-    const result2 = sign * parseFloat(value);
-    return Number.isFinite(result2) ? result2 : NOT_RESOLVED;
-  }
-  if (!YAML_FLOAT_IMPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
-  const result = Number(source);
-  if (Number.isFinite(result)) return result;
-  return NOT_RESOLVED;
-}
-function representYamlFloat$1(object) {
-  if (isNaN(object)) return ".nan";
-  if (object === Number.POSITIVE_INFINITY) return ".inf";
-  if (object === Number.NEGATIVE_INFINITY) return "-.inf";
-  if (Object.is(object, -0)) return "-0.0";
-  const result = object.toString(10);
-  return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
-}
-var floatJsonTag = defineScalarTag("tag:yaml.org,2002:float", {
-  implicit: true,
-  implicitFirstChars: ["-", ..."0123456789"],
-  resolve: resolveYamlFloat$1,
-  identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
-  represent: representYamlFloat$1
-});
-var YAML_FLOAT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?(?:(?:[0-9][0-9_]*)?\\.[0-9_]*)(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
-var YAML_FLOAT_SPECIAL_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
-function resolveYamlFloat(source) {
-  if (!YAML_FLOAT_PATTERN.test(source)) return NOT_RESOLVED;
-  let value = source.toLowerCase().replace(/_/g, "");
-  const sign = value[0] === "-" ? -1 : 1;
-  if ("+-".includes(value[0])) value = value.slice(1);
-  if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-  if (value === ".nan") return NaN;
-  let result = 0;
-  if (value.includes(":")) {
-    for (const part of value.split(":")) result = result * 60 + Number(part);
-    result *= sign;
-  } else result = sign * parseFloat(value);
-  if (Number.isFinite(result) || YAML_FLOAT_SPECIAL_PATTERN.test(source)) return result;
-  return NOT_RESOLVED;
-}
-function representYamlFloat(object) {
-  if (isNaN(object)) return ".nan";
-  if (object === Number.POSITIVE_INFINITY) return ".inf";
-  if (object === Number.NEGATIVE_INFINITY) return "-.inf";
-  if (Object.is(object, -0)) return "-0.0";
-  const result = object.toString(10);
-  return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
-}
-var floatYaml11Tag = defineScalarTag("tag:yaml.org,2002:float", {
-  implicit: true,
-  implicitFirstChars: [
-    "-",
-    "+",
-    ".",
-    ..."0123456789"
-  ],
-  resolve: resolveYamlFloat,
-  identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
-  represent: representYamlFloat
-});
-var mergeTag = defineScalarTag("tag:yaml.org,2002:merge", {
-  implicit: true,
-  implicitFirstChars: ["<"],
-  resolve: (source, isExplicit) => {
-    if (source === "<<" || isExplicit && source === "") return "<<";
-    return NOT_RESOLVED;
-  },
-  identify: () => false
-});
-var BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
-function resolveYamlBinary(source) {
-  const input = source.replace(/\s/g, "");
-  if (input.length % 4 !== 0 || !BASE64_PATTERN.test(input)) return NOT_RESOLVED;
-  const binary = atob(input);
-  const result = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index++) result[index] = binary.charCodeAt(index);
-  return result;
-}
-function representYamlBinary(object) {
-  let binary = "";
-  for (let index = 0; index < object.length; index++) binary += String.fromCharCode(object[index]);
-  return btoa(binary);
-}
-var binaryTag = defineScalarTag("tag:yaml.org,2002:binary", {
-  resolve: resolveYamlBinary,
-  identify: (object) => Object.prototype.toString.call(object) === "[object Uint8Array]",
-  represent: representYamlBinary
-});
-var YAML_DATE_REGEXP = /* @__PURE__ */ new RegExp("^([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])$");
-var YAML_TIMESTAMP_REGEXP = /* @__PURE__ */ new RegExp("^([0-9][0-9][0-9][0-9])-([0-9][0-9]?)-([0-9][0-9]?)(?:[Tt]|[ \\t]+)([0-9][0-9]?):([0-9][0-9]):([0-9][0-9])(?:\\.([0-9]*))?(?:[ \\t]*(Z|([-+])([0-9][0-9]?)(?::([0-9][0-9]))?))?$");
-function makeUtcDate(year, month, day, hour = 0, minute = 0, second = 0, fraction = 0) {
-  const date = new Date(Date.UTC(year, month, day, hour, minute, second, fraction));
-  date.setUTCFullYear(year, month, day);
-  return date;
-}
-function resolveYamlTimestamp(source) {
-  let match = YAML_DATE_REGEXP.exec(source);
-  if (match === null) match = YAML_TIMESTAMP_REGEXP.exec(source);
-  if (match === null) return NOT_RESOLVED;
-  const year = +match[1];
-  const month = +match[2] - 1;
-  const day = +match[3];
-  if (!match[4]) {
-    const date2 = makeUtcDate(year, month, day);
-    if (date2.getUTCFullYear() !== year || date2.getUTCMonth() !== month || date2.getUTCDate() !== day) return NOT_RESOLVED;
-    return date2;
-  }
-  const hour = +match[4];
-  const minute = +match[5];
-  const second = +match[6];
-  let fraction = 0;
-  if (hour > 23 || minute > 59 || second > 59) return NOT_RESOLVED;
-  if (match[7]) {
-    let value = match[7].slice(0, 3);
-    while (value.length < 3) value += "0";
-    fraction = +value;
-  }
-  const date = makeUtcDate(year, month, day, hour, minute, second, fraction);
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return NOT_RESOLVED;
-  if (match[9]) {
-    const offsetHour = +match[10];
-    const offsetMinute = +(match[11] || 0);
-    if (offsetHour > 23 || offsetMinute > 59) return NOT_RESOLVED;
-    const offset = (offsetHour * 60 + offsetMinute) * 6e4;
-    date.setTime(date.getTime() - (match[9] === "-" ? -offset : offset));
-  }
-  return date;
-}
-var timestampTag = defineScalarTag("tag:yaml.org,2002:timestamp", {
-  implicit: true,
-  implicitFirstChars: [..."0123456789"],
-  resolve: resolveYamlTimestamp,
-  identify: (object) => object instanceof Date,
-  represent: (object) => object.toISOString()
-});
-var seqTag = defineSequenceTag("tag:yaml.org,2002:seq", {
-  create: () => [],
-  addItem: (container, item) => {
-    container.push(item);
-  },
-  identify: Array.isArray
-});
-function isPlainObject(data) {
-  if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
-  const prototype = Object.getPrototypeOf(data);
-  return prototype === null || prototype === Object.prototype;
-}
-var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
-  create: () => ({
-    list: [],
-    seen: /* @__PURE__ */ new Set()
-  }),
-  addItem: (carrier, item) => {
-    let key;
-    if (item instanceof Map) {
-      if (item.size !== 1) return "cannot resolve an ordered map item";
-      key = item.keys().next().value;
-    } else if (isPlainObject(item)) {
-      const itemKeys = Object.keys(item);
-      if (itemKeys.length !== 1) return "cannot resolve an ordered map item";
-      key = itemKeys[0];
-    } else return "cannot resolve an ordered map item";
-    if (carrier.seen.has(key)) return "duplicate key in ordered map";
-    carrier.seen.add(key);
-    carrier.list.push(item);
-    return "";
-  },
-  finalize: (carrier) => carrier.list,
-  identify: () => false
-});
-var pairsTag = defineSequenceTag("tag:yaml.org,2002:pairs", {
-  create: () => [],
-  addItem: (container, item) => {
-    if (item instanceof Map) {
-      if (item.size !== 1) return "cannot resolve a pairs item";
-      container.push(item.entries().next().value);
-      return "";
-    }
-    if (Object.prototype.toString.call(item) !== "[object Object]") return "cannot resolve a pairs item";
-    const object = item;
-    const keys = Object.keys(object);
-    if (keys.length !== 1) return "cannot resolve a pairs item";
-    container.push([keys[0], object[keys[0]]]);
-    return "";
-  },
-  identify: () => false
-});
-var mapTag = defineMappingTag("tag:yaml.org,2002:map", {
-  create: () => ({}),
-  identify: isPlainObject,
-  represent: (o) => {
-    const map = /* @__PURE__ */ new Map();
-    for (const key of Object.keys(o)) map.set(key, o[key]);
-    return map;
-  },
-  addPair: (container, key, value) => {
-    if (key !== null && typeof key === "object") return "object-based map does not support complex keys";
-    const normalizedKey = String(key);
-    if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
-      value,
-      enumerable: true,
-      configurable: true,
-      writable: true
-    });
-    else container[normalizedKey] = value;
-    return "";
-  },
-  has: (container, key) => {
-    if (key !== null && typeof key === "object") return false;
-    return Object.prototype.hasOwnProperty.call(container, String(key));
-  },
-  keys: (container) => Object.keys(container),
-  get: (container, key) => {
-    const normalizedKey = String(key);
-    if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
-    return container[normalizedKey];
-  }
-});
-var setTag = defineMappingTag("tag:yaml.org,2002:set", {
-  create: () => /* @__PURE__ */ new Set(),
-  identify: (data) => data instanceof Set,
-  represent: (data) => {
-    const map = /* @__PURE__ */ new Map();
-    for (const key of data) map.set(key, null);
-    return map;
-  },
-  addPair: (container, key, value) => {
-    if (value !== null) return "cannot resolve a set item";
-    container.add(key);
-    return "";
-  },
-  has: (container, key) => container.has(key),
-  keys: (container) => container.keys(),
-  get: () => null
-});
-function createTagDefinitionMap() {
-  return {
-    scalar: /* @__PURE__ */ Object.create(null),
-    sequence: /* @__PURE__ */ Object.create(null),
-    mapping: /* @__PURE__ */ Object.create(null)
-  };
-}
-function createTagDefinitionListMap() {
-  return {
-    scalar: [],
-    sequence: [],
-    mapping: []
-  };
-}
-function compileTags(tags) {
-  const result = [];
-  for (const tag of tags) {
-    let index = result.length;
-    for (let previousIndex = 0; previousIndex < result.length; previousIndex++) {
-      const previous = result[previousIndex];
-      if (previous.nodeKind === tag.nodeKind && previous.tagName === tag.tagName && previous.matchByTagPrefix === tag.matchByTagPrefix) {
-        index = previousIndex;
-        break;
-      }
-    }
-    result[index] = tag;
-  }
-  return result;
-}
-var Schema = class Schema2 {
-  tags;
-  /** @internal */
-  implicitScalarTags;
-  /**
-  * Dispatch implicit scalar resolvers by `source.charAt(0)`. Each bucket holds
-  * the resolvers that may match that key, in schema order; a key absent from
-  * the map uses
-  * {@link Schema.implicitScalarAnyFirstChar}
-  * (resolvers that declared no first-char constraint, so they apply to any
-  * first character).
-  */
-  implicitScalarByFirstChar;
-  implicitScalarAnyFirstChar;
-  /**
-  * The default scalar tag (`!!str`), resolved once so the composer's fallback
-  * for unresolved plain scalars avoids a keyed lookup per scalar.
-  *
-  * @internal
-  */
-  defaultScalarTag;
-  /**
-  * The default container tags (`!!seq` / `!!map`), used by the dumper: when a
-  * value is identified by its default tag, the tag is implicit and not
-  * printed. Undefined if the schema does not define them (then such values
-  * can't be dumped).
-  *
-  * @internal
-  */
-  defaultSequenceTag;
-  /** @internal */
-  defaultMappingTag;
-  exact;
-  prefix;
-  constructor(tags) {
-    const compiledTags = compileTags(tags);
-    const implicitScalarTags = [];
-    const exact = createTagDefinitionMap();
-    const prefix = createTagDefinitionListMap();
-    for (const tag of compiledTags) {
-      if (tag.nodeKind === "scalar" && tag.implicit) {
-        if (tag.matchByTagPrefix) throw new Error("Implicit scalar tags cannot match by tag prefix");
-        implicitScalarTags.push(tag);
-      }
-      switch (tag.nodeKind) {
-        case "scalar":
-          if (tag.matchByTagPrefix) prefix.scalar.push(tag);
-          else exact.scalar[tag.tagName] = tag;
-          break;
-        case "sequence":
-          if (tag.matchByTagPrefix) prefix.sequence.push(tag);
-          else exact.sequence[tag.tagName] = tag;
-          break;
-        case "mapping":
-          if (tag.matchByTagPrefix) prefix.mapping.push(tag);
-          else exact.mapping[tag.tagName] = tag;
-      }
-    }
-    const implicitScalarAnyFirstChar = implicitScalarTags.filter((tag) => tag.implicitFirstChars === null);
-    const keys = /* @__PURE__ */ new Set();
-    for (const tag of implicitScalarTags) if (tag.implicitFirstChars !== null) for (const key of tag.implicitFirstChars) keys.add(key);
-    const implicitScalarByFirstChar = /* @__PURE__ */ new Map();
-    for (const key of keys) implicitScalarByFirstChar.set(key, implicitScalarTags.filter((tag) => tag.implicitFirstChars === null || tag.implicitFirstChars.indexOf(key) !== -1));
-    const defaultScalarTag = exact.scalar["tag:yaml.org,2002:str"];
-    if (!defaultScalarTag) throw new Error("schema does not define the default scalar tag (tag:yaml.org,2002:str)");
-    this.tags = compiledTags;
-    this.implicitScalarTags = implicitScalarTags;
-    this.implicitScalarByFirstChar = implicitScalarByFirstChar;
-    this.implicitScalarAnyFirstChar = implicitScalarAnyFirstChar;
-    this.defaultScalarTag = defaultScalarTag;
-    this.defaultSequenceTag = exact.sequence["tag:yaml.org,2002:seq"];
-    this.defaultMappingTag = exact.mapping["tag:yaml.org,2002:map"];
-    this.exact = exact;
-    this.prefix = prefix;
-  }
-  /** @internal */
-  lookupScalarTag(tagName) {
-    const exactTag = this.exact.scalar[tagName];
-    if (exactTag) return exactTag;
-    for (const tag of this.prefix.scalar) if (tagName.startsWith(tag.tagName)) return tag;
-  }
-  /** @internal */
-  lookupSequenceTag(tagName) {
-    const exactTag = this.exact.sequence[tagName];
-    if (exactTag) return exactTag;
-    for (const tag of this.prefix.sequence) if (tagName.startsWith(tag.tagName)) return tag;
-  }
-  /** @internal */
-  lookupMappingTag(tagName) {
-    const exactTag = this.exact.mapping[tagName];
-    if (exactTag) return exactTag;
-    for (const tag of this.prefix.mapping) if (tagName.startsWith(tag.tagName)) return tag;
-  }
-  /** @internal */
-  resolveImplicitScalarTag(source) {
-    const candidates = this.implicitScalarByFirstChar.get(source.charAt(0)) ?? this.implicitScalarAnyFirstChar;
-    for (const tag2 of candidates) {
-      const value = tag2.resolve(source, false, tag2.tagName);
-      if (value !== NOT_RESOLVED) return {
-        value,
-        tag: tag2
-      };
-    }
-    const tag = this.defaultScalarTag;
-    return {
-      value: tag.resolve(source, false, tag.tagName),
-      tag
-    };
-  }
-  /**
-  * Creates a new schema with the specified tags added. If a tag already
-  * exists, it is replaced by the specified tag.
-  *
-  * @example
-  *
-  * ```javascript
-  * import { CORE_SCHEMA, mergeTag, realMapTag } from 'js-yaml'
-  *
-  * const schema = CORE_SCHEMA.withTags(mergeTag, realMapTag)
-  * ```
-  */
-  withTags(...tags) {
-    let flatTags = [];
-    for (const tag of tags) flatTags = flatTags.concat(tag);
-    return new Schema2([...this.tags, ...flatTags]);
-  }
-};
-var FAILSAFE_SCHEMA = new Schema([
-  strTag,
-  seqTag,
-  mapTag
-]);
-var JSON_SCHEMA = new Schema([
-  ...FAILSAFE_SCHEMA.tags,
-  nullJsonTag,
-  boolJsonTag,
-  intJsonTag,
-  floatJsonTag
-]);
-var CORE_SCHEMA = new Schema([
-  ...FAILSAFE_SCHEMA.tags,
-  nullCoreTag,
-  boolCoreTag,
-  intCoreTag,
-  floatCoreTag
-]);
-var YAML11_SCHEMA = new Schema([
-  ...FAILSAFE_SCHEMA.tags,
-  nullYaml11Tag,
-  boolYaml11Tag,
-  intYaml11Tag,
-  floatYaml11Tag,
-  timestampTag,
-  mergeTag,
-  binaryTag,
-  omapTag,
-  pairsTag,
-  setTag
-]);
-var DUMP_SCHEMA = YAML11_SCHEMA.withTags({
-  ...intYaml11Tag,
-  resolve: (source, isExplicit, tagName) => {
-    const result = intYaml11Tag.resolve(source, isExplicit, tagName);
-    return result === NOT_RESOLVED ? intCoreTag.resolve(source, isExplicit, tagName) : result;
-  }
-}, {
-  ...floatYaml11Tag,
-  resolve: (source, isExplicit, tagName) => {
-    const result = floatYaml11Tag.resolve(source, isExplicit, tagName);
-    return result === NOT_RESOLVED ? floatCoreTag.resolve(source, isExplicit, tagName) : result;
-  }
-});
-var realMapTag = defineMappingTag("tag:yaml.org,2002:map", {
-  create: () => /* @__PURE__ */ new Map(),
-  addPair: (container, key, value) => {
-    container.set(key, value);
-    return "";
-  },
-  has: (container, key) => container.has(key),
-  keys: (container) => container.keys(),
-  get: (container, key) => container.get(key),
-  identify: (data) => data instanceof Map || isPlainObject(data),
-  represent: (data) => {
-    if (data instanceof Map) return data;
-    const map = /* @__PURE__ */ new Map();
-    const obj = data;
-    for (const key of Object.keys(obj)) map.set(key, obj[key]);
-    return map;
-  }
-});
-function normalizeKey(key) {
-  if (Array.isArray(key)) {
-    const array = Array.prototype.slice.call(key);
-    for (let index = 0; index < array.length; index++) {
-      if (Array.isArray(array[index])) return null;
-      if (typeof array[index] === "object" && Object.prototype.toString.call(array[index]) === "[object Object]") array[index] = "[object Object]";
-    }
-    return String(array);
-  }
-  if (typeof key === "object" && Object.prototype.toString.call(key) === "[object Object]") return "[object Object]";
-  return String(key);
-}
-var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
-  create: () => ({}),
-  identify: isPlainObject,
-  represent: (o) => {
-    const map = /* @__PURE__ */ new Map();
-    for (const key of Object.keys(o)) map.set(key, o[key]);
-    return map;
-  },
-  addPair: (container, key, value) => {
-    const normalizedKey = normalizeKey(key);
-    if (normalizedKey === null) return "nested arrays are not supported inside keys";
-    if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
-      value,
-      enumerable: true,
-      configurable: true,
-      writable: true
-    });
-    else container[normalizedKey] = value;
-    return "";
-  },
-  has: (container, key) => {
-    const normalizedKey = normalizeKey(key);
-    return normalizedKey !== null && Object.prototype.hasOwnProperty.call(container, normalizedKey);
-  },
-  keys: (container) => Object.keys(container),
-  get: (container, key) => {
-    const normalizedKey = String(key);
-    if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
-    return container[normalizedKey];
-  }
-});
-var EVENT_ID = {
-  DOCUMENT: 1,
-  SEQUENCE: 2,
-  MAPPING: 3,
-  SCALAR: 4,
-  ALIAS: 5,
-  POP: 6
-};
-var SCALAR_STYLE = {
-  PLAIN: 1,
-  SINGLE_QUOTED: 2,
-  DOUBLE_QUOTED: 3,
-  LITERAL_BLOCK: 4,
-  FOLDED_BLOCK: 5
-};
-var COLLECTION_STYLE = {
-  BLOCK: 1,
-  FLOW: 2
-};
-var CHOMPING_MODE = {
-  CLIP: 1,
-  STRIP: 2,
-  KEEP: 3
-};
-function simpleEscapeSequence(c) {
-  switch (c) {
-    case 48:
-      return "\0";
-    case 97:
-      return "\x07";
-    case 98:
-      return "\b";
-    case 116:
-      return "	";
-    case 9:
-      return "	";
-    case 110:
-      return "\n";
-    case 118:
-      return "\v";
-    case 102:
-      return "\f";
-    case 114:
-      return "\r";
-    case 101:
-      return "\x1B";
-    case 32:
-      return " ";
-    case 34:
-      return '"';
-    case 47:
-      return "/";
-    case 92:
-      return "\\";
-    case 78:
-      return "\x85";
-    case 95:
-      return "\xA0";
-    case 76:
-      return "\u2028";
-    case 80:
-      return "\u2029";
-    default:
-      return "";
-  }
-}
-var simpleEscapeCheck = new Array(256);
-var simpleEscapeMap = new Array(256);
-for (let i = 0; i < 256; i++) {
-  simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
-  simpleEscapeMap[i] = simpleEscapeSequence(i);
-}
-var DEFAULT_TAG_HANDLERS = Object.assign(/* @__PURE__ */ Object.create(null), {
-  "!": "!",
-  "!!": "tag:yaml.org,2002:"
-});
-var TAG_SUFFIX_CHARS = "-#;/?:@&=+$_.~*'()";
-var TAG_URI_CHARS = TAG_SUFFIX_CHARS + "!,[]";
-var DEFAULT_CONSTRUCTOR_OPTIONS = {
-  filename: "",
-  schema: CORE_SCHEMA,
-  json: false,
-  maxTotalMergeKeys: 1e4,
-  maxAliases: -1
-};
-var NS_URI_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$,_.!~*'()\[\]])`;
-var NS_TAG_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$.~*'()_])`;
-var PATTERN_TAG_URI = new RegExp(`^(?:${NS_URI_CHAR})*$`);
-var PATTERN_TAG_SUFFIX = new RegExp(`^(?:${NS_TAG_CHAR})+$`);
-var PATTERN_TAG_PREFIX = new RegExp(`^(?:!(?:${NS_URI_CHAR})*|${NS_TAG_CHAR}(?:${NS_URI_CHAR})*)$`);
-var DEFAULT_PARSER_OPTIONS = {
-  filename: "",
-  maxDepth: 100
-};
-var DEFAULT_LOAD_OPTIONS = {
-  ...DEFAULT_PARSER_OPTIONS,
-  ...DEFAULT_CONSTRUCTOR_OPTIONS
-};
-function hasBit(mask, bit) {
-  return (mask & 1 << bit) !== 0;
-}
-var DEFAULT_SCALAR_STYLE_RULES = {
-  applyQuoteFlowKeysOption,
-  doubleQuoteForInvisibles,
-  doubleQuoteWhitespaceOnly,
-  applyForceQuotesOption,
-  tryLongOrMultilineAsBlock,
-  quoteInvalidPlain,
-  fallbackToDoubleQuoted
-};
-function _preferredQuotedStyle(layout) {
-  if (layout.presenterOptions.quoteStyle === "single" && hasBit(layout.allowedStylesMask, SCALAR_STYLE.SINGLE_QUOTED)) return SCALAR_STYLE.SINGLE_QUOTED;
-  return SCALAR_STYLE.DOUBLE_QUOTED;
-}
-function applyQuoteFlowKeysOption(layout) {
-  if (!layout.presenterOptions.quoteFlowKeys) return;
-  if (!layout.isKey || !layout.flowOnly || layout.style !== SCALAR_STYLE.PLAIN) return;
-  layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
-}
-function doubleQuoteForInvisibles(layout) {
-  if (layout.style === SCALAR_STYLE.PLAIN && /[\t\x7F-\xA0\u2028\u2029\uFEFF\uFFFE\uFFFF]/.test(layout.node.value)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
-}
-function doubleQuoteWhitespaceOnly(layout) {
-  if (layout.style === SCALAR_STYLE.PLAIN && /^\s+$/.test(layout.node.value)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
-}
-function applyForceQuotesOption(layout) {
-  if (!layout.presenterOptions.forceQuotes) return;
-  if (layout.isKey || layout.style !== SCALAR_STYLE.PLAIN) return;
-  if (layout.node.tag !== layout.presenterOptions.schema.defaultScalarTag.tagName) return;
-  layout.style = layout.node.value.includes("\n") ? SCALAR_STYLE.DOUBLE_QUOTED : _preferredQuotedStyle(layout);
-}
-function tryLongOrMultilineAsBlock(layout) {
-  if (layout.style !== SCALAR_STYLE.PLAIN || layout.isKey) return;
-  const value = layout.node.value;
-  const multiline = value.indexOf("\n") !== -1;
-  if (!hasBit(layout.allowedStylesMask, SCALAR_STYLE.LITERAL_BLOCK)) {
-    if (multiline) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
-    return;
-  }
-  const w = layout.presenterOptions.lineWidth;
-  if (w === -1) {
-    if (multiline) layout.style = SCALAR_STYLE.LITERAL_BLOCK;
-    return;
-  }
-  const availableWidth = Math.max(Math.min(w, 40), w - layout.shiftOfContent);
-  let position = 0;
-  let shouldFold = false;
-  while (position <= value.length) {
-    let lineEnd = value.length;
-    const nextLineBreak = value.indexOf("\n", position);
-    if (nextLineBreak !== -1) lineEnd = nextLineBreak;
-    const line = value.slice(position, lineEnd);
-    if (line.length > availableWidth && line[0] !== " " && / [^ \t]/.test(line)) shouldFold = true;
-    if (nextLineBreak === -1) break;
-    position = nextLineBreak + 1;
-  }
-  if (shouldFold) layout.style = SCALAR_STYLE.FOLDED_BLOCK;
-  else if (multiline) layout.style = SCALAR_STYLE.LITERAL_BLOCK;
-}
-function quoteInvalidPlain(layout) {
-  if (layout.style === SCALAR_STYLE.PLAIN && !hasBit(layout.allowedStylesMask, SCALAR_STYLE.PLAIN)) layout.style = _preferredQuotedStyle(layout);
-}
-function fallbackToDoubleQuoted(layout) {
-  if (!hasBit(layout.allowedStylesMask, layout.style)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
-}
-var SRC_C_PRINTABLE = "[\\x09\\x0A\\x0D\\x20-\\x7E\\x85\\xA0-\\uD7FF\\uE000-\\uFFFD\\u{10000}-\\u{10FFFF}]";
-var SRC_B_CHAR = "[\\n\\r]";
-var SRC_C_BYTE_ORDER_MARK = "\\uFEFF";
-var SRC_S_WHITE = "[ \\t]";
-var SRC_NB_CHAR = `(?:(?!(?:${SRC_B_CHAR}|${SRC_C_BYTE_ORDER_MARK}))${SRC_C_PRINTABLE})`;
-var SRC_NS_CHAR = `(?:(?!${SRC_S_WHITE})${SRC_NB_CHAR})`;
-var SRC_NB_JSON = "[\\x09\\x20-\\uD7FF\\uE000-\\uFFFF\\u{10000}-\\u{10FFFF}]";
-var SRC_C_INDICATOR = "[-?:,\\[\\]{}#&*!|>'\"%@`]";
-var SRC_C_FLOW_INDICATOR = "[,\\[\\]{}]";
-var SRC_NS_PLAIN_SAFE_FLOW_OUT = SRC_NS_CHAR;
-var SRC_NS_PLAIN_SAFE_FLOW_IN = `(?:(?!${SRC_C_FLOW_INDICATOR})${SRC_NS_CHAR})`;
-var SRC_NS_PLAIN_FIRST_FLOW_OUT = `(?:(?:(?!${SRC_C_INDICATOR})${SRC_NS_CHAR})|[?:-](?=${SRC_NS_PLAIN_SAFE_FLOW_OUT}))`;
-var SRC_NS_PLAIN_FIRST_FLOW_IN = `(?:(?:(?!${SRC_C_INDICATOR})${SRC_NS_CHAR})|[?:-](?=${SRC_NS_PLAIN_SAFE_FLOW_IN}))`;
-var SRC_NS_PLAIN_CHAR_FLOW_OUT = `(?:(?:(?![:#])${SRC_NS_PLAIN_SAFE_FLOW_OUT})|:(?=${SRC_NS_PLAIN_SAFE_FLOW_OUT}))#*`;
-var SRC_NS_PLAIN_CHAR_FLOW_IN = `(?:(?:(?![:#])${SRC_NS_PLAIN_SAFE_FLOW_IN})|:(?=${SRC_NS_PLAIN_SAFE_FLOW_IN}))#*`;
-var SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT = `(?:${SRC_S_WHITE}*${SRC_NS_PLAIN_CHAR_FLOW_OUT})*`;
-var SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN = `(?:${SRC_S_WHITE}*${SRC_NS_PLAIN_CHAR_FLOW_IN})*`;
-var SRC_NS_PLAIN_ONE_LINE_FLOW_OUT = `${SRC_NS_PLAIN_FIRST_FLOW_OUT}#*${SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT}`;
-var SRC_NS_PLAIN_ONE_LINE_FLOW_IN = `${SRC_NS_PLAIN_FIRST_FLOW_IN}#*${SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN}`;
-var SRC_NS_PLAIN_ONE_LINE_BLOCK_KEY = SRC_NS_PLAIN_ONE_LINE_FLOW_OUT;
-var SRC_NS_PLAIN_ONE_LINE_FLOW_KEY = SRC_NS_PLAIN_ONE_LINE_FLOW_IN;
-var SRC_S_NS_PLAIN_NEXT_LINE_FLOW_OUT = `\\n+${SRC_NS_PLAIN_CHAR_FLOW_OUT}${SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT}`;
-var SRC_S_NS_PLAIN_NEXT_LINE_FLOW_IN = `\\n+${SRC_NS_PLAIN_CHAR_FLOW_IN}${SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN}`;
-var SRC_NS_PLAIN_MULTI_LINE_FLOW_OUT = `${SRC_NS_PLAIN_ONE_LINE_FLOW_OUT}(?:${SRC_S_NS_PLAIN_NEXT_LINE_FLOW_OUT})*`;
-var SRC_NS_PLAIN_MULTI_LINE_FLOW_IN = `${SRC_NS_PLAIN_ONE_LINE_FLOW_IN}(?:${SRC_S_NS_PLAIN_NEXT_LINE_FLOW_IN})*`;
-var NS_PLAIN_FLOW_OUT = new RegExp(`^(?:${SRC_NS_PLAIN_MULTI_LINE_FLOW_OUT})$`, "u");
-var NS_PLAIN_FLOW_IN = new RegExp(`^(?:${SRC_NS_PLAIN_MULTI_LINE_FLOW_IN})$`, "u");
-var NS_PLAIN_BLOCK_KEY = new RegExp(`^(?:${SRC_NS_PLAIN_ONE_LINE_BLOCK_KEY})$`, "u");
-var NS_PLAIN_FLOW_KEY = new RegExp(`^(?:${SRC_NS_PLAIN_ONE_LINE_FLOW_KEY})$`, "u");
-var NB_SINGLE_ONE_LINE = new RegExp(`^(?:${SRC_NB_JSON})*$`, "u");
-var NB_SINGLE_MULTI_LINE = new RegExp(`^(?:${SRC_NB_JSON}|\\n)*$`, "u");
-var BLOCK_SCALAR_CONTENT = new RegExp(`^(?:${SRC_NB_CHAR}|\\n)*$`, "u");
-var DEFAULT_PRESENTER_OPTIONS = {
-  indent: 2,
-  seqNoIndent: false,
-  seqInlineFirst: true,
-  lineWidth: 80,
-  flowBracketPadding: false,
-  flowSkipCommaSpace: false,
-  flowSkipColonSpace: false,
-  quoteFlowKeys: false,
-  quoteStyle: "single",
-  forceQuotes: false,
-  scalarStyleRules: Object.keys(DEFAULT_SCALAR_STYLE_RULES).map((name) => Reflect.get(DEFAULT_SCALAR_STYLE_RULES, name)),
-  tagBeforeAnchor: false
-};
-var DEFAULT_DUMP_OPTIONS = {
-  ...DEFAULT_PRESENTER_OPTIONS,
-  schema: DUMP_SCHEMA,
-  skipInvalid: false,
-  noRefs: false,
-  flowLevel: -1,
-  sortKeys: false,
-  transform: () => {
-  }
-};
-var EVENT_DOCUMENT = EVENT_ID.DOCUMENT;
-var EVENT_SEQUENCE = EVENT_ID.SEQUENCE;
-var EVENT_MAPPING = EVENT_ID.MAPPING;
-var EVENT_SCALAR = EVENT_ID.SCALAR;
-var EVENT_ALIAS = EVENT_ID.ALIAS;
-var EVENT_POP = EVENT_ID.POP;
-var SCALAR_STYLE_PLAIN = SCALAR_STYLE.PLAIN;
-var SCALAR_STYLE_SINGLE_QUOTED = SCALAR_STYLE.SINGLE_QUOTED;
-var SCALAR_STYLE_DOUBLE_QUOTED = SCALAR_STYLE.DOUBLE_QUOTED;
-var SCALAR_STYLE_LITERAL_BLOCK = SCALAR_STYLE.LITERAL_BLOCK;
-var SCALAR_STYLE_FOLDED_BLOCK = SCALAR_STYLE.FOLDED_BLOCK;
-var COLLECTION_STYLE_BLOCK = COLLECTION_STYLE.BLOCK;
-var COLLECTION_STYLE_FLOW = COLLECTION_STYLE.FLOW;
-var CHOMPING_CLIP = CHOMPING_MODE.CLIP;
-var CHOMPING_STRIP = CHOMPING_MODE.STRIP;
-var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
-
-// scripts/lib/installed-copy.mjs
-import { existsSync as existsSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-
-// scripts/lib/sterling-roots.mjs
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
-import { createHash } from "node:crypto";
-
-// scripts/lib/jsonc.mjs
-var JSONC_SOURCE = String.raw`
-function parseJsonc(text) {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
-      out += text.slice(i, j + 1);
-      i = j;
-    } else if (c === '/' && text[i + 1] === '/') {
-      while (i < text.length && text[i] !== '\n') i++;
-      out += '\n';
-    } else if (c === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
-      if (end === -1) throw new Error('unterminated /* comment');
-      i = end + 1;
-    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
-      // a trailing comma (only whitespace or comments before the closing bracket): dropped
-    } else out += c;
-  }
-  return JSON.parse(out);
-}
-`;
-var parseJsonc = new Function(`${JSONC_SOURCE}
-return parseJsonc;`)();
-
-// scripts/lib/sterling-roots.mjs
-var RESOLVER_IMPORTS = [
-  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
-  "import { homedir } from 'node:os';",
-  "import { join } from 'node:path';"
-].join("\n");
-var RESOLVER_SOURCE = String.raw`
-function installRoots(env = process.env, home = homedir()) {
-  return [
-    { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
-    { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
-  ];
-}
-
-// ENOENT/ENOTDIR mean "no such level", the normal case; any other error is thrown.
-function sterlingRootsLs(dir) {
-  try {
-    return readdirSync(dir);
-  } catch (err) {
-    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
-    throw err;
-  }
-}
-
-function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
-  for (const rel of manifests) {
-    let text;
-    try {
-      text = readFileSync(join(root, rel), 'utf8');
-    } catch (err) {
-      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) continue;
-      throw err;
-    }
-    let version;
-    try {
-      version = JSON.parse(text).version;
-    } catch (err) {
-      return { reason: rel + ' is not valid JSON (' + err.message + ')' };
-    }
-    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
-    return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
-  }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
-}
-
-// The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
-// precedence. Strict grammar: major.minor.patch with no leading zeros and no v prefix,
-// dot-separated prerelease identifiers, build metadata accepted and ignored. A prerelease
-// sorts below its release; prerelease identifiers compare one by one, numeric ones
-// numerically and below alphanumeric ones, and a longer list wins when all shared ones match.
-function parseSterlingVersion(v) {
-  const m = typeof v === 'string' ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(v) : null;
-  if (!m) return null;
-  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
-}
-
-function compareSterlingVersions(a, b) {
-  const x = parseSterlingVersion(a);
-  const y = parseSterlingVersion(b);
-  if (!x || !y) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(x ? b : a));
-  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
-  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
-  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
-    if (i >= x.pre.length) return -1;
-    if (i >= y.pre.length) return 1;
-    const p = x.pre[i];
-    const q = y.pre[i];
-    if (p === q) continue;
-    const pn = /^\d+$/.test(p);
-    const qn = /^\d+$/.test(q);
-    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
-    if (pn !== qn) return pn ? -1 : 1;
-    return p < q ? -1 : 1;
-  }
-  return 0;
-}
-
-function scanInstalledSterling(env = process.env, home = homedir()) {
-  const roots = installRoots(env, home);
-  const copies = [];
-  const skipped = [];
-  const consider = (root, host) => {
-    const v = readCopyVersion(root, host);
-    if (v.version) copies.push({ root, version: v.version, host });
-    else skipped.push({ root, host, reason: v.reason });
-  };
-  for (const { host, dir } of roots) {
-    if (host === 'claude-code') {
-      for (const marketplace of sterlingRootsLs(dir)) {
-        for (const entry of sterlingRootsLs(join(dir, marketplace, 'sterling'))) consider(join(dir, marketplace, 'sterling', entry), host);
-      }
-      continue;
-    }
-    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
-    // its timestamp; a copy found there is half-finished or already moved, never one to use.
-    const walk = (d, depth) => {
-      const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
-      if (existsSync(pkg)) consider(pkg, host);
-      if (depth === 0) return;
-      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
-    };
-    walk(dir, 4);
-  }
-  return { roots, copies, skipped };
-}
-
-function newestInstalledSterling(env = process.env, home = homedir()) {
-  let best = null;
-  for (const c of scanInstalledSterling(env, home).copies) {
-    if (!best) {
-      best = c;
-      continue;
-    }
-    const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
-      (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
-    if (d > 0) best = c;
-  }
-  return best;
-}
-
-// host null: the asking host is unknown, so both commands are named.
-function sterlingInstallRemedy(host) {
-  if (host === 'claude-code') return 'claude plugin install sterling@sterling';
-  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
-  throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
-}
-
-function sterlingNotFoundMessage(host, env = process.env, home = homedir()) {
-  const remedy = sterlingInstallRemedy(host);
-  const scan = scanInstalledSterling(env, home);
-  const where = scan.roots.map((r) => r.dir + ' (' + r.host + ')').join(' or ');
-  const why = scan.skipped.map((s) => '; skipped ' + s.root + ': ' + s.reason).join('');
-  return 'no installed Sterling found under ' + where + why + '. Install it: ' + remedy + '.';
-}
-`;
-var api = new Function(
-  "existsSync",
-  "readFileSync",
-  "readdirSync",
-  "join",
-  "homedir",
-  `${RESOLVER_SOURCE}
-return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync, readFileSync, readdirSync, join, homedir);
-var installRoots = api.installRoots;
-var readCopyVersion = api.readCopyVersion;
-var parseSterlingVersion = api.parseSterlingVersion;
-var compareSterlingVersions = api.compareSterlingVersions;
-var scanInstalledSterling = api.scanInstalledSterling;
-var newestInstalledSterling = api.newestInstalledSterling;
-var sterlingInstallRemedy = api.sterlingInstallRemedy;
-var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-var STERLING_NPM_PACKAGE = "@chulf58/sterling";
-var SPECS_SOURCE = String.raw`
-const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
-const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-function isNpmSpec(s) {
-  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
-}
-function namesSterling(s) {
-  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
-}
-function sterlingPluginSpecs(plugins) {
-  if (!Array.isArray(plugins)) return [];
-  const out = [];
-  for (const entry of plugins) {
-    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
-    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
-  }
-  return out;
-}
-`;
-var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
-return sterlingPluginSpecs;`)();
-var OPENCODE_LOADED_SOURCE = String.raw`
-function openCodeCacheKey(spec, kind) {
-  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
-  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
-  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
-  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
-  let target;
-  try {
-    target = decodeURIComponent(spec.split('#')[0]);
-  } catch {
-    target = spec.split('#')[0];
-  }
-  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
-  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
-}
-
-function openCodeLoadedSterling(env = process.env, home = homedir()) {
-  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
-  let config;
-  try {
-    config = parseJsonc(readFileSync(configPath, 'utf8'));
-  } catch (err) {
-    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
-    return { configPath, error: (err && err.message) || String(err) };
-  }
-  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
-  const copies = [];
-  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
-    const dir = join(cache, openCodeCacheKey(spec, kind));
-    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
-    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
-    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
-  }
-  return { configPath, copies };
-}
-`;
-var loaded = new Function(
-  "createHash",
-  "existsSync",
-  "readFileSync",
-  "readdirSync",
-  "join",
-  "homedir",
-  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
-return { openCodeCacheKey, openCodeLoadedSterling };`
-)(createHash, existsSync, readFileSync, readdirSync, join, homedir);
-var openCodeCacheKey = loaded.openCodeCacheKey;
-var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
-function canonical(p) {
-  try {
-    return realpathSync(p);
-  } catch (err) {
-    if (err?.code === "ENOENT") return resolve(p);
-    throw err;
-  }
-}
-function installHostOf(root, { env = process.env, home = homedir() } = {}) {
-  const real = canonical(root);
-  for (const { host, dir } of installRoots(env, home)) {
-    if (real.startsWith(canonical(dir) + sep)) return host;
-  }
-  return null;
-}
-
-// scripts/lib/installed-copy.mjs
-function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
-  if (typeof root !== "string" || root.length === 0) {
-    throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
-  }
-  if (!existsSync2(join2(root, ".git"))) return true;
-  return installHostOf(root, { env, home }) !== null;
-}
-
-// scripts/lib/atomic-write.mjs
-import { randomUUID } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join as join3 } from "node:path";
-function atomicTempPath(path) {
-  return join3(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`);
-}
-function writeFileAtomic(path, content, fs = {}) {
-  replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
-}
-function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
-  try {
-    writeFile(tmp, content);
-    rename(tmp, path);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    throw err;
-  }
-}
-function writeFileAtomicIfChanged(path, content, fs) {
-  if (existsSync3(path) && readFileSync2(path, "utf8") === content) return false;
-  replaceVia(atomicTempPath(path), path, content, fs);
-  return true;
-}
-
-// scripts/lib/worktree-root.mjs
-import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5, realpathSync as realpathSync2, statSync } from "node:fs";
-import { basename as basename2, dirname as dirname2, join as join5, resolve as resolve2 } from "node:path";
-
-// scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
-import { join as join4 } from "node:path";
-var CONFIG_REL = join4(".sterling", "config.json");
-var STORE_DB_REL = join4(".sterling", "sterling.db");
-function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync4(join4(dir, CONFIG_REL)) || existsSync4(join4(dir, STORE_DB_REL)));
-}
-
-// scripts/lib/worktree-root.mjs
-function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git4 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
-  const real = (p) => {
-    try {
-      return realpathSync2(p);
-    } catch {
-      return null;
-    }
-  };
-  const r = git4(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = real(resolve2(cwd, gitDir));
-  const commonReal = real(resolve2(cwd, commonDir));
-  const worktree = real(toplevel);
-  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git4(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
-  const settings = {};
-  if (!core.error && core.status === 0) {
-    for (const line of core.stdout.split("\n")) {
-      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
-      if (m) settings[m[1]] = m[2];
-    }
-  }
-  if (settings.bare === "true") return null;
-  let mainRoot = null;
-  if (settings.worktree) mainRoot = real(resolve2(commonReal, settings.worktree));
-  else if (basename2(commonReal) === ".git") mainRoot = dirname2(commonReal);
-  if (!mainRoot || mainRoot === worktree) return null;
-  return { worktree, mainRoot };
-}
-function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
-  if (!linkedWorktree) return target;
-  const configRel = join5(".sterling", "config.json");
-  const worktreeOnlyConfig = !existsSync5(join5(linkedWorktree.mainRoot, configRel)) && existsSync5(join5(linkedWorktree.worktree, configRel));
-  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
-}
-var linkedProbes = /* @__PURE__ */ new Map();
-function linkedWorktreeOnce(dir) {
-  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
-  return linkedProbes.get(dir);
-}
-function gitFileAt(dir) {
-  try {
-    return statSync(join5(dir, ".git")).isFile();
-  } catch {
-    return false;
-  }
-}
-function storeRootFor(dir, isRoot = isSterlingRoot) {
-  if (!dir) return dir;
-  const at = resolve2(String(dir));
-  if (!gitFileAt(at)) return dir;
-  const linked = linkedWorktreeOnce(at);
-  if (!linked || realOf(at) !== linked.worktree) return dir;
-  const storeRoot = resolveStoreRoot(linked.worktree, linked);
-  return isRoot(storeRoot) ? storeRoot : dir;
-}
-function realOf(p) {
-  try {
-    return realpathSync2(p);
-  } catch {
-    return p;
-  }
-}
-
-// scripts/lib/generated-marker.mjs
-import { createHash as createHash2 } from "node:crypto";
-var sha256 = (s) => createHash2("sha256").update(s).digest("hex");
-var normalizeEol = (s) => s.replace(/\r\n/g, "\n");
-var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function stampBody(body, prefix) {
-  const normalized = normalizeEol(body);
-  const lines = normalized.split("\n");
-  const [first, ...rest] = lines;
-  return [first, `${prefix} sterling-generated content_hash=${sha256(normalized)}`, ...rest].join("\n");
-}
-function verifyStamp(content, prefix) {
-  const normalized = normalizeEol(content);
-  const lines = normalized.split("\n");
-  const marker = lines[1] ?? "";
-  const m = new RegExp(`^${escapeRegExp(prefix)} sterling-generated content_hash=([0-9a-f]{64})$`).exec(marker);
-  if (!m) return null;
-  const rebuilt = [lines[0], ...lines.slice(2)].join("\n");
-  return { unmodified: sha256(rebuilt) === m[1] };
-}
+import { existsSync as existsSync9, mkdirSync as mkdirSync5, readFileSync as readFileSync7, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -6952,17 +5458,17 @@ var RETIRED_MODEL_KEYS = [
   "debugger",
   "classifiers"
 ];
-var isPlainObject2 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function normalizeRawConfig(raw) {
-  if (!isPlainObject2(raw))
+  if (!isPlainObject(raw))
     return raw;
   let out = raw;
   const sp = raw.sparring_partner;
-  if (isPlainObject2(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
+  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
     const { model, ...rest } = sp;
     if (model !== void 0 && model !== "") {
       const existing = rest.models;
-      if (existing === void 0 || isPlainObject2(existing)) {
+      if (existing === void 0 || isPlainObject(existing)) {
         const models2 = { ...existing ?? {} };
         if (models2.openai === void 0 || typeof model !== "string")
           models2.openai = { model };
@@ -6972,7 +5478,7 @@ function normalizeRawConfig(raw) {
     out = { ...out, sparring_partner: rest };
   }
   const models = raw.models;
-  if (isPlainObject2(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
+  if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
   }
   return out;
@@ -7078,9 +5584,1881 @@ var renameFenceSchema = external_exports.object({
   fenced_at: external_exports.string()
 }).strict();
 
+// packages/store/dist/pg-bridge.js
+import { homedir } from "node:os";
+import { join } from "node:path";
+var DEFAULT_PG_CREDENTIALS_PATH = join(homedir(), ".sterling", "credentials", "served.json");
+
+// packages/store/dist/search-fold.js
+var LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+var LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+var COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+function foldSearchText(s) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+
+// packages/store/dist/pg-driver.js
+var PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+var DEFAULT_PG_RANKING = "bm25";
+var PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+var PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+var PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+var PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+var PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+var PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+var PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+
+// packages/store/dist/axis.js
+var AXIS_MAX_TERM_LEN = 64;
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname, join as join2, resolve } from "node:path";
+var REGISTRY_DDL = `
+CREATE TABLE IF NOT EXISTS projects (
+  repo_path TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  stack_tags TEXT NOT NULL,
+  toolchains TEXT NOT NULL,
+  sterling_version TEXT,
+  first_init_at TEXT NOT NULL,
+  last_init_at TEXT NOT NULL,
+  last_seen_at TEXT
+);`;
+var OCCUPANCY_DDL = `
+CREATE TABLE IF NOT EXISTS project_occupancy (
+  path TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  from_at TEXT NOT NULL,
+  to_at TEXT
+);
+CREATE INDEX IF NOT EXISTS project_occupancy_path ON project_occupancy (path);
+CREATE INDEX IF NOT EXISTS project_occupancy_key ON project_occupancy (project_key);`;
+var MIGRATED_FROM = "";
+function registryPath() {
+  return process.env.STERLING_REGISTRY_DB ?? join2(homedir2(), ".sterling", "registry.db");
+}
+var ProjectRegistry = class {
+  db;
+  constructor(path = registryPath()) {
+    mkdirSync(dirname(path), { recursive: true });
+    this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA busy_timeout=5000");
+    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(REGISTRY_DDL);
+      this.migrateIdentity();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      this.db.close();
+      throw e;
+    }
+  }
+  /** Idempotent, inside the constructor's transaction: the project_key
+   *  column, the occupancy table, a key and an open MIGRATED_FROM interval for
+   *  every row without a key. The path-alias table an unreleased build of
+   *  this branch wrote is dropped (it never shipped). */
+  migrateIdentity() {
+    const cols = this.db.prepare("PRAGMA table_info(projects)").all();
+    if (!cols.some((c) => c.name === "project_key"))
+      this.db.exec("ALTER TABLE projects ADD COLUMN project_key TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS projects_project_key ON projects (project_key)");
+    this.db.exec(OCCUPANCY_DDL);
+    this.db.exec("DROP TABLE IF EXISTS project_path_aliases");
+    const unkeyed = this.db.prepare("SELECT repo_path FROM projects WHERE project_key IS NULL").all();
+    for (const { repo_path } of unkeyed) {
+      const key = randomUUID();
+      this.db.prepare("UPDATE projects SET project_key = ? WHERE repo_path = ?").run(key, repo_path);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(repo_path, key, MIGRATED_FROM);
+    }
+  }
+  /** Run `fn` in one BEGIN IMMEDIATE transaction. */
+  tx(fn) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** Upsert by repo_path (init event, P4): create on first init
+   *  (first_init_at = last_init_at = at, a new project_key, an occupancy
+   *  interval opened at `at`), refresh the mutable fields + last_init_at on
+   *  re-init while preserving first_init_at and the key. */
+  register(input) {
+    this.tx(() => {
+      const own = this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(input.repo_path);
+      if (own) {
+        this.db.prepare("UPDATE projects SET name = ?, stack_tags = ?, toolchains = ?, sterling_version = ?, last_init_at = ? WHERE repo_path = ?").run(input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.repo_path);
+        const open = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
+        if (!open)
+          this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, own.project_key, input.at);
+        return;
+      }
+      const key = randomUUID();
+      this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at, project_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, key, input.at);
+    });
+  }
+  /** Session-activity touch (H1 SessionStart): update last_seen_at for an
+   *  EXISTING row only — never create (registration is init's job). Returns
+   *  whether a row was updated. */
+  touchLastSeen(repoPath2, at) {
+    return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
+  }
+  /** Mount-change refresh (/sterling:domains --apply): replace stack_tags of an
+   *  EXISTING row and nothing else, so the row's init dates and version still
+   *  say when and by which Sterling the project was last initialized. Never
+   *  creates a row. Returns whether a row was updated. */
+  updateStackTags(repoPath2, stackTags) {
+    return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
+  }
+  /** Rename (config.json project_name changed, or /sterling:projects --rename):
+   *  replace the name of an EXISTING row and nothing else, only when no other row
+   *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+   *  transaction, so two projects renaming to the same name at once cannot both
+   *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+   *  the repo_paths that count as this project (rows that spell one folder
+   *  differently); a row there never conflicts. Never creates a row.
+   *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+  renameIfUnique(repoPath2, name, selfPaths = [repoPath2]) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const own = this.db.prepare("SELECT name FROM projects WHERE repo_path = ?").get(repoPath2);
+      let result;
+      if (!own)
+        result = { status: "missing" };
+      else if (own.name === name)
+        result = { status: "unchanged" };
+      else {
+        const taken = this.db.prepare("SELECT repo_path FROM projects WHERE name = ?").all(name).find((r) => !selfPaths.includes(r.repo_path));
+        if (taken)
+          result = { status: "conflict", conflict_path: taken.repo_path };
+        else {
+          this.db.prepare("UPDATE projects SET name = ? WHERE repo_path = ?").run(name, repoPath2);
+          result = { status: "renamed" };
+        }
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** All registered projects, name-ordered. Stale-at-read (existence of
+   *  repo_path) is the caller's lazy check — the registry stores no liveness. */
+  list() {
+    return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map((r) => projectRegistrationSchema.parse({
+      ...r,
+      stack_tags: JSON.parse(r.stack_tags),
+      toolchains: JSON.parse(r.toolchains)
+    }));
+  }
+  /** The whole occupancy history, oldest interval first. */
+  occupancy() {
+    return this.db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy ORDER BY from_at, path").all().map((o) => ({
+      path: o.path,
+      project_key: o.project_key,
+      from_at: o.from_at,
+      to_at: o.to_at
+    }));
+  }
+  /** The project_key of the row at repoPath, or undefined. */
+  keyOf(repoPath2) {
+    return this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(repoPath2)?.project_key;
+  }
+  /** Rows (repo_path, name, project_key) and the occupancy history in one read transaction. */
+  snapshot() {
+    this.db.exec("BEGIN");
+    try {
+      const rows = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const snap = { rows, occupancy: this.occupancy() };
+      this.db.exec("COMMIT");
+      return snap;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** Folder move (/sterling:projects --move, GitHub issue #119): repoint the
+   *  row at `fromPath` to `toPath`, keeping its project_key; the key's interval
+   *  at `fromPath` closes at `at` and one at `toPath` opens. The conflict check
+   *  (another row at `toPath`), the row update and the interval writes run in
+   *  one BEGIN IMMEDIATE transaction. Touches nothing on disk. */
+  moveProject(fromPath, toPath, at) {
+    if (fromPath === toPath)
+      return { status: "unchanged" };
+    return this.tx(() => {
+      const key = this.keyOf(fromPath);
+      if (key === void 0)
+        return { status: "missing" };
+      const taken = this.db.prepare("SELECT repo_path FROM projects WHERE repo_path = ?").get(toPath);
+      if (taken)
+        return { status: "conflict", conflict_path: taken.repo_path };
+      this.db.prepare("UPDATE projects SET repo_path = ? WHERE repo_path = ?").run(toPath, fromPath);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(toPath, key, at);
+      return { status: "moved" };
+    });
+  }
+  /** Human-gated removal (the /sterling:projects prune of a missing project) —
+   *  never automatic. Returns whether a row was removed. The key's open
+   *  interval closes at `at` and stays as its tombstone, so a tracker created
+   *  while the project was registered reads "no longer registered" and never
+   *  resolves to a project that registers at the path later. */
+  remove(repoPath2, at = (/* @__PURE__ */ new Date()).toISOString()) {
+    return this.tx(() => {
+      const key = this.keyOf(repoPath2);
+      if (key === void 0)
+        return false;
+      this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      return true;
+    });
+  }
+  close() {
+    this.db.close();
+  }
+};
+
+// packages/store/dist/handoff.js
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+
+// packages/store/dist/board-snapshot.js
+function journalSelect(withHandoff = true) {
+  const handoff = withHandoff ? "handoff_role, handoff_from_name" : "NULL AS handoff_role, NULL AS handoff_from_name";
+  return `SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, ${handoff} FROM board_removal_journal ORDER BY seq ASC`;
+}
+var JOURNAL_SELECT = journalSelect();
+
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+
+// packages/store/dist/index.js
+var MAX_RANK_TERMS = 16;
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base2 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base2;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
+
+// scripts/open-session.mjs
+import { homedir as homedir6 } from "node:os";
+import { basename as basename4, dirname as dirname5, join as join12, resolve as resolve8 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// scripts/lib/opencode-install.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { createHash as createHash4 } from "node:crypto";
+import { existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { basename as basename3, dirname as dirname4, isAbsolute, join as join11, resolve as resolve7 } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// node_modules/js-yaml/dist/js-yaml.mjs
+var NOT_RESOLVED = /* @__PURE__ */ Symbol("NOT_RESOLVED");
+function defineScalarTag(tagName, options) {
+  return {
+    tagName,
+    nodeKind: "scalar",
+    implicit: options.implicit ?? false,
+    matchByTagPrefix: options.matchByTagPrefix ?? false,
+    implicitFirstChars: options.implicitFirstChars ?? null,
+    resolve: options.resolve,
+    identify: options.identify,
+    represent: options.represent ?? ((data) => String(data)),
+    representTagName: options.representTagName ?? (() => tagName)
+  };
+}
+function defineSequenceTag(tagName, options) {
+  const carrierIsResult = options.finalize === void 0;
+  return {
+    tagName,
+    nodeKind: "sequence",
+    implicit: false,
+    matchByTagPrefix: options.matchByTagPrefix ?? false,
+    create: options.create,
+    addItem: options.addItem,
+    finalize: options.finalize ?? ((carrier) => carrier),
+    carrierIsResult,
+    identify: options.identify,
+    represent: options.represent ?? ((data) => data),
+    representTagName: options.representTagName ?? (() => tagName)
+  };
+}
+function defineMappingTag(tagName, options) {
+  const carrierIsResult = options.finalize === void 0;
+  return {
+    tagName,
+    nodeKind: "mapping",
+    implicit: false,
+    matchByTagPrefix: options.matchByTagPrefix ?? false,
+    create: options.create,
+    addPair: options.addPair,
+    has: options.has,
+    keys: options.keys,
+    get: options.get,
+    finalize: options.finalize ?? ((carrier) => carrier),
+    carrierIsResult,
+    identify: options.identify,
+    represent: options.represent ?? ((data) => data),
+    representTagName: options.representTagName ?? (() => tagName)
+  };
+}
+var strTag = defineScalarTag("tag:yaml.org,2002:str", {
+  resolve: (source) => source,
+  identify: (data) => typeof data === "string"
+});
+var NULL_VALUES$1 = [
+  "",
+  "~",
+  "null",
+  "Null",
+  "NULL"
+];
+var nullCoreTag = defineScalarTag("tag:yaml.org,2002:null", {
+  implicit: true,
+  implicitFirstChars: [
+    "",
+    "~",
+    "n",
+    "N"
+  ],
+  resolve: (source) => {
+    if (NULL_VALUES$1.indexOf(source) !== -1) return null;
+    return NOT_RESOLVED;
+  },
+  identify: (object) => object === null,
+  represent: () => "null"
+});
+var nullJsonTag = defineScalarTag("tag:yaml.org,2002:null", {
+  implicit: true,
+  implicitFirstChars: ["n"],
+  resolve: (source, isExplicit) => {
+    if (source === "null" || isExplicit && source === "") return null;
+    return NOT_RESOLVED;
+  },
+  identify: (object) => object === null,
+  represent: () => "null"
+});
+var NULL_VALUES = [
+  "",
+  "~",
+  "null",
+  "Null",
+  "NULL"
+];
+var nullYaml11Tag = defineScalarTag("tag:yaml.org,2002:null", {
+  implicit: true,
+  implicitFirstChars: [
+    "",
+    "~",
+    "n",
+    "N"
+  ],
+  resolve: (source) => {
+    if (NULL_VALUES.indexOf(source) !== -1) return null;
+    return NOT_RESOLVED;
+  },
+  identify: (object) => object === null,
+  represent: () => "null"
+});
+var TRUE_VALUES$2 = [
+  "true",
+  "True",
+  "TRUE"
+];
+var FALSE_VALUES$2 = [
+  "false",
+  "False",
+  "FALSE"
+];
+var boolCoreTag = defineScalarTag("tag:yaml.org,2002:bool", {
+  implicit: true,
+  implicitFirstChars: [
+    "t",
+    "T",
+    "f",
+    "F"
+  ],
+  resolve: (source) => {
+    if (TRUE_VALUES$2.indexOf(source) !== -1) return true;
+    if (FALSE_VALUES$2.indexOf(source) !== -1) return false;
+    return NOT_RESOLVED;
+  },
+  identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
+  represent: (object) => object ? "true" : "false"
+});
+var TRUE_VALUES$1 = ["true"];
+var FALSE_VALUES$1 = ["false"];
+var boolJsonTag = defineScalarTag("tag:yaml.org,2002:bool", {
+  implicit: true,
+  implicitFirstChars: ["t", "f"],
+  resolve: (source) => {
+    if (TRUE_VALUES$1.indexOf(source) !== -1) return true;
+    if (FALSE_VALUES$1.indexOf(source) !== -1) return false;
+    return NOT_RESOLVED;
+  },
+  identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
+  represent: (object) => object ? "true" : "false"
+});
+var TRUE_VALUES = [
+  "true",
+  "True",
+  "TRUE",
+  "y",
+  "Y",
+  "yes",
+  "Yes",
+  "YES",
+  "on",
+  "On",
+  "ON"
+];
+var FALSE_VALUES = [
+  "false",
+  "False",
+  "FALSE",
+  "n",
+  "N",
+  "no",
+  "No",
+  "NO",
+  "off",
+  "Off",
+  "OFF"
+];
+var boolYaml11Tag = defineScalarTag("tag:yaml.org,2002:bool", {
+  implicit: true,
+  implicitFirstChars: [
+    "y",
+    "Y",
+    "n",
+    "N",
+    "t",
+    "T",
+    "f",
+    "F",
+    "o",
+    "O"
+  ],
+  resolve: (source) => {
+    if (TRUE_VALUES.indexOf(source) !== -1) return true;
+    if (FALSE_VALUES.indexOf(source) !== -1) return false;
+    return NOT_RESOLVED;
+  },
+  identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
+  represent: (object) => object ? "true" : "false"
+});
+var YAML_INTEGER_IMPLICIT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:0o[0-7]+|0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
+var YAML_INTEGER_EXPLICIT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
+function parseYamlInteger$2(source) {
+  let value = source;
+  let sign = 1;
+  if (value[0] === "-" || value[0] === "+") {
+    if (value[0] === "-") sign = -1;
+    value = value.slice(1);
+  }
+  if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
+  if (value.startsWith("0o")) return sign * parseInt(value.slice(2), 8);
+  if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
+  return sign * parseInt(value, 10);
+}
+function resolveYamlInteger$2(source, isExplicit) {
+  if (isExplicit) {
+    if (!YAML_INTEGER_EXPLICIT_PATTERN$1.test(source)) return NOT_RESOLVED;
+  } else if (!YAML_INTEGER_IMPLICIT_PATTERN$1.test(source)) return NOT_RESOLVED;
+  const result = parseYamlInteger$2(source);
+  return Number.isFinite(result) ? result : NOT_RESOLVED;
+}
+var intCoreTag = defineScalarTag("tag:yaml.org,2002:int", {
+  implicit: true,
+  implicitFirstChars: [
+    "-",
+    "+",
+    ..."0123456789"
+  ],
+  resolve: resolveYamlInteger$2,
+  identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
+  represent: (object) => object.toString(10)
+});
+var YAML_INTEGER_IMPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^-?(?:0|[1-9][0-9]*)$");
+var YAML_INTEGER_EXPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
+function parseYamlInteger$1(source) {
+  let value = source;
+  let sign = 1;
+  if (value[0] === "-" || value[0] === "+") {
+    if (value[0] === "-") sign = -1;
+    value = value.slice(1);
+  }
+  if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
+  if (value.startsWith("0o")) return sign * parseInt(value.slice(2), 8);
+  if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
+  return sign * parseInt(value, 10);
+}
+function resolveYamlInteger$1(source, isExplicit) {
+  if (isExplicit) {
+    if (!YAML_INTEGER_EXPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+  } else if (!YAML_INTEGER_IMPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+  const result = parseYamlInteger$1(source);
+  return Number.isFinite(result) ? result : NOT_RESOLVED;
+}
+var intJsonTag = defineScalarTag("tag:yaml.org,2002:int", {
+  implicit: true,
+  implicitFirstChars: ["-", ..."0123456789"],
+  resolve: resolveYamlInteger$1,
+  identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
+  represent: (object) => object.toString(10)
+});
+var YAML_INTEGER_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+|[-+]?(?:0|[1-9][0-9_]*))$");
+function parseYamlInteger(source) {
+  let value = source.replace(/_/g, "");
+  let sign = 1;
+  if (value[0] === "-" || value[0] === "+") {
+    if (value[0] === "-") sign = -1;
+    value = value.slice(1);
+  }
+  if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
+  if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
+  if (value.includes(":")) {
+    let result = 0;
+    for (const part of value.split(":")) result = result * 60 + Number(part);
+    return sign * result;
+  }
+  if (value !== "0" && value[0] === "0") return sign * parseInt(value, 8);
+  return sign * parseInt(value, 10);
+}
+function resolveYamlInteger(source) {
+  if (!YAML_INTEGER_PATTERN.test(source)) return NOT_RESOLVED;
+  const result = parseYamlInteger(source);
+  return Number.isFinite(result) ? result : NOT_RESOLVED;
+}
+var intYaml11Tag = defineScalarTag("tag:yaml.org,2002:int", {
+  implicit: true,
+  implicitFirstChars: [
+    "-",
+    "+",
+    ..."0123456789"
+  ],
+  resolve: resolveYamlInteger,
+  identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
+  represent: (object) => object.toString(10)
+});
+var YAML_FLOAT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?[0-9]+(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?|[-+]?\\.[0-9]+(?:[eE][-+]?[0-9]+)?|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+var YAML_FLOAT_SPECIAL_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+function resolveYamlFloat$2(source) {
+  if (!YAML_FLOAT_PATTERN$1.test(source)) return NOT_RESOLVED;
+  let value = source.toLowerCase();
+  const sign = value[0] === "-" ? -1 : 1;
+  if ("+-".includes(value[0])) value = value.slice(1);
+  if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+  if (value === ".nan") return NaN;
+  const result = sign * parseFloat(value);
+  if (Number.isFinite(result) || YAML_FLOAT_SPECIAL_PATTERN$1.test(source)) return result;
+  return NOT_RESOLVED;
+}
+function representYamlFloat$2(object) {
+  if (isNaN(object)) return ".nan";
+  if (object === Number.POSITIVE_INFINITY) return ".inf";
+  if (object === Number.NEGATIVE_INFINITY) return "-.inf";
+  if (Object.is(object, -0)) return "-0.0";
+  const result = object.toString(10);
+  return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
+}
+var floatCoreTag = defineScalarTag("tag:yaml.org,2002:float", {
+  implicit: true,
+  implicitFirstChars: [
+    "-",
+    "+",
+    ".",
+    ..."0123456789"
+  ],
+  resolve: resolveYamlFloat$2,
+  identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
+  represent: representYamlFloat$2
+});
+var YAML_FLOAT_IMPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?$");
+var YAML_FLOAT_EXPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?[0-9]+(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?|[-+]?\\.[0-9]+(?:[eE][-+]?[0-9]+)?|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+function resolveYamlFloat$1(source, isExplicit) {
+  if (isExplicit) {
+    if (!YAML_FLOAT_EXPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+    let value = source.toLowerCase();
+    const sign = value[0] === "-" ? -1 : 1;
+    if ("+-".includes(value[0])) value = value.slice(1);
+    if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+    if (value === ".nan") return NaN;
+    const result2 = sign * parseFloat(value);
+    return Number.isFinite(result2) ? result2 : NOT_RESOLVED;
+  }
+  if (!YAML_FLOAT_IMPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+  const result = Number(source);
+  if (Number.isFinite(result)) return result;
+  return NOT_RESOLVED;
+}
+function representYamlFloat$1(object) {
+  if (isNaN(object)) return ".nan";
+  if (object === Number.POSITIVE_INFINITY) return ".inf";
+  if (object === Number.NEGATIVE_INFINITY) return "-.inf";
+  if (Object.is(object, -0)) return "-0.0";
+  const result = object.toString(10);
+  return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
+}
+var floatJsonTag = defineScalarTag("tag:yaml.org,2002:float", {
+  implicit: true,
+  implicitFirstChars: ["-", ..."0123456789"],
+  resolve: resolveYamlFloat$1,
+  identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
+  represent: representYamlFloat$1
+});
+var YAML_FLOAT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?(?:(?:[0-9][0-9_]*)?\\.[0-9_]*)(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+var YAML_FLOAT_SPECIAL_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+function resolveYamlFloat(source) {
+  if (!YAML_FLOAT_PATTERN.test(source)) return NOT_RESOLVED;
+  let value = source.toLowerCase().replace(/_/g, "");
+  const sign = value[0] === "-" ? -1 : 1;
+  if ("+-".includes(value[0])) value = value.slice(1);
+  if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+  if (value === ".nan") return NaN;
+  let result = 0;
+  if (value.includes(":")) {
+    for (const part of value.split(":")) result = result * 60 + Number(part);
+    result *= sign;
+  } else result = sign * parseFloat(value);
+  if (Number.isFinite(result) || YAML_FLOAT_SPECIAL_PATTERN.test(source)) return result;
+  return NOT_RESOLVED;
+}
+function representYamlFloat(object) {
+  if (isNaN(object)) return ".nan";
+  if (object === Number.POSITIVE_INFINITY) return ".inf";
+  if (object === Number.NEGATIVE_INFINITY) return "-.inf";
+  if (Object.is(object, -0)) return "-0.0";
+  const result = object.toString(10);
+  return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
+}
+var floatYaml11Tag = defineScalarTag("tag:yaml.org,2002:float", {
+  implicit: true,
+  implicitFirstChars: [
+    "-",
+    "+",
+    ".",
+    ..."0123456789"
+  ],
+  resolve: resolveYamlFloat,
+  identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
+  represent: representYamlFloat
+});
+var mergeTag = defineScalarTag("tag:yaml.org,2002:merge", {
+  implicit: true,
+  implicitFirstChars: ["<"],
+  resolve: (source, isExplicit) => {
+    if (source === "<<" || isExplicit && source === "") return "<<";
+    return NOT_RESOLVED;
+  },
+  identify: () => false
+});
+var BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+function resolveYamlBinary(source) {
+  const input = source.replace(/\s/g, "");
+  if (input.length % 4 !== 0 || !BASE64_PATTERN.test(input)) return NOT_RESOLVED;
+  const binary = atob(input);
+  const result = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) result[index] = binary.charCodeAt(index);
+  return result;
+}
+function representYamlBinary(object) {
+  let binary = "";
+  for (let index = 0; index < object.length; index++) binary += String.fromCharCode(object[index]);
+  return btoa(binary);
+}
+var binaryTag = defineScalarTag("tag:yaml.org,2002:binary", {
+  resolve: resolveYamlBinary,
+  identify: (object) => Object.prototype.toString.call(object) === "[object Uint8Array]",
+  represent: representYamlBinary
+});
+var YAML_DATE_REGEXP = /* @__PURE__ */ new RegExp("^([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])$");
+var YAML_TIMESTAMP_REGEXP = /* @__PURE__ */ new RegExp("^([0-9][0-9][0-9][0-9])-([0-9][0-9]?)-([0-9][0-9]?)(?:[Tt]|[ \\t]+)([0-9][0-9]?):([0-9][0-9]):([0-9][0-9])(?:\\.([0-9]*))?(?:[ \\t]*(Z|([-+])([0-9][0-9]?)(?::([0-9][0-9]))?))?$");
+function makeUtcDate(year, month, day, hour = 0, minute = 0, second = 0, fraction = 0) {
+  const date = new Date(Date.UTC(year, month, day, hour, minute, second, fraction));
+  date.setUTCFullYear(year, month, day);
+  return date;
+}
+function resolveYamlTimestamp(source) {
+  let match = YAML_DATE_REGEXP.exec(source);
+  if (match === null) match = YAML_TIMESTAMP_REGEXP.exec(source);
+  if (match === null) return NOT_RESOLVED;
+  const year = +match[1];
+  const month = +match[2] - 1;
+  const day = +match[3];
+  if (!match[4]) {
+    const date2 = makeUtcDate(year, month, day);
+    if (date2.getUTCFullYear() !== year || date2.getUTCMonth() !== month || date2.getUTCDate() !== day) return NOT_RESOLVED;
+    return date2;
+  }
+  const hour = +match[4];
+  const minute = +match[5];
+  const second = +match[6];
+  let fraction = 0;
+  if (hour > 23 || minute > 59 || second > 59) return NOT_RESOLVED;
+  if (match[7]) {
+    let value = match[7].slice(0, 3);
+    while (value.length < 3) value += "0";
+    fraction = +value;
+  }
+  const date = makeUtcDate(year, month, day, hour, minute, second, fraction);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return NOT_RESOLVED;
+  if (match[9]) {
+    const offsetHour = +match[10];
+    const offsetMinute = +(match[11] || 0);
+    if (offsetHour > 23 || offsetMinute > 59) return NOT_RESOLVED;
+    const offset = (offsetHour * 60 + offsetMinute) * 6e4;
+    date.setTime(date.getTime() - (match[9] === "-" ? -offset : offset));
+  }
+  return date;
+}
+var timestampTag = defineScalarTag("tag:yaml.org,2002:timestamp", {
+  implicit: true,
+  implicitFirstChars: [..."0123456789"],
+  resolve: resolveYamlTimestamp,
+  identify: (object) => object instanceof Date,
+  represent: (object) => object.toISOString()
+});
+var seqTag = defineSequenceTag("tag:yaml.org,2002:seq", {
+  create: () => [],
+  addItem: (container, item) => {
+    container.push(item);
+  },
+  identify: Array.isArray
+});
+function isPlainObject2(data) {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
+  const prototype = Object.getPrototypeOf(data);
+  return prototype === null || prototype === Object.prototype;
+}
+var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
+  create: () => ({
+    list: [],
+    seen: /* @__PURE__ */ new Set()
+  }),
+  addItem: (carrier, item) => {
+    let key;
+    if (item instanceof Map) {
+      if (item.size !== 1) return "cannot resolve an ordered map item";
+      key = item.keys().next().value;
+    } else if (isPlainObject2(item)) {
+      const itemKeys = Object.keys(item);
+      if (itemKeys.length !== 1) return "cannot resolve an ordered map item";
+      key = itemKeys[0];
+    } else return "cannot resolve an ordered map item";
+    if (carrier.seen.has(key)) return "duplicate key in ordered map";
+    carrier.seen.add(key);
+    carrier.list.push(item);
+    return "";
+  },
+  finalize: (carrier) => carrier.list,
+  identify: () => false
+});
+var pairsTag = defineSequenceTag("tag:yaml.org,2002:pairs", {
+  create: () => [],
+  addItem: (container, item) => {
+    if (item instanceof Map) {
+      if (item.size !== 1) return "cannot resolve a pairs item";
+      container.push(item.entries().next().value);
+      return "";
+    }
+    if (Object.prototype.toString.call(item) !== "[object Object]") return "cannot resolve a pairs item";
+    const object = item;
+    const keys = Object.keys(object);
+    if (keys.length !== 1) return "cannot resolve a pairs item";
+    container.push([keys[0], object[keys[0]]]);
+    return "";
+  },
+  identify: () => false
+});
+var mapTag = defineMappingTag("tag:yaml.org,2002:map", {
+  create: () => ({}),
+  identify: isPlainObject2,
+  represent: (o) => {
+    const map = /* @__PURE__ */ new Map();
+    for (const key of Object.keys(o)) map.set(key, o[key]);
+    return map;
+  },
+  addPair: (container, key, value) => {
+    if (key !== null && typeof key === "object") return "object-based map does not support complex keys";
+    const normalizedKey = String(key);
+    if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
+    else container[normalizedKey] = value;
+    return "";
+  },
+  has: (container, key) => {
+    if (key !== null && typeof key === "object") return false;
+    return Object.prototype.hasOwnProperty.call(container, String(key));
+  },
+  keys: (container) => Object.keys(container),
+  get: (container, key) => {
+    const normalizedKey = String(key);
+    if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
+    return container[normalizedKey];
+  }
+});
+var setTag = defineMappingTag("tag:yaml.org,2002:set", {
+  create: () => /* @__PURE__ */ new Set(),
+  identify: (data) => data instanceof Set,
+  represent: (data) => {
+    const map = /* @__PURE__ */ new Map();
+    for (const key of data) map.set(key, null);
+    return map;
+  },
+  addPair: (container, key, value) => {
+    if (value !== null) return "cannot resolve a set item";
+    container.add(key);
+    return "";
+  },
+  has: (container, key) => container.has(key),
+  keys: (container) => container.keys(),
+  get: () => null
+});
+function createTagDefinitionMap() {
+  return {
+    scalar: /* @__PURE__ */ Object.create(null),
+    sequence: /* @__PURE__ */ Object.create(null),
+    mapping: /* @__PURE__ */ Object.create(null)
+  };
+}
+function createTagDefinitionListMap() {
+  return {
+    scalar: [],
+    sequence: [],
+    mapping: []
+  };
+}
+function compileTags(tags) {
+  const result = [];
+  for (const tag of tags) {
+    let index = result.length;
+    for (let previousIndex = 0; previousIndex < result.length; previousIndex++) {
+      const previous = result[previousIndex];
+      if (previous.nodeKind === tag.nodeKind && previous.tagName === tag.tagName && previous.matchByTagPrefix === tag.matchByTagPrefix) {
+        index = previousIndex;
+        break;
+      }
+    }
+    result[index] = tag;
+  }
+  return result;
+}
+var Schema = class Schema2 {
+  tags;
+  /** @internal */
+  implicitScalarTags;
+  /**
+  * Dispatch implicit scalar resolvers by `source.charAt(0)`. Each bucket holds
+  * the resolvers that may match that key, in schema order; a key absent from
+  * the map uses
+  * {@link Schema.implicitScalarAnyFirstChar}
+  * (resolvers that declared no first-char constraint, so they apply to any
+  * first character).
+  */
+  implicitScalarByFirstChar;
+  implicitScalarAnyFirstChar;
+  /**
+  * The default scalar tag (`!!str`), resolved once so the composer's fallback
+  * for unresolved plain scalars avoids a keyed lookup per scalar.
+  *
+  * @internal
+  */
+  defaultScalarTag;
+  /**
+  * The default container tags (`!!seq` / `!!map`), used by the dumper: when a
+  * value is identified by its default tag, the tag is implicit and not
+  * printed. Undefined if the schema does not define them (then such values
+  * can't be dumped).
+  *
+  * @internal
+  */
+  defaultSequenceTag;
+  /** @internal */
+  defaultMappingTag;
+  exact;
+  prefix;
+  constructor(tags) {
+    const compiledTags = compileTags(tags);
+    const implicitScalarTags = [];
+    const exact = createTagDefinitionMap();
+    const prefix = createTagDefinitionListMap();
+    for (const tag of compiledTags) {
+      if (tag.nodeKind === "scalar" && tag.implicit) {
+        if (tag.matchByTagPrefix) throw new Error("Implicit scalar tags cannot match by tag prefix");
+        implicitScalarTags.push(tag);
+      }
+      switch (tag.nodeKind) {
+        case "scalar":
+          if (tag.matchByTagPrefix) prefix.scalar.push(tag);
+          else exact.scalar[tag.tagName] = tag;
+          break;
+        case "sequence":
+          if (tag.matchByTagPrefix) prefix.sequence.push(tag);
+          else exact.sequence[tag.tagName] = tag;
+          break;
+        case "mapping":
+          if (tag.matchByTagPrefix) prefix.mapping.push(tag);
+          else exact.mapping[tag.tagName] = tag;
+      }
+    }
+    const implicitScalarAnyFirstChar = implicitScalarTags.filter((tag) => tag.implicitFirstChars === null);
+    const keys = /* @__PURE__ */ new Set();
+    for (const tag of implicitScalarTags) if (tag.implicitFirstChars !== null) for (const key of tag.implicitFirstChars) keys.add(key);
+    const implicitScalarByFirstChar = /* @__PURE__ */ new Map();
+    for (const key of keys) implicitScalarByFirstChar.set(key, implicitScalarTags.filter((tag) => tag.implicitFirstChars === null || tag.implicitFirstChars.indexOf(key) !== -1));
+    const defaultScalarTag = exact.scalar["tag:yaml.org,2002:str"];
+    if (!defaultScalarTag) throw new Error("schema does not define the default scalar tag (tag:yaml.org,2002:str)");
+    this.tags = compiledTags;
+    this.implicitScalarTags = implicitScalarTags;
+    this.implicitScalarByFirstChar = implicitScalarByFirstChar;
+    this.implicitScalarAnyFirstChar = implicitScalarAnyFirstChar;
+    this.defaultScalarTag = defaultScalarTag;
+    this.defaultSequenceTag = exact.sequence["tag:yaml.org,2002:seq"];
+    this.defaultMappingTag = exact.mapping["tag:yaml.org,2002:map"];
+    this.exact = exact;
+    this.prefix = prefix;
+  }
+  /** @internal */
+  lookupScalarTag(tagName) {
+    const exactTag = this.exact.scalar[tagName];
+    if (exactTag) return exactTag;
+    for (const tag of this.prefix.scalar) if (tagName.startsWith(tag.tagName)) return tag;
+  }
+  /** @internal */
+  lookupSequenceTag(tagName) {
+    const exactTag = this.exact.sequence[tagName];
+    if (exactTag) return exactTag;
+    for (const tag of this.prefix.sequence) if (tagName.startsWith(tag.tagName)) return tag;
+  }
+  /** @internal */
+  lookupMappingTag(tagName) {
+    const exactTag = this.exact.mapping[tagName];
+    if (exactTag) return exactTag;
+    for (const tag of this.prefix.mapping) if (tagName.startsWith(tag.tagName)) return tag;
+  }
+  /** @internal */
+  resolveImplicitScalarTag(source) {
+    const candidates = this.implicitScalarByFirstChar.get(source.charAt(0)) ?? this.implicitScalarAnyFirstChar;
+    for (const tag2 of candidates) {
+      const value = tag2.resolve(source, false, tag2.tagName);
+      if (value !== NOT_RESOLVED) return {
+        value,
+        tag: tag2
+      };
+    }
+    const tag = this.defaultScalarTag;
+    return {
+      value: tag.resolve(source, false, tag.tagName),
+      tag
+    };
+  }
+  /**
+  * Creates a new schema with the specified tags added. If a tag already
+  * exists, it is replaced by the specified tag.
+  *
+  * @example
+  *
+  * ```javascript
+  * import { CORE_SCHEMA, mergeTag, realMapTag } from 'js-yaml'
+  *
+  * const schema = CORE_SCHEMA.withTags(mergeTag, realMapTag)
+  * ```
+  */
+  withTags(...tags) {
+    let flatTags = [];
+    for (const tag of tags) flatTags = flatTags.concat(tag);
+    return new Schema2([...this.tags, ...flatTags]);
+  }
+};
+var FAILSAFE_SCHEMA = new Schema([
+  strTag,
+  seqTag,
+  mapTag
+]);
+var JSON_SCHEMA = new Schema([
+  ...FAILSAFE_SCHEMA.tags,
+  nullJsonTag,
+  boolJsonTag,
+  intJsonTag,
+  floatJsonTag
+]);
+var CORE_SCHEMA = new Schema([
+  ...FAILSAFE_SCHEMA.tags,
+  nullCoreTag,
+  boolCoreTag,
+  intCoreTag,
+  floatCoreTag
+]);
+var YAML11_SCHEMA = new Schema([
+  ...FAILSAFE_SCHEMA.tags,
+  nullYaml11Tag,
+  boolYaml11Tag,
+  intYaml11Tag,
+  floatYaml11Tag,
+  timestampTag,
+  mergeTag,
+  binaryTag,
+  omapTag,
+  pairsTag,
+  setTag
+]);
+var DUMP_SCHEMA = YAML11_SCHEMA.withTags({
+  ...intYaml11Tag,
+  resolve: (source, isExplicit, tagName) => {
+    const result = intYaml11Tag.resolve(source, isExplicit, tagName);
+    return result === NOT_RESOLVED ? intCoreTag.resolve(source, isExplicit, tagName) : result;
+  }
+}, {
+  ...floatYaml11Tag,
+  resolve: (source, isExplicit, tagName) => {
+    const result = floatYaml11Tag.resolve(source, isExplicit, tagName);
+    return result === NOT_RESOLVED ? floatCoreTag.resolve(source, isExplicit, tagName) : result;
+  }
+});
+var realMapTag = defineMappingTag("tag:yaml.org,2002:map", {
+  create: () => /* @__PURE__ */ new Map(),
+  addPair: (container, key, value) => {
+    container.set(key, value);
+    return "";
+  },
+  has: (container, key) => container.has(key),
+  keys: (container) => container.keys(),
+  get: (container, key) => container.get(key),
+  identify: (data) => data instanceof Map || isPlainObject2(data),
+  represent: (data) => {
+    if (data instanceof Map) return data;
+    const map = /* @__PURE__ */ new Map();
+    const obj = data;
+    for (const key of Object.keys(obj)) map.set(key, obj[key]);
+    return map;
+  }
+});
+function normalizeKey(key) {
+  if (Array.isArray(key)) {
+    const array = Array.prototype.slice.call(key);
+    for (let index = 0; index < array.length; index++) {
+      if (Array.isArray(array[index])) return null;
+      if (typeof array[index] === "object" && Object.prototype.toString.call(array[index]) === "[object Object]") array[index] = "[object Object]";
+    }
+    return String(array);
+  }
+  if (typeof key === "object" && Object.prototype.toString.call(key) === "[object Object]") return "[object Object]";
+  return String(key);
+}
+var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
+  create: () => ({}),
+  identify: isPlainObject2,
+  represent: (o) => {
+    const map = /* @__PURE__ */ new Map();
+    for (const key of Object.keys(o)) map.set(key, o[key]);
+    return map;
+  },
+  addPair: (container, key, value) => {
+    const normalizedKey = normalizeKey(key);
+    if (normalizedKey === null) return "nested arrays are not supported inside keys";
+    if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
+    else container[normalizedKey] = value;
+    return "";
+  },
+  has: (container, key) => {
+    const normalizedKey = normalizeKey(key);
+    return normalizedKey !== null && Object.prototype.hasOwnProperty.call(container, normalizedKey);
+  },
+  keys: (container) => Object.keys(container),
+  get: (container, key) => {
+    const normalizedKey = String(key);
+    if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
+    return container[normalizedKey];
+  }
+});
+var EVENT_ID = {
+  DOCUMENT: 1,
+  SEQUENCE: 2,
+  MAPPING: 3,
+  SCALAR: 4,
+  ALIAS: 5,
+  POP: 6
+};
+var SCALAR_STYLE = {
+  PLAIN: 1,
+  SINGLE_QUOTED: 2,
+  DOUBLE_QUOTED: 3,
+  LITERAL_BLOCK: 4,
+  FOLDED_BLOCK: 5
+};
+var COLLECTION_STYLE = {
+  BLOCK: 1,
+  FLOW: 2
+};
+var CHOMPING_MODE = {
+  CLIP: 1,
+  STRIP: 2,
+  KEEP: 3
+};
+function simpleEscapeSequence(c) {
+  switch (c) {
+    case 48:
+      return "\0";
+    case 97:
+      return "\x07";
+    case 98:
+      return "\b";
+    case 116:
+      return "	";
+    case 9:
+      return "	";
+    case 110:
+      return "\n";
+    case 118:
+      return "\v";
+    case 102:
+      return "\f";
+    case 114:
+      return "\r";
+    case 101:
+      return "\x1B";
+    case 32:
+      return " ";
+    case 34:
+      return '"';
+    case 47:
+      return "/";
+    case 92:
+      return "\\";
+    case 78:
+      return "\x85";
+    case 95:
+      return "\xA0";
+    case 76:
+      return "\u2028";
+    case 80:
+      return "\u2029";
+    default:
+      return "";
+  }
+}
+var simpleEscapeCheck = new Array(256);
+var simpleEscapeMap = new Array(256);
+for (let i = 0; i < 256; i++) {
+  simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
+  simpleEscapeMap[i] = simpleEscapeSequence(i);
+}
+var DEFAULT_TAG_HANDLERS = Object.assign(/* @__PURE__ */ Object.create(null), {
+  "!": "!",
+  "!!": "tag:yaml.org,2002:"
+});
+var TAG_SUFFIX_CHARS = "-#;/?:@&=+$_.~*'()";
+var TAG_URI_CHARS = TAG_SUFFIX_CHARS + "!,[]";
+var DEFAULT_CONSTRUCTOR_OPTIONS = {
+  filename: "",
+  schema: CORE_SCHEMA,
+  json: false,
+  maxTotalMergeKeys: 1e4,
+  maxAliases: -1
+};
+var NS_URI_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$,_.!~*'()\[\]])`;
+var NS_TAG_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$.~*'()_])`;
+var PATTERN_TAG_URI = new RegExp(`^(?:${NS_URI_CHAR})*$`);
+var PATTERN_TAG_SUFFIX = new RegExp(`^(?:${NS_TAG_CHAR})+$`);
+var PATTERN_TAG_PREFIX = new RegExp(`^(?:!(?:${NS_URI_CHAR})*|${NS_TAG_CHAR}(?:${NS_URI_CHAR})*)$`);
+var DEFAULT_PARSER_OPTIONS = {
+  filename: "",
+  maxDepth: 100
+};
+var DEFAULT_LOAD_OPTIONS = {
+  ...DEFAULT_PARSER_OPTIONS,
+  ...DEFAULT_CONSTRUCTOR_OPTIONS
+};
+function hasBit(mask, bit) {
+  return (mask & 1 << bit) !== 0;
+}
+var DEFAULT_SCALAR_STYLE_RULES = {
+  applyQuoteFlowKeysOption,
+  doubleQuoteForInvisibles,
+  doubleQuoteWhitespaceOnly,
+  applyForceQuotesOption,
+  tryLongOrMultilineAsBlock,
+  quoteInvalidPlain,
+  fallbackToDoubleQuoted
+};
+function _preferredQuotedStyle(layout) {
+  if (layout.presenterOptions.quoteStyle === "single" && hasBit(layout.allowedStylesMask, SCALAR_STYLE.SINGLE_QUOTED)) return SCALAR_STYLE.SINGLE_QUOTED;
+  return SCALAR_STYLE.DOUBLE_QUOTED;
+}
+function applyQuoteFlowKeysOption(layout) {
+  if (!layout.presenterOptions.quoteFlowKeys) return;
+  if (!layout.isKey || !layout.flowOnly || layout.style !== SCALAR_STYLE.PLAIN) return;
+  layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+}
+function doubleQuoteForInvisibles(layout) {
+  if (layout.style === SCALAR_STYLE.PLAIN && /[\t\x7F-\xA0\u2028\u2029\uFEFF\uFFFE\uFFFF]/.test(layout.node.value)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+}
+function doubleQuoteWhitespaceOnly(layout) {
+  if (layout.style === SCALAR_STYLE.PLAIN && /^\s+$/.test(layout.node.value)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+}
+function applyForceQuotesOption(layout) {
+  if (!layout.presenterOptions.forceQuotes) return;
+  if (layout.isKey || layout.style !== SCALAR_STYLE.PLAIN) return;
+  if (layout.node.tag !== layout.presenterOptions.schema.defaultScalarTag.tagName) return;
+  layout.style = layout.node.value.includes("\n") ? SCALAR_STYLE.DOUBLE_QUOTED : _preferredQuotedStyle(layout);
+}
+function tryLongOrMultilineAsBlock(layout) {
+  if (layout.style !== SCALAR_STYLE.PLAIN || layout.isKey) return;
+  const value = layout.node.value;
+  const multiline = value.indexOf("\n") !== -1;
+  if (!hasBit(layout.allowedStylesMask, SCALAR_STYLE.LITERAL_BLOCK)) {
+    if (multiline) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+    return;
+  }
+  const w = layout.presenterOptions.lineWidth;
+  if (w === -1) {
+    if (multiline) layout.style = SCALAR_STYLE.LITERAL_BLOCK;
+    return;
+  }
+  const availableWidth = Math.max(Math.min(w, 40), w - layout.shiftOfContent);
+  let position = 0;
+  let shouldFold = false;
+  while (position <= value.length) {
+    let lineEnd = value.length;
+    const nextLineBreak = value.indexOf("\n", position);
+    if (nextLineBreak !== -1) lineEnd = nextLineBreak;
+    const line = value.slice(position, lineEnd);
+    if (line.length > availableWidth && line[0] !== " " && / [^ \t]/.test(line)) shouldFold = true;
+    if (nextLineBreak === -1) break;
+    position = nextLineBreak + 1;
+  }
+  if (shouldFold) layout.style = SCALAR_STYLE.FOLDED_BLOCK;
+  else if (multiline) layout.style = SCALAR_STYLE.LITERAL_BLOCK;
+}
+function quoteInvalidPlain(layout) {
+  if (layout.style === SCALAR_STYLE.PLAIN && !hasBit(layout.allowedStylesMask, SCALAR_STYLE.PLAIN)) layout.style = _preferredQuotedStyle(layout);
+}
+function fallbackToDoubleQuoted(layout) {
+  if (!hasBit(layout.allowedStylesMask, layout.style)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+}
+var SRC_C_PRINTABLE = "[\\x09\\x0A\\x0D\\x20-\\x7E\\x85\\xA0-\\uD7FF\\uE000-\\uFFFD\\u{10000}-\\u{10FFFF}]";
+var SRC_B_CHAR = "[\\n\\r]";
+var SRC_C_BYTE_ORDER_MARK = "\\uFEFF";
+var SRC_S_WHITE = "[ \\t]";
+var SRC_NB_CHAR = `(?:(?!(?:${SRC_B_CHAR}|${SRC_C_BYTE_ORDER_MARK}))${SRC_C_PRINTABLE})`;
+var SRC_NS_CHAR = `(?:(?!${SRC_S_WHITE})${SRC_NB_CHAR})`;
+var SRC_NB_JSON = "[\\x09\\x20-\\uD7FF\\uE000-\\uFFFF\\u{10000}-\\u{10FFFF}]";
+var SRC_C_INDICATOR = "[-?:,\\[\\]{}#&*!|>'\"%@`]";
+var SRC_C_FLOW_INDICATOR = "[,\\[\\]{}]";
+var SRC_NS_PLAIN_SAFE_FLOW_OUT = SRC_NS_CHAR;
+var SRC_NS_PLAIN_SAFE_FLOW_IN = `(?:(?!${SRC_C_FLOW_INDICATOR})${SRC_NS_CHAR})`;
+var SRC_NS_PLAIN_FIRST_FLOW_OUT = `(?:(?:(?!${SRC_C_INDICATOR})${SRC_NS_CHAR})|[?:-](?=${SRC_NS_PLAIN_SAFE_FLOW_OUT}))`;
+var SRC_NS_PLAIN_FIRST_FLOW_IN = `(?:(?:(?!${SRC_C_INDICATOR})${SRC_NS_CHAR})|[?:-](?=${SRC_NS_PLAIN_SAFE_FLOW_IN}))`;
+var SRC_NS_PLAIN_CHAR_FLOW_OUT = `(?:(?:(?![:#])${SRC_NS_PLAIN_SAFE_FLOW_OUT})|:(?=${SRC_NS_PLAIN_SAFE_FLOW_OUT}))#*`;
+var SRC_NS_PLAIN_CHAR_FLOW_IN = `(?:(?:(?![:#])${SRC_NS_PLAIN_SAFE_FLOW_IN})|:(?=${SRC_NS_PLAIN_SAFE_FLOW_IN}))#*`;
+var SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT = `(?:${SRC_S_WHITE}*${SRC_NS_PLAIN_CHAR_FLOW_OUT})*`;
+var SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN = `(?:${SRC_S_WHITE}*${SRC_NS_PLAIN_CHAR_FLOW_IN})*`;
+var SRC_NS_PLAIN_ONE_LINE_FLOW_OUT = `${SRC_NS_PLAIN_FIRST_FLOW_OUT}#*${SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT}`;
+var SRC_NS_PLAIN_ONE_LINE_FLOW_IN = `${SRC_NS_PLAIN_FIRST_FLOW_IN}#*${SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN}`;
+var SRC_NS_PLAIN_ONE_LINE_BLOCK_KEY = SRC_NS_PLAIN_ONE_LINE_FLOW_OUT;
+var SRC_NS_PLAIN_ONE_LINE_FLOW_KEY = SRC_NS_PLAIN_ONE_LINE_FLOW_IN;
+var SRC_S_NS_PLAIN_NEXT_LINE_FLOW_OUT = `\\n+${SRC_NS_PLAIN_CHAR_FLOW_OUT}${SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT}`;
+var SRC_S_NS_PLAIN_NEXT_LINE_FLOW_IN = `\\n+${SRC_NS_PLAIN_CHAR_FLOW_IN}${SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN}`;
+var SRC_NS_PLAIN_MULTI_LINE_FLOW_OUT = `${SRC_NS_PLAIN_ONE_LINE_FLOW_OUT}(?:${SRC_S_NS_PLAIN_NEXT_LINE_FLOW_OUT})*`;
+var SRC_NS_PLAIN_MULTI_LINE_FLOW_IN = `${SRC_NS_PLAIN_ONE_LINE_FLOW_IN}(?:${SRC_S_NS_PLAIN_NEXT_LINE_FLOW_IN})*`;
+var NS_PLAIN_FLOW_OUT = new RegExp(`^(?:${SRC_NS_PLAIN_MULTI_LINE_FLOW_OUT})$`, "u");
+var NS_PLAIN_FLOW_IN = new RegExp(`^(?:${SRC_NS_PLAIN_MULTI_LINE_FLOW_IN})$`, "u");
+var NS_PLAIN_BLOCK_KEY = new RegExp(`^(?:${SRC_NS_PLAIN_ONE_LINE_BLOCK_KEY})$`, "u");
+var NS_PLAIN_FLOW_KEY = new RegExp(`^(?:${SRC_NS_PLAIN_ONE_LINE_FLOW_KEY})$`, "u");
+var NB_SINGLE_ONE_LINE = new RegExp(`^(?:${SRC_NB_JSON})*$`, "u");
+var NB_SINGLE_MULTI_LINE = new RegExp(`^(?:${SRC_NB_JSON}|\\n)*$`, "u");
+var BLOCK_SCALAR_CONTENT = new RegExp(`^(?:${SRC_NB_CHAR}|\\n)*$`, "u");
+var DEFAULT_PRESENTER_OPTIONS = {
+  indent: 2,
+  seqNoIndent: false,
+  seqInlineFirst: true,
+  lineWidth: 80,
+  flowBracketPadding: false,
+  flowSkipCommaSpace: false,
+  flowSkipColonSpace: false,
+  quoteFlowKeys: false,
+  quoteStyle: "single",
+  forceQuotes: false,
+  scalarStyleRules: Object.keys(DEFAULT_SCALAR_STYLE_RULES).map((name) => Reflect.get(DEFAULT_SCALAR_STYLE_RULES, name)),
+  tagBeforeAnchor: false
+};
+var DEFAULT_DUMP_OPTIONS = {
+  ...DEFAULT_PRESENTER_OPTIONS,
+  schema: DUMP_SCHEMA,
+  skipInvalid: false,
+  noRefs: false,
+  flowLevel: -1,
+  sortKeys: false,
+  transform: () => {
+  }
+};
+var EVENT_DOCUMENT = EVENT_ID.DOCUMENT;
+var EVENT_SEQUENCE = EVENT_ID.SEQUENCE;
+var EVENT_MAPPING = EVENT_ID.MAPPING;
+var EVENT_SCALAR = EVENT_ID.SCALAR;
+var EVENT_ALIAS = EVENT_ID.ALIAS;
+var EVENT_POP = EVENT_ID.POP;
+var SCALAR_STYLE_PLAIN = SCALAR_STYLE.PLAIN;
+var SCALAR_STYLE_SINGLE_QUOTED = SCALAR_STYLE.SINGLE_QUOTED;
+var SCALAR_STYLE_DOUBLE_QUOTED = SCALAR_STYLE.DOUBLE_QUOTED;
+var SCALAR_STYLE_LITERAL_BLOCK = SCALAR_STYLE.LITERAL_BLOCK;
+var SCALAR_STYLE_FOLDED_BLOCK = SCALAR_STYLE.FOLDED_BLOCK;
+var COLLECTION_STYLE_BLOCK = COLLECTION_STYLE.BLOCK;
+var COLLECTION_STYLE_FLOW = COLLECTION_STYLE.FLOW;
+var CHOMPING_CLIP = CHOMPING_MODE.CLIP;
+var CHOMPING_STRIP = CHOMPING_MODE.STRIP;
+var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
+
+// scripts/lib/installed-copy.mjs
+import { existsSync as existsSync2 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
+
+// scripts/lib/sterling-roots.mjs
+import { existsSync, readFileSync, readdirSync, realpathSync as realpathSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join3, resolve as resolve2, sep } from "node:path";
+import { createHash } from "node:crypto";
+
+// scripts/lib/jsonc.mjs
+var JSONC_SOURCE = String.raw`
+function parseJsonc(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
+      i = end + 1;
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+`;
+var parseJsonc = new Function(`${JSONC_SOURCE}
+return parseJsonc;`)();
+
+// scripts/lib/sterling-roots.mjs
+var RESOLVER_IMPORTS = [
+  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+  "import { homedir } from 'node:os';",
+  "import { join } from 'node:path';"
+].join("\n");
+var RESOLVER_SOURCE = String.raw`
+function installRoots(env = process.env, home = homedir()) {
+  return [
+    { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
+    { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+  ];
+}
+
+// ENOENT/ENOTDIR mean "no such level", the normal case; any other error is thrown.
+function sterlingRootsLs(dir) {
+  try {
+    return readdirSync(dir);
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
+    throw err;
+  }
+}
+
+function readCopyVersion(root, host) {
+  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  for (const rel of manifests) {
+    let text;
+    try {
+      text = readFileSync(join(root, rel), 'utf8');
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) continue;
+      throw err;
+    }
+    let version;
+    try {
+      version = JSON.parse(text).version;
+    } catch (err) {
+      return { reason: rel + ' is not valid JSON (' + err.message + ')' };
+    }
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
+    return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
+  }
+  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+}
+
+// The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
+// precedence. Strict grammar: major.minor.patch with no leading zeros and no v prefix,
+// dot-separated prerelease identifiers, build metadata accepted and ignored. A prerelease
+// sorts below its release; prerelease identifiers compare one by one, numeric ones
+// numerically and below alphanumeric ones, and a longer list wins when all shared ones match.
+function parseSterlingVersion(v) {
+  const m = typeof v === 'string' ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(v) : null;
+  if (!m) return null;
+  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+}
+
+function compareSterlingVersions(a, b) {
+  const x = parseSterlingVersion(a);
+  const y = parseSterlingVersion(b);
+  if (!x || !y) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(x ? b : a));
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
+  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    if (i >= x.pre.length) return -1;
+    if (i >= y.pre.length) return 1;
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+function scanInstalledSterling(env = process.env, home = homedir()) {
+  const roots = installRoots(env, home);
+  const copies = [];
+  const skipped = [];
+  const consider = (root, host) => {
+    const v = readCopyVersion(root, host);
+    if (v.version) copies.push({ root, version: v.version, host });
+    else skipped.push({ root, host, reason: v.reason });
+  };
+  for (const { host, dir } of roots) {
+    if (host === 'claude-code') {
+      for (const marketplace of sterlingRootsLs(dir)) {
+        for (const entry of sterlingRootsLs(join(dir, marketplace, 'sterling'))) consider(join(dir, marketplace, 'sterling', entry), host);
+      }
+      continue;
+    }
+    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
+    // its timestamp; a copy found there is half-finished or already moved, never one to use.
+    const walk = (d, depth) => {
+      const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
+      if (existsSync(pkg)) consider(pkg, host);
+      if (depth === 0) return;
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
+    };
+    walk(dir, 4);
+  }
+  return { roots, copies, skipped };
+}
+
+function newestInstalledSterling(env = process.env, home = homedir()) {
+  let best = null;
+  for (const c of scanInstalledSterling(env, home).copies) {
+    if (!best) {
+      best = c;
+      continue;
+    }
+    const d = compareSterlingVersions(c.version, best.version) ||
+      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
+    if (d > 0) best = c;
+  }
+  return best;
+}
+
+// host null: the asking host is unknown, so both commands are named.
+function sterlingInstallRemedy(host) {
+  if (host === 'claude-code') return 'claude plugin install sterling@sterling';
+  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
+}
+
+function sterlingNotFoundMessage(host, env = process.env, home = homedir()) {
+  const remedy = sterlingInstallRemedy(host);
+  const scan = scanInstalledSterling(env, home);
+  const where = scan.roots.map((r) => r.dir + ' (' + r.host + ')').join(' or ');
+  const why = scan.skipped.map((s) => '; skipped ' + s.root + ': ' + s.reason).join('');
+  return 'no installed Sterling found under ' + where + why + '. Install it: ' + remedy + '.';
+}
+`;
+var api = new Function(
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}
+return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
+)(existsSync, readFileSync, readdirSync, join3, homedir3);
+var installRoots = api.installRoots;
+var readCopyVersion = api.readCopyVersion;
+var parseSterlingVersion = api.parseSterlingVersion;
+var compareSterlingVersions = api.compareSterlingVersions;
+var scanInstalledSterling = api.scanInstalledSterling;
+var newestInstalledSterling = api.newestInstalledSterling;
+var sterlingInstallRemedy = api.sterlingInstallRemedy;
+var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+var STERLING_NPM_PACKAGE = "@chulf58/sterling";
+var SPECS_SOURCE = String.raw`
+const STERLING_NPM_PACKAGE_NAME = '@chulf58/sterling';
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+function isNpmSpec(s) {
+  return s === STERLING_NPM_PACKAGE_NAME || s.startsWith(STERLING_NPM_PACKAGE_NAME + '@');
+}
+function namesSterling(s) {
+  return typeof s === 'string' && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split('#')[0]));
+}
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? 'npm' : 'git' });
+  }
+  return out;
+}
+`;
+var sterlingPluginSpecs = new Function(`${SPECS_SOURCE}
+return sterlingPluginSpecs;`)();
+var OPENCODE_LOADED_SOURCE = String.raw`
+function openCodeCacheKey(spec, kind) {
+  // npm-package-arg (13.0.2 and npm's 4.28.0 checked 2026-10-23) keeps rawSpec as typed,
+  // whitespace included, except an empty suffix, which it reads as the range '*'; an alias
+  // or a Git spec after the '@' is no registry target, and OpenCode keys it as the spec itself.
+  if (kind === 'npm') return spec === STERLING_NPM_PACKAGE_NAME ? spec + '@latest' : spec === STERLING_NPM_PACKAGE_NAME + '@' ? spec + '*' : spec;
+  let target;
+  try {
+    target = decodeURIComponent(spec.split('#')[0]);
+  } catch {
+    target = spec.split('#')[0];
+  }
+  const slug = target.replace(/\.git$/i, '').split(/[/:\\]/).at(-1)?.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repository';
+  return 'git-' + slug + '-' + createHash('sha256').update(spec).digest('hex').slice(0, 12);
+}
+
+function openCodeLoadedSterling(env = process.env, home = homedir()) {
+  const configPath = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'opencode.json');
+  let config;
+  try {
+    config = parseJsonc(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { configPath, copies: [] };
+    return { configPath, error: (err && err.message) || String(err) };
+  }
+  const cache = installRoots(env, home).find((r) => r.host === 'opencode').dir;
+  const copies = [];
+  for (const { spec, kind } of sterlingPluginSpecs(config && typeof config === 'object' ? config.plugins : undefined)) {
+    const dir = join(cache, openCodeCacheKey(spec, kind));
+    const latest = sterlingRootsLs(dir).filter((n) => /^\d+$/.test(n)).sort((a, b) => Number(a) - Number(b)).at(-1);
+    const root = latest === undefined ? null : join(dir, latest, 'node_modules', '@chulf58', 'sterling');
+    copies.push(root === null ? { spec, dir, root } : { spec, dir, root, ...readCopyVersion(root, 'opencode') });
+  }
+  return { configPath, copies };
+}
+`;
+var loaded = new Function(
+  "createHash",
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
+return { openCodeCacheKey, openCodeLoadedSterling };`
+)(createHash, existsSync, readFileSync, readdirSync, join3, homedir3);
+var openCodeCacheKey = loaded.openCodeCacheKey;
+var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
+function canonical(p) {
+  try {
+    return realpathSync2(p);
+  } catch (err) {
+    if (err?.code === "ENOENT") return resolve2(p);
+    throw err;
+  }
+}
+function installHostOf(root, { env = process.env, home = homedir3() } = {}) {
+  const real = canonical(root);
+  for (const { host, dir } of installRoots(env, home)) {
+    if (real.startsWith(canonical(dir) + sep)) return host;
+  }
+  return null;
+}
+
+// scripts/lib/installed-copy.mjs
+function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
+  }
+  if (!existsSync2(join4(root, ".git"))) return true;
+  return installHostOf(root, { env, home }) !== null;
+}
+
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname as dirname2, join as join5 } from "node:path";
+function atomicTempPath(path) {
+  return join5(dirname2(path), `.${basename(path)}.tmp-${process.pid}-${randomUUID2().slice(0, 8)}`);
+}
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID2()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFileAtomicIfChanged(path, content, fs) {
+  if (existsSync3(path) && readFileSync2(path, "utf8") === content) return false;
+  replaceVia(atomicTempPath(path), path, content, fs);
+  return true;
+}
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync5, realpathSync as realpathSync3, statSync } from "node:fs";
+import { basename as basename2, dirname as dirname3, join as join7, resolve as resolve3 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
+import { join as join6 } from "node:path";
+var CONFIG_REL = join6(".sterling", "config.json");
+var STORE_DB_REL = join6(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync4(join6(dir, CONFIG_REL)) || existsSync4(join6(dir, STORE_DB_REL)));
+}
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git4 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git4(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve3(cwd, gitDir));
+  const commonReal = real(resolve3(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git4(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve3(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname3(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join7(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync5(join7(linkedWorktree.mainRoot, configRel)) && existsSync5(join7(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join7(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve3(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync3(p);
+  } catch {
+    return p;
+  }
+}
+
+// scripts/lib/generated-marker.mjs
+import { createHash as createHash2 } from "node:crypto";
+var sha256 = (s) => createHash2("sha256").update(s).digest("hex");
+var normalizeEol = (s) => s.replace(/\r\n/g, "\n");
+var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function stampBody(body, prefix) {
+  const normalized = normalizeEol(body);
+  const lines = normalized.split("\n");
+  const [first, ...rest] = lines;
+  return [first, `${prefix} sterling-generated content_hash=${sha256(normalized)}`, ...rest].join("\n");
+}
+function verifyStamp(content, prefix) {
+  const normalized = normalizeEol(content);
+  const lines = normalized.split("\n");
+  const marker = lines[1] ?? "";
+  const m = new RegExp(`^${escapeRegExp(prefix)} sterling-generated content_hash=([0-9a-f]{64})$`).exec(marker);
+  if (!m) return null;
+  const rebuilt = [lines[0], ...lines.slice(2)].join("\n");
+  return { unmodified: sha256(rebuilt) === m[1] };
+}
+
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync, statSync as statSync2, lstatSync, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
+import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync as mkdirSync2, statSync as statSync2, lstatSync, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -7249,27 +7627,27 @@ function validateHosts(entry, where) {
     throw new Error(`${where}: an agent not installed on claude must declare opencode_full (where OpenCode installs it)`);
   }
 }
-function loadRegistry(registryPath) {
-  const registry = JSON.parse(readFileSync4(registryPath, "utf8"));
+function loadRegistry(registryPath2) {
+  const registry = JSON.parse(readFileSync4(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
-    throw new Error(`agent registry ${registryPath}: unsupported shape (expected {version: 1, agents: []})`);
+    throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
   const names = /* @__PURE__ */ new Set();
   const files = /* @__PURE__ */ new Set();
   for (const [index, entry] of registry.agents.entries()) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error(`agent registry ${registryPath}: agents[${index}] must be an object`);
+      throw new Error(`agent registry ${registryPath2}: agents[${index}] must be an object`);
     }
     if (typeof entry.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) {
-      throw new Error(`agent registry ${registryPath}: agents[${index}].name must be a safe agent name`);
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].name must be a safe agent name`);
     }
     if (typeof entry.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
-      throw new Error(`agent registry ${registryPath}: agents[${index}].file must be a template filename ending in .md`);
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
     }
-    if (entry.opencode !== void 0) validateOpenCodeEntry(entry, `agent registry ${registryPath}: agents[${index}].opencode`);
-    validateHosts(entry, `agent registry ${registryPath}: agents[${index}]`);
+    if (entry.opencode !== void 0) validateOpenCodeEntry(entry, `agent registry ${registryPath2}: agents[${index}].opencode`);
+    validateHosts(entry, `agent registry ${registryPath2}: agents[${index}]`);
     if (names.has(entry.name) || files.has(entry.file)) {
-      throw new Error(`agent registry ${registryPath}: duplicate agent name or template file at agents[${index}]`);
+      throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
     }
     names.add(entry.name);
     files.add(entry.file);
@@ -7286,12 +7664,12 @@ var RESTART_INSTRUCTION = [
 ].join("\n");
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
-import { join as join7, resolve as resolve4 } from "node:path";
+import { lstatSync as lstatSync3, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync3, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { join as join9, resolve as resolve5 } from "node:path";
 
 // scripts/lib/store-path.mjs
-import { lstatSync as lstatSync2, realpathSync as realpathSync3 } from "node:fs";
-import { join as join6, resolve as resolve3, sep as sep2 } from "node:path";
+import { lstatSync as lstatSync2, realpathSync as realpathSync4 } from "node:fs";
+import { join as join8, resolve as resolve4, sep as sep2 } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -7314,8 +7692,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve3(root);
-  const target = resolve3(rootResolved, ...segments);
+  const rootResolved = resolve4(root);
+  const target = resolve4(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -7334,7 +7712,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep2)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join6(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join8(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -7342,7 +7720,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join6(cursor, part);
+    const next = join8(cursor, part);
     let st;
     try {
       st = lstatSync2(next);
@@ -7356,13 +7734,13 @@ function resolveStoreWritePath(root, ...segments) {
     if (st.isSymbolicLink()) {
       let resolvedRoot;
       try {
-        resolvedRoot = realpathSync3(rootResolved);
+        resolvedRoot = realpathSync4(rootResolved);
       } catch {
         resolvedRoot = rootResolved;
       }
       let resolvedEscape;
       try {
-        resolvedEscape = realpathSync3(next);
+        resolvedEscape = realpathSync4(next);
       } catch {
         resolvedEscape = null;
       }
@@ -7376,7 +7754,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   let realRoot;
   try {
-    realRoot = realpathSync3(rootResolved);
+    realRoot = realpathSync4(rootResolved);
   } catch (e) {
     if (e && e.code === "ENOENT") {
       realRoot = rootResolved;
@@ -7392,7 +7770,7 @@ function resolveStoreWritePath(root, ...segments) {
     realDeepest = realRoot;
   } else {
     try {
-      realDeepest = realpathSync3(deepestExisting);
+      realDeepest = realpathSync4(deepestExisting);
     } catch (e) {
       throw new StorePathContainmentError(
         `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
@@ -7407,7 +7785,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join6(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join8(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep2)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -7435,9 +7813,9 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s) => s === ".." || s === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve4(root);
+  let cursor = resolve5(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join7(cursor, part);
+    cursor = join9(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -7464,7 +7842,7 @@ function mkdirContained(root, rel) {
   for (let i = 1; i <= segments.length; i++) {
     const partial = segments.slice(0, i).join("/");
     const abs = containedPath(root, partial, "dir");
-    if (!lstatOrNull(abs)) mkdirSync2(abs);
+    if (!lstatOrNull(abs)) mkdirSync3(abs);
   }
 }
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -7559,11 +7937,11 @@ function parseOpenCodeHeader(content) {
 // scripts/lib/handoff-projection.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
-import { join as join8, resolve as resolve5 } from "node:path";
+import { join as join10, resolve as resolve6 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 var CONFIG_REL2 = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
-  const where = `${fwd(resolve5(root))}/${CONFIG_REL2}`;
+  const where = `${fwd(resolve6(root))}/${CONFIG_REL2}`;
   if (!existsContained(root, CONFIG_REL2, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
@@ -7600,7 +7978,7 @@ function trackedHandoffFiles(root, { spawn = spawnSync3 } = {}) {
   if (!existsSync7(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync7(join8(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync7(join10(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -7693,19 +8071,19 @@ function opencodeSystemDir({ env = process.env, platform = process.platform } = 
   if (platform === "darwin") return "/Library/Application Support/opencode";
   if (platform === "win32") {
     const base2 = env.ProgramData || env.PROGRAMDATA;
-    return base2 ? join9(base2, "opencode") : null;
+    return base2 ? join11(base2, "opencode") : null;
   }
   return null;
 }
-function opencodeConfigDir({ env = process.env, home = homedir3() } = {}) {
-  return join9(env.XDG_CONFIG_HOME || join9(home, ".config"), "opencode");
+function opencodeConfigDir({ env = process.env, home = homedir5() } = {}) {
+  return join11(env.XDG_CONFIG_HOME || join11(home, ".config"), "opencode");
 }
-function mcpLauncherPath({ home = homedir3() } = {}) {
-  return join9(home, ".sterling", "opencode", "sterling-mcp.mjs");
+function mcpLauncherPath({ home = homedir5() } = {}) {
+  return join11(home, ".sterling", "opencode", "sterling-mcp.mjs");
 }
-function probeOpenCode({ env = process.env, home = homedir3() } = {}) {
+function probeOpenCode({ env = process.env, home = homedir5() } = {}) {
   let r = spawnSync4("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
-  const homeBin = join9(home, ".opencode", "bin", "opencode");
+  const homeBin = join11(home, ".opencode", "bin", "opencode");
   if (r.error?.code === "ENOENT" && existsSync8(homeBin)) r = spawnSync4(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH or in ~/.opencode/bin" : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
@@ -7726,7 +8104,7 @@ var IMPORTS = [
   "import { pathToFileURL } from 'node:url';"
 ].join("\n");
 function rootExpr(pluginRoot2, installed) {
-  return installed ? "sterlingInstallRoot()" : JSON.stringify(fwd2(resolve6(pluginRoot2)));
+  return installed ? "sterlingInstallRoot()" : JSON.stringify(fwd2(resolve7(pluginRoot2)));
 }
 function notFoundLine(what, shimPath) {
   return `console.error('Sterling not found; ${what} is off. Remove ' + ${JSON.stringify(fwd2(shimPath))} + ' or reinstall Sterling (' + String((err && err.message) || err) + ')');`;
@@ -7895,7 +8273,7 @@ await import(pathToFileURL(entry).href);
 }
 function ensureStampedFile(path, content, label) {
   if (!existsSync8(path)) {
-    mkdirSync3(dirname3(path), { recursive: true });
+    mkdirSync4(dirname4(path), { recursive: true });
     writeFileSync3(path, content);
     return { item: label, status: "created" };
   }
@@ -7927,13 +8305,13 @@ var TUI_MATERIALIZED_KEEP = 2;
 var MATERIALIZED_MARKER = ".sterling-materialized.json";
 var SEMVER_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 var bytesHash = (b) => createHash4("sha256").update(b).digest("hex");
-function materializedTuiRoot({ home = homedir3() } = {}) {
-  return join9(home, ".sterling", "opencode", "tui");
+function materializedTuiRoot({ home = homedir5() } = {}) {
+  return join11(home, ".sterling", "opencode", "tui");
 }
 function materializedState(dir) {
   let marker;
   try {
-    marker = JSON.parse(readFileSync6(join9(dir, MATERIALIZED_MARKER), "utf8"));
+    marker = JSON.parse(readFileSync6(join11(dir, MATERIALIZED_MARKER), "utf8"));
   } catch (err) {
     if (err.code === "ENOENT" || err instanceof SyntaxError) return "foreign";
     throw err;
@@ -7943,27 +8321,27 @@ function materializedState(dir) {
   const extra = readdirSync4(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
   if (extra.length) return "edited";
   for (const [name, hash] of Object.entries(files)) {
-    if (!existsSync8(join9(dir, name)) || bytesHash(readFileSync6(join9(dir, name))) !== hash) return "edited";
+    if (!existsSync8(join11(dir, name)) || bytesHash(readFileSync6(join11(dir, name))) !== hash) return "edited";
   }
   return "ours";
 }
-function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = homedir3() }) {
+function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = homedir5() }) {
   void env;
   const base2 = materializedTuiRoot({ home });
-  const src = join9(pluginRoot2, "opencode", "sterling-tui");
+  const src = join11(pluginRoot2, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot2, "opencode");
   if (!v.version) return [refusal(`${fwd2(base2)}/`, `the version of ${fwd2(pluginRoot2)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
-  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync8(join9(src, f)));
+  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync8(join11(src, f)));
   if (missing.length) return [refusal(`${fwd2(base2)}/`, `${fwd2(src)} lacks ${missing.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
-  const dest = join9(base2, v.version);
+  const dest = join11(base2, v.version);
   const item = `${fwd2(dest)}/`;
-  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync6(join9(src, f))]));
+  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync6(join11(src, f))]));
   const hashes = Object.fromEntries(Object.entries(content).map(([f, b]) => [f, bytesHash(b)]));
   const write = () => {
-    mkdirSync3(dest, { recursive: true });
-    for (const [f, b] of Object.entries(content)) writeFileSync3(join9(dest, f), b);
-    writeFileSync3(join9(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
+    mkdirSync4(dest, { recursive: true });
+    for (const [f, b] of Object.entries(content)) writeFileSync3(join11(dest, f), b);
+    writeFileSync3(join11(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
   if (!existsSync8(dest)) {
@@ -7973,17 +8351,17 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
     const state = statSync3(dest).isDirectory() ? materializedState(dest) : "foreign";
     if (state === "foreign") rows.push(refusal(item, `${item} exists and Sterling did not write it`, `move it aside, then rerun /sterling:update`));
     else if (state === "edited") rows.push(refusal(item, `${item} was edited after Sterling wrote it`, `delete it so Sterling can copy the dashboard again, then rerun /sterling:update`));
-    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync6(join9(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
+    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync6(join11(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
     else {
       write();
       rows.push({ item, status: "refreshed" });
     }
   }
-  const versions = readdirSync4(base2).filter((n) => SEMVER_DIR.test(n) && statSync3(join9(base2, n)).isDirectory());
+  const versions = readdirSync4(base2).filter((n) => SEMVER_DIR.test(n) && statSync3(join11(base2, n)).isDirectory());
   versions.sort((a, b) => compareSterlingVersions(b, a));
   const keep = /* @__PURE__ */ new Set([...versions.slice(0, TUI_MATERIALIZED_KEEP), v.version]);
   for (const old of versions.filter((n) => !keep.has(n))) {
-    const dir = join9(base2, old);
+    const dir = join11(base2, old);
     const oldItem = `${fwd2(dir)}/`;
     const state = materializedState(dir);
     if (state === "ours") {
@@ -7996,7 +8374,7 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
   return rows;
 }
 function ensureTuiShim(tuiDir, shim) {
-  const pkgPath = join9(tuiDir, "package.json");
+  const pkgPath = join11(tuiDir, "package.json");
   const pkgLabel = `${fwd2(tuiDir)}/package.json`;
   const pkg = renderTuiPackageJson();
   const pkgState = existsSync8(pkgPath) && statSync3(pkgPath).isFile() ? tuiPackageState(normalize3(readFileSync6(pkgPath, "utf8"))) : null;
@@ -8013,18 +8391,18 @@ function ensureTuiShim(tuiDir, shim) {
     return [refusal(`${fwd2(tuiDir)}/`, `${fwd2(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd2(tuiDir)}/, then rerun /sterling:update`)];
   }
   const before = existsSync8(pkgPath) ? normalize3(readFileSync6(pkgPath, "utf8")) : null;
-  mkdirSync3(tuiDir, { recursive: true });
+  mkdirSync4(tuiDir, { recursive: true });
   if (before !== pkg) writeFileSync3(pkgPath, pkg);
   return [
     { item: pkgLabel, status: before === null ? "created" : before === pkg ? "matches" : "refreshed" },
-    ensureStampedFile(join9(tuiDir, "tui.tsx"), shim, `${fwd2(tuiDir)}/tui.tsx`)
+    ensureStampedFile(join11(tuiDir, "tui.tsx"), shim, `${fwd2(tuiDir)}/tui.tsx`)
   ];
 }
-function npmCopyOnMachine({ env = process.env, home = homedir3() } = {}) {
+function npmCopyOnMachine({ env = process.env, home = homedir5() } = {}) {
   const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === "opencode");
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
   const root = copies.length ? copies[copies.length - 1].root : null;
-  const path = join9(opencodeConfigDir({ env, home }), "opencode.json");
+  const path = join11(opencodeConfigDir({ env, home }), "opencode.json");
   if (!existsSync8(path)) return { root, configured: false };
   const item = `${fwd2(path)} plugins`;
   let config;
@@ -8039,17 +8417,17 @@ function npmCopyOnMachine({ env = process.env, home = homedir3() } = {}) {
 function loadedNpmCopyRoot({ env, home }) {
   return openCodeLoadedSterling(env, home).copies?.find((c) => c.root !== null)?.root ?? null;
 }
-function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir3() }) {
-  const pluginsDir = join9(opencodeConfigDir({ env, home }), "plugins");
-  const tuiDir = join9(pluginsDir, "sterling-tui");
+function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir5() }) {
+  const pluginsDir = join11(opencodeConfigDir({ env, home }), "plugins");
+  const tuiDir = join11(pluginsDir, "sterling-tui");
   const rows = [];
   const machine = npmCopyOnMachine({ env, home });
   if (machine.row) rows.push(machine.row);
   const npmRoot = loadedNpmCopyRoot({ env, home }) ?? (npmCopy ? pluginRoot2 : machine.root);
   if (npmCopy || machine.root !== null || machine.configured) {
-    rows.push(retireServerShim(join9(pluginsDir, "sterling.js")));
+    rows.push(retireServerShim(join11(pluginsDir, "sterling.js")));
   } else {
-    rows.push(ensureStampedFile(join9(pluginsDir, "sterling.js"), renderServerShim(pluginRoot2, installed, join9(pluginsDir, "sterling.js")), `${fwd2(pluginsDir)}/sterling.js`));
+    rows.push(ensureStampedFile(join11(pluginsDir, "sterling.js"), renderServerShim(pluginRoot2, installed, join11(pluginsDir, "sterling.js")), `${fwd2(pluginsDir)}/sterling.js`));
   }
   if (npmRoot !== null) {
     rows.push(...materializeTui({ pluginRoot: npmRoot, env, home }));
@@ -8067,7 +8445,7 @@ var isFile = (p) => existsSync8(p) && statSync3(p).isFile();
 function codexCandidates({ env, home }) {
   const out = [];
   const notes = [];
-  const claudeJson = join9(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+  const claudeJson = join11(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   if (isFile(claudeJson)) {
     let command;
     try {
@@ -8077,11 +8455,11 @@ function codexCandidates({ env, home }) {
     }
     if (typeof command === "string" && isAbsolute(command)) out.push(command);
   }
-  out.push(join9(home, PINNED_CODEX_REL));
-  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join9(dir, "codex"));
+  out.push(join11(home, PINNED_CODEX_REL));
+  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join11(dir, "codex"));
   return { candidates: [...new Set(out)].filter(isFile), notes };
 }
-function resolveCodexMcp({ env = process.env, home = homedir3(), nodeBinDir, spawnFn = spawnSync4 }) {
+function resolveCodexMcp({ env = process.env, home = homedir5(), nodeBinDir, spawnFn = spawnSync4 }) {
   const { candidates, notes } = codexCandidates({ env, home });
   const tried = [...notes];
   for (const command of candidates) {
@@ -8102,8 +8480,8 @@ function codexServerEntry(command, nodeBinDir) {
     timeout: { startup: 3e4, execution: 9e5 }
   };
 }
-function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = dirname3(process.execPath), spawnFn = spawnSync4 }) {
-  const path = join9(opencodeConfigDir({ env, home }), "opencode.json");
+function ensureCodexServer({ env = process.env, home = homedir5(), nodeBinDir = dirname4(process.execPath), spawnFn = spawnSync4 }) {
+  const path = join11(opencodeConfigDir({ env, home }), "opencode.json");
   const label = `${fwd2(path)} mcp.servers.codex`;
   const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
   if (!found.command) {
@@ -8132,7 +8510,7 @@ function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = 
     return { item: label, status: "skipped", detail: `kept: mcp.servers.codex is already set and differs from Sterling's (yours); Sterling's would be ${JSON.stringify(want)}${legacy}` };
   }
   config.mcp = { ...mcp, servers: { ...servers, codex: want } };
-  mkdirSync3(dirname3(path), { recursive: true });
+  mkdirSync4(dirname4(path), { recursive: true });
   writeFileSync3(path, `${JSON.stringify(config, null, 2)}
 `);
   return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd2(found.command)}${legacy}` };
@@ -8142,7 +8520,7 @@ function git(projectDir, args) {
   if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd2(projectDir)}: ${r.error.message}`);
   return r;
 }
-function mcpCommand({ home = homedir3() } = {}) {
+function mcpCommand({ home = homedir5() } = {}) {
   return ["node", "--disable-warning=ExperimentalWarning", fwd2(mcpLauncherPath({ home })), "--store", ".sterling/sterling.db"];
 }
 var EDIT_FAMILY = ["edit", "write", "patch"];
@@ -8191,12 +8569,12 @@ function guardPermission(permission) {
 }
 function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new Set() } = {}) {
   if (!existsSync8(dir)) return [];
-  const real = realpathSync4(dir);
+  const real = realpathSync5(dir);
   if (seen.has(real)) return [];
   seen.add(real);
   const files = [];
   for (const name of readdirSync4(dir)) {
-    const path = join9(dir, name);
+    const path = join11(dir, name);
     let st;
     try {
       st = statSync3(path);
@@ -8244,13 +8622,13 @@ function hasEvaluateHook(version) {
   for (let i = 0; i < 3; i++) if (Number(m[i + 1]) !== want[i]) return Number(m[i + 1]) > want[i];
   return true;
 }
-function visibleAgents({ projectDir, env = process.env, home = homedir3(), checkAgentFiles = true, systemDir = opencodeSystemDir({ env }) }) {
+function visibleAgents({ projectDir, env = process.env, home = homedir5(), checkAgentFiles = true, systemDir = opencodeSystemDir({ env }) }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
-  const dotDir = join9(projectDir, ".opencode");
+  const dotDir = join11(projectDir, ".opencode");
   const ancestors = [];
-  for (let d = dirname3(resolve6(projectDir)); ; d = dirname3(d)) {
+  for (let d = dirname4(resolve7(projectDir)); ; d = dirname4(d)) {
     ancestors.push(d);
-    if (dirname3(d) === d) break;
+    if (dirname4(d) === d) break;
   }
   const names = /* @__PURE__ */ new Set();
   const envNames = /* @__PURE__ */ new Set();
@@ -8261,13 +8639,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir3(), check
     incomplete = true;
     problems.push({ item: label, status: "skipped", detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
   };
-  for (const dir of [...systemDir ? [systemDir] : [], globalDir, dotDir, ...ancestors.map((a) => join9(a, ".opencode"))]) {
+  for (const dir of [...systemDir ? [systemDir] : [], globalDir, dotDir, ...ancestors.map((a) => join11(a, ".opencode"))]) {
     for (const [sub, flat] of [["agent", false], ["agents", false], ["mode", true], ["modes", true]]) {
       let files;
       try {
-        files = agentFiles(join9(dir, sub), { flat });
+        files = agentFiles(join11(dir, sub), { flat });
       } catch (err) {
-        unreadable(fwd2(join9(dir, sub)), err);
+        unreadable(fwd2(join11(dir, sub)), err);
         continue;
       }
       if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name), paths: Object.fromEntries(files.map((f) => [f.name, f.path])) });
@@ -8288,16 +8666,16 @@ function visibleAgents({ projectDir, env = process.env, home = homedir3(), check
     }
   }
   const docs = [
-    ...systemDir ? ["opencode.json", "opencode.jsonc"].map((f) => join9(systemDir, f)) : [],
-    ...["opencode.json", "opencode.jsonc"].map((f) => join9(globalDir, f)),
-    ...["opencode.json", "opencode.jsonc"].map((f) => join9(projectDir, f)),
-    join9(dotDir, "opencode.jsonc"),
-    ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join9(a, f))),
+    ...systemDir ? ["opencode.json", "opencode.jsonc"].map((f) => join11(systemDir, f)) : [],
+    ...["opencode.json", "opencode.jsonc"].map((f) => join11(globalDir, f)),
+    ...["opencode.json", "opencode.jsonc"].map((f) => join11(projectDir, f)),
+    join11(dotDir, "opencode.jsonc"),
+    ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join11(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
   ].map((path) => ({ label: fwd2(path), path, read: () => existsSync8(path) ? readFileSync6(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
-  const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd2(join9(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
-  const late2 = /* @__PURE__ */ new Set([fwd2(join9(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
+  const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd2(join11(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
+  const late2 = /* @__PURE__ */ new Set([fwd2(join11(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   for (const doc of docs) {
     let text;
     try {
@@ -8335,9 +8713,9 @@ function guardNativeRules(rules) {
   const isGuard = (r) => guard.some((g) => JSON.stringify(g) === JSON.stringify(r));
   return { value: [...(rules ?? []).filter((r) => !isGuard(r)), ...guard] };
 }
-function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(), tracked, conductorOk = true, opencodeVersion, systemDir }) {
+function ensureProjectConfig({ projectDir, env = process.env, home = homedir5(), tracked, conductorOk = true, opencodeVersion, systemDir }) {
   const rel = PROJECT_CONFIG_REL;
-  const path = join9(projectDir, rel);
+  const path = join11(projectDir, rel);
   if (tracked.includes(rel)) {
     return [refusal(rel, `${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config)`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`)];
   }
@@ -8430,7 +8808,7 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(),
   else if (config.default_agent !== CONDUCTOR_AGENT) notes.push(`default_agent kept as ${JSON.stringify(config.default_agent)} (yours), so OpenCode does not start in ${CONDUCTOR_AGENT}`);
   const after = projectConfigText(config);
   if (after === before) return [{ item: rel, status: "matches", detail: notes.join("; ") }, ...extraRows];
-  mkdirSync3(dirname3(path), { recursive: true });
+  mkdirSync4(dirname4(path), { recursive: true });
   writeFileAtomic(path, after);
   return [{ item: rel, status: before === null ? "created" : "refreshed", detail: ["store-guard edit deny, default_agent", ...notes].join("; ") }, ...extraRows];
 }
@@ -8438,7 +8816,7 @@ function excludeLines(wholeDir, ownAgentPaths) {
   return wholeDir ? ["/.opencode/"] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`, ...ownAgentPaths.map((rel) => `/${rel}`)];
 }
 function opencodeOwnAgentPaths(pluginRoot2 = sterlingRootFrom()) {
-  return loadRegistry(join9(pluginRoot2, "agent-templates", "registry.json")).agents.filter((a) => a.opencode_full).map((a) => a.opencode_full.path);
+  return loadRegistry(join11(pluginRoot2, "agent-templates", "registry.json")).agents.filter((a) => a.opencode_full).map((a) => a.opencode_full.path);
 }
 function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [], ownAgentPaths = opencodeOwnAgentPaths() }) {
   const label = ".git/info/exclude";
@@ -8447,7 +8825,7 @@ function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [], ownAg
   const want = [EXCLUDE_BEGIN, ...lines, EXCLUDE_END].join("\n");
   const gp = git(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
-  const excludePath = resolve6(projectDir, gp.stdout.trim());
+  const excludePath = resolve7(projectDir, gp.stdout.trim());
   const current = existsSync8(excludePath) ? normalize3(readFileSync6(excludePath, "utf8")) : "";
   const begin = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END);
@@ -8462,7 +8840,7 @@ function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [], ownAg
   if (probe.checked && probe.ignored.length === probePaths.length) {
     return { item: label, status: "matches", detail: `already ignored (${[...new Set(probe.ignored.map((i) => i.rule))].join("; ")})` };
   }
-  mkdirSync3(dirname3(excludePath), { recursive: true });
+  mkdirSync4(dirname4(excludePath), { recursive: true });
   const sep3 = current === "" || current.endsWith("\n") ? "" : "\n";
   writeFileSync3(excludePath, `${current}${sep3}${want}
 `);
@@ -8477,10 +8855,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync6(join9(pluginRoot2, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync6(join11(pluginRoot2, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join9(pluginRoot2, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join11(pluginRoot2, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -8495,7 +8873,7 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 function configuredFullAgentModels(projectDir) {
-  const where = fwd2(join9(projectDir, ".sterling", "config.json"));
+  const where = fwd2(join11(projectDir, ".sterling", "config.json"));
   const leave = (why) => ({
     refused: {
       item: ".sterling/config.json models",
@@ -8507,7 +8885,7 @@ function configuredFullAgentModels(projectDir) {
   });
   let raw;
   try {
-    raw = JSON.parse(readFileSync6(join9(projectDir, ".sterling", "config.json"), "utf8"));
+    raw = JSON.parse(readFileSync6(join11(projectDir, ".sterling", "config.json"), "utf8"));
   } catch (err) {
     return leave(err.code === "ENOENT" ? `${where} does not exist` : `${where} could not be read (${err.message})`);
   }
@@ -8528,10 +8906,10 @@ function configuredFullAgentModels(projectDir) {
   return { models };
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
-  const start = dirname3(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname3(dir)) {
-    if (existsSync8(join9(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname3(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname4(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname4(dir)) {
+    if (existsSync8(join11(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
@@ -8608,13 +8986,13 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
-  const registry = loadRegistry(join9(pluginRoot2, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join11(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot2) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join9(projectDir, rel);
-    const templateContent = readFileSync6(join9(pluginRoot2, "agent-templates", entry.file), "utf8");
+    const path = join11(projectDir, rel);
+    const templateContent = readFileSync6(join11(pluginRoot2, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
@@ -8659,7 +9037,7 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
-      mkdirSync3(dirname3(w.path), { recursive: true });
+      mkdirSync4(dirname4(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
     }
@@ -8684,7 +9062,7 @@ function restoreFullAgentFiles(writes, fs = {}) {
   }
   if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
 }
-function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir3(), installed, probe = probeOpenCode }) {
+function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir5(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
   const configDir = storeRootFor(projectDir);
   if (env.STERLING_OPENCODE_SETUP_DISABLE === "1") return { skipped: "Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)" };
@@ -8804,8 +9182,8 @@ function hasFlag(name, argv = process.argv.slice(2)) {
 }
 
 // scripts/open-session.mjs
-var here = dirname4(fileURLToPath2(new URL("../scripts/open-session.mjs", import.meta.url).href));
-var pluginRoot = resolve7(here, "..");
+var here = dirname5(fileURLToPath2(new URL("../scripts/open-session.mjs", import.meta.url).href));
+var pluginRoot = resolve8(here, "..");
 var SessionRefusal = class extends Error {
   constructor(message, exit = 2) {
     super(message);
@@ -8829,10 +9207,10 @@ function resolveMainCheckout(target) {
   const top = git3(target, ["rev-parse", "--show-toplevel"]);
   if (top.status !== 0) throw new SessionRefusal(`${target} is not inside a git repository (${top.stderr.split("\n")[0]}); a parallel session needs one`);
   const linked = resolveLinkedWorktree(target);
-  return linked ? linked.mainRoot : realpathSync5(top.stdout);
+  return linked ? linked.mainRoot : realpathSync6(top.stdout);
 }
 function worktreePathFor(mainRoot, label) {
-  return join10(dirname4(mainRoot), `${basename4(mainRoot)}.worktrees`, label);
+  return join12(dirname5(mainRoot), `${basename4(mainRoot)}.worktrees`, label);
 }
 function checkLabel(label) {
   if (!LABEL_SHAPE.test(label)) {
@@ -8863,9 +9241,9 @@ function openSession({ target, name, setup = setupOpenCode, pluginRootDir = plug
     throw new SessionRefusal(`REFUSED: the branch ${branch} already exists; pick another --name, or delete the branch (git branch -d ${branch}) if it is finished`);
   }
   const base2 = defaultBranch(mainRoot);
-  mkdirSync4(dirname4(path), { recursive: true });
+  mkdirSync5(dirname5(path), { recursive: true });
   gitOrThrow(mainRoot, ["worktree", "add", "-b", branch, path, base2]);
-  const mainConfig = join10(mainRoot, ".sterling", "config.json");
+  const mainConfig = join12(mainRoot, ".sterling", "config.json");
   let copied = null;
   let result;
   try {
@@ -8911,23 +9289,86 @@ commit or discard them (the session's work is not lost until you do), then rerun
   }
   return { path, branch, branchKept };
 }
+function registeredProjects() {
+  const registry = new ProjectRegistry();
+  try {
+    return registry.list();
+  } finally {
+    registry.close();
+  }
+}
+var isDirectory = (p) => existsSync9(p) && statSync4(p).isDirectory();
+function resolveTarget(value, { cwd = process.cwd(), projects = registeredProjects } = {}) {
+  const asPath = resolve8(cwd, value);
+  const dir = isDirectory(asPath);
+  const explicitPath = /[\\/]/.test(value) || value === "." || value === "..";
+  if (dir && explicitPath) return asPath;
+  const matches = projects().filter((r) => r.name === value);
+  const roots = [...new Set(matches.map((r) => r.repo_path))];
+  if (dir) {
+    const other = roots.filter((root) => !isDirectory(root) || realpathSync6(root) !== realpathSync6(asPath));
+    if (other.length === 0) return asPath;
+    throw new SessionRefusal(`REFUSED: --target '${value}' is both a directory here (${asPath}) and a registered project (${other.join(", ")}); pass a path with a separator (./${value}) or the registered root to say which`);
+  }
+  if (roots.length === 1) return roots[0];
+  if (roots.length > 1) throw new SessionRefusal(`REFUSED: --target '${value}' names ${roots.length} registered projects (${roots.join(", ")}); pass the path of the one you mean`);
+  throw new SessionRefusal(`REFUSED: --target '${value}' is neither a directory (no such directory: ${asPath}) nor a registered project (no such registered project; run list-projects.mjs to see them)`);
+}
+function runOpencode(args) {
+  let last;
+  for (const bin of ["opencode", join12(homedir6(), ".opencode", "bin", "opencode")]) {
+    last = spawnSync6(bin, args, { encoding: "utf8", timeout: 3e4 });
+    if (last.error?.code !== "ENOENT") break;
+  }
+  return { status: last.status, stdout: last.stdout ?? "", stderr: last.stderr ?? "", error: last.error };
+}
+var AGENT = "sterling/conductor";
+function createOpencodeSession({ path, title, run = runOpencode }) {
+  const body = { location: { directory: path }, title, agent: AGENT };
+  const r = run(["api", "POST", "/api/session", "-d", JSON.stringify(body)]);
+  const serverText = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();
+  let why;
+  let uncertain = false;
+  if (r.error) why = `${r.error.code ?? r.error.message}${r.error.code ? ` (${r.error.message})` : ""}${serverText ? `: ${serverText}` : ""}`;
+  else if (r.status !== 0) why = `exit ${r.status}${serverText ? `: ${serverText}` : ""}`;
+  else {
+    uncertain = true;
+    let id;
+    try {
+      id = JSON.parse(r.stdout)?.data?.id;
+    } catch (e) {
+      why = `the response was not JSON (${e.message})${serverText ? `: ${serverText}` : ""}`;
+    }
+    if (why === void 0) {
+      if (typeof id === "string" && id) return { id };
+      why = `the response has no data.id${serverText ? `: ${serverText}` : ""}`;
+    }
+  }
+  throw new SessionRefusal(`REFUSED: --create-session could not create the OpenCode session (${why}). The worktree ${path} was created and is kept.${uncertain ? " The server answered success, so a session MAY have been created anyway: check the OpenCode session list before retrying." : ""} Start the OpenCode server with \`opencode service start\` and retry, or start it by hand: cd "${path}" && opencode`);
+}
 function usage(msg) {
   console.error(`open-session: ${msg}
-usage: open-session.mjs [--target <project>] [--name <label>]
-       open-session.mjs [--target <project>] --remove <label>`);
+usage: open-session.mjs [--target <project-name|path>] [--name <label>] [--create-session]
+       open-session.mjs [--target <project-name|path>] --remove <label>`);
   process.exit(1);
 }
 function parseArgs(argv) {
   const known = ["--target", "--name", "--remove"];
+  const bool = ["--create-session"];
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if (!tok.startsWith("--")) usage(`unexpected argument '${tok}'`);
     const flag = tok.split("=")[0];
+    if (bool.includes(flag)) {
+      if (tok.includes("=")) usage(`${flag} takes no value`);
+      continue;
+    }
     if (!known.includes(flag)) usage(`unrecognized argument '${tok}'`);
     if (!tok.includes("=")) i++;
   }
-  const opts = { target: process.cwd(), name: void 0, remove: void 0 };
+  const opts = { target: process.cwd(), name: void 0, remove: void 0, createSession: false };
   try {
+    opts.createSession = hasFlag("--create-session", argv);
     for (const flag of known) {
       const value = arg(flag, argv);
       if (value === void 0) {
@@ -8935,14 +9376,19 @@ function parseArgs(argv) {
         continue;
       }
       if (value === "") usage(`${flag} requires a value`);
-      if (flag === "--target") opts.target = resolve7(value);
+      if (flag === "--target") opts.target = resolveTarget(value);
       else if (flag === "--name") opts.name = value;
       else opts.remove = value;
     }
   } catch (err) {
+    if (err instanceof SessionRefusal) {
+      console.error(err.message);
+      process.exit(err.exit);
+    }
     usage(err.message);
   }
   if (opts.remove !== void 0 && opts.name !== void 0) usage("--remove and --name cannot be combined");
+  if (opts.remove !== void 0 && opts.createSession) usage("--remove and --create-session cannot be combined");
   return opts;
 }
 function main() {
@@ -8967,24 +9413,33 @@ ${p}
       console.error(`The worktree exists but OpenCode is NOT ready in it. Fix the above, then run --remove ${label} and open the session again.`);
       process.exit(2);
     }
+    let startCmd = "opencode";
+    if (opts.createSession) {
+      const made = createOpencodeSession({ path, title: `${basename4(mainRoot)} ${label}` });
+      console.log(`session: ${made.id}`);
+      startCmd = `opencode --session ${made.id}`;
+    }
     console.log(`
 Start the session in the worktree (never move an existing session into it):
-  cd "${path}" && opencode`);
+  cd "${path}" && ${startCmd}`);
     console.log("Parallel sessions share the main checkout's board: claim a board task before working on it, so another session does not take the same one.");
-    console.log(`When the session is finished and its work is merged: node "${join10(pluginRoot, "bin", "open-session.mjs")}" --target "${mainRoot}" --remove ${label}`);
+    console.log(`When the session is finished and its work is merged: node "${join12(pluginRoot, "bin", "open-session.mjs")}" --target "${mainRoot}" --remove ${label}`);
   } catch (err) {
     if (!(err instanceof SessionRefusal)) throw err;
     console.error(err.message);
     process.exit(err.exit);
   }
 }
-var launchedAs = process.argv[1] && resolve7(process.argv[1]);
+var launchedAs = process.argv[1] && resolve8(process.argv[1]);
 if (launchedAs === fileURLToPath2(new URL("../scripts/open-session.mjs", import.meta.url).href) || launchedAs === fileURLToPath2(new URL("../bin/open-session.mjs", new URL("../scripts/open-session.mjs", import.meta.url).href))) main();
 export {
   SessionRefusal,
+  createOpencodeSession,
   openSession,
   removeSession,
   resolveMainCheckout,
+  resolveTarget,
+  runOpencode,
   worktreePathFor
 };
 /*! Bundled license information:

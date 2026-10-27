@@ -383,6 +383,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'close it with `board_remove` and a `note`, plus `evidence`',
     after: 'close it with `board_remove`, its `outcome` and a `note`, plus `evidence`',
   },
+  {
+    commit: 'board c3224327',
+    date: '2026-10-27',
+    reason: 'new bullet: reaffirm every held board claim when a lane lands and before a background wait that may outlast a quarter of the lease (CH.Core pilot defect 6; user-ruled 2026-10-27 through the question form, "Conductor rule only")',
+    before: 'polls in five days).\n',
+    after: 'polls in five days).\n- Keep your board claims alive while you wait. Each time a lane lands, and before you start a background wait (a lane or a long shell) that may outlast a quarter of the claim lease (`board_claims.lease_minutes`, 60 by default), call `board_reaffirm` for every item this session holds; a `board_update` naming `session` also renews, at most once per quarter lease. A claim not renewed for the full lease shows as "check owner" and any session may take it over (decision `board-task-claims-for-parallel-sessions-claim-generation-ren`; CH.Core pilot, 2026-10-27: a conductor waited on a long background lane without renewing, the 60-minute lease expired, and another session took the item over while uncommitted work existed; user-ruled 2026-10-27 through the question form, "Conductor rule only (Recommended)").\n',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
