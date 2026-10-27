@@ -59,7 +59,7 @@ function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync2, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { delimiter, dirname as dirname2, join as join3 } from "node:path";
+import { dirname as dirname2, join as join3 } from "node:path";
 function gh(cwd, args, timeoutMs = 12e4) {
   return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }

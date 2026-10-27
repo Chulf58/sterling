@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SterlingStore, readBoardSnapshot, BoardSnapshotError } from '../index.js';
+import { SterlingStore, SqliteDriver, readBoardSnapshot, BoardSnapshotError } from '../index.js';
 import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-10-27T12:00:00.000Z';
@@ -56,8 +56,8 @@ test('remove with a removal journals a user task as it was, with outcome, eviden
     p.store.remove(a.id, NOW, { outcome: 'done', evidence: { commit: '1a2b3c' }, note: 'shipped' });
     p.store.remove(b.id, LATER, { outcome: 'duplicate' });
     assert.deepEqual(p.store.boardRemovalJournal(), [
-      { seq: 1, item_id: a.id, slug: 'ship-export', text: 'Ship export', source: 'user', objective: 'exports', priority: 'high', outcome: 'done', evidence: { commit: '1a2b3c' }, note: 'shipped', removed_at: NOW },
-      { seq: 2, item_id: b.id, text: 'Old idea', source: 'user', outcome: 'duplicate', removed_at: LATER },
+      { seq: 1, item_id: a.id, slug: 'ship-export', text: 'Ship export', source: 'user', objective: 'exports', priority: 'high', outcome: 'done', evidence: { commit: '1a2b3c' }, note: 'shipped', removed_at: NOW, handoff_role: 'none' },
+      { seq: 2, item_id: b.id, text: 'Old idea', source: 'user', outcome: 'duplicate', removed_at: LATER, handoff_role: 'none' },
     ]);
     assert.equal(p.store.get(a.id), undefined);
   } finally {
@@ -304,7 +304,7 @@ const JOURNAL_0_19_130 = `CREATE TABLE board_removal_journal (
   objective TEXT, priority TEXT, outcome TEXT NOT NULL, evidence TEXT, note TEXT, removed_at TEXT NOT NULL
 )`;
 
-test('the journal row records the removed todo\'s hand-off role, and the sending project for a received item', SQLITE, () => {
+test('the journal row records the removed todo\'s hand-off role (none for a plain task), and the sending project for a received item', SQLITE, () => {
   const p = project();
   try {
     const recv = mk(p.store, { text: 'From CH.Hub: a task', handoff: RECEIVED });
@@ -316,11 +316,12 @@ test('the journal row records the removed todo\'s hand-off role, and the sending
     assert.equal(byId.get(recv.id)?.handoff_from_name, 'CH.Hub');
     assert.equal(byId.get(tracker.id)?.handoff_role, 'sent');
     assert.equal(byId.get(tracker.id)?.handoff_from_name, undefined, 'a tracker names no sending project');
-    assert.equal('handoff_role' in byId.get(plain.id)!, false);
+    assert.equal(byId.get(plain.id)?.handoff_role, 'none', 'a plain task is told apart from a row written before the column');
     assert.equal('handoff_from_name' in byId.get(plain.id)!, false);
     const snap = new Map(readBoardSnapshot(p.root).journal.map((e) => [e.item_id, e]));
     assert.deepEqual(snap.get(recv.id), byId.get(recv.id));
     assert.deepEqual(snap.get(tracker.id), byId.get(tracker.id));
+    assert.deepEqual(snap.get(plain.id), byId.get(plain.id));
   } finally {
     p.cleanup();
   }
@@ -361,6 +362,70 @@ test('additive: a 0.19.130 journal table gains the hand-off columns on the next 
     p.store.close();
     p.store = new SterlingStore(p.dbPath);
     assert.equal(p.store.boardRemovalJournal().length, 2, 'a second open finds the columns already there');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('additive: a failure adding the hand-off columns is not swallowed', SQLITE, () => {
+  const p = project();
+  try {
+    p.store.close();
+    const db = new DatabaseSync(p.dbPath);
+    db.exec('DROP TABLE board_removal_journal');
+    db.exec(JOURNAL_0_19_130);
+    db.close();
+    const driver = new SqliteDriver(p.dbPath);
+    try {
+      // An ALTER that fails for a reason other than an existing column (here an injected I/O error) must reach the caller.
+      const handle = (driver as unknown as { db: { exec: (sql: string) => void } }).db;
+      const exec = handle.exec.bind(handle);
+      handle.exec = (sql: string) => {
+        if (/ALTER TABLE board_removal_journal ADD COLUMN/.test(sql)) throw new Error('injected disk I/O error');
+        exec(sql);
+      };
+      assert.throws(() => driver.prepareWritable(false), /injected disk I\/O error/);
+    } finally {
+      driver.close();
+    }
+    p.store = new SterlingStore(p.dbPath);
+    assert.deepEqual(p.store.boardRemovalJournal(), [], 'a normal open afterwards adds the columns');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('additive: a column another opener adds between the check and the ALTER is not an error', SQLITE, () => {
+  const p = project();
+  try {
+    p.store.close();
+    const db = new DatabaseSync(p.dbPath);
+    db.exec('DROP TABLE board_removal_journal');
+    db.exec(JOURNAL_0_19_130);
+    db.close();
+    const driver = new SqliteDriver(p.dbPath);
+    try {
+      // The interleaving: the column lands (as another opener's ALTER would) after table_info was read and
+      // before this opener's ALTER runs, so that ALTER fails with 'duplicate column name'.
+      const handle = (driver as unknown as { db: { exec: (sql: string) => void } }).db;
+      const exec = handle.exec.bind(handle);
+      let raced = 0;
+      handle.exec = (sql: string) => {
+        if (/ALTER TABLE board_removal_journal ADD COLUMN handoff_role/.test(sql)) {
+          raced++;
+          exec(sql);
+        }
+        exec(sql);
+      };
+      driver.prepareWritable(false);
+      assert.equal(raced, 1, 'the injected interleaving ran');
+    } finally {
+      driver.close();
+    }
+    p.store = new SterlingStore(p.dbPath);
+    const t = mk(p.store, { text: 'Received', handoff: { role: 'received', transfer_id: randomUUID(), from_root: '/x', from_name: 'CH.Hub', from_item_id: randomUUID() } });
+    p.store.remove(t.id, NOW, { outcome: 'done' });
+    assert.equal(p.store.boardRemovalJournal()[0].handoff_from_name, 'CH.Hub', 'both columns exist after the raced open');
   } finally {
     p.cleanup();
   }

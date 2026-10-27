@@ -4657,7 +4657,13 @@ var boardRemovalJournalEntrySchema = external_exports.object({
   outcome: boardRemovalOutcomeSchema,
   evidence: handoffEvidenceSchema.optional(),
   note: external_exports.string().min(1).optional(),
-  removed_at: external_exports.string().min(1)
+  removed_at: external_exports.string().min(1),
+  // The removed todo's hand-off role ('none' for a task that was no
+  // hand-off) and, for a received item, the sending project
+  // (todoHandoffSchema's role and from_name). Both are absent only on rows
+  // journaled before the store kept them (Sterling 0.19.130).
+  handoff_role: external_exports.enum(["sent", "received", "none"]).optional(),
+  handoff_from_name: external_exports.string().min(1).optional()
 }).strict();
 var handoffEvidenceFileSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
@@ -6642,8 +6648,12 @@ CREATE TABLE IF NOT EXISTS ${s2}.board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
+ALTER TABLE ${s2}.board_removal_journal ADD COLUMN IF NOT EXISTS handoff_role TEXT;
+ALTER TABLE ${s2}.board_removal_journal ADD COLUMN IF NOT EXISTS handoff_from_name TEXT;
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON ${s2}.board_removal_journal (item_id);
 `;
 }
@@ -8190,11 +8200,17 @@ function journalRowToEntry(row) {
     outcome: row.outcome,
     ...evidence !== void 0 ? { evidence } : {},
     ...row.note !== null ? { note: row.note } : {},
-    removed_at: row.removed_at
+    removed_at: row.removed_at,
+    ...row.handoff_role !== null ? { handoff_role: row.handoff_role } : {},
+    ...row.handoff_from_name !== null ? { handoff_from_name: row.handoff_from_name } : {}
   });
   return parsed.success ? parsed.data : parsed.error.issues.map((i) => `${i.path.join(".") || "(row)"}: ${i.message}`).join("; ");
 }
-var JOURNAL_SELECT = "SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at FROM board_removal_journal ORDER BY seq ASC";
+function journalSelect(withHandoff = true) {
+  const handoff = withHandoff ? "handoff_role, handoff_from_name" : "NULL AS handoff_role, NULL AS handoff_from_name";
+  return `SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, ${handoff} FROM board_removal_journal ORDER BY seq ASC`;
+}
+var JOURNAL_SELECT = journalSelect();
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -8319,7 +8335,11 @@ CREATE TABLE IF NOT EXISTS store_meta (
 -- board-remove-records-outcome-and-evidence-in-a-removal-journal): one row per
 -- removed user task, written in remove()'s transaction and never pruned.
 -- Additive like store_meta: CREATE IF NOT EXISTS on every v2 open, no
--- user_version bump. evidence is JSON text or NULL.
+-- user_version bump. evidence is JSON text or NULL. handoff_role ('sent',
+-- 'received', or 'none' for a task that was no hand-off) and handoff_from_name
+-- (the sending project, received items only) copy the removed todo's handoff
+-- field; both are NULL only on rows written before the columns existed
+-- (createSchema adds them to a table made by 0.19.130).
 CREATE TABLE IF NOT EXISTS board_removal_journal (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id TEXT NOT NULL,
@@ -8331,7 +8351,9 @@ CREATE TABLE IF NOT EXISTS board_removal_journal (
   outcome TEXT NOT NULL,
   evidence TEXT,
   note TEXT,
-  removed_at TEXT NOT NULL
+  removed_at TEXT NOT NULL,
+  handoff_role TEXT,
+  handoff_from_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journal(item_id);
 `;
@@ -8561,6 +8583,18 @@ var SqliteDriver = class {
     } catch {
     }
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
+    const journalColumns = () => new Set(this.db.prepare("PRAGMA table_info(board_removal_journal)").all().map((c) => c.name));
+    const present = journalColumns();
+    for (const column of ["handoff_role", "handoff_from_name"]) {
+      if (present.has(column))
+        continue;
+      try {
+        this.db.exec(`ALTER TABLE board_removal_journal ADD COLUMN ${column} TEXT`);
+      } catch (e) {
+        if (!journalColumns().has(column))
+          throw e;
+      }
+    }
   }
   /**
    * PRAGMA journal_mode=WAL on a fresh file, which several openers may try at
@@ -11113,7 +11147,10 @@ var SterlingStore = class _SterlingStore {
         if (!record || record.type !== "todo" || record.source !== "user") {
           throw new Error(`remove: '${id}' is ${record ? record.type === "todo" ? `a ${record.source ?? "sourceless"} todo` : `a ${record.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);
         }
-        this.db.prepare("INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, typeof record.slug === "string" && record.slug.length > 0 ? record.slug : null, record.text ?? "", "user", typeof record.objective === "string" && record.objective.length > 0 ? record.objective : null, typeof record.priority === "string" && record.priority.length > 0 ? record.priority : null, checkedRemoval.outcome, checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null, checkedRemoval.note ?? null, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
+        const handoff = record.handoff;
+        const handoffRole = handoff?.role === "sent" || handoff?.role === "received" ? handoff.role : "none";
+        const handoffFrom = handoffRole === "received" && typeof handoff?.from_name === "string" && handoff.from_name.length > 0 ? handoff.from_name : null;
+        this.db.prepare("INSERT INTO board_removal_journal (item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, handoff_role, handoff_from_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(record.id, typeof record.slug === "string" && record.slug.length > 0 ? record.slug : null, record.text ?? "", "user", typeof record.objective === "string" && record.objective.length > 0 ? record.objective : null, typeof record.priority === "string" && record.priority.length > 0 ? record.priority : null, checkedRemoval.outcome, checkedRemoval.evidence ? JSON.stringify(checkedRemoval.evidence) : null, checkedRemoval.note ?? null, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), handoffRole, handoffFrom);
       }
       if (isSystemDrain && record) {
         this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);

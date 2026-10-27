@@ -4655,7 +4655,13 @@ var boardRemovalJournalEntrySchema = external_exports.object({
   outcome: boardRemovalOutcomeSchema,
   evidence: handoffEvidenceSchema.optional(),
   note: external_exports.string().min(1).optional(),
-  removed_at: external_exports.string().min(1)
+  removed_at: external_exports.string().min(1),
+  // The removed todo's hand-off role ('none' for a task that was no
+  // hand-off) and, for a received item, the sending project
+  // (todoHandoffSchema's role and from_name). Both are absent only on rows
+  // journaled before the store kept them (Sterling 0.19.130).
+  handoff_role: external_exports.enum(["sent", "received", "none"]).optional(),
+  handoff_from_name: external_exports.string().min(1).optional()
 }).strict();
 var handoffEvidenceFileSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
@@ -5664,6 +5670,13 @@ import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+
+// packages/store/dist/board-snapshot.js
+function journalSelect(withHandoff = true) {
+  const handoff = withHandoff ? "handoff_role, handoff_from_name" : "NULL AS handoff_role, NULL AS handoff_from_name";
+  return `SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, ${handoff} FROM board_removal_journal ORDER BY seq ASC`;
+}
+var JOURNAL_SELECT = journalSelect();
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";

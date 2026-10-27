@@ -4653,7 +4653,13 @@ var boardRemovalJournalEntrySchema = external_exports.object({
   outcome: boardRemovalOutcomeSchema,
   evidence: handoffEvidenceSchema.optional(),
   note: external_exports.string().min(1).optional(),
-  removed_at: external_exports.string().min(1)
+  removed_at: external_exports.string().min(1),
+  // The removed todo's hand-off role ('none' for a task that was no
+  // hand-off) and, for a received item, the sending project
+  // (todoHandoffSchema's role and from_name). Both are absent only on rows
+  // journaled before the store kept them (Sterling 0.19.130).
+  handoff_role: external_exports.enum(["sent", "received", "none"]).optional(),
+  handoff_from_name: external_exports.string().min(1).optional()
 }).strict();
 var handoffEvidenceFileSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),

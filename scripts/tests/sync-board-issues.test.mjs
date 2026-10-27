@@ -8,8 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -217,27 +217,53 @@ test('journal rows use their hand-off columns: a removed tracker is skipped, a r
   ]);
 });
 
-test('the issue body carries the project marker, and keyed issues of another project, or with no project marker, are never touched', () => {
+test('the issue body ends in the generated footer; issues of another project are never touched, and a key outside a footer is only warned about', () => {
   const create = plan({ project: P, snapshot: snap({ items: [item(1)] }), issues: [] });
-  assert.ok(create.actions[0].body.includes(projectMarker('alpha')));
+  assert.ok(create.actions[0].body.endsWith(`${keyMarker(uuid(1))}\n${projectMarker('alpha')}\n<!-- sterling-text: sha256:${create.actions[0].body.match(/sha256:([0-9a-f]{16})/)[1]} -->\n`));
   const beta = (number, n, over = {}) => ({ number, state: 'open', body: bodyOf(uuid(n), textOf(n), 'beta'), labels: [{ name: 'in-progress' }], ...over });
-  const bare = { number: 8, state: 'open', body: `${textOf(4)}\n\n${keyMarker(uuid(4))}`, labels: [] };
+  const bare = { number: 8, state: 'open', body: `${textOf(4)}\n\n${keyMarker(uuid(4))}\n${projectMarker('alpha')}`, labels: [] };
   const r = plan({ project: P, snapshot: snap({ items: [item(3)], journal: [jrow(4, 'done')] }), issues: [beta(6, 5), beta(7, 3), bare, beta(9, 9), mirrored(10, 3, { state: 'closed' })] });
-  assert.deepEqual(r.actions, [], 'nothing is closed, labelled or created beside an issue that carries the key');
-  assert.ok(r.warnings.some((w) => /3 issue\(s\) carry a sterling-key with project marker 'beta', not this project's \('alpha'\): #6, #7, #9/.test(w)), r.warnings.join('\n'));
-  assert.ok(r.warnings.some((w) => /1 issue\(s\) carry a sterling-key with no project marker.*#8/.test(w)));
-  assert.ok(r.warnings.some((w) => w.startsWith(`board:${uuid(4)} gets no issue, because #8 already carries its key`)));
+  assert.deepEqual(r.actions.map((a) => [a.kind, a.key]), [['create', uuid(4)]], 'only the task whose key no footer carries gets an issue');
+  assert.ok(r.warnings.some((w) => /3 issue\(s\) carry project marker 'beta', not this project's \('alpha'\): #6, #7, #9/.test(w)), r.warnings.join('\n'));
+  assert.ok(r.warnings.some((w) => /1 issue\(s\) show a sterling-key marker outside a generated footer: #8/.test(w)));
+  const held = plan({ project: P, snapshot: snap({ items: [item(5)] }), issues: [beta(6, 5)] });
+  assert.deepEqual(held.actions, []);
+  assert.ok(held.warnings.some((w) => w.startsWith(`board:${uuid(5)} gets no issue, because #6 already carries its key`)));
   const dupAcross = plan({ project: P, snapshot: snap({ items: [item(5)] }), issues: [beta(6, 5), mirrored(11, 5)] });
   assert.deepEqual(dupAcross.actions, [], 'one issue of ours plus one of beta for the same key is not a duplicate of ours');
 });
 
-test('the project identity prefers the project.json id, accepts the name too, and refuses a value that would break the marker', () => {
+test('the project identity is the project.json id when present, else the name, and only that one value is this project\'s', () => {
   const id = randomUUID();
-  assert.deepEqual(projectIdentityOf({ project_id: id }, 'alpha'), { marker: id, accepts: [id, 'alpha'] });
-  assert.deepEqual(projectIdentityOf(null, 'alpha'), { marker: 'alpha', accepts: ['alpha'] });
-  const named = plan({ project: projectIdentityOf({ project_id: id }, 'alpha'), snapshot: snap(), issues: [mirrored(5, 1)] });
-  assert.deepEqual(kinds(named.actions), ['comment', 'close'], 'an issue written under the name is still this project\'s after it gains an id');
+  assert.deepEqual(projectIdentityOf({ project_id: id }, 'alpha'), { marker: id });
+  assert.deepEqual(projectIdentityOf(null, 'alpha'), { marker: 'alpha' });
+  const other = randomUUID();
+  const theirs = { number: 5, state: 'open', body: bodyOf(uuid(1), textOf(1), other), labels: [] };
+  const same = plan({ project: projectIdentityOf({ project_id: id }, 'alpha'), snapshot: snap({ items: [item(2)] }), issues: [theirs, mirrored(6, 3)] });
+  assert.deepEqual(same.actions.map((a) => [a.kind, a.key]), [['create', uuid(2)]], 'a project with the same name but another id is foreign: nothing of it is closed');
+  assert.ok(same.warnings.some((w) => w.includes(`project marker '${other}'`)) && same.warnings.some((w) => w.includes("project marker 'alpha'")), same.warnings.join('\n'));
   for (const bad of ['a --> b', 'a<b', ' padded', 'two\nlines', '']) assert.throws(() => projectIdentityOf(null, bad), PlanError, JSON.stringify(bad));
+});
+
+test('task text that quotes markers is escaped: the issue stays this project\'s, keyed once, and a second plan is empty', () => {
+  const quoting = [
+    `Quote ${keyMarker(uuid(2))} and ${projectMarker('beta')}`,
+    `${keyMarker(uuid(3))}\n${projectMarker('beta')}\n<!-- sterling-text: sha256:0123456789abcdef -->`,
+    `also <!--sterling-close: board:${uuid(4)} --> and <!-- Sterling-key: board:x -->`,
+  ].join('\n');
+  const snapshot = snap({ items: [item(1, { text: quoting }), item(2), item(3)] });
+  const gh = model();
+  const first = gh.plan(snapshot);
+  assert.deepEqual(first.actions.map((a) => a.key).sort(), [uuid(1), uuid(2), uuid(3)]);
+  const body = first.actions.find((a) => a.key === uuid(1)).body;
+  assert.equal((body.match(/<!-- sterling-key: /g) ?? []).length, 1, 'only the footer carries a key marker');
+  assert.equal((body.match(/<!-- sterling-project: /g) ?? []).length, 1);
+  assert.ok(body.includes('<!-- sterling\u200B-key: board:'), 'the quoted marker is kept, broken by a zero-width space');
+  gh.apply(first.actions);
+  const second = gh.plan(snapshot);
+  assert.deepEqual(second.actions, []);
+  assert.deepEqual(second.warnings, []);
+  assert.deepEqual(second.drift, []);
 });
 
 test('the ceiling stops creates at 200 genuine issues (pull requests excluded) while closes and labels still run', () => {
@@ -254,11 +280,16 @@ test('the ceiling stops creates at 200 genuine issues (pull requests excluded) w
   assert.deepEqual(kinds(full.actions), ['comment', 'close', 'comment', 'close', 'comment', 'close']);
 });
 
-test('two issues with one key, or one issue with two keys, refuse the plan and name the issues', () => {
+test('two of this project\'s issues with one key refuse the plan and name the issues; a pull request never counts', () => {
   assert.throws(() => plan({ project: P, snapshot: snap({ items: [item(1)] }), issues: [mirrored(5, 1), mirrored(9, 1, { state: 'closed' })] }), /board:00000000-0000-4000-8000-000000000001 on issues #5 \(open\), #9 \(closed\)/);
-  assert.throws(() => plan({ project: P, snapshot: snap(), issues: [{ number: 4, state: 'open', body: `${keyMarker(uuid(1))}\n${keyMarker(uuid(2))}\n${projectMarker('alpha')}`, labels: [] }] }), /issue #4 carries 2 sterling-key markers/);
   const pr = plan({ project: P, snapshot: snap({ items: [item(1)] }), issues: [mirrored(5, 1), { ...mirrored(9, 1), pull_request: {} }] });
   assert.deepEqual(pr.actions, [], 'a pull request with the same marker is not an issue');
+});
+
+test('a journal row with handoff_role none is a plain task even when its text starts like a tracker; only a row with no role falls back to the text', () => {
+  const text = "Handed to project 'Other': this is my own wording";
+  const r = plan({ project: P, snapshot: snap({ journal: [jrow(1, 'done', { handoff_role: 'none', text }), jrow(2, 'done', { text })] }), issues: [] });
+  assert.deepEqual(r.actions.map((a) => [a.kind, a.key]), [['create', uuid(1)]]);
 });
 
 test('an empty board with no journal plans nothing; journal-backed closures still run on an empty board', () => {
@@ -335,6 +366,7 @@ if (method === 'GET' && route === base + '/issues') page(s.issues);
 if (method === 'GET' && route === base + '/labels') page(s.labels.map((name) => ({ name })));
 if (method === 'GET' && (m = route.match(/\\/issues\\/(\\d+)\\/comments$/))) page(s.comments[m[1]] ?? []);
 if (method === 'POST' && route === base + '/labels') { if (s.label_create_fail) { console.error('gh: Resource not accessible by integration (HTTP 403)'); process.exit(1); } s.labels.push(body.name); save(); out({ name: body.name }); }
+if (method === 'POST' && route === base + '/issues' && s.slow_create_ms) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, s.slow_create_ms);
 if (method === 'POST' && route === base + '/issues') { const n = s.issues.length + 1; s.issues.push({ number: n, state: 'open', title: body.title, body: body.body, labels: (body.labels ?? []).map((name) => ({ name })) }); save(); out({ number: n }); }
 if (method === 'POST' && (m = route.match(/\\/issues\\/(\\d+)\\/comments$/))) { (s.comments[m[1]] ??= []).push({ body: body.body }); save(); out({ id: 1 }); }
 if (method === 'POST' && (m = route.match(/\\/issues\\/(\\d+)\\/labels$/))) { issue(m[1]).labels.push(...body.labels.map((name) => ({ name }))); save(); out(issue(m[1]).labels); }
@@ -394,6 +426,7 @@ function harness({ preexisting = 0 } = {}) {
         .map((l) => JSON.parse(l))
         .filter((a) => a[0] === 'api' && a[a.indexOf('--method') + 1] !== 'GET'),
     resetCalls: () => writeFileSync(join(state, 'calls.jsonl'), ''),
+    callsText: () => (existsSync(join(state, 'calls.jsonl')) ? readFileSync(join(state, 'calls.jsonl'), 'utf8') : ''),
     /** Another project in the same repo, run with the same fake gh. */
     another: (name, opts) => {
       const p = makeProject(base, name, opts);
@@ -420,7 +453,9 @@ function seedBoard(h) {
   h.store.remove(tracker.id, NOW, { outcome: 'done' });
   const recvShort = h.mk({ text: 'Received and done quickly', handoff: received });
   h.store.remove(recvShort.id, NOW, { outcome: 'done' });
-  return { open, recv, short, recvShort };
+  const lookalike = h.mk({ text: "Handed to project 'Other': my own wording, no hand-off" });
+  h.store.remove(lookalike.id, NOW, { outcome: 'dropped' });
+  return { open, recv, short, recvShort, lookalike };
 }
 
 test('end to end: a dry run lists the plan and writes nothing; a real run mirrors; a second run writes nothing; a removal closes', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
@@ -434,15 +469,16 @@ test('end to end: a dry run lists the plan and writes nothing; a real run mirror
     assert.match(dry.stdout, /would create issue "From CH\.Hub: add a field" with 'from:CH\.Hub'/);
     assert.match(dry.stdout, /would create issue "Quick fix" for board:\S+, then comment and close it as completed \(done\)/);
     assert.match(dry.stdout, /would create issue "Received and done quickly" with 'from:CH\.Hub' for board:\S+, then comment and close it as completed \(done\)/);
-    assert.doesNotMatch(dry.stdout, /Handed to project|capture owed|A tracker whose text/);
-    assert.match(dry.stdout, /github\.com\/acme\/widgets: 1 ensure_label, 4 create \(dry run: nothing was written\); 120 issue\(s\) in the repo before this run/);
+    assert.doesNotMatch(dry.stdout, /Handed to project 'Other': do X|capture owed|A tracker whose text/);
+    assert.match(dry.stdout, /would create issue "Handed to project 'Other': my own wording, no hand-off" for board:\S+, then comment and close it as not_planned \(dropped\)/);
+    assert.match(dry.stdout, /github\.com\/acme\/widgets: 1 ensure_label, 5 create \(dry run: nothing was written\); 120 issue\(s\) in the repo before this run/);
     assert.deepEqual(h.writes(), [], 'a dry run makes no write call');
 
     const real = h.run();
     assert.equal(real.status, 0, real.stderr);
     const gh = h.gh();
     const ours = gh.issues.filter((i) => i.body?.includes('<!-- sterling-key: board:'));
-    assert.equal(ours.length, 4);
+    assert.equal(ours.length, 5);
     assert.ok(ours.every((i) => i.body.includes(projectMarker('alpha'))));
     assert.deepEqual(ours.find((i) => i.body.includes(keyMarker(ids.recvShort.id))).labels, [{ name: 'from:CH.Hub' }]);
     const byKey = (id) => ours.find((i) => i.body.includes(keyMarker(id)));
@@ -486,7 +522,7 @@ test('end to end: two projects mirroring into one repo never touch each other\'s
     assert.equal(h.run().status, 0);
     const second = beta.run();
     assert.equal(second.status, 0, second.stderr);
-    assert.match(second.stderr, /1 issue\(s\) carry a sterling-key with project marker 'alpha', not this project's \('[0-9a-f-]{36}' or 'beta'\): #2/);
+    assert.match(second.stderr, /1 issue\(s\) carry project marker 'alpha', not this project's \('[0-9a-f-]{36}'\): #2/);
     const issueOf = (id) => h.gh().issues.find((i) => i.body?.includes(keyMarker(id)));
     assert.ok(issueOf(a.id).body.includes(projectMarker('alpha')));
     assert.ok(issueOf(b.id).body.includes(projectMarker(betaId)), 'a project with project.json writes its project_id');
@@ -499,6 +535,38 @@ test('end to end: two projects mirroring into one repo never touch each other\'s
     assert.equal(h.run().status, 0);
     assert.equal(issueOf(a.id).state, 'closed');
     assert.equal(issueOf(b.id).state, 'open', 'alpha never closes beta\'s task, which is not on alpha\'s board');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('end to end: two projects on one repo take turns: a concurrent run is refused, and at 199 issues only one create happens', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, async () => {
+  const h = harness({ preexisting: 199 });
+  try {
+    const beta = h.another('beta', { config: { project_name: 'beta' } });
+    h.mk({ text: 'Alpha task' });
+    beta.mk({ text: 'Beta task' });
+    h.setGh({ slow_create_ms: 3000 });
+    const alpha = spawn(process.execPath, [SCRIPT], { cwd: h.root, env: h.env });
+    let alphaErr = '';
+    alpha.stderr.on('data', (d) => (alphaErr += d));
+    const alphaExit = new Promise((done) => alpha.on('exit', (code) => done(code)));
+    const deadline = Date.now() + 15_000;
+    // alpha takes the lock before its first inventory read (a GET), and its create then sleeps in the fake gh
+    while (!h.callsText().includes('"--method","GET"')) {
+      assert.ok(Date.now() < deadline, 'alpha never started reading the inventory');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const during = beta.run();
+    assert.equal(during.status, 1, during.stderr);
+    assert.match(during.stderr, /another sync-board-issues run holds the lock for github\.com\/acme\/widgets/);
+    assert.equal(await alphaExit, 0, alphaErr);
+    const after = beta.run();
+    assert.equal(after.status, 3, after.stderr);
+    assert.match(after.stderr, /CEILING github\.com\/acme\/widgets holds 200 issues/);
+    const genuine = h.gh().issues.filter((i) => !i.pull_request);
+    assert.equal(genuine.length, 200, 'only one create happened across both projects');
+    assert.ok(genuine.some((i) => i.title === 'Alpha task'));
   } finally {
     h.cleanup();
   }
@@ -518,7 +586,7 @@ test('end to end: a label the account cannot create fails loudly and names gh', 
   }
 });
 
-test('end to end: a second run while the lock is held exits 1 and writes nothing', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+test('end to end: a run while the repo lock is held (any spelling of the repo) exits 1 and writes nothing', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
   const h = harness();
   try {
     h.mk({ text: 'A task' });
@@ -526,14 +594,14 @@ test('end to end: a second run while the lock is held exits 1 and writes nothing
     process.env.TMPDIR = h.env.TMPDIR;
     let lockPath;
     try {
-      lockPath = lockPathFor(h.root, 'github.com/acme/widgets');
+      lockPath = lockPathFor('GitHub.com/Acme/Widgets');
     } finally {
       if (prevTmp === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = prevTmp;
     }
     const r = withSessionEventsLock(lockPath, () => h.run(), { timeoutMs: 0 });
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /another sync-board-issues run holds the lock for .* and github\.com\/acme\/widgets/);
+    assert.match(r.stderr, /another sync-board-issues run holds the lock for github\.com\/acme\/widgets/);
     assert.deepEqual(h.writes(), []);
     const after = h.run();
     assert.equal(after.status, 0, after.stderr);

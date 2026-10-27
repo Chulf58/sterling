@@ -20,13 +20,13 @@
 // The planner (plan) is pure: board snapshot plus GitHub inventory in, actions
 // out. The executor runs the actions through gh in order and stops at the
 // first failure; a rerun plans from what GitHub then holds, so it resumes.
-// A real run holds a kernel-held lock per project and repo (the cooperating
+// A real run holds a kernel-held lock per repo (the cooperating
 // lock of scripts/hooks/lib/session-events.mjs), so a second run at the same
 // time exits 1 instead of writing beside it. --dry-run reads, plans and
 // prints, takes no lock and writes nothing.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,9 +59,27 @@ export const projectMarker = (identity) => `<!-- sterling-project: ${identity} -
 export const closeReceipt = (id) => `<!-- sterling-close: board:${id} -->`;
 export const textHash = (text) => createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex').slice(0, 16);
 export const textMarker = (text) => `<!-- sterling-text: sha256:${textHash(text)} -->`;
-const KEY_RE = /<!-- sterling-key: board:([^\s>]+) -->/g;
-const TEXT_RE = /<!-- sterling-text: sha256:([0-9a-f]{16}) -->/;
-const PROJECT_RE = /<!-- sterling-project: (.+?) -->/g;
+const KEY_RE = /<!-- sterling-key: board:([^\s>]+) -->/;
+// The generated footer: the key, project and text-hash markers on three
+// consecutive lines, as bodyOf writes them. Metadata is read only from the last
+// such footer in a body, never from a marker standing anywhere else, and the
+// copied task text has its marker sequences broken (escapeMarkers), so text
+// that quotes a marker can neither claim, disown nor duplicate an issue.
+const FOOTER_RE = /<!-- sterling-key: board:([^\s>]+) -->\r?\n<!-- sterling-project: ([^\r\n]+?) -->\r?\n<!-- sterling-text: sha256:([0-9a-f]{16}) -->/g;
+
+/** The last generated footer in a body as { key, project, hash }, or null. */
+export function footerOf(body) {
+  let last = null;
+  for (const m of String(body ?? '').matchAll(FOOTER_RE)) last = { key: m[1], project: m[2], hash: m[3] };
+  return last;
+}
+
+/**
+ * Task text with every `<!--` + `sterling-` sequence broken by a zero-width
+ * space after 'sterling', so no copied text forms a marker. Inside an HTML
+ * comment the change is hidden; in visible text the zero-width space does not show.
+ */
+export const escapeMarkers = (text) => String(text ?? '').replace(/(<!--\s*sterling)-/gi, '$1\u200B-');
 
 // A journal row carries the removed todo's hand-off role and sending project
 // (handoff_role, handoff_from_name). Rows journaled before the store kept them
@@ -88,29 +106,27 @@ export function titleOf(text, id) {
   return first.length > TITLE_MAX ? `${first.slice(0, TITLE_MAX - 1)}…` : first;
 }
 
-/** The issue body: the task text, then the key, project and text-hash markers. */
+/** The issue body: the task text (marker sequences broken), then the generated footer of key, project and text-hash markers. */
 export function bodyOf(id, text, identity) {
   const t = String(text ?? '');
-  const shown = t.length > BODY_TEXT_MAX ? `${t.slice(0, BODY_TEXT_MAX)}\n\n(The board text is longer; it was cut here.)` : t;
+  const cut = t.length > BODY_TEXT_MAX ? `${t.slice(0, BODY_TEXT_MAX)}\n\n(The board text is longer; it was cut here.)` : t;
+  const shown = escapeMarkers(cut);
   return `${shown.trimEnd()}\n\n${keyMarker(id)}\n${projectMarker(identity)}\n${textMarker(t)}\n`;
 }
 
 /**
- * The project's marker identity and the identities it accepts as its own:
- * the work-project id from .sterling/project.json when present, else
- * config.project_name, else the folder name. The name is accepted too, so
- * issues written before a hobby project gained a project.json stay its own.
- * `identity` is { project_id } or null (readProjectIdentity), `name` the
- * configured or folder name.
+ * The project's one marker identity: the work-project id from
+ * .sterling/project.json when present, else config.project_name, else the
+ * folder name. Only that value is accepted as this project's, so another
+ * project with the same name never adopts its issues. `identity` is
+ * { project_id } or null (readProjectIdentity), `name` the configured or folder name.
  */
 export function projectIdentityOf(identity, name) {
   const marker = identity?.project_id ?? name;
-  for (const value of [marker, name]) {
-    if (typeof value !== 'string' || !value.trim() || value !== value.trim() || /[<>\n\r]|-->/.test(value)) {
-      throw new PlanError(`the project identity ${JSON.stringify(value)} cannot go into an issue marker (it must be non-blank, without surrounding spaces, '<', '>', line breaks or '-->'); set config.project_name. Nothing was written.`);
-    }
+  if (typeof marker !== 'string' || !marker.trim() || marker !== marker.trim() || /[<>\n\r]|-->/.test(marker)) {
+    throw new PlanError(`the project identity ${JSON.stringify(marker)} cannot go into an issue marker (it must be non-blank, without surrounding spaces, '<', '>', line breaks or '-->'); set config.project_name. Nothing was written.`);
   }
-  return { marker, accepts: [...new Set([marker, name])] };
+  return { marker };
 }
 
 const labelNames = (issue) => (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : l?.name)).filter((n) => typeof n === 'string');
@@ -118,7 +134,7 @@ const hasLabel = (names, label) => names.some((n) => n.toLowerCase() === label.t
 const isTrackerItem = (item) => item.record?.handoff?.role === 'sent' || item.readiness?.state === 'delegated';
 const receivedFrom = (item) => (item.record?.handoff?.role === 'received' ? item.record.handoff.from_name : undefined);
 
-/** A journal row's hand-off: its columns, or the text lines for a row written before them. */
+/** A journal row's hand-off: its columns ('none' for a plain task), or, only for a row journaled before the columns existed (role absent), the text lines. */
 function journalHandoff(entry) {
   if (entry.handoff_role !== undefined) return { tracker: entry.handoff_role === 'sent', from: entry.handoff_role === 'received' ? entry.handoff_from_name : undefined };
   return { tracker: TRACKER_TEXT_RE.test(entry.text), from: receivedFromText(entry.text) };
@@ -139,44 +155,43 @@ function fromLabel(project) {
 }
 
 /**
- * Genuine issues (pull requests excluded) that carry a sterling key, split by
- * project marker: `ours` (key -> issue) holds the issues whose one project
- * marker is one of `project.accepts`; `foreign` (key -> issues) holds every
- * other keyed issue (another project's marker, several, or none), which the
- * mirror never changes. `warnings` names the foreign ones, grouped by marker.
- * Among ours, two issues with one key, or one issue with two keys, refuse the plan.
+ * Genuine issues (pull requests excluded) with a generated footer, split by its
+ * project marker: `ours` (key -> issue) holds the issues whose footer names this
+ * project; `foreign` (key -> issues) holds those whose footer names another,
+ * which the mirror never changes and never creates a second issue beside. An
+ * issue that shows a sterling-key outside any footer is only warned about.
+ * `warnings` names both kinds, grouped. Two of our issues with one key refuse the plan.
  */
 export function indexByKey(issues, project) {
-  const accepts = new Set(project.accepts);
   const holders = new Map();
   const foreign = new Map();
   const foreignBy = new Map();
+  const bare = [];
   for (const issue of issues) {
     if (issue.pull_request) continue;
-    const body = String(issue.body ?? '');
-    const keys = [...new Set([...body.matchAll(KEY_RE)].map((m) => m[1]))];
-    if (keys.length === 0) continue;
-    const projects = [...new Set([...body.matchAll(PROJECT_RE)].map((m) => m[1]))];
-    if (projects.length !== 1 || !accepts.has(projects[0])) {
-      for (const key of keys) foreign.set(key, [...(foreign.get(key) ?? []), issue]);
-      const label = projects.length === 0 ? 'no project marker' : `project marker ${projects.map((v) => `'${v}'`).join(' and ')}`;
-      foreignBy.set(label, [...(foreignBy.get(label) ?? []), issue.number]);
+    const footer = footerOf(issue.body);
+    if (!footer) {
+      if (KEY_RE.test(String(issue.body ?? ''))) bare.push(issue.number);
       continue;
     }
-    if (keys.length > 1) {
-      throw new PlanError(`issue #${issue.number} carries ${keys.length} sterling-key markers (${keys.join(', ')}); fix its body by hand so it carries one. Nothing was written.`);
+    if (footer.project !== project.marker) {
+      foreign.set(footer.key, [...(foreign.get(footer.key) ?? []), issue]);
+      foreignBy.set(footer.project, [...(foreignBy.get(footer.project) ?? []), issue.number]);
+      continue;
     }
-    holders.set(keys[0], [...(holders.get(keys[0]) ?? []), issue]);
+    holders.set(footer.key, [...(holders.get(footer.key) ?? []), issue]);
   }
   const dupes = [...holders].filter(([, list]) => list.length > 1);
   if (dupes.length) {
     const lines = dupes.map(([key, list]) => `board:${key} on issues ${list.map((i) => `#${i.number} (${i.state})`).join(', ')}`);
     throw new PlanError(`more than one issue carries the same sterling-key marker, and the mirror will not pick one: ${lines.join('; ')}. Remove the marker from all but one of them by hand, then rerun. Nothing was written.`);
   }
+  const list = (numbers) => numbers.map((n) => `#${n}`).join(', ');
   const warnings = [...foreignBy].map(
-    ([label, numbers]) => `${numbers.length} issue(s) carry a sterling-key with ${label}, not this project's (${[...accepts].map((v) => `'${v}'`).join(' or ')}): ${numbers.map((n) => `#${n}`).join(', ')}. They belong to another project or were made by hand; the mirror leaves them alone.`
+    ([other, numbers]) => `${numbers.length} issue(s) carry project marker '${other}', not this project's ('${project.marker}'): ${list(numbers)}. They belong to another project; the mirror leaves them alone.`
   );
-  return { ours: new Map([...holders].map(([key, list]) => [key, list[0]])), foreign, warnings };
+  if (bare.length) warnings.push(`${bare.length} issue(s) show a sterling-key marker outside a generated footer: ${list(bare)}. The mirror did not write them that way and leaves them alone.`);
+  return { ours: new Map([...holders].map(([key, l]) => [key, l[0]])), foreign, warnings };
 }
 
 /** This project's open mirrored issues whose task left the board: the issues whose comments the executor reads for a close receipt before planning. */
@@ -251,7 +266,7 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
         warnings.push(`#${issue.number} is closed on GitHub while board item ${key} is still open; the mirror never reopens an issue.`);
         continue;
       }
-      const written = TEXT_RE.exec(String(issue.body ?? ''))?.[1];
+      const written = footerOf(issue.body)?.hash;
       const text = String(item.record.text ?? '');
       if (written && written !== textHash(text)) drift.push({ number: issue.number, key, title: titleOf(text, key) });
       const names = labelNames(issue);
@@ -431,7 +446,7 @@ export function readInventory(gh, ownerRepo, snapshot, project) {
   const receipts = new Set();
   const byNumber = new Map(issues.map((i) => [i.number, i]));
   for (const number of closeCandidates(snapshot, issues, project)) {
-    const key = [...String(byNumber.get(number).body ?? '').matchAll(KEY_RE)][0][1];
+    const key = footerOf(byNumber.get(number).body).key;
     const comments = gh.list(`repos/${ownerRepo}/issues/${number}/comments`);
     if (comments.some((c) => String(c.body ?? '').includes(closeReceipt(key)))) receipts.add(number);
   }
@@ -481,8 +496,13 @@ export function execute(actions, gh, ownerRepo, log) {
 
 // ---------- lock ----------
 
-/** The lock file for one project and repo, under a private per-user directory in the OS temp dir. */
-export function lockPathFor(storeRoot, repo) {
+/**
+ * The lock file for one repo (host/owner/repo, lowercased as GitHub compares
+ * them), under a private per-user directory in the OS temp dir. It is per repo,
+ * not per project: every project mirroring into one repo shares the 200-issue
+ * ceiling, so their runs take turns. Not guaranteed across machines or WSL distros.
+ */
+export function lockPathFor(repo) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
   const dir = join(tmpdir(), `sterling-locks-${uid}`);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -490,7 +510,7 @@ export function lockPathFor(storeRoot, repo) {
   if (!st.isDirectory() || st.isSymbolicLink() || (typeof process.getuid === 'function' && st.uid !== process.getuid())) {
     throw new Error(`sync-board-issues: ${dir} is not a private directory of this user; refusing to take the run lock through it`);
   }
-  const hash = createHash('sha256').update(`${realpathSync(storeRoot)}\n${repo}`).digest('hex').slice(0, 32);
+  const hash = createHash('sha256').update(String(repo).toLowerCase()).digest('hex').slice(0, 32);
   return join(dir, `sync-board-issues-${hash}`);
 }
 
@@ -607,12 +627,12 @@ function main() {
   try {
     if (args.dryRun) code = run();
     else {
-      const lockPath = lockPathFor(storeRoot, origin.repo);
+      const lockPath = lockPathFor(origin.repo);
       try {
         code = withSessionEventsLock(lockPath, run, { timeoutMs: 0 });
       } catch (e) {
         if (e?.code !== SESSION_EVENTS_LOCK_HELD) throw e;
-        refuse(`another sync-board-issues run holds the lock for ${storeRoot} and ${origin.repo} (${lockPath}.lock.db). Nothing was written; run again after it finishes.`);
+        refuse(`another sync-board-issues run holds the lock for ${origin.repo} (${lockPath}.lock.db), from this project or another one mirroring into that repo. Nothing was written; run again after it finishes.`);
       }
     }
   } catch (e) {

@@ -4461,7 +4461,8 @@ export class SterlingStore {
         }
         // The todo's handoff field as stored (todoHandoffSchema): the role, and for a received item the sending project.
         const handoff = (record as { handoff?: { role?: unknown; from_name?: unknown } }).handoff;
-        const handoffRole = handoff?.role === 'sent' || handoff?.role === 'received' ? handoff.role : null;
+        // 'none' for a plain task, so a NULL role marks only a row journaled before the column existed (0.19.130).
+        const handoffRole = handoff?.role === 'sent' || handoff?.role === 'received' ? handoff.role : 'none';
         const handoffFrom = handoffRole === 'received' && typeof handoff?.from_name === 'string' && handoff.from_name.length > 0 ? handoff.from_name : null;
         this.db
           .prepare(
