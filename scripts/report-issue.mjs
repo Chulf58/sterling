@@ -41,8 +41,9 @@
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pluginRoot } from './hooks/lib/plugin-root-walk.mjs';
+import { resolveGhPath } from './lib/gh-path.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 import {
@@ -110,20 +111,6 @@ function parseArgs(argv) {
 }
 
 // ---------- gh ----------
-
-/** The gh that PATH resolves to (the first hit), or null. Named in every
- * failure line, because on WSL it is often a Windows gh.exe. */
-function resolveGhPath() {
-  const names = process.platform === 'win32' ? ['gh.exe', 'gh.cmd', 'gh'] : ['gh', 'gh.exe'];
-  for (const dir of String(process.env.PATH ?? '').split(delimiter)) {
-    if (!dir) continue;
-    for (const name of names) {
-      const candidate = join(dir, name);
-      if (existsSync(candidate)) return candidate;
-    }
-  }
-  return null;
-}
 
 /** A gh failure. `status` is the HTTP status gh printed ("... (HTTP 422)"), or null when there is none (gh missing, network down, bad JSON). */
 class TransportError extends Error {

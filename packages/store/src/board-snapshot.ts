@@ -65,6 +65,8 @@ interface JournalRow {
   evidence: string | null;
   note: string | null;
   removed_at: string;
+  handoff_role: string | null;
+  handoff_from_name: string | null;
 }
 
 /** One board_removal_journal row as a checked entry, or the reason it is not one. Shared with SterlingStore.boardRemovalJournal. */
@@ -89,11 +91,18 @@ export function journalRowToEntry(row: JournalRow): BoardRemovalJournalEntry | s
     ...(evidence !== undefined ? { evidence } : {}),
     ...(row.note !== null ? { note: row.note } : {}),
     removed_at: row.removed_at,
+    ...(row.handoff_role !== null ? { handoff_role: row.handoff_role } : {}),
+    ...(row.handoff_from_name !== null ? { handoff_from_name: row.handoff_from_name } : {}),
   });
   return parsed.success ? parsed.data : parsed.error.issues.map((i) => `${i.path.join('.') || '(row)'}: ${i.message}`).join('; ');
 }
 
-export const JOURNAL_SELECT = 'SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at FROM board_removal_journal ORDER BY seq ASC';
+/** The journal read; `withHandoff` false selects NULL for the hand-off columns of a table 0.19.130 made and no newer Sterling has opened yet. */
+export function journalSelect(withHandoff = true): string {
+  const handoff = withHandoff ? 'handoff_role, handoff_from_name' : 'NULL AS handoff_role, NULL AS handoff_from_name';
+  return `SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, ${handoff} FROM board_removal_journal ORDER BY seq ASC`;
+}
+export const JOURNAL_SELECT = journalSelect();
 
 /** config.storage of the project, read without writing; absent means SQLite. */
 function storageOf(projectRoot: string): string | undefined {
@@ -216,7 +225,10 @@ function readInside(db: DatabaseSync, dbPath: string, opts: ReadBoardSnapshotOpt
     }).map((r) => [r.id, r])
   );
   const journal: BoardRemovalJournalEntry[] = [];
-  for (const row of db.prepare(JOURNAL_SELECT).all() as unknown as JournalRow[]) {
+  // A read-only reader cannot add the hand-off columns, so a table without them reads them as NULL (rows from before the columns).
+  const journalColumns = new Set((db.prepare('PRAGMA table_info(board_removal_journal)').all() as { name: string }[]).map((c) => c.name));
+  const withHandoff = journalColumns.has('handoff_role') && journalColumns.has('handoff_from_name');
+  for (const row of db.prepare(journalSelect(withHandoff)).all() as unknown as JournalRow[]) {
     const entry = journalRowToEntry(row);
     if (typeof entry === 'string') {
       throw new BoardSnapshotError('bad_journal_row', `board snapshot: board_removal_journal row ${String(row.seq)} (item ${row.item_id}) is not a journal entry: ${entry}. Nothing was returned.`);
