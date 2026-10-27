@@ -211,6 +211,37 @@ test('snapshot is read-only on a cold store: no -wal or -shm is created and the 
   }
 });
 
+test('snapshot reads a store left with a -wal and no -shm: committed frames are seen and the main file and -wal are unchanged', SQLITE, () => {
+  const p = project();
+  try {
+    const keep = mk(p.store, { text: 'Kept task' });
+    const done = mk(p.store, { text: 'Done task' });
+    p.store.remove(done.id, NOW, { outcome: 'done' });
+    // A copy of the hot store with its -wal but without its -shm, as a crashed writer can leave it.
+    const copy = mkdtempSync(join(tmpdir(), 'sterling-removal-journal-noshm-'));
+    try {
+      mkdirSync(join(copy, '.sterling'));
+      const db = join(copy, '.sterling', 'sterling.db');
+      writeFileSync(db, readFileSync(p.dbPath));
+      writeFileSync(`${db}-wal`, readFileSync(`${p.dbPath}-wal`));
+      assert.equal(existsSync(`${db}-shm`), false, 'precondition: no -shm');
+      const mainBefore = hash(db);
+      const walBefore = hash(`${db}-wal`);
+      const snap = readBoardSnapshot(copy);
+      assert.deepEqual(snap.items.map((i) => i.record.id), [keep.id]);
+      assert.deepEqual(snap.journal.map((j) => j.item_id), [done.id]);
+      assert.equal(hash(db), mainBefore, 'the main file is unchanged');
+      assert.equal(hash(`${db}-wal`), walBefore, 'the -wal is unchanged');
+      // Measured: the read-only open creates the -shm (the WAL index) and cannot remove it; it is left, never deleted, as openForeignDbReadOnly documents.
+      assert.equal(existsSync(`${db}-shm`), true, 'the WAL index the read created is left in place');
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('snapshot refusals name why: Postgres storage, no database, wrong schema version, no journal table, a bad journal row', SQLITE, () => {
   const p = project();
   try {
@@ -225,6 +256,10 @@ test('snapshot refusals name why: Postgres storage, no database, wrong schema ve
     };
     writeFileSync(join(p.root, '.sterling', 'config.json'), JSON.stringify({ storage: 'postgres' }));
     assert.equal(kind(() => readBoardSnapshot(p.root)), 'not_sqlite');
+    for (const bad of ['null', '[]', '"sqlite"', '7', '{"storage": 5}', '{ not json']) {
+      writeFileSync(join(p.root, '.sterling', 'config.json'), bad);
+      assert.equal(kind(() => readBoardSnapshot(p.root)), 'unreadable', `config ${bad}`);
+    }
     writeFileSync(join(p.root, '.sterling', 'config.json'), '{}');
 
     const empty = mkdtempSync(join(tmpdir(), 'sterling-removal-journal-empty-'));

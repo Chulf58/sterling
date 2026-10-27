@@ -338,8 +338,10 @@ test('H3 IDS NEVER CLIP — THE REGRESSION PIN: the headline keeps its FULL uuid
     // takes off a headline listing must satisfy the destroying call's exact-id
     // rule. An 8-char form is refused, which is exactly why the full one must
     // survive the projection.
+    // The outcome is given, so the only reason left to refuse is the address.
     assert.throws(
-      () => tools.boardRemove(id8(h.id as string)),
+      () => tools.boardRemove(id8(h.id as string), { outcome: 'done' }),
+      /this tool addresses items by their EXACT full uuid only/,
       'precondition (S1 E2): the destroying call refuses the 8-char form — so a headline that only showed id8 would be undeletable'
     );
     tools.boardRemove(h.id as string, { outcome: 'done' });

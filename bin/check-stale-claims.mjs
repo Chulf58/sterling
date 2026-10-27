@@ -4311,7 +4311,7 @@ function undeclaredPhaseInterfaces(rec) {
   const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
   return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name4) => !declared.has(name4)).map((name4) => ({ phase_id: phase.phase_id, name: name4 })));
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4780,15 +4780,37 @@ var init_records = __esm({
     hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
     EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
     handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+    BOARD_REMOVAL_OUTCOMES = ["done", "dropped", "superseded", "duplicate"];
+    boardRemovalOutcomeSchema = external_exports.enum(BOARD_REMOVAL_OUTCOMES);
+    boardRemovalSchema = external_exports.object({
+      outcome: boardRemovalOutcomeSchema,
+      evidence: handoffEvidenceSchema.optional(),
+      note: external_exports.string().refine((v) => v.trim().length > 0, "note must not be blank").optional()
+    }).strict();
+    boardRemovalJournalEntrySchema = external_exports.object({
+      seq: external_exports.number().int().positive(),
+      item_id: external_exports.string().min(1),
+      slug: external_exports.string().min(1).optional(),
+      text: external_exports.string(),
+      source: external_exports.literal("user"),
+      objective: external_exports.string().min(1).optional(),
+      priority: external_exports.string().min(1).optional(),
+      outcome: boardRemovalOutcomeSchema,
+      evidence: handoffEvidenceSchema.optional(),
+      note: external_exports.string().min(1).optional(),
+      removed_at: external_exports.string().min(1)
+    }).strict();
     handoffEvidenceFileSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
-      evidence: handoffEvidenceSchema
-    }).strict();
+      evidence: handoffEvidenceSchema.optional(),
+      outcome: boardRemovalOutcomeSchema.optional()
+    }).strict().refine((f) => f.evidence !== void 0 || f.outcome !== void 0, "the evidence file needs evidence, an outcome or both");
     handoffEvidenceFileReadSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
-      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY).optional(),
+      outcome: external_exports.string().min(1).optional()
     });
     needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
     todoWaitFieldsReadSchema = external_exports.object({
@@ -6203,6 +6225,9 @@ var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
+init_dist();
+
+// packages/store/dist/board-snapshot.js
 init_dist();
 
 // packages/store/dist/handoff.js

@@ -4635,15 +4635,37 @@ var handoffEvidenceShape = external_exports.object({
 var hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
 var EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
 var handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+var BOARD_REMOVAL_OUTCOMES = ["done", "dropped", "superseded", "duplicate"];
+var boardRemovalOutcomeSchema = external_exports.enum(BOARD_REMOVAL_OUTCOMES);
+var boardRemovalSchema = external_exports.object({
+  outcome: boardRemovalOutcomeSchema,
+  evidence: handoffEvidenceSchema.optional(),
+  note: external_exports.string().refine((v) => v.trim().length > 0, "note must not be blank").optional()
+}).strict();
+var boardRemovalJournalEntrySchema = external_exports.object({
+  seq: external_exports.number().int().positive(),
+  item_id: external_exports.string().min(1),
+  slug: external_exports.string().min(1).optional(),
+  text: external_exports.string(),
+  source: external_exports.literal("user"),
+  objective: external_exports.string().min(1).optional(),
+  priority: external_exports.string().min(1).optional(),
+  outcome: boardRemovalOutcomeSchema,
+  evidence: handoffEvidenceSchema.optional(),
+  note: external_exports.string().min(1).optional(),
+  removed_at: external_exports.string().min(1)
+}).strict();
 var handoffEvidenceFileSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
   item_id: external_exports.string().uuid(),
-  evidence: handoffEvidenceSchema
-}).strict();
+  evidence: handoffEvidenceSchema.optional(),
+  outcome: boardRemovalOutcomeSchema.optional()
+}).strict().refine((f) => f.evidence !== void 0 || f.outcome !== void 0, "the evidence file needs evidence, an outcome or both");
 var handoffEvidenceFileReadSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
   item_id: external_exports.string().uuid(),
-  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY).optional(),
+  outcome: external_exports.string().min(1).optional()
 });
 var needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
 function needsReasonAllowed(needs) {

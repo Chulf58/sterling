@@ -105,23 +105,31 @@ function storageOf(projectRoot: string): string | undefined {
     if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined;
     throw new BoardSnapshotError('unreadable', `board snapshot: ${p} could not be read (${(e as Error)?.message ?? String(e)}).`, { cause: e });
   }
-  let raw: { storage?: unknown };
+  let raw: unknown;
   try {
-    raw = JSON.parse(text) as { storage?: unknown };
+    raw = JSON.parse(text);
   } catch (e) {
     throw new BoardSnapshotError('unreadable', `board snapshot: ${p} is not valid JSON, so the storage backend is unknown.`, { cause: e });
   }
-  if (raw.storage === undefined) return undefined;
-  return typeof raw.storage === 'string' ? raw.storage : String(raw.storage);
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new BoardSnapshotError('unreadable', `board snapshot: ${p} is not a JSON object (it holds ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : `a ${typeof raw}`}), so the storage backend is unknown.`);
+  }
+  const storage = (raw as { storage?: unknown }).storage;
+  if (storage === undefined) return undefined;
+  if (typeof storage !== 'string') {
+    throw new BoardSnapshotError('unreadable', `board snapshot: ${p} has a storage value that is not text (${JSON.stringify(storage)}), so the storage backend is unknown.`);
+  }
+  return storage;
 }
 
 /**
  * The project's live user board, each item with the store's readiness
  * derivation (boardReadinessOf, the rule board_query uses) and claim view,
  * plus every board removal journal row, read in ONE read transaction on the
- * project's `.sterling/sterling.db`, opened read-only. Nothing is written:
- * no DDL, no pragma write, no checkpoint, and no file beside the database is
- * created or removed.
+ * project's `.sterling/sterling.db`, opened read-only. The database and its
+ * WAL are never changed: no DDL, no pragma write, no checkpoint, and no file
+ * beside the database is removed. SQLite may create the `-shm` WAL index when
+ * a `-wal` exists without one.
  *
  * Refused with a BoardSnapshotError, naming why: a project whose
  * config.storage is not SQLite (Postgres is switched off; this reader only
