@@ -15,8 +15,10 @@ import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import {
+  FOOTER_RE,
   ISSUE_CEILING,
   PlanError,
+  objectiveLabel,
   bodyOf,
   closeCandidates,
   closeReceipt,
@@ -271,13 +273,103 @@ test('the ceiling stops creates at 200 genuine issues (pull requests excluded) w
   const others = Array.from({ length: 197 }, (_, i) => ({ number: i + 1, state: i % 2 ? 'closed' : 'open', body: 'not ours', labels: [] }));
   const prs = Array.from({ length: 10 }, (_, i) => ({ number: 500 + i, state: 'open', body: keyMarker(uuid(900 + i)), pull_request: {}, labels: [] }));
   const issues = [...others, ...prs, mirrored(300, 1), mirrored(301, 2)];
-  const r = plan({ project: P, snapshot: snap({ items: [item(2, {}, { state: 'blocked' }), item(3), item(4)], journal: [jrow(1, 'done'), jrow(5, 'done')] }), issues, labels: ['blocked'] });
+  const r = plan({ project: P, snapshot: snap({ items: [item(2, {}, { state: 'blocked' }), item(3, { created_at: '2026-10-01T00:00:00.000Z' }), item(4, { created_at: '2026-10-02T00:00:00.000Z' })], journal: [jrow(1, 'done'), jrow(5, 'done')] }), issues, labels: ['blocked'] });
   assert.deepEqual(r.ceiling, { limit: 200, count: 199, skipped: 2, skipped_items: [{ key: uuid(4), title: 'Task 4' }, { key: uuid(5), title: 'Task 5' }] });
   assert.deepEqual(kinds(r.actions), ['comment', 'close', 'add_labels', 'create']);
   assert.equal(r.actions[3].key, uuid(3));
   const full = plan({ project: P, snapshot: snap({ items: [item(3)] }), issues: [...others, mirrored(300, 1), mirrored(301, 2), mirrored(302, 9)] });
   assert.deepEqual(full.ceiling, { limit: 200, count: 200, skipped: 1, skipped_items: [{ key: uuid(3), title: 'Task 3' }] });
   assert.deepEqual(kinds(full.actions), ['comment', 'close', 'comment', 'close', 'comment', 'close']);
+});
+
+test('an objective becomes the label objective:<objective>, created when missing, none without an objective', () => {
+  const r = plan({ project: P, snapshot: snap({ items: [item(1, { objective: 'Animation pass' }), item(2)] }), issues: [], labels: [] });
+  assert.deepEqual(kinds(r.actions), ['ensure_label', 'create', 'create']);
+  assert.equal(r.actions[0].name, 'objective:Animation pass');
+  assert.deepEqual(r.actions[1].labels, ['objective:Animation pass']);
+  assert.deepEqual(r.actions[2].labels, []);
+  assert.equal(objectiveLabel(undefined), null);
+  assert.equal(objectiveLabel('  '), null);
+});
+
+test('the objective label follows the board: added, changed (old one removed), cleared, and left alone when current', () => {
+  const added = plan({ project: P, snapshot: snap({ items: [item(1, { objective: 'A' })] }), issues: [mirrored(5, 1)], labels: ['objective:A'] });
+  assert.deepEqual(added.actions, [{ kind: 'add_labels', number: 5, labels: ['objective:A'] }]);
+  const changed = plan({ project: P, snapshot: snap({ items: [item(1, { objective: 'B' })] }), issues: [mirrored(5, 1, { labels: [{ name: 'objective:A' }] })], labels: ['objective:A'] });
+  assert.deepEqual(changed.actions, [
+    { kind: 'ensure_label', name: 'objective:B', color: 'bfd4f2', description: 'Sterling board: the objective this task belongs to' },
+    { kind: 'remove_label', number: 5, label: 'objective:A' },
+    { kind: 'add_labels', number: 5, labels: ['objective:B'] },
+  ]);
+  const cleared = plan({ project: P, snapshot: snap({ items: [item(1)] }), issues: [mirrored(5, 1, { labels: [{ name: 'objective:A' }] })], labels: ['objective:A'] });
+  assert.deepEqual(cleared.actions, [{ kind: 'remove_label', number: 5, label: 'objective:A' }]);
+  const same = plan({ project: P, snapshot: snap({ items: [item(1, { objective: 'A' })] }), issues: [mirrored(5, 1, { labels: [{ name: 'Objective:a' }] })], labels: ['objective:A'] });
+  assert.deepEqual(same.actions, []);
+});
+
+test('the objective label is kept when the task closes, and a journal-only task is created with its objective', () => {
+  const closed = plan({ project: P, snapshot: snap({ journal: [jrow(1, 'done')] }), issues: [mirrored(5, 1, { labels: [{ name: 'objective:A' }, { name: 'blocked' }] })] });
+  assert.deepEqual(closed.actions.filter((a) => a.kind === 'remove_label').map((a) => a.label), ['blocked']);
+  const short = plan({ project: P, snapshot: snap({ journal: [jrow(2, 'done', { objective: 'A' })] }), issues: [], labels: ['objective:A'] });
+  assert.deepEqual(short.actions[0].labels, ['objective:A']);
+});
+
+test('an objective label over 50 characters is cut to 33 characters, ~ and 6 hex of the objective\'s SHA-256, and is stable', () => {
+  const objective = 'Long objective name that goes well past what GitHub allows for a label';
+  const name = objectiveLabel(objective);
+  assert.equal(name.length, 50);
+  assert.match(name, /^objective:Long objective name that goes wel~[0-9a-f]{6}$/);
+  assert.equal(name, objectiveLabel(objective));
+  assert.notEqual(name, objectiveLabel(`${objective}!`));
+  assert.equal(objectiveLabel('x'.repeat(40)), `objective:${'x'.repeat(40)}`, 'exactly 50 characters is kept whole');
+  assert.equal(objectiveLabel('x'.repeat(41)).length, 50);
+});
+
+test('at the ceiling, new issues go by priority (high, normal, low) then oldest first; the left-out tasks are listed in that order', () => {
+  const others = Array.from({ length: 196 }, (_, i) => ({ number: i + 1, state: 'closed', body: 'not ours', labels: [] }));
+  const at = (d) => `2026-10-${String(d).padStart(2, '0')}T08:00:00.000Z`;
+  const items = [
+    item(1, { priority: 'low', created_at: at(1) }),
+    item(2, { created_at: at(5) }),
+    item(3, { priority: 'high', created_at: at(9) }),
+    item(4, { priority: 'normal', created_at: at(2) }),
+    item(5, { priority: 'high', created_at: at(3) }),
+  ];
+  const r = plan({ project: P, snapshot: snap({ items }), issues: others });
+  assert.deepEqual(r.actions.map((a) => a.key), [uuid(5), uuid(3), uuid(4), uuid(2)].slice(0, 4));
+  assert.deepEqual(r.ceiling.skipped_items.map((s) => s.key), [uuid(1)]);
+  const tight = plan({ project: P, snapshot: snap({ items }), issues: [...others, mirrored(300, 90), mirrored(301, 91)] });
+  assert.deepEqual(tight.actions.filter((a) => a.kind === 'create').map((a) => a.key), [uuid(5), uuid(3)]);
+  assert.deepEqual(tight.ceiling.skipped_items.map((s) => s.key), [uuid(4), uuid(2), uuid(1)]);
+});
+
+test('a journal-only task ranks by its row\'s priority and removed_at, like a live task by priority and created_at', () => {
+  const others = Array.from({ length: 197 }, (_, i) => ({ number: i + 1, state: 'closed', body: 'not ours', labels: [] }));
+  const r = plan({
+    project: P,
+    snapshot: snap({
+      items: [item(1, { created_at: '2026-10-20T00:00:00.000Z' })],
+      journal: [jrow(2, 'done', { priority: 'high', removed_at: '2026-10-26T00:00:00.000Z' }), jrow(3, 'done', { removed_at: '2026-10-10T00:00:00.000Z' })],
+    }),
+    issues: others,
+  });
+  assert.deepEqual(r.actions.map((a) => a.key), [uuid(2), uuid(3), uuid(1)].slice(0, 3));
+  assert.equal(r.ceiling.skipped, 0);
+  const tight = plan({ project: P, snapshot: snap({ items: [item(1, { created_at: '2026-10-20T00:00:00.000Z' })], journal: [jrow(2, 'done', { priority: 'high' }), jrow(3, 'done', { removed_at: '2026-10-10T00:00:00.000Z' })] }), issues: [...others, mirrored(300, 90)] });
+  assert.deepEqual(tight.actions.filter((a) => a.kind === 'create').map((a) => a.key), [uuid(2), uuid(3)]);
+  assert.deepEqual(tight.ceiling.skipped_items.map((s) => s.key), [uuid(1)]);
+});
+
+test('the documented footer regex gets the board uuid and project back from a generated body, and ignores a quoted marker', () => {
+  const doc = readFileSync(fileURLToPath(new URL('../../skills/sync-board-issues/SKILL.md', import.meta.url)), 'utf8');
+  assert.ok(doc.includes(FOOTER_RE.source), 'the skill documents the exact regex the script uses');
+  const text = `Quote: <!-- sterling-key: board:${uuid(99)} -->\n<!-- sterling-project: evil -->`;
+  const body = bodyOf(uuid(7), text, 'My Project');
+  const found = [...body.matchAll(new RegExp(FOOTER_RE.source, 'g'))].pop();
+  assert.equal(found[1], uuid(7));
+  assert.equal(found[2], 'My Project');
+  assert.match(found[3], /^[0-9a-f]{16}$/);
+  assert.equal([...body.matchAll(new RegExp(FOOTER_RE.source, 'g'))].length, 1);
 });
 
 test('two of this project\'s issues with one key refuse the plan and name the issues; a pull request never counts', () => {
