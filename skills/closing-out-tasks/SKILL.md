@@ -38,7 +38,7 @@ Leave no droppings.
 
 What each surface answers — the session todo list, the **board** and the **maintenance queue** — and why they are never collapsed is in the conductor prompt (`agent-templates/conductor.md`, installed in each project as `.claude/agents/conductor.md`), section "Three surfaces, never collapsed"; close-on-commit is in `CLAUDE.md`, "Conduct rules (Sterling layer)". At the finish line that means:
 
-- A board item this work paid is `board_remove`d citing the commit — never just called done in conversation. Anything genuinely deferred goes on the board, not in the dying todo list.
+- A board item this work paid is `board_remove`d with `outcome: done` and the commit as `evidence` — never just called done in conversation. Anything genuinely deferred goes on the board, not in the dying todo list.
 - A maintenance item closes only through the artifact that fulfils it (see the `drain` skill); never hand-park a "remember to do X" item on the queue.
 - **The knowledge store** gets what will matter in a month to someone who wasn't in this session — most tasks produce nothing durable. The conductor alone authors it and creates records directly (see `decision-records`); the `librarian` may apply conductor-drafted update-shaped and board writes verbatim, never author. A `researcher`, `scout` or `implementor` names a **capture candidate** in its report instead of writing.
 
