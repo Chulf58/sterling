@@ -177,6 +177,27 @@ test('sync-agents: an invalid mode refuses the whole sync (exit 2), naming the v
   }
 });
 
+// GitHub #212: a linked worktree has no .sterling/ of its own, so the work identity is read
+// from the main checkout (the store root), as mode and handoff already are.
+test('sync-agents: a work project in a linked worktree is not refused for a missing project.json', () => {
+  const main = project({ mode: 'work', handoff: false });
+  const git = (cwd, ...a) => spawnSync('git', a, { cwd, encoding: 'utf8' });
+  const wt = join(mkdtempSync(join(tmpdir(), 'sterling-mode-wt-')), 'wt');
+  try {
+    assert.equal(git(main, 'init', '-q').status, 0);
+    assert.equal(git(main, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init').status, 0);
+    const added = git(main, 'worktree', 'add', '-q', wt, '-b', 'wt-branch');
+    assert.equal(added.status, 0, added.stderr);
+    assert.equal(existsSync(join(wt, '.sterling', 'project.json')), false);
+    const r = syncAgents(wt);
+    assert.doesNotMatch(r.stdout, /refused_project_identity/, r.stdout + r.stderr);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+  } finally {
+    cleanup(main);
+    cleanup(dirname(wt));
+  }
+});
+
 test('sync-agents: on→off deletes nothing and says the files are no longer maintained; off→on provisions', () => {
   const dir = project(OFF);
   try {

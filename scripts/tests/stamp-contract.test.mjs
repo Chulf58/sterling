@@ -1331,3 +1331,119 @@ test('stamp-contract --apply-inserts: a bullet still under its old lead is kept 
     f.cleanup();
   }
 });
+
+// CLI surface (issues #207, #210): --help prints usage, an unknown flag and a --project that
+// matches no registered project both exit 2, none of them writing anything.
+test('--help prints the usage and exits 0 without running the registry pass', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-help-'));
+  try {
+    const r = runStampContract(join(dir, 'registry.db'), ['--help']);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /^usage: node scripts\/stamp-contract\.mjs /);
+    assert.doesNotMatch(r.stdout, /DRY-RUN/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unknown option exits 2 naming it, with the usage', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-bogus-'));
+  try {
+    const r = runStampContract(join(dir, 'registry.db'), ['--bogus']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /unknown option --bogus/);
+    assert.match(r.stderr, /usage: node scripts\/stamp-contract\.mjs /);
+    assert.doesNotMatch(r.stdout, /DRY-RUN/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a --project that matches no registered project exits 2 naming the value', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-nomatch-'));
+  try {
+    const nope = join(dir, 'not-registered');
+    const r = runStampContract(join(dir, 'registry.db'), ['--project', nope]);
+    assert.equal(r.status, 2);
+    assert.ok(r.stderr.includes(`--project matched no registered project: ${nope}`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --project naming a linked git worktree (issue #210, user-ruled 2026-10-27 "The worktree's
+// copy"): the registry match goes through the main project, the files are the worktree's own.
+function worktreeFixture() {
+  const f = stampFixture('wt', (complete) => ({ planted: dropBlock(complete, READY_LEAD), expected: complete }));
+  const main = dirname(f.claudePath);
+  const git = (...args) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: main, encoding: 'utf8' });
+    assert.equal(r.status, 0, 'git setup step failed');
+  };
+  git('init', '-q');
+  git('add', '.');
+  git('commit', '-q', '-m', 'seed');
+  const wt = `${main}-wt`;
+  git('worktree', 'add', '-q', wt, '-b', 'wt-branch');
+  const cleanup = () => {
+    f.cleanup();
+    rmSync(wt, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  };
+  return { ...f, main, wt, cleanup };
+}
+
+test('--project <linked worktree> --apply edits the worktree copy and leaves the main checkout untouched', () => {
+  const f = worktreeFixture();
+  try {
+    const r = runStampContract(f.regDb, ['--apply', '--project', f.wt]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.expected, 'the worktree copy is stamped');
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.planted, 'the main checkout is byte-identical');
+    assert.match(r.stdout, /worktree .*-wt; the main checkout is not touched/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--project <linked worktree> dry run reports the worktree path and writes nothing', () => {
+  const f = worktreeFixture();
+  try {
+    const r = runStampContract(f.regDb, ['--project', f.wt]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(r.stdout.includes(join(f.wt, 'CLAUDE.md')), 'the output names the worktree file');
+    assert.ok(!r.stdout.includes(`${f.main}/CLAUDE.md`), 'the main checkout file is not named');
+    assert.match(r.stdout, /would_insert/);
+    assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.planted);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('naming both the registered project and its worktree stamps only the worktree copy', () => {
+  const f = worktreeFixture();
+  try {
+    const r = runStampContract(f.regDb, ['--apply', '--project', f.main, '--project', f.wt]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.expected);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.planted);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a worktree whose main project is not registered exits 2 as unmatched', () => {
+  const f = worktreeFixture();
+  try {
+    const other = mkdtempSync(join(tmpdir(), 'sterling-stamp-emptyreg-'));
+    try {
+      const r = runStampContract(join(other, 'registry.db'), ['--apply', '--project', f.wt]);
+      assert.equal(r.status, 2);
+      assert.ok(r.stderr.includes(`--project matched no registered project: ${f.wt}`));
+      assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.planted);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  } finally {
+    f.cleanup();
+  }
+});

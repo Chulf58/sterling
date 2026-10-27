@@ -49,6 +49,9 @@ function makePluginRoot() {
   mkdirSync(join(dir, 'templates'));
   cpSync(join(root, 'scripts', 'stamp-contract.mjs'), join(dir, 'scripts', 'stamp-contract.mjs'));
   cpSync(join(root, 'scripts', 'lib'), join(dir, 'scripts', 'lib'), { recursive: true });
+  // scripts/lib/worktree-root.mjs (stamp-contract's --project worktree resolution) imports this.
+  mkdirSync(join(dir, 'scripts', 'hooks', 'lib'), { recursive: true });
+  cpSync(join(root, 'scripts', 'hooks', 'lib', 'store-backend.mjs'), join(dir, 'scripts', 'hooks', 'lib', 'store-backend.mjs'));
   symlinkSync(nodeModulesDir(), join(dir, 'node_modules'), 'dir');
   git(dir, ['init', '-q']);
   git(dir, ['config', 'user.email', 'test@example.com']);

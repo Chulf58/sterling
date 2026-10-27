@@ -110,7 +110,9 @@ test('every type: only an optional field ever loses its example to the whole-rec
       omitted.push(`${type}.${field.name}`);
     }
   }
-  assert.deepEqual(omitted, [`open_question.${OPEN_QUESTION_TERMINUS_FIELD}`]);
+  // feature_article.retired_reason (GitHub #217) is refused on a live record,
+  // which is what the printed examples describe, so it prints no example.
+  assert.deepEqual(omitted.sort(), ['feature_article.retired_reason', `open_question.${OPEN_QUESTION_TERMINUS_FIELD}`]);
 });
 
 test('example choice: a candidate the record schema throws on is never chosen', () => {

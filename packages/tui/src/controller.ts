@@ -568,6 +568,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
     try {
       store.bootstrapCatalogIfAbsent(config, nowISO);
+      store.ensureCatalogPinnedModels(config);
       const rec = store.query({ types: ['reference_material'], cap: 200 }).find((r) => (r as { catalog?: unknown }).catalog);
       const days = cfg.models_catalog?.staleness_days ?? 45;
       const status = catalogStatus(rec ?? null, nowISO, days);

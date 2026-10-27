@@ -165,7 +165,7 @@ export const WORKER_TOOLS = [
   mcp('maintenance_remove'),
   mcp('knowledge_line_ref_fix'),
   mcpPlugin('knowledge_line_ref_fix'),
-  ...[...WRITE_GRANT, 'knowledge_query', 'knowledge_schema'].flatMap((t) => [mcp(t), mcpPlugin(t)]),
+  ...[...WRITE_GRANT, 'knowledge_query', 'knowledge_schema', 'knowledge_preflight'].flatMap((t) => [mcp(t), mcpPlugin(t)]),
   'Read',
   'Grep',
   'WebSearch',

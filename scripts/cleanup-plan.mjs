@@ -22,13 +22,20 @@
 // A reference from any other file does, and a path that stays (keep, release)
 // is such a file, so what a kept path names stays with it.
 // Only `delete` paths reach the top-level delete_paths list. An article whose
-// every path is absent is not a candidate at all (decision
+// every path is absent is not a deletion candidate (decision
 // cleanup-plan-skips-deprecated-articles-whose-files-are-all-gone): its files
-// are already deleted, the store keeps it as history, and nothing is left to
-// plan. A path that cannot be statted for any reason but ENOENT counts as
-// present. The planner opens a read-only copy of the store and never writes to it.
+// are already deleted and nothing is left to delete. A DEPRECATED one goes to
+// `retire_candidates` instead (GitHub #217): knowledge_retire(id, reason:
+// 'feature_removed') can retire it with no successor. Each entry names the
+// tree its absence was checked against and its blockers: an active dependent
+// in either direction, a path present in its resolved tree, a path parked on
+// another branch, or a tree that does not resolve. The parked probe here is a
+// plan-time approximation of the MCP server's classifier; knowledge_retire
+// re-checks everything and its refusal is the authority. A path that cannot
+// be statted for any reason but ENOENT counts as present. The planner opens a
+// read-only copy of the store and never writes to it.
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, join, posix } from 'node:path';
+import { basename, isAbsolute, join, posix } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { arg, openProjectReadOnly } from './lib/project.mjs';
 
@@ -152,7 +159,61 @@ function referencesTo(path) {
   return { refs, what: n.what };
 }
 
-function buildPlan(store) {
+// The tree an article's paths resolve against, as the MCP server's treeRootFor
+// resolves it: no working_tree is the project root, a name mapped in
+// config.working_trees is that path (absolute, or joined to the project root),
+// and an unmapped name does not resolve, so nothing is checked against it.
+function treeFor(a, config) {
+  if (!a.working_tree) return { root: target };
+  const mapped = config?.working_trees?.[a.working_tree];
+  if (!mapped) return { root: null, why: `working_tree '${a.working_tree}' is not mapped in config.working_trees, so file absence was not checked` };
+  return { root: isAbsolute(mapped) || /^[A-Za-z]:[\\/]/.test(mapped) ? mapped : join(target, mapped) };
+}
+
+// Where an absent path is still alive: HEAD (deleted but not committed), or a
+// local branch that is not merged into HEAD and holds a copy it did not inherit
+// from its merge base with HEAD. Every local branch is checked (no cap), each by
+// its full refname so a same-named tag cannot answer for it. Returns { refs },
+// or { error } when any git call gives neither a yes nor a no: that blocks the
+// candidate, because a probe that did not finish proved nothing.
+function parkedRefs(root, path) {
+  const git = (args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
+  const why = (r, what) => `git ${what} failed in ${root} (${firstLine(r.error?.message ?? r.stderr)})`;
+  const inside = git(['rev-parse', '--is-inside-work-tree']);
+  if (inside.error || inside.status !== 0) return { error: why(inside, 'rev-parse') };
+  // The path's tree entry at `ref`: '' when absent, undefined when git failed.
+  const entry = (ref) => {
+    const r = git(['ls-tree', '--full-tree', ref, '--', path]);
+    return r.error || r.status !== 0 ? undefined : r.stdout.trim();
+  };
+  const refs = [];
+  const atHead = entry('HEAD');
+  if (atHead === undefined) return { error: why(git(['ls-tree', '--full-tree', 'HEAD', '--', path]), 'ls-tree HEAD') };
+  if (atHead) refs.push('HEAD');
+  // Full refnames, used unchanged: under %(refname:short) a branch that shares
+  // its name with a tag prints as 'heads/<name>'. The short name is display only.
+  const heads = git(['for-each-ref', '--format=%(refname)', 'refs/heads']);
+  if (heads.error || heads.status !== 0) return { error: why(heads, 'for-each-ref') };
+  for (const ref of heads.stdout.split('\n').filter(Boolean)) {
+    const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+    const held = entry(ref);
+    if (held === undefined) return { error: `git ls-tree ${branch} failed in ${root}` };
+    if (!held) continue;
+    const merged = git(['merge-base', '--is-ancestor', ref, 'HEAD']);
+    if (merged.status === 0) continue;
+    if (merged.error || merged.status !== 1) return { error: why(merged, `merge-base --is-ancestor ${branch} HEAD`) };
+    const base = git(['merge-base', 'HEAD', ref]);
+    if (base.status === 0) {
+      const inherited = entry(base.stdout.trim());
+      if (inherited === undefined) return { error: `git ls-tree of the merge base of HEAD and ${branch} failed in ${root}` };
+      if (inherited === held) continue;
+    } else if (base.error || base.status !== 1) return { error: why(base, `merge-base HEAD ${branch}`) };
+    refs.push(branch);
+  }
+  return { refs };
+}
+
+function buildPlan(store, config) {
   const articles = store.query({ types: ['feature_article'], cap: ARTICLE_CAP });
   if (articles.length >= ARTICLE_CAP) {
     throw new Error(`cleanup-plan REFUSED: ${articles.length} articles filled the ${ARTICLE_CAP} query window, so the live-owner set may be incomplete`);
@@ -231,18 +292,24 @@ function buildPlan(store) {
     return verdicts;
   };
 
+  // Both dependency directions of one article. relies_on names articles by
+  // SLUG (pinned convention, decision foreign_474b1c71); id accepted as a legacy
+  // fallback. relied_by is the article's own list (skills/cleanup/SKILL.md: any
+  // active relied_by = blocked).
+  const dependentsOf = (a) => ({
+    active_dependents: articles
+      .filter((other) => other.id !== a.id && isActive(other) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id)))
+      .map((d) => ({ id: d.id, slug: d.slug })),
+    active_relied_by: a.dependencies.relied_by
+      .map((ref) => bySlugOrId.get(ref))
+      .filter((d) => d && d.id !== a.id && isActive(d))
+      .map((d) => ({ id: d.id, slug: d.slug })),
+  });
+
   const candidates = articles
     .filter((a) => (a.state === 'deprecated' || a.state === 'dormant') && !a.files.every((f) => isGone(f.path)))
     .map((a) => {
-      // relies_on names articles by SLUG (pinned convention, decision foreign_474b1c71); id accepted as a legacy fallback.
-      const active_dependents = articles
-        .filter((other) => other.id !== a.id && isActive(other) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id)))
-        .map((d) => ({ id: d.id, slug: d.slug }));
-      // The candidate's own relied_by (skills/cleanup/SKILL.md: any active relied_by = blocked).
-      const active_relied_by = a.dependencies.relied_by
-        .map((ref) => bySlugOrId.get(ref))
-        .filter((d) => d && d.id !== a.id && isActive(d))
-        .map((d) => ({ id: d.id, slug: d.slug }));
+      const { active_dependents, active_relied_by } = dependentsOf(a);
       const deletable = active_dependents.length === 0 && active_relied_by.length === 0;
       let buckets = null;
       if (deletable) {
@@ -269,17 +336,57 @@ function buildPlan(store) {
         buckets,
       };
     });
+  const retire_candidates = articles
+    .filter((a) => a.state === 'deprecated' && a.files.every((f) => isGone(f.path)))
+    .map((a) => {
+      const { active_dependents, active_relied_by } = dependentsOf(a);
+      const blockers = [];
+      if (active_dependents.length) blockers.push(`active article(s) ${listed(active_dependents.map((d) => d.slug))} rely on it`);
+      if (active_relied_by.length) blockers.push(`its relied_by names active article(s) ${listed(active_relied_by.map((d) => d.slug))}`);
+      const tree = treeFor(a, config);
+      const parked = [];
+      if (!tree.root) blockers.push(tree.why);
+      else {
+        for (const path of new Set(a.files.map((f) => f.path))) {
+          let present = true;
+          try {
+            lstatSync(join(tree.root, path));
+          } catch (e) {
+            present = e.code !== 'ENOENT';
+          }
+          if (present) {
+            blockers.push(`'${path}' is present in ${tree.root}`);
+            continue;
+          }
+          const probe = parkedRefs(tree.root, path);
+          if (probe.error) blockers.push(`'${path}': ${probe.error}`);
+          else for (const ref of probe.refs) parked.push({ path, ref });
+        }
+      }
+      for (const { path, ref } of parked) blockers.push(`'${path}' is parked on ${ref === 'HEAD' ? 'HEAD (deleted but not committed)' : `branch '${ref}'`}`);
+      return {
+        article: a.id,
+        slug: a.slug,
+        files: a.files.map((f) => f.path),
+        tree: tree.root,
+        active_dependents,
+        active_relied_by,
+        parked,
+        blockers,
+        retirable: blockers.length === 0,
+      };
+    });
   const delete_paths = [...new Set(candidates.flatMap((c) => (c.buckets ? c.buckets.delete.map((e) => e.path) : [])))].sort();
   const queue = store
     .query({ types: ['todo'], cap: 1000 })
     .filter((t) => t.source === 'system' && t.system_reason === 'deletion_candidate')
     .map((t) => ({ id: t.id, text: t.text, file_keys: t.file_keys ?? [] }));
-  return { candidates, delete_paths, queue };
+  return { candidates, retire_candidates, delete_paths, queue };
 }
 
-const { store, close } = openProjectReadOnly(target);
+const { store, config, close } = openProjectReadOnly(target);
 try {
-  console.log(JSON.stringify(buildPlan(store), null, 2));
+  console.log(JSON.stringify(buildPlan(store, config), null, 2));
 } catch (e) {
   console.error(e.message);
   process.exitCode = 1;

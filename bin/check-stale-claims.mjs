@@ -4234,14 +4234,24 @@ var init_source_extensions = __esm({
 
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
+  const removedTerminus = rec.retired_reason !== void 0;
+  if (rec.status === "superseded" && rec.superseded_by === null && !removedTerminus) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
   }
   if (rec.status === "active" && rec.superseded_by !== null) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
   }
+  if (removedTerminus && rec.status !== "superseded") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "retired_reason requires status 'superseded': it is written only by knowledge_retire(id, reason)"
+    });
+  }
+  if (removedTerminus && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "retired_reason forbids superseded_by: a removed feature has no successor" });
+  }
 }
-var LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, LIFECYCLE_VALUES, FRESHNESS_VALUES, envelopeFields;
+var LINK_RELS, linkSchema, AUTHOR_RE, SCOPE_RE, LIFECYCLE_VALUES, FRESHNESS_VALUES, envelopeFields, RETIRED_REASONS;
 var init_envelope = __esm({
   "packages/schemas/dist/envelope.js"() {
     "use strict";
@@ -4283,6 +4293,7 @@ var init_envelope = __esm({
       scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
       stack_tags: external_exports.array(external_exports.string())
     };
+    RETIRED_REASONS = ["feature_removed"];
   }
 });
 
@@ -4461,7 +4472,12 @@ var init_records = __esm({
       // Board 6a8507f8: when an instrument-describing article's probe script was
       // last actually RUN — distinct from updated_at (when the record was
       // edited). Optional: most articles describe no probe at all.
-      last_executed: external_exports.string().datetime().optional()
+      last_executed: external_exports.string().datetime().optional(),
+      // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+      // the article is retired with no successor because its feature is gone.
+      // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+      // status 'superseded' and a null superseded_by.
+      retired_reason: external_exports.enum(RETIRED_REASONS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];

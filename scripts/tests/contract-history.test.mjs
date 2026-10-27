@@ -76,6 +76,31 @@ test('no git repository with bin/contract-history.json: the snapshot blocks are 
   }
 });
 
+test('shallow clone (git log returns one commit): the snapshot is unioned into the git-walked variants (issue #209)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-shallow-'));
+  const warned = [];
+  try {
+    mkdirSync(join(dir, '.git'));
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin', 'contract-history.json'), JSON.stringify({ [LEAD]: [`${LEAD} old`] }));
+    const v = historicalVariants({
+      repoRoot: dir,
+      templateRels: ['templates/a.md'],
+      leads: [LEAD],
+      extractBlock,
+      currentBlocks: new Map([[LEAD, `${LEAD} now`]]),
+      warn: (m) => warned.push(m),
+      git: (args) => (args[0] === 'log'
+        ? { status: 0, stdout: 'abc123\n', stderr: '' }
+        : { status: 0, stdout: `${LEAD} now`, stderr: '' }),
+    });
+    assert.deepEqual([...v.get(LEAD)].sort(), [`${LEAD} now`, `${LEAD} old`]);
+    assert.deepEqual(warned, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('no git repository with an unparseable bin/contract-history.json: degraded to the current block, announced once', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-nogit-bad-'));
   const warned = [];

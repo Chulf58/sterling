@@ -35,6 +35,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
+import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
 import {
   AGENTS_TEMPLATE_REL,
   CLAUDE_TEMPLATE_REL,
@@ -53,6 +54,19 @@ import {
   INSERT_AFTER,
 } from './lib/contract-bullets.mjs';
 
+const USAGE = 'usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...] [--help]';
+const KNOWN_FLAGS = new Set(['--apply', '--apply-inserts', '--verbose', '--project']);
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+for (const a of argv) {
+  if (a.startsWith('-') && !KNOWN_FLAGS.has(a)) {
+    console.error(`stamp-contract: unknown option ${a}\n${USAGE}`);
+    process.exit(2);
+  }
+}
 const APPLY = process.argv.includes('--apply');
 // --apply wins when both are given: it is the wider mode.
 const APPLY_INSERTS = !APPLY && process.argv.includes('--apply-inserts');
@@ -62,6 +76,21 @@ const onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === '--project' && process.argv[i + 1]) onlyProjects.push(resolve(process.argv[++i]));
 }
+// A --project value that is a linked git worktree matches its registered MAIN project, but the
+// contract files read and written are the worktree's own, so the stamp lands on that branch
+// (user-ruled 2026-10-27, "The worktree's copy"). value: what was typed; match: the path the
+// registry is compared against; dir: where AGENTS.md/CLAUDE.md live.
+const realOrResolved = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+};
+const projectTargets = onlyProjects.map((value) => {
+  const linked = resolveLinkedWorktree(value);
+  return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
+});
 
 // The plugin root, from this file's location: scripts/.. in a clone, and the same root
 // when run as bin/stamp-contract.mjs, whose bundle rewrites import.meta.url to this source
@@ -164,7 +193,7 @@ try {
 const selfPath = realpathSync(repoRoot);
 const results = [];
 let drift = 0;
-
+const matchedProjects = new Set();
 // QUIET ON CLEAN, LOUD ON DRIFT (P1). A fully in-sync project prints nothing —
 // it is counted in the summary instead. This runs inside /sterling:update between
 // the build/test/check blocks, where one 'matches' line per bullet per project
@@ -200,23 +229,34 @@ function record(r) {
 // What a written action is called when its file could not be written.
 const UNWRITTEN = { updated: 'would_update', inserted: 'would_insert', renamed: 'would_rename', section_inserted: 'would_insert_section' };
 
-for (const p of projects) {
-  const repo = p.repo_path;
-  if (onlyProjects.length && !onlyProjects.includes(resolve(repo))) continue;
+// The directories to stamp for a registered project: itself, or, when --project named one or
+// more of its linked worktrees, only those worktree copies (null: --project excludes it).
+function stampDirs(p) {
+  if (!onlyProjects.length) return [p.repo_path];
+  const hits = projectTargets.filter((t) => t.match === resolve(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  for (const t of hits) matchedProjects.add(t.value);
+  if (!hits.length) return null;
+  const worktrees = hits.filter((t) => t.worktree);
+  return worktrees.length ? worktrees.map((t) => t.dir) : [p.repo_path];
+}
+
+const work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
+for (const { p, dir: repo } of work) {
+  const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
   if (!existsSync(repo)) {
-    record({ project: p.name, status: 'missing_path', detail: repo });
+    record({ project: projectLabel, status: 'missing_path', detail: repo });
     continue;
   }
   if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own contract files are hand-maintained in sync with the templates
   const agentsMd = join(repo, 'AGENTS.md');
   const claudeMd = join(repo, 'CLAUDE.md');
   if (!existsSync(agentsMd)) {
-    record({ project: p.name, status: 'not_migrated', detail: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
+    record({ project: projectLabel, status: 'not_migrated', detail: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
   if (!existsSync(claudeMd)) {
-    record({ project: p.name, status: 'no_claude_md', detail: claudeMd });
+    record({ project: projectLabel, status: 'no_claude_md', detail: claudeMd });
     drift++;
     continue;
   }
@@ -389,7 +429,7 @@ for (const p of projects) {
       }
     }
   }
-  record({ project: p.name, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
+  record({ project: projectLabel, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
 }
 
 const processed = results.filter((r) => r.status === 'processed').length;
@@ -398,6 +438,11 @@ console.log(
     `${inSync} already in sync, ${drift} refusal(s).` +
     (!VERBOSE && inSync ? ' Pass --verbose to list the in-sync bullets.' : '')
 );
+const unmatched = onlyProjects.filter((p) => !matchedProjects.has(p));
+if (unmatched.length) {
+  console.error(`stamp-contract: --project matched no registered project: ${unmatched.join(', ')} (the value must equal a registered repo_path)`);
+  process.exit(2);
+}
 if (drift) {
   console.error('stamp-contract: refused above — resolve each by hand (sibling text that differs from every template version, a missing anchor, or a file that could not be written) and re-run.');
   process.exit(2);

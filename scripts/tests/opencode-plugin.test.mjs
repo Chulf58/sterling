@@ -482,7 +482,7 @@ test('template drift is loud: invalid host blocks fail the render; an unmapped C
     const real = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
     mkdirSync(join(fake, 'templates'));
     mkdirSync(join(fake, 'commands'));
-    for (const c of ['task', 'drain']) writeFileSync(join(fake, 'commands', `${c}.md`), 'x');
+    for (const c of ['task', 'drain', 'cleanup']) writeFileSync(join(fake, 'commands', `${c}.md`), 'x');
     const tpl = join(fake, 'templates', 'target-claude-md.md');
     writeFileSync(tpl, real.replace('<!-- /opencode-only -->', ''));
     assert.throws(() => server.renderSterlingLayer(p.dir, fake), /host blocks invalid.*fence/s);
@@ -882,6 +882,114 @@ test('settlement mints but does not advance while a Claude dispatch register has
     );
     await plugin.handlers.event(succeeded);
     assert.notEqual(readFileSync(settledPath(p.dir), 'utf8'), before, 'an ended row no longer holds the snapshot');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+const registerPath = (dir) => join(dir, '.sterling', 'transient', 'dispatch-register.json');
+const mintedPath = (dir) => join(dir, '.sterling', 'transient', 'settle-minted.json');
+const reconcileNotices = (dir) => JSON.parse(readFileSync(join(dir, server.NOTICES_REL), 'utf8')).filter((n) => /queued reconcile duties/.test(n.text));
+const liveRow = [{ agent_id: 'ag1', session_id: 'claude-s', files: ['src/a.mjs'], at: NOW }];
+
+test('while a dispatch holds the snapshot, an unchanged path mints and notices once; a changed hash mints again; advancing clears the memory; each held pass logs', async () => {
+  const p = makeProject();
+  try {
+    // The notice text repeats for the same paths, so mints are counted at the store.
+    let mints = 0;
+    const openStore = (path) => {
+      const s = new SterlingStore(path);
+      const enqueue = s.enqueueSystemTodo.bind(s);
+      s.enqueueSystemTodo = (item, ...rest) => {
+        if (item.system_reason === 'reconcile_needed') mints += 1;
+        return enqueue(item, ...rest);
+      };
+      return s;
+    };
+    const { plugin, cleanup } = await setupPlugin(p.dir, { openStore });
+    await plugin.handlers.event(succeeded);
+    writeFileSync(registerPath(p.dir), JSON.stringify(liveRow));
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 6;\n');
+    await plugin.handlers.event(succeeded);
+    assert.equal(mints, 1);
+    assert.equal(reconcileNotices(p.dir).length, 1);
+    await plugin.handlers.event(succeeded);
+    assert.equal(mints, 1, 'the same path at the same hash is not minted again');
+
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 7;\n');
+    await plugin.handlers.event(succeeded);
+    assert.equal(mints, 2, 'a changed hash is a new change');
+    assert.ok(existsSync(mintedPath(p.dir)));
+
+    const log = readFileSync(join(p.dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8');
+    const held = log.split('\n').filter((l) => /settle: snapshot held/.test(l));
+    assert.equal(held.length, 3, 'one line per held pass');
+    assert.match(held[1], /ag1.*1 candidate path\(s\), 1 already minted/);
+
+    writeFileSync(registerPath(p.dir), JSON.stringify([{ ...liveRow[0], ended: { at: NOW, event: 'SubagentStop' } }]));
+    await plugin.handlers.event(succeeded);
+    assert.equal(existsSync(mintedPath(p.dir)), false, 'the snapshot advance clears the minted map');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a minted map from an older settled snapshot is ignored, so a path returning to its old hash after a foreign advance mints again', async () => {
+  const p = makeProject();
+  try {
+    let mints = 0;
+    const openStore = (path) => {
+      const s = new SterlingStore(path);
+      const enqueue = s.enqueueSystemTodo.bind(s);
+      s.enqueueSystemTodo = (item, ...rest) => {
+        if (item.system_reason === 'reconcile_needed') mints += 1;
+        return enqueue(item, ...rest);
+      };
+      return s;
+    };
+    const { plugin, cleanup } = await setupPlugin(p.dir, { openStore });
+    await plugin.handlers.event(succeeded);
+    writeFileSync(registerPath(p.dir), JSON.stringify(liveRow));
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 8;\n'); // hash A
+    await plugin.handlers.event(succeeded);
+    assert.equal(mints, 1);
+    // A Claude Code Stop advances the snapshot to B (a different dirty hash for the path).
+    const settled = readSettled(p.dir);
+    writeFileSync(settledPath(p.dir), JSON.stringify({ ...settled, dirty: { ...settled.dirty, 'src/a.mjs': sha('export const a = 9;\n') }, at: '2026-10-27T09:00:00.000Z' }));
+    await plugin.handlers.event(succeeded); // the working tree (A) differs from B: a genuinely new change
+    assert.equal(mints, 2, 'the map from the older snapshot does not suppress it');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a duty noticed on a held turn is queued at the next held settlement and is not owed again', async () => {
+  const p = makeProject();
+  try {
+    const { plugin, cleanup } = await setupPlugin(p.dir);
+    await plugin.handlers.event(succeeded);
+    writeFileSync(registerPath(p.dir), JSON.stringify(liveRow));
+    writeFileSync(join(p.dir, 'src', 'unowned.mjs'), 'export const u = 1;\n');
+    const dutiesPath = join(p.dir, '.sterling', 'transient', 'opencode-duties.json');
+    const articleOwed = () => JSON.parse(readFileSync(dutiesPath, 'utf8')).owed.filter((d) => d.duty === 'article');
+    const articleTodos = () => {
+      const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+      try {
+        return s.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'article_missing');
+      } finally {
+        s.close();
+      }
+    };
+    await plugin.handlers.event(succeeded);
+    assert.equal(articleOwed().length, 1, 'turn 1 notices the duty and owes it');
+    assert.equal(articleTodos().length, 0);
+
+    await plugin.handlers.event(succeeded);
+    assert.equal(articleTodos().length, 1, 'turn 2: still unpaid, so it is queued as a maintenance item');
+    assert.deepEqual(articleOwed(), [], 'turn 2 does not owe, and so does not notice, the same path and hash again');
     await cleanup?.();
   } finally {
     p.cleanup();

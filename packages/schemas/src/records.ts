@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { envelopeFields, refineSupersession } from './envelope.js';
+import { envelopeFields, refineSupersession, RETIRED_REASONS } from './envelope.js';
 import { normalizeLocation, normalizeRepoPath, repoPath, repoPathOfLocation } from './paths.js';
 import { retiredTermSchema } from './retired-terms.js';
 
@@ -291,6 +291,11 @@ export const featureArticleSchema = base
     // last actually RUN — distinct from updated_at (when the record was
     // edited). Optional: most articles describe no probe at all.
     last_executed: z.string().datetime().optional(),
+    // Set only by knowledge_retire(id, reason: 'feature_removed') (GitHub #217):
+    // the article is retired with no successor because its feature is gone.
+    // Server-owned (WRITE_REFUSED_FIELDS); refineSupersession pairs it with
+    // status 'superseded' and a null superseded_by.
+    retired_reason: z.enum(RETIRED_REASONS).optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
@@ -2048,6 +2053,10 @@ function recordFieldConditions(type: string): [path: string, text: string][] {
         out.push(['state', `state '${state}' requires ${needed.join(' and ')}.`]);
         for (const field of needed) out.push([field, `Required when state is '${state}'.`]);
       }
+      out.push([
+        'retired_reason',
+        `Written only by knowledge_retire(id, reason: '${RETIRED_REASONS.join("' | '")}'); accepted only with status 'superseded' and no superseded_by, refused on a live record.`,
+      ]);
       return out;
     }
     case 'todo': {

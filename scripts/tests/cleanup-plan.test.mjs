@@ -154,6 +154,130 @@ test('cleanup-plan: an all-gone article is skipped even when an active article r
   }
 });
 
+test('cleanup-plan: a deprecated all-gone article is a retire candidate with no blockers; a dormant one is not listed', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    const dep = store.create(articleRec('gone-deprecated', ['src/gone_a.mjs', 'src/gone_b.mjs'], { state: 'deprecated' }));
+    const dorm = store.create(articleRec('gone-dormant', ['src/gone_c.mjs'], { state: 'dormant', state_reason: 'r', wiring_todo_id: randomUUID() }));
+    store.create(articleRec('old-user', ['src/other.mjs'], { state: 'deprecated', dependencies: { relies_on: ['gone-deprecated'], relied_by: [] } }));
+    const p = plan(dir);
+    assert.deepEqual(p.retire_candidates, [
+      {
+        article: dep.id,
+        slug: 'gone-deprecated',
+        files: ['src/gone_a.mjs', 'src/gone_b.mjs'],
+        tree: dir,
+        active_dependents: [],
+        active_relied_by: [],
+        parked: [],
+        blockers: [],
+        retirable: true,
+      },
+    ], 'a deprecated dependent does not block, and the dormant article is not a retire candidate');
+    assert.ok(!p.retire_candidates.some((x) => x.article === dorm.id));
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a retire candidate lists an active dependent and a parked path as blockers', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    // src/parked.mjs lives only on an unmerged branch; the checkout does not have it.
+    const base = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    git(dir, ['checkout', '-qb', 'feat/keep']);
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'parked.mjs'), 'export const p = 1;\n');
+    git(dir, ['add', 'src/parked.mjs']);
+    git(dir, ['commit', '-qm', 'parked work']);
+    git(dir, ['checkout', '-q', base]);
+    const dead = store.create(articleRec('gone-base', ['src/gone.mjs', 'src/parked.mjs'], { state: 'deprecated' }));
+    const user = store.create(articleRec('live-user', ['src/other.mjs'], { dependencies: { relies_on: ['gone-base'], relied_by: [] } }));
+    const p = plan(dir);
+    const r = p.retire_candidates.find((x) => x.article === dead.id);
+    assert.ok(r, 'the all-gone deprecated article is listed even when blocked');
+    assert.equal(r.retirable, false);
+    assert.deepEqual(r.active_dependents, [{ id: user.id, slug: 'live-user' }]);
+    assert.deepEqual(r.parked, [{ path: 'src/parked.mjs', ref: 'feat/keep' }]);
+    assert.ok(r.blockers.some((b) => /live-user rely on it/.test(b)), r.blockers.join(' | '));
+    assert.ok(r.blockers.includes("'src/parked.mjs' is parked on branch 'feat/keep'"), r.blockers.join(' | '));
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a path parked only on the 41st branch blocks the retire candidate (every branch is checked)', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    const base = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    for (let i = 0; i < 40; i++) git(dir, ['branch', `b${String(i).padStart(2, '0')}`]);
+    git(dir, ['checkout', '-qb', 'b40']);
+    writeFileSync(join(dir, 'src', 'late.mjs'), 'export const l = 1;\n');
+    git(dir, ['add', 'src/late.mjs']);
+    git(dir, ['commit', '-qm', 'late work']);
+    git(dir, ['checkout', '-q', base]);
+    const dead = store.create(articleRec('gone-late', ['src/late.mjs'], { state: 'deprecated' }));
+    const r = plan(dir).retire_candidates.find((x) => x.article === dead.id);
+    assert.equal(r.retirable, false);
+    assert.deepEqual(r.parked, [{ path: 'src/late.mjs', ref: 'b40' }]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a branch and a tag both named release leave an eligible retire candidate retirable', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    // Under %(refname:short) this branch prints as 'heads/release' because the tag shares its name.
+    git(dir, ['branch', 'release']);
+    git(dir, ['tag', 'release']);
+    const dead = store.create(articleRec('gone-collision', ['src/gone.mjs'], { state: 'deprecated' }));
+    const r = plan(dir).retire_candidates.find((x) => x.article === dead.id);
+    assert.deepEqual(r.blockers, []);
+    assert.equal(r.retirable, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a git failure while checking a branch blocks the retire candidate and names it', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  const saved = process.env.PATH;
+  try {
+    git(dir, ['branch', 'zz-broken']);
+    const dead = store.create(articleRec('gone-probe', ['src/gone.mjs'], { state: 'deprecated' }));
+    const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    const bin = join(dir, 'fake-bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" ls-tree "*zz-broken*) echo "fatal: injected ls-tree failure" >&2; exit 128;; esac\nexec "${real}" "$@"\n`);
+    chmodSync(join(bin, 'git'), 0o755);
+    process.env.PATH = `${bin}:${saved ?? ''}`;
+    const r = plan(dir).retire_candidates.find((x) => x.article === dead.id);
+    process.env.PATH = saved;
+    assert.equal(r.retirable, false);
+    assert.deepEqual(r.parked, []);
+    assert.match(r.blockers.join(' | '), /'src\/gone\.mjs': git ls-tree zz-broken failed/);
+    const clean = plan(dir).retire_candidates.find((x) => x.article === dead.id);
+    assert.equal(clean.retirable, true, 'without the injected failure the same candidate is retirable');
+  } finally {
+    process.env.PATH = saved;
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a retire candidate whose working_tree is not mapped is blocked, not checked against the project root', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    const dead = store.create(articleRec('gone-elsewhere', ['src/gone.mjs'], { state: 'deprecated', working_tree: 'other-tree' }));
+    const r = plan(dir).retire_candidates.find((x) => x.article === dead.id);
+    assert.equal(r.tree, null);
+    assert.equal(r.retirable, false);
+    assert.match(r.blockers.join(' | '), /working_tree 'other-tree' is not mapped in config\.working_trees/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('cleanup-plan: a sole-owned file referenced by another tracked file is keep, with the referrer in the reason', () => {
   const { dir, store, cleanup } = makeProject({
     'game/run/worker_crew.gd': 'extends Node\n',
