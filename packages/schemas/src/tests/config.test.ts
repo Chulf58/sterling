@@ -801,3 +801,12 @@ test('models.implementor: medium effort by default, in the schema and in templat
   assert.deepEqual(parseConfig({}).models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
   assert.deepEqual(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' }, 'an explicit entry wins');
 });
+
+test('multi_session: absent key is off with max_sessions 1; enabled with 3 parses; 0 and non-integers are refused', () => {
+  const absent = parseConfig({});
+  assert.deepEqual(absent.multi_session, { enabled: false, max_sessions: 1 });
+  assert.deepEqual(parseConfig({ multi_session: { enabled: true, max_sessions: 3 } }).multi_session, { enabled: true, max_sessions: 3 });
+  assert.throws(() => parseConfig({ multi_session: { max_sessions: 0 } }), /max_sessions/);
+  assert.throws(() => parseConfig({ multi_session: { max_sessions: 1.5 } }), /max_sessions/);
+  assert.throws(() => parseConfig({ multi_session: { max_sessions: '3' } }), /max_sessions/);
+});

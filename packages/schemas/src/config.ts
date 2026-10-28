@@ -250,6 +250,16 @@ export const configSchema = z.object({
       lease_minutes: z.number().int().positive().default(60),
     })
     .default({}),
+  // Multi-session toolkit opt-in (decision
+  // sterling-ports-ch-hub-s-whole-multi-session-toolkit-session): per project, off by
+  // default. When off, scripts refuse NEW launches and deliveries loudly, naming this
+  // key; inspection and cleanup still work. max_sessions limits toolkit launches only.
+  multi_session: z
+    .object({
+      enabled: z.boolean().default(false),
+      max_sessions: z.number().int().positive().default(1),
+    })
+    .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
   // Hard rule encoded here as data: no xhigh/max for subagents; max never
   // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
