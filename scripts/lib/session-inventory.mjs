@@ -168,7 +168,7 @@ async function sessionRowsAt(api, root, { all = false } = {}) {
       if ((root === undefined || dir === root) && (all || parent === null)) out.push(s);
     }
     // The V2 OpenAPI (SessionsResponse) requires the cursor object and gives next as a cursor string
-    // or null; a page with sessions and a null or no next is the last page (anti_pattern 6a76943f:
+    // or null; a page with sessions and a null or no next is the last page (a CH.Hub anti-pattern:
     // follow cursor.next until it is absent). A missing cursor object, or a next that is not a
     // non-empty string, is not trusted.
     const info = res.cursor;
