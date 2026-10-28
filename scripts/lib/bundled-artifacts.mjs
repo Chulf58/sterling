@@ -389,6 +389,8 @@ export const BIN_ENTRIES = {
   'notify-project': 'scripts/notify-project.mjs',
   // the parallel-session worktree opener commands/session.md runs in any consumer project
   'open-session': 'scripts/open-session.mjs',
+  // multi-session toolkit slice 6: /sterling:session --window, a tmux OpenCode window for a session worktree under max_sessions
+  'open-session-window': 'scripts/open-session-window.mjs',
   'plan-lock': 'scripts/plan-lock.mjs',
   'pr-review-wait': 'scripts/pr-review-wait.mjs',
   // files a scrubbed Sterling defect report as a GitHub issue from a consumer project

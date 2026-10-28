@@ -3,7 +3,7 @@
 // (multi-session toolkit slice 3, decision sterling-ports-ch-hub-s-whole-multi-session-toolkit-session;
 // ported from CH.Hub's scripts/wake-project.mjs without the hub).
 //
-//   node bin/wake-project.mjs --project <registry name> [--checkout <folder>] [--dry-run]
+//   node bin/wake-project.mjs --project <registry name> [--checkout <folder> | --item <board item id>] [--dry-run]
 //   node bin/wake-project.mjs --set-owner --project <registry name> --session <full id> [--checkout <folder>]
 //   node bin/wake-project.mjs --show-owners [--project <registry name> [--checkout <folder>]]
 //
@@ -18,6 +18,10 @@
 // admission). Every prompt is journaled before it is sent (scripts/lib/delivery-journal.mjs); a run after an
 // uncertain send looks the prompt up and resends it with the same message id only when it is absent.
 //
+// --item routes by the board item's claim (scripts/lib/claim-route.mjs): a held claim sends the wake to its holder in
+// the holder's checkout, never to the owner; no claim or an expired one goes to the owner. The claim is read from the
+// target's own board, read-only, and again right before the send. It does not combine with --checkout.
+//
 // --set-owner changes a project's own record, so it runs only from a checkout of that project; it is a
 // compare-and-set against the record it read before it checked the session. --show-owners reads files only
 // and needs no server.
@@ -26,29 +30,28 @@
 // owner_set, the owner list. Exit 1: refused or failed. Exit 2: bad arguments, an unknown project or checkout.
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Fail, Refused, deliver, realDeps, resolveCheckout, senderName, usableOwner } from './lib/owner-session.mjs';
+import { Fail, Refused, deliver, parseFlags, realDeps, resolveCheckout, senderName, usableOwner } from './lib/owner-session.mjs';
+import { isItemRef } from './lib/claim-route.mjs';
 import { checkSessionId, projectContext, sessionCheckouts, canonical, isUnder } from './lib/session-inventory.mjs';
 
-export const wakeText = (sender) => `Sterling project ${sender} woke this session. Read your board (board_query, readiness ready) and work what is ready under your conductor rules: plan it, dispatch subagents for the reading and the work, and keep this session for decisions and review.`;
+export const wakeText = (sender, item) => (item === undefined
+  ? `Sterling project ${sender} woke this session. Read your board (board_query, readiness ready) and work what is ready under your conductor rules: plan it, dispatch subagents for the reading and the work, and keep this session for decisions and review.`
+  : `Sterling project ${sender} woke this session about board item ${item}, which this session holds. Read it (board_get) and work it under your conductor rules: plan it, dispatch subagents for the reading and the work, and keep this session for decisions and review.`);
 
-const USAGE = 'usage: wake-project.mjs --project <registry name> [--checkout <folder>] [--dry-run]\n'
+const USAGE = 'usage: wake-project.mjs --project <registry name> [--checkout <folder> | --item <board item id>] [--dry-run]\n'
   + '       wake-project.mjs --set-owner --project <registry name> --session <full session id> [--checkout <folder>]\n'
   + '       wake-project.mjs --show-owners [--project <registry name> [--checkout <folder>]]';
 
 export function parseArgs(argv) {
-  const args = { dryRun: false, setOwner: false, showOwners: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--dry-run') args.dryRun = true;
-    else if (a === '--set-owner') args.setOwner = true;
-    else if (a === '--show-owners') args.showOwners = true;
-    else if (a === '--project' || a === '--session' || a === '--checkout') {
-      const v = argv[++i];
-      if (v === undefined || v.startsWith('--')) throw new Fail(2, `${a} needs a value`);
-      args[a.slice(2)] = v;
-    } else throw new Fail(2, `unknown argument '${a}'\n${USAGE}`);
-  }
+  const got = parseFlags(argv, { values: ['--project', '--session', '--checkout', '--item'], bools: ['--dry-run', '--set-owner', '--show-owners'], usage: USAGE });
+  const args = { dryRun: got['dry-run'] === true, setOwner: got['set-owner'] === true, showOwners: got['show-owners'] === true };
+  for (const k of ['project', 'session', 'checkout', 'item']) if (got[k] !== undefined) args[k] = got[k];
   if (args.showOwners && args.setOwner) throw new Fail(2, '--show-owners and --set-owner do not combine');
+  if (args.item !== undefined) {
+    if (args.showOwners || args.setOwner) throw new Fail(2, '--item goes with a wake only');
+    if (args.checkout !== undefined) throw new Fail(2, '--item names its checkout itself (the holder\'s), so it does not combine with --checkout');
+    if (!isItemRef(args.item)) throw new Fail(2, `--item takes a board item id, 8-character prefix or slug, got ${JSON.stringify(args.item)}`);
+  }
   if (args.showOwners) {
     if (args.dryRun) throw new Fail(2, '--show-owners does not take --dry-run');
     if (args.session !== undefined) throw new Fail(2, '--show-owners does not take --session');
@@ -121,7 +124,7 @@ export async function showOwners(args, deps) {
 
 export async function wake(args, deps) {
   const registry = await deps.listProjects();
-  return deliver('wake', { ...args, body: 'wake' }, deps, registry, wakeText(await senderName(deps, registry)));
+  return deliver('wake', { ...args, body: args.item === undefined ? 'wake' : `wake item ${args.item}` }, deps, registry, wakeText(await senderName(deps, registry), args.item));
 }
 
 const exitOf = (r) => (['queued', 'delivered', 'would_queue', 'owner_set'].includes(r.status) ? 0 : r.status === 'failed' ? r.code : 1);

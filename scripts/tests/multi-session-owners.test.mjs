@@ -348,11 +348,17 @@ test('--show-owners reads the records only: every checkout of every project, one
 test('bad arguments exit 2 before any call: unknown flags, an option token where a value belongs, combinations', async () => {
   const w = world();
   try {
-    for (const argv of [[], ['--bogus'], ['--project', '--dry-run'], ['--show-owners', '--set-owner'], ['--project', 'proj', '--session', 'ses_A'], ['--show-owners', '--dry-run'], ['--item', 'x', '--project', 'proj']]) {
+    for (const argv of [[], ['--bogus'], ['--project', '--dry-run'], ['--show-owners', '--set-owner'], ['--project', 'proj', '--session', 'ses_A'], ['--show-owners', '--dry-run'], ['--item', 'not an id', '--project', 'proj']]) {
       const { code } = await run(w, argv);
       assert.equal(code, 2, argv.join(' '));
     }
     assert.equal(w.calls.length, 0);
+    // `--item x` was an unknown flag when this list was written. Since slice 5 `x` is a well-formed slug, so it passes the
+    // parser and the run reads its claim (here no reader exists, so the claim is unreadable: exit 1, nothing sent). It is
+    // therefore outside the "before any call" list; the malformed value above ('not an id') still pins exit 2.
+    const slug = await run(w, ['--item', 'x', '--project', 'proj']);
+    assert.equal(slug.code, 1);
+    assert.equal(w.posts.length, 0);
   } finally {
     w.cleanup();
   }
