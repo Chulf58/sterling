@@ -19,8 +19,8 @@
 // The record is also the checkout's OWNER record for the multi-session toolkit
 // (scripts/lib/owner-record.mjs): wake-project and notify-project send to it, and
 // `wake-project --set-owner` changes it by compare-and-set. This recorder writes through
-// recordOwner, under the same lock file, so a set-owner compare cannot straddle this write.
-import { recordOwner, OWNER_RECORD_REL } from '../../../scripts/lib/owner-record.mjs';
+// withOwnerRecord, under the same lock file, so a set-owner compare cannot straddle this write.
+import { withOwnerRecord, OWNER_RECORD_REL } from '../../../scripts/lib/owner-record.mjs';
 import { sessionKind } from './dispatch.mjs';
 import { inWorkerChild } from './worker.mjs';
 
@@ -48,9 +48,13 @@ export function createConductorSessionRecorder({ rootOf, fenced, getSession, par
       const kind = await sessionKind(getSession?.(), sessionID, parents);
       if (kind.why) throw new Error(`conductor session not recorded: could not tell whether session ${sessionID} is a root session (${kind.why})`);
       if (kind.kind !== 'root') return;
-      if (seq <= (lastWritten.get(root) ?? 0)) return;
-      await recordOwner(root, sessionID);
-      lastWritten.set(root, seq);
+      // The order check, the write and the counter update are one critical section under the
+      // record's lock: checked before the lock, a prompt that waited on it could overwrite a newer one.
+      await withOwnerRecord(root, ({ current, write }) => {
+        if (seq <= (lastWritten.get(root) ?? 0)) return;
+        if (current !== sessionID) write(sessionID);
+        lastWritten.set(root, seq);
+      });
     });
   };
 }

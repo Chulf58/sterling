@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 // scripts/lib/owner-session.mjs
 import { createServer } from "node:net";
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
 import { readdir, readlink, realpath } from "node:fs/promises";
@@ -5881,41 +5881,27 @@ async function readAll(reader, size) {
   }
   return buf.subarray(0, at).toString("utf8");
 }
-async function opencodeApi(bin, method, path, body, timeoutMs = 0, { maxStdout = MAX_STDOUT } = {}) {
-  const deadline = timeoutMs > 0 ? performance.now() + timeoutMs : Infinity;
-  let service;
+async function replyFiles(fs = {}) {
+  const { mkdtemp: makeDir = mkdtemp, open: openFile = open, rm: remove = rm } = fs;
+  const dir = await makeDir(join3(tmpdir(), "sterling-api-"));
+  const handles = [];
+  let removed = false;
   try {
-    service = readService(serviceFilePath());
-  } catch (err) {
-    return { code: 1, stdout: "", stderr: err.message };
-  }
-  if (service.password.includes("\0")) {
-    return { code: 1, stdout: "", stderr: "OpenCode service password cannot be used in the child environment" };
-  }
-  const args = ["api", method.toLowerCase(), path, ...body === void 0 ? [] : ["-d", body], "--server", service.url];
-  let result;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const remaining = Math.ceil(deadline - performance.now());
-    if (remaining <= 0) return result ?? { code: 124, stdout: "", stderr: `${bin} timed out after ${timeoutMs} ms and was killed` };
-    result = await runAttempt(bin, args, method, path, timeoutMs, deadline, service.password, maxStdout);
-    const diagnostic = `Error: Could not reach server at ${service.url}`;
-    if (method.toUpperCase() !== "GET" || result.code === 0 || result.code === 124 || result.stdout !== "" || result.stderr.split("\n")[0] !== diagnostic || attempt === 2) return result;
-    const delay = [250, 1e3][attempt];
-    if (performance.now() + delay >= deadline) return result;
-    await sleep(delay);
+    handles.push(await openFile(join3(dir, "stdout"), "w", 384));
+    handles.push(await openFile(join3(dir, "stdout"), "r"));
+    removed = true;
+    await remove(dir, { recursive: true, force: true });
+    return { out: handles[0], reader: handles[1] };
+  } catch (e) {
+    const cleanup = await Promise.allSettled([...handles.map((h) => h.close()), ...removed ? [] : [remove(dir, { recursive: true, force: true })]]);
+    const failed = cleanup.filter((r) => r.status === "rejected").map((r) => r.reason);
+    if (failed.length > 0) throw new AggregateError([e, ...failed], `preparing the reply files failed (${e.message}), and so did cleaning them up`);
+    throw e;
   }
 }
-async function runAttempt(bin, args, method, path, timeoutMs, deadline, password, maxStdout) {
-  const dir = await mkdtemp(join3(tmpdir(), "sterling-api-"));
-  let out = null;
-  let reader = null;
+async function runPrepared(bin, args, method, path, timeoutMs, deadline, password, maxStdout, files) {
+  const { out, reader } = files;
   try {
-    try {
-      out = await open(join3(dir, "stdout"), "w", 384);
-      reader = await open(join3(dir, "stdout"), "r");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
     const remaining = Math.ceil(deadline - performance.now());
     if (remaining <= 0) return { code: 124, stdout: "", stderr: `${bin} timed out after ${timeoutMs} ms and was killed` };
     const result = await runToFile(bin, args, out.fd, Number.isFinite(remaining) ? remaining : 0, password);
@@ -5927,9 +5913,39 @@ ${result.stderr}` : over };
     }
     return { code: result.code, stdout: await readAll(reader, size), stderr: result.stderr };
   } finally {
-    await out?.close();
-    await reader?.close();
+    await out.close();
+    await reader.close();
   }
+}
+async function prepareApiCall(bin, method, path, body, timeoutMs = 0, { maxStdout = MAX_STDOUT } = {}) {
+  let service;
+  try {
+    service = readService(serviceFilePath());
+  } catch (err) {
+    return { send: async () => ({ code: 1, stdout: "", stderr: err.message }), discard: async () => {
+    } };
+  }
+  if (service.password.includes("\0")) {
+    return { send: async () => ({ code: 1, stdout: "", stderr: "OpenCode service password cannot be used in the child environment" }), discard: async () => {
+    } };
+  }
+  const args = ["api", method.toLowerCase(), path, ...body === void 0 ? [] : ["-d", body], "--server", service.url];
+  const files = await replyFiles();
+  let used = false;
+  return {
+    send: () => {
+      if (used) throw new Error("a prepared OpenCode API call runs once");
+      used = true;
+      const deadline = timeoutMs > 0 ? performance.now() + timeoutMs : Infinity;
+      return runPrepared(bin, args, method, path, timeoutMs, deadline, service.password, maxStdout, files);
+    },
+    discard: async () => {
+      if (used) return;
+      used = true;
+      await files.out.close();
+      await files.reader.close();
+    }
+  };
 }
 var REQUEST_TIMEOUT_MS = 12e4;
 var SLOW_GET_MS = 1e4;
@@ -6022,8 +6038,7 @@ var provenNotSent = (stderr) => {
   const first = String(stderr ?? "").trimStart().split("\n")[0];
   return NOT_SENT.some((re) => re.test(first));
 };
-async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api = opencodeApi, timeoutMs = 3e4 } = {}) {
-  const r = await api(bin, method, path, body === void 0 ? void 0 : JSON.stringify(body), timeoutMs);
+function sendOutcome(r) {
   const text = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();
   if (r.code === 124) return { ok: false, uncertain: true, why: `timed out${text ? `: ${text}` : ""}` };
   if (r.code !== 0) return { ok: false, uncertain: !provenNotSent(r.stderr), why: `exit ${r.code}${text ? `: ${text}` : ""}` };
@@ -6033,9 +6048,16 @@ async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api = o
     return { ok: false, uncertain: true, why: `the response was not JSON (${e.message})${text ? `: ${text}` : ""}` };
   }
 }
+async function prepareSend(method, path, body, { bin = defaultOpencodeBin(), api, prepare = prepareApiCall, timeoutMs = 3e4 } = {}) {
+  const text = body === void 0 ? void 0 : JSON.stringify(body);
+  if (api) return { send: async () => sendOutcome(await api(bin, method, path, text, timeoutMs)), discard: async () => {
+  } };
+  const call = await prepare(bin, method, path, text, timeoutMs);
+  return { send: async () => sendOutcome(await call.send()), discard: () => call.discard() };
+}
 
 // scripts/lib/owner-record.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync5, statSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 
 // scripts/lib/atomic-write.mjs
@@ -6055,90 +6077,115 @@ function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = re
 }
 
 // scripts/lib/file-lock.mjs
-import { linkSync, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, unlinkSync, writeFileSync as writeFileSync2, mkdirSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync as readFileSync4, rmSync as rmSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { hostname } from "node:os";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+var UNPARSEABLE_GRACE_MS = 1e4;
 var LockTimeout = class extends Error {
   constructor(message) {
     super(message);
     this.lockTimeout = true;
   }
 };
-var pidAlive = (pid) => {
+function pidIsAlive2(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
     return e?.code === "EPERM";
   }
-};
-function readLock(path) {
+}
+function procStartTime2(pid) {
   try {
-    return readFileSync4(path, "utf8");
-  } catch (e) {
-    if (e?.code === "ENOENT") return null;
-    throw e;
+    const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
   }
 }
-function tryTake(path, content) {
+function createWithContent(path, content) {
   const tmp = `${path}.tmp-${randomUUID2()}`;
-  writeFileSync2(tmp, content, { mode: 384 });
+  writeFileSync2(tmp, content, { flag: "wx", mode: 384 });
   try {
     linkSync(tmp, path);
     return true;
   } catch (e) {
-    if (e?.code !== "EEXIST") throw e;
-    return false;
+    if (e?.code === "EEXIST") return false;
+    throw e;
   } finally {
     rmSync2(tmp, { force: true });
   }
 }
-function takeOverStale(path, seen) {
-  const aside = `${path}.stale-${randomUUID2()}`;
+function readLock(path) {
+  let raw;
+  let mtimeMs;
   try {
-    renameSync2(path, aside);
+    raw = readFileSync4(path, "utf8");
+    mtimeMs = statSync(path).mtimeMs;
   } catch (e) {
-    if (e?.code === "ENOENT") return;
+    if (e?.code === "ENOENT") return void 0;
     throw e;
   }
-  const caught = readLock(aside);
-  if (caught === seen) {
-    unlinkSync(aside);
-    return;
-  }
   try {
-    linkSync(aside, path);
-  } catch (e) {
-    throw new Error(`lock ${path}: a live lock was moved aside while a stale one was cleared and could not be put back (${e.code ?? e.message}); remove ${aside} by hand once no run of this tool is active`);
-  } finally {
-    rmSync2(aside, { force: true });
+    const v = JSON.parse(raw);
+    if (Number.isInteger(v?.pid) && typeof v.token === "string" && typeof v.hostname === "string") return { raw, owner: v, mtimeMs };
+  } catch {
   }
+  return { raw, mtimeMs };
 }
-async function takeFileLock(path, { waitMs = 5e3, now = Date.now, sleep: sleep2 = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+function ownerGone(seen, probe) {
+  const o = seen.owner;
+  if (!o) return probe.now() - seen.mtimeMs >= UNPARSEABLE_GRACE_MS;
+  if (o.hostname !== probe.host) return false;
+  if (!probe.isAlive(o.pid)) return true;
+  if (o.proc_start === null || o.proc_start === void 0) return false;
+  const cur = probe.startTimeOf(o.pid);
+  return cur !== null && cur !== o.proc_start;
+}
+function takeOverStale(path, staleRaw, me, probe) {
+  let key = staleRaw;
+  const dead = [];
+  for (let depth = 0; depth < 16; depth++) {
+    const ticket = `${path}.takeover-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+    if (createWithContent(ticket, me)) {
+      try {
+        probe.beforeRemove?.();
+        if (readLock(path)?.raw === staleRaw) rmSync2(path, { force: true });
+        return "removed";
+      } finally {
+        rmSync2(ticket, { force: true });
+        for (const d of dead) rmSync2(d, { force: true });
+      }
+    }
+    const t = readLock(ticket);
+    if (!t) return "retry";
+    if (!ownerGone(t, probe)) return "taker-busy";
+    dead.push(ticket);
+    key = `${key}\0${t.raw}`;
+  }
+  return "taker-busy";
+}
+async function takeFileLock(path, { waitMs = 5e3, pollMs = 25, now = Date.now, sleep: sleep2 = (ms) => new Promise((r) => setTimeout(r, ms)), isAlive = pidIsAlive2, startTimeOf = procStartTime2, pid = process.pid, beforeRemove } = {}) {
   mkdirSync(dirname2(path), { recursive: true });
-  const content = JSON.stringify({ pid: process.pid, nonce: randomUUID2() });
+  const host = hostname();
+  const token = randomUUID2();
+  const me = JSON.stringify({ pid, proc_start: startTimeOf(pid), hostname: host, token });
+  const probe = { isAlive, startTimeOf, host, now, beforeRemove };
   const end = now() + waitMs;
   for (; ; ) {
-    if (tryTake(path, content)) {
+    if (createWithContent(path, me)) {
       return () => {
-        if (readLock(path) === content) unlinkSync(path);
+        if (readLock(path)?.owner?.token === token) rmSync2(path, { force: true });
       };
     }
     const seen = readLock(path);
-    if (seen !== null) {
-      let pid = null;
-      try {
-        pid = JSON.parse(seen)?.pid;
-      } catch {
-        pid = null;
-      }
-      if (Number.isInteger(pid) && pid > 0 && !pidAlive(pid)) {
-        takeOverStale(path, seen);
-        continue;
-      }
-    }
+    if (!seen) continue;
+    if (ownerGone(seen, probe) && takeOverStale(path, seen.raw, me, probe) !== "taker-busy") continue;
     if (now() >= end) throw new LockTimeout(`the lock ${path} stayed taken for ${waitMs} ms`);
-    await sleep2(25);
+    await sleep2(pollMs);
   }
 }
 async function withFileLock(path, fn, options) {
@@ -6162,7 +6209,7 @@ function readOwner(checkout) {
   let mtime;
   try {
     text = readFileSync5(path, "utf8");
-    mtime = statSync(path).mtime;
+    mtime = statSync2(path).mtime;
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw e;
@@ -6197,7 +6244,7 @@ import { join as join7 } from "node:path";
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5, realpathSync, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync5, realpathSync, statSync as statSync3 } from "node:fs";
 import { basename, dirname as dirname4, join as join6, resolve as resolve2 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
@@ -6255,7 +6302,7 @@ function linkedWorktreeOnce(dir) {
 }
 function gitFileAt(dir) {
   try {
-    return statSync2(join6(dir, ".git")).isFile();
+    return statSync3(join6(dir, ".git")).isFile();
   } catch {
     return false;
   }
@@ -6462,6 +6509,10 @@ async function pendingIds(api, path) {
   if (!Array.isArray(res?.data)) throw new Fail(1, `GET ${path}: unexpected shape (data is not a list)`);
   return new Set(res.data.map((f) => f?.sessionID));
 }
+async function pendingInDir(api, dir) {
+  const loc = `location%5Bdirectory%5D=${encodeURIComponent(dir)}`;
+  return { forms: await pendingIds(api, `/api/form?${loc}`), perms: await pendingIds(api, `/api/permission/request?${loc}`) };
+}
 async function inboxPending(api, session, { now, allowCompleted = true } = {}) {
   const path = `/api/session/${checkSessionId(session, "live session")}/inbox`;
   const res = await getJson(api, path);
@@ -6512,18 +6563,6 @@ async function sessionRowsAt(api, root, { all = false } = {}) {
     cursors.add(cursor);
   }
   throw new Fail(1, `more than ${MAX_PAGES} pages of sessions for ${root}; refusing to guess`);
-}
-async function inputGuard(api, root, session) {
-  const list = async (path) => {
-    const res = await getJson(api, path);
-    if (!Array.isArray(res?.data)) throw new Fail(1, `GET ${path}: unexpected shape (data is not a list)`);
-    return res.data;
-  };
-  const loc = `location%5Bdirectory%5D=${encodeURIComponent(root)}`;
-  if ((await list(`/api/form?${loc}`)).some((f) => f?.sessionID === session)) return "a question form is open";
-  if ((await list(`/api/permission/request?${loc}`)).some((f) => f?.sessionID === session)) return "a permission request is open";
-  if ((await list(`/api/session/${session}/inbox`)).some((e) => !isNonInputNotice(e))) return "input is already queued";
-  return null;
 }
 async function resolvedOrNull(resolve4, dir) {
   try {
@@ -6915,7 +6954,7 @@ async function rootOf(deps, snapshot, id) {
     const s = snapshot.get(current) ?? (await getJson(deps.api, `/api/session/${checkSessionId(current, "parent chain")}`))?.data;
     if (s?.id !== current) throw new Fail(1, `session ${id}: cannot read ${current} in its parent chain`);
     const parent = parentOf(s, `session ${current}`);
-    if (parent === null) return current;
+    if (parent === null) return s;
     current = parent;
   }
   throw new Fail(1, `session ${id}: parent chain is deeper than ${MAX_DEPTH2}`);
@@ -6954,41 +6993,81 @@ async function runningShells(deps, dirs) {
   return { shells: reads.flatMap((r) => r.shells ?? []), unknown: reads.flatMap((r) => r.unknown ? [r.unknown] : []) };
 }
 var busyWord = (why) => why.some((w) => w === "busy" || w.endsWith("is busy"));
-async function admission(deps, { registry, project, scope, owner, kind }) {
+var MAX_ACTIVITY_ROUNDS = 3;
+async function admissionPass(deps, { registry, project, scope, owner: given, kind }) {
   const snapshot = await readSessionSnapshot(deps);
+  const fresh = snapshot.get(given.id);
+  if (!fresh) return new Refused("owner_missing", `session ${given.id} is not in the session listing; nothing sent`);
+  const real = await canonical(deps.realpath, fresh.location?.directory, `session ${given.id}`);
+  if (checkoutOf(real, shapeOf(scope)) !== scope.canonicalRoot) return new Refused("owner_missing", `session ${given.id} now runs in ${fresh.location?.directory}, not in the checkout ${scope.canonicalRoot}; nothing sent`);
+  const owner = { ...given, directory: fresh.location.directory };
   const active = await activeIds(deps);
   const [inv] = await readProjectInventories(deps, registry, [{ project }], { snapshot, active });
-  if (inv.unknown) return { refused: new Refused("unknown", `the sessions of ${project} cannot be read in full; nothing sent`) };
+  if (inv.unknown) return new Refused("unknown", `the sessions of ${project} cannot be read in full; nothing sent`);
   const here = inv.live.filter((e) => e.checkout === scope.canonicalRoot);
   const mine = here.find((e) => e.id === owner.id);
   if (mine) {
     const why = mine.why.join(", ");
-    return { refused: busyWord(mine.why) ? new Refused("busy", `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused("input_pending", `owner session ${owner.id} is waiting on input (${why}); nothing sent`) };
+    return busyWord(mine.why) ? new Refused("busy", `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused("input_pending", `owner session ${owner.id} is waiting on input (${why}); nothing sent`);
   }
   const others = here.filter((e) => e.id !== owner.id);
-  if (kind === "wake" && others.length > 0) {
-    return { refused: new Refused("ambiguous_session", `owner session ${owner.id} is idle but ${others.length} other conductor(s) of the checkout are live: ${others.map((e) => `${e.id} (${e.why.join(", ")})`).join("; ")}; nothing sent`) };
-  }
+  if (kind === "wake" && others.length > 0) return competing(owner, others);
   const tree = descendantsOf(snapshot, owner.id);
-  return { refused: await shellsRefusal(deps, owner, tree), snapshot, tree };
+  const running = runningJudge(deps, { snapshot, scope, owner, tree, kind });
+  let ids = active;
+  for (let round = 1; round <= MAX_ACTIVITY_ROUNDS; round++) {
+    await running.resolve(ids);
+    const busy = running.judge(ids);
+    if (busy) return busy;
+    const pending = await treePending(deps, owner, tree);
+    if (pending) return pending;
+    const shells = await shellsRefusal(deps, owner, tree);
+    if (shells) return shells;
+    const closing = await activeIds(deps);
+    if (running.knows(closing)) return running.judge(closing);
+    ids = closing;
+  }
+  return new Refused("deferred", `new sessions kept appearing in the closing activity read (${MAX_ACTIVITY_ROUNDS} rounds); nothing sent`);
+}
+var competing = (owner, others) => new Refused("ambiguous_session", `owner session ${owner.id} is idle but ${others.length} other conductor(s) of the checkout are live: ${others.map((e) => `${e.id} (${e.why.join(", ")})`).join("; ")}; nothing sent`);
+function runningJudge(deps, { snapshot, scope, owner, tree, kind }) {
+  const mineIds = /* @__PURE__ */ new Set([owner.id, ...tree.map((s) => s.id)]);
+  const known = /* @__PURE__ */ new Map();
+  const one = async (id) => {
+    if (mineIds.has(id)) return new Refused("busy", `owner session ${owner.id} is working (${id === owner.id ? "busy" : `its subagent ${id} is busy`}); nothing sent`);
+    const root = await rootOf(deps, snapshot, id);
+    if (root.id === owner.id) return new Refused("busy", `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
+    if (kind !== "wake" || !isConductorCandidate(root)) return null;
+    const real = await canonical(deps.realpath, root.location?.directory, `session ${root.id}`);
+    return checkoutOf(real, shapeOf(scope)) === scope.canonicalRoot ? competing(owner, [{ id: root.id, why: [root.id === id ? "busy" : `its subagent ${id} is busy`] }]) : null;
+  };
+  return {
+    resolve: async (ids) => {
+      for (const id of ids) if (!known.has(id)) known.set(id, await one(id));
+    },
+    knows: (ids) => ids.every((id) => known.has(id)),
+    judge: (ids) => ids.map((id) => known.get(id)).find((r) => r) ?? null
+  };
+}
+async function treePending(deps, owner, tree) {
+  const members = /* @__PURE__ */ new Set([owner.id, ...tree.map((s) => s.id)]);
+  const queued = await mapLimit([...members], PARALLEL, async (id) => [id, await inboxPending(deps.api, id, { allowCompleted: false })]);
+  const hit = queued.find(([, q]) => q);
+  if (hit) return new Refused("input_pending", `owner session ${owner.id} is waiting on input (${hit[0] === owner.id ? "" : `its subagent ${hit[0]}: `}input is already queued); nothing sent`);
+  const dirs = [.../* @__PURE__ */ new Set([owner.directory, ...tree.map((s) => s.location?.directory).filter((d) => typeof d === "string" && isAbsolute2(d))])];
+  for (const { forms, perms } of await mapLimit(dirs, PARALLEL, (dir) => pendingInDir(deps.api, dir))) {
+    for (const [ids, what] of [[forms, "a question form is open"], [perms, "a permission request is open"]]) {
+      const id = [...ids].find((x) => members.has(x));
+      if (id) return new Refused("input_pending", `owner session ${owner.id} is waiting on input (${id === owner.id ? "" : `its subagent ${id}: `}${what}); nothing sent`);
+    }
+  }
+  return null;
 }
 async function shellsRefusal(deps, owner, tree) {
   const dirs = [.../* @__PURE__ */ new Set([owner.directory, ...tree.map((s) => s.location?.directory).filter((d) => typeof d === "string" && isAbsolute2(d))])];
   const { shells, unknown } = await runningShells(deps, dirs);
   if (unknown.length > 0) return new Refused("unknown", `the running shells cannot be established (${unknown.join("; ")}); nothing sent`);
   if (shells.length > 0) return new Refused("shell_running", `a shell command still runs where owner session ${owner.id} or its subagents work (${shells.map((s) => `${s.id} in ${s.dir}`).join("; ")}); nothing sent`);
-  return null;
-}
-async function finalAdmission(deps, { owner, snapshot, tree }) {
-  const pending = await inputGuard(deps.api, owner.directory, owner.id);
-  if (pending) return new Refused("input_pending", `owner session ${owner.id}: ${pending}; nothing sent`);
-  const shells = await shellsRefusal(deps, owner, tree);
-  if (shells) return shells;
-  const mineIds = /* @__PURE__ */ new Set([owner.id, ...tree.map((s) => s.id)]);
-  for (const id of await activeIds(deps)) {
-    if (mineIds.has(id)) return new Refused("busy", `owner session ${owner.id} is working (${id === owner.id ? "busy" : `its subagent ${id} is busy`}); nothing sent`);
-    if (!snapshot.has(id) && await rootOf(deps, snapshot, id) === owner.id) return new Refused("busy", `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
-  }
   return null;
 }
 async function receipt(deps, record) {
@@ -7010,7 +7089,7 @@ async function receipt(deps, record) {
   return "absent";
 }
 function holdRunLock(key, waitMs = RUN_LOCK_WAIT_MS) {
-  const name = `\0sterling-delivery:${process.getuid()}:${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+  const name = `\0sterling-delivery:${process.getuid()}:${createHash2("sha256").update(key).digest("hex").slice(0, 32)}`;
   const started = Date.now();
   const attempt = () => new Promise((resolve4, reject) => {
     const server = createServer();
@@ -7095,21 +7174,30 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
       throw new Refused("unresolved_delivery", `an earlier ${p.kind} ${p.id} (${p.created_at}) to ${owner.id} may or may not have arrived and is not in the session; run that ${p.kind} again to resend it with the same id, then this one; nothing sent`);
     }
   }
-  const admitted = await admission(deps, { registry, project: args.project, scope, owner, kind });
-  if (admitted.refused) throw admitted.refused;
+  const first = await admissionPass(deps, { registry, project: args.project, scope, owner, kind });
+  if (first) throw first;
   const id = resend?.id ?? newMessageId(deps.now());
   const prompt = resend?.text ?? text;
   if (args.dryRun) return { ...out, status: "would_queue", session: owner.id, text: prompt };
-  const now = deps.readOwner(scope.root);
-  if (now?.session !== recorded.session) throw new Refused("owner_changed", `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? "none"} during the admission; nothing sent`);
-  const still = await usableOwner(deps, owner.id, scope);
-  if (!still.ok) throw new Refused("owner_missing", `${still.why}; nothing sent`);
-  const last = await finalAdmission(deps, { owner, snapshot: admitted.snapshot, tree: admitted.tree });
-  if (last) throw last;
   await journal.sending({ id, kind, body: args.body, text: prompt, sender: deps.senderRoot ?? null, ...target, session: owner.id });
+  let post = null;
+  try {
+    post = await deps.prepareSend("POST", `/api/session/${owner.id}/prompt`, { id, text: prompt, delivery: "queue" });
+    const still = await usableOwner(deps, owner.id, scope);
+    if (!still.ok) throw new Refused("owner_missing", `${still.why}; nothing sent`);
+    const last = await admissionPass(deps, { registry, project: args.project, scope, owner: still, kind });
+    if (last) throw last;
+    const now = deps.readOwner(scope.root);
+    if (now?.session !== recorded.session) throw new Refused("owner_changed", `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? "none"} during the admission; nothing sent`);
+  } catch (e) {
+    const why2 = `not sent: ${e instanceof Refused ? `${e.reason}: ${e.why}` : String(e?.message ?? e)}`;
+    await post?.discard();
+    await journal.settle(id, resend ? "uncertain" : "failed", resend ? `${resend.why ?? "an earlier attempt may have been sent"}; a resend was refused (${why2})` : why2);
+    throw e;
+  }
   out.sent = "maybe";
   out.id = id;
-  const r = await deps.send("POST", `/api/session/${owner.id}/prompt`, { id, text: prompt, delivery: "queue" });
+  const r = await post.send();
   if (r.ok && r.data?.data?.sessionID === owner.id && r.data.data.delivery === "queue") {
     await journal.settle(id, "delivered");
     return { ...out, status: "queued", sent: "yes", session: owner.id, ...resend ? { resent: true } : {} };
@@ -7126,7 +7214,7 @@ function realDeps() {
   const senderRoot = resolveProjectRoots(process.cwd())?.storeRoot ?? null;
   return {
     api: createHttpApi(),
-    send: (method, path, body) => apiSend(method, path, body),
+    prepareSend: (method, path, body) => prepareSend(method, path, body),
     realpath: (p) => realpath(p),
     readdir: (dir) => readdir(dir),
     gitWorktrees: (root, ms) => new Promise((resolve4, reject) => {

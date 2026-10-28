@@ -8,7 +8,7 @@
 //
 // Every dependency arrives in `deps` (realDeps in wake-project.mjs), so the tests run on fakes:
 //   api(method, path)        GET reads, { code, stdout, stderr } (opencode-api.mjs createHttpApi)
-//   send(method, path, body) the one POST, { ok, data, uncertain, why } (opencode-api.mjs apiSend)
+//   prepareSend(method, path, body)  the one POST made ready: { send, discard } (opencode-api.mjs prepareSend)
 //   realpath, readdir, gitWorktrees(root, ms), now()   as session-inventory.mjs needs them
 //   processCwds()            [{ pid, cwd }] of this machine, for a removed folder's shells
 //   readOwner(checkout), transitionOwner(checkout, cas)   owner-record.mjs
@@ -22,14 +22,14 @@ import { existsSync } from 'node:fs';
 import { readdir, readlink, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { registryPath, readRegistrySnapshotReadOnly } from '@sterling/store';
-import { createHttpApi, apiSend } from './opencode-api.mjs';
+import { createHttpApi, prepareSend } from './opencode-api.mjs';
 import { readOwner, transitionOwner } from './owner-record.mjs';
 import { readMultiSession } from './multi-session.mjs';
 import { deliveryJournal, newMessageId } from './delivery-journal.mjs';
 import { resolveProjectRoots } from './worktree-root.mjs';
 import {
-  Fail, activeIds, canonical, checkoutOf, checkSessionId, getJson, inputGuard, isConductorCandidate, isUnder, mapLimit,
-  parentOf, parseGitWorktrees, projectContext, readProjectInventories, readSessionSnapshot, sessionCheckouts,
+  Fail, activeIds, canonical, checkoutOf, checkSessionId, getJson, inboxPending, isConductorCandidate, isUnder, mapLimit,
+  parentOf, parseGitWorktrees, pendingInDir, projectContext, readProjectInventories, readSessionSnapshot, sessionCheckouts,
 } from './session-inventory.mjs';
 
 export { Fail };
@@ -131,7 +131,7 @@ export function descendantsOf(snapshot, id) {
   return out;
 }
 
-// The top-level session an id belongs to, read from the snapshot and, for an id the snapshot lacks (it started after it),
+// The top-level session (its info) an id belongs to, read from the snapshot and, for an id the snapshot lacks (it started after it),
 // from the server. Throws when the chain cannot be followed.
 async function rootOf(deps, snapshot, id) {
   const seen = new Set();
@@ -142,7 +142,7 @@ async function rootOf(deps, snapshot, id) {
     const s = snapshot.get(current) ?? (await getJson(deps.api, `/api/session/${checkSessionId(current, 'parent chain')}`))?.data;
     if (s?.id !== current) throw new Fail(1, `session ${id}: cannot read ${current} in its parent chain`);
     const parent = parentOf(s, `session ${current}`);
-    if (parent === null) return current;
+    if (parent === null) return s;
     current = parent;
   }
   throw new Fail(1, `session ${id}: parent chain is deeper than ${MAX_DEPTH}`);
@@ -189,34 +189,107 @@ export async function runningShells(deps, dirs) {
 const busyWord = (why) => why.some((w) => w === 'busy' || w.endsWith('is busy'));
 
 /**
- * The admission of a prompt into `owner` (usableOwner's answer) of the checkout `scope`. Returns null to send, or a
- * Refused. All of these must hold, and a read that fails or is incomplete refuses (decision 1ca7b4e5, finding 0ded033d):
- *   - the project's inventory is complete, and the owner is not live: not running a turn, no subagent running at any depth,
- *     no question form or permission request open in its tree, no input queued (input_pending, busy);
- *   - for a wake, no OTHER conductor of the same checkout is live (ambiguous_session): one prompt goes to one conductor;
- *   - no running shell in the owner's folder or in the folder of any session of its tree (shell_running; the shell list
- *     names no session, so a running shell there cannot be attributed outside the owner's tree).
- * `final` repeats the target's own checks right before the POST and ends on the activity read.
- * NOT guaranteed: the moment between the last read and the POST (the server has no conditional prompt), and a reload of
- * the OpenCode service (hazard 7d1d2c71), which no route shows.
+ * One admission pass for a prompt into `owner` (usableOwner's answer) of the checkout `scope`. Returns null to send, or a
+ * Refused. Every read is fresh, and a read that fails or is incomplete throws or refuses (decision 1ca7b4e5, finding
+ * 0ded033d). In this order:
+ *   b. one session snapshot. The owner's folder is taken from it, so an owner that moved inside its checkout is checked
+ *      where it now runs. The project's inventory from that snapshot and one activity read must be complete (unknown).
+ *      The owner must not be live: running a turn, a busy subagent, a form, permission request or queued input in it
+ *      (busy, input_pending). For a wake no OTHER conductor of the same checkout may be live (ambiguous_session): one
+ *      prompt goes to one conductor. A notify goes to the owner whatever the others do.
+ *   c. every running id is resolved (cached): in the owner's tree, a new subagent of the owner (busy), a conductor of the
+ *      checkout or one of its subagents (ambiguous_session, wake only), or neither. A session the snapshot lacks is placed
+ *      by reading its parent chain; one that cannot be placed fails the run.
+ *   d. ONE final evidence batch, after every lookup: the pending input, forms and permission requests of the owner's whole
+ *      tree (every depth, ended subagents included, hazard fa5791e3), then running shells in every folder the tree uses
+ *      (the shell list names no session, so a shell there cannot be attributed outside the tree), then the closing
+ *      activity read, judged from the cached answers alone.
+ *   e. a closing read holding an id not yet resolved goes back to c, and the whole batch d runs again; after
+ *      MAX_ACTIVITY_ROUNDS rounds the run refuses (deferred), so it never sends on an unresolved read.
+ * Null therefore means: nothing after the closing read's response was awaited here. deliver() then re-reads the owner
+ * record synchronously and starts the already prepared POST at once.
+ * The ONE window left is server-side: between the closing read and the server receiving the POST, a turn, a form or
+ * input can still start. The server offers no conditional prompt, so no client can close it; it is accepted. A reload of
+ * the OpenCode service (hazard 7d1d2c71) is not shown by any route either.
  */
-export async function admission(deps, { registry, project, scope, owner, kind }) {
+export const MAX_ACTIVITY_ROUNDS = 3;
+export async function admissionPass(deps, { registry, project, scope, owner: given, kind }) {
   const snapshot = await readSessionSnapshot(deps);
+  const fresh = snapshot.get(given.id);
+  if (!fresh) return new Refused('owner_missing', `session ${given.id} is not in the session listing; nothing sent`);
+  const real = await canonical(deps.realpath, fresh.location?.directory, `session ${given.id}`);
+  if (checkoutOf(real, shapeOf(scope)) !== scope.canonicalRoot) return new Refused('owner_missing', `session ${given.id} now runs in ${fresh.location?.directory}, not in the checkout ${scope.canonicalRoot}; nothing sent`);
+  const owner = { ...given, directory: fresh.location.directory };
   const active = await activeIds(deps);
   const [inv] = await readProjectInventories(deps, registry, [{ project }], { snapshot, active });
-  if (inv.unknown) return { refused: new Refused('unknown', `the sessions of ${project} cannot be read in full; nothing sent`) };
+  if (inv.unknown) return new Refused('unknown', `the sessions of ${project} cannot be read in full; nothing sent`);
   const here = inv.live.filter((e) => e.checkout === scope.canonicalRoot);
   const mine = here.find((e) => e.id === owner.id);
   if (mine) {
     const why = mine.why.join(', ');
-    return { refused: busyWord(mine.why) ? new Refused('busy', `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused('input_pending', `owner session ${owner.id} is waiting on input (${why}); nothing sent`) };
+    return busyWord(mine.why) ? new Refused('busy', `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused('input_pending', `owner session ${owner.id} is waiting on input (${why}); nothing sent`);
   }
   const others = here.filter((e) => e.id !== owner.id);
-  if (kind === 'wake' && others.length > 0) {
-    return { refused: new Refused('ambiguous_session', `owner session ${owner.id} is idle but ${others.length} other conductor(s) of the checkout are live: ${others.map((e) => `${e.id} (${e.why.join(', ')})`).join('; ')}; nothing sent`) };
-  }
+  if (kind === 'wake' && others.length > 0) return competing(owner, others);
   const tree = descendantsOf(snapshot, owner.id);
-  return { refused: await shellsRefusal(deps, owner, tree), snapshot, tree };
+  const running = runningJudge(deps, { snapshot, scope, owner, tree, kind });
+  let ids = active;
+  for (let round = 1; round <= MAX_ACTIVITY_ROUNDS; round++) {
+    await running.resolve(ids); // c
+    const busy = running.judge(ids);
+    if (busy) return busy;
+    // d: the final evidence batch, after every lookup.
+    const pending = await treePending(deps, owner, tree);
+    if (pending) return pending;
+    const shells = await shellsRefusal(deps, owner, tree);
+    if (shells) return shells;
+    const closing = await activeIds(deps);
+    // From the closing response to the caller's POST: no read, no wait.
+    if (running.knows(closing)) return running.judge(closing);
+    ids = closing; // e
+  }
+  return new Refused('deferred', `new sessions kept appearing in the closing activity read (${MAX_ACTIVITY_ROUNDS} rounds); nothing sent`);
+}
+
+const competing = (owner, others) => new Refused('ambiguous_session', `owner session ${owner.id} is idle but ${others.length} other conductor(s) of the checkout are live: ${others.map((e) => `${e.id} (${e.why.join(', ')})`).join('; ')}; nothing sent`);
+
+// What each running session means for the delivery (step c of admissionPass): resolve(ids) looks up what is not known
+// yet; judge(ids) answers from the cache alone, with no read; knows(ids) says whether judge can answer.
+function runningJudge(deps, { snapshot, scope, owner, tree, kind }) {
+  const mineIds = new Set([owner.id, ...tree.map((s) => s.id)]);
+  // id -> null (irrelevant), or the Refused its running means.
+  const known = new Map();
+  const one = async (id) => {
+    if (mineIds.has(id)) return new Refused('busy', `owner session ${owner.id} is working (${id === owner.id ? 'busy' : `its subagent ${id} is busy`}); nothing sent`);
+    const root = await rootOf(deps, snapshot, id);
+    if (root.id === owner.id) return new Refused('busy', `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
+    if (kind !== 'wake' || !isConductorCandidate(root)) return null;
+    const real = await canonical(deps.realpath, root.location?.directory, `session ${root.id}`);
+    return checkoutOf(real, shapeOf(scope)) === scope.canonicalRoot ? competing(owner, [{ id: root.id, why: [root.id === id ? 'busy' : `its subagent ${id} is busy`] }]) : null;
+  };
+  return {
+    resolve: async (ids) => {
+      for (const id of ids) if (!known.has(id)) known.set(id, await one(id));
+    },
+    knows: (ids) => ids.every((id) => known.has(id)),
+    judge: (ids) => ids.map((id) => known.get(id)).find((r) => r) ?? null,
+  };
+}
+
+// Queued input, an open form or a permission request anywhere in the owner's tree, its subagents included.
+async function treePending(deps, owner, tree) {
+  const members = new Set([owner.id, ...tree.map((s) => s.id)]);
+  const queued = await mapLimit([...members], PARALLEL, async (id) => [id, await inboxPending(deps.api, id, { allowCompleted: false })]);
+  const hit = queued.find(([, q]) => q);
+  if (hit) return new Refused('input_pending', `owner session ${owner.id} is waiting on input (${hit[0] === owner.id ? '' : `its subagent ${hit[0]}: `}input is already queued); nothing sent`);
+  const dirs = [...new Set([owner.directory, ...tree.map((s) => s.location?.directory).filter((d) => typeof d === 'string' && isAbsolute(d))])];
+  for (const { forms, perms } of await mapLimit(dirs, PARALLEL, (dir) => pendingInDir(deps.api, dir))) {
+    for (const [ids, what] of [[forms, 'a question form is open'], [perms, 'a permission request is open']]) {
+      const id = [...ids].find((x) => members.has(x));
+      if (id) return new Refused('input_pending', `owner session ${owner.id} is waiting on input (${id === owner.id ? '' : `its subagent ${id}: `}${what}); nothing sent`);
+    }
+  }
+  return null;
 }
 
 async function shellsRefusal(deps, owner, tree) {
@@ -224,20 +297,6 @@ async function shellsRefusal(deps, owner, tree) {
   const { shells, unknown } = await runningShells(deps, dirs);
   if (unknown.length > 0) return new Refused('unknown', `the running shells cannot be established (${unknown.join('; ')}); nothing sent`);
   if (shells.length > 0) return new Refused('shell_running', `a shell command still runs where owner session ${owner.id} or its subagents work (${shells.map((s) => `${s.id} in ${s.dir}`).join('; ')}); nothing sent`);
-  return null;
-}
-
-/** The last checks before the POST: the target's own input, its shells, then the activity read. Null to send. */
-export async function finalAdmission(deps, { owner, snapshot, tree }) {
-  const pending = await inputGuard(deps.api, owner.directory, owner.id);
-  if (pending) return new Refused('input_pending', `owner session ${owner.id}: ${pending}; nothing sent`);
-  const shells = await shellsRefusal(deps, owner, tree);
-  if (shells) return shells;
-  const mineIds = new Set([owner.id, ...tree.map((s) => s.id)]);
-  for (const id of await activeIds(deps)) {
-    if (mineIds.has(id)) return new Refused('busy', `owner session ${owner.id} is working (${id === owner.id ? 'busy' : `its subagent ${id} is busy`}); nothing sent`);
-    if (!snapshot.has(id) && (await rootOf(deps, snapshot, id)) === owner.id) return new Refused('busy', `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
-  }
   return null;
 }
 
@@ -365,22 +424,38 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
       throw new Refused('unresolved_delivery', `an earlier ${p.kind} ${p.id} (${p.created_at}) to ${owner.id} may or may not have arrived and is not in the session; run that ${p.kind} again to resend it with the same id, then this one; nothing sent`);
     }
   }
-  const admitted = await admission(deps, { registry, project: args.project, scope, owner, kind });
-  if (admitted.refused) throw admitted.refused;
+  const first = await admissionPass(deps, { registry, project: args.project, scope, owner, kind });
+  if (first) throw first;
   const id = resend?.id ?? newMessageId(deps.now());
   const prompt = resend?.text ?? text;
   if (args.dryRun) return { ...out, status: 'would_queue', session: owner.id, text: prompt };
-  // The owner record is the target runtime's: re-read, so a /new or a --set-owner during the admission sends nothing.
-  const now = deps.readOwner(scope.root);
-  if (now?.session !== recorded.session) throw new Refused('owner_changed', `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? 'none'} during the admission; nothing sent`);
-  const still = await usableOwner(deps, owner.id, scope);
-  if (!still.ok) throw new Refused('owner_missing', `${still.why}; nothing sent`);
-  const last = await finalAdmission(deps, { owner, snapshot: admitted.snapshot, tree: admitted.tree });
-  if (last) throw last;
+  // The intent is journaled BEFORE the last checks: the journal write can wait on its lock, and nothing may wait between
+  // the last check and the POST. A crash from here on leaves `sending`, which the next run settles by receipt or resends
+  // under the same id. A refusal below is certainly unsent: a new record is settled failed, a resend goes back to
+  // uncertain (its earlier attempt is still unaccounted for).
   await journal.sending({ id, kind, body: args.body, text: prompt, sender: deps.senderRoot ?? null, ...target, session: owner.id });
+  let post = null;
+  try {
+    // The transport is made ready before the last checks, so its preparation (temp files, arguments) is not a wait
+    // between them and the POST.
+    post = await deps.prepareSend('POST', `/api/session/${owner.id}/prompt`, { id, text: prompt, delivery: 'queue' });
+    const still = await usableOwner(deps, owner.id, scope);
+    if (!still.ok) throw new Refused('owner_missing', `${still.why}; nothing sent`);
+    const last = await admissionPass(deps, { registry, project: args.project, scope, owner: still, kind });
+    if (last) throw last;
+    // The owner record is the target runtime's: re-read synchronously after the closing activity read, so a /new or a
+    // --set-owner at any point of the admission sends nothing. Nothing is awaited from here to the POST.
+    const now = deps.readOwner(scope.root);
+    if (now?.session !== recorded.session) throw new Refused('owner_changed', `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? 'none'} during the admission; nothing sent`);
+  } catch (e) {
+    const why = `not sent: ${e instanceof Refused ? `${e.reason}: ${e.why}` : String(e?.message ?? e)}`;
+    await post?.discard();
+    await journal.settle(id, resend ? 'uncertain' : 'failed', resend ? `${resend.why ?? 'an earlier attempt may have been sent'}; a resend was refused (${why})` : why);
+    throw e;
+  }
   out.sent = 'maybe';
   out.id = id;
-  const r = await deps.send('POST', `/api/session/${owner.id}/prompt`, { id, text: prompt, delivery: 'queue' });
+  const r = await post.send();
   if (r.ok && r.data?.data?.sessionID === owner.id && r.data.data.delivery === 'queue') {
     await journal.settle(id, 'delivered');
     return { ...out, status: 'queued', sent: 'yes', session: owner.id, ...(resend ? { resent: true } : {}) };
@@ -399,7 +474,7 @@ export function realDeps() {
   const senderRoot = resolveProjectRoots(process.cwd())?.storeRoot ?? null;
   return {
     api: createHttpApi(),
-    send: (method, path, body) => apiSend(method, path, body),
+    prepareSend: (method, path, body) => prepareSend(method, path, body),
     realpath: (p) => realpath(p),
     readdir: (dir) => readdir(dir),
     gitWorktrees: (root, ms) => new Promise((resolve, reject) => {
@@ -436,4 +511,3 @@ export function realDeps() {
     },
   };
 }
-

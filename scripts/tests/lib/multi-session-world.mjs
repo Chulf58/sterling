@@ -37,6 +37,8 @@ export function world() {
     // A hook run before each GET answer: tests change the world mid-run with it.
     onGet: null,
     sendResult: null,
+    onPrepare: null,
+    discarded: 0,
     cleanup: () => rmSync(base, { recursive: true, force: true }),
   };
   w.session = (id, { parent, dir = ROOT, agent, archived, created } = {}) => {
@@ -83,7 +85,16 @@ export function world() {
   };
   w.deps = (over = {}) => ({
     api: w.api,
-    send: w.send,
+    // The prepared POST: preparation may run a test's hook (a wait), send() posts at once.
+    prepareSend: async (method, path, body) => {
+      w.calls.push('prepare');
+      if (w.onPrepare) await w.onPrepare(w);
+      let used = false;
+      return {
+        send: () => { used = true; w.calls.push('POST'); return w.send(method, path, body); },
+        discard: async () => { if (!used) w.discarded += 1; used = true; },
+      };
+    },
     realpath: (p) => realpath(p),
     readdir: async (dir) => (dir === join(base, 'proj.worktrees') ? ['lane'] : []),
     gitWorktrees: async () => [ROOT, WT],

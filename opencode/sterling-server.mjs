@@ -27966,94 +27966,119 @@ function createSessionSync(deps = {}) {
 
 // scripts/lib/owner-record.mjs
 init_atomic_write();
-import { mkdirSync as mkdirSync24, readFileSync as readFileSync33, statSync as statSync12 } from "node:fs";
+import { mkdirSync as mkdirSync24, readFileSync as readFileSync33, statSync as statSync13 } from "node:fs";
 import { dirname as dirname23, join as join53 } from "node:path";
 
 // scripts/lib/file-lock.mjs
-import { linkSync as linkSync3, readFileSync as readFileSync32, renameSync as renameSync13, rmSync as rmSync17, unlinkSync as unlinkSync6, writeFileSync as writeFileSync17, mkdirSync as mkdirSync23 } from "node:fs";
+import { linkSync as linkSync3, mkdirSync as mkdirSync23, readFileSync as readFileSync32, rmSync as rmSync17, statSync as statSync12, writeFileSync as writeFileSync17 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
-import { randomUUID as randomUUID14 } from "node:crypto";
+import { hostname as hostname4 } from "node:os";
+import { createHash as createHash11, randomUUID as randomUUID14 } from "node:crypto";
+var UNPARSEABLE_GRACE_MS2 = 1e4;
 var LockTimeout = class extends Error {
   constructor(message) {
     super(message);
     this.lockTimeout = true;
   }
 };
-var pidAlive2 = (pid) => {
+function pidIsAlive2(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
     return e?.code === "EPERM";
   }
-};
-function readLock2(path) {
+}
+function procStartTime2(pid) {
   try {
-    return readFileSync32(path, "utf8");
-  } catch (e) {
-    if (e?.code === "ENOENT") return null;
-    throw e;
+    const stat = readFileSync32(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
   }
 }
-function tryTake(path, content) {
+function createWithContent2(path, content) {
   const tmp = `${path}.tmp-${randomUUID14()}`;
-  writeFileSync17(tmp, content, { mode: 384 });
+  writeFileSync17(tmp, content, { flag: "wx", mode: 384 });
   try {
     linkSync3(tmp, path);
     return true;
   } catch (e) {
-    if (e?.code !== "EEXIST") throw e;
-    return false;
+    if (e?.code === "EEXIST") return false;
+    throw e;
   } finally {
     rmSync17(tmp, { force: true });
   }
 }
-function takeOverStale2(path, seen) {
-  const aside = `${path}.stale-${randomUUID14()}`;
+function readLock2(path) {
+  let raw;
+  let mtimeMs;
   try {
-    renameSync13(path, aside);
+    raw = readFileSync32(path, "utf8");
+    mtimeMs = statSync12(path).mtimeMs;
   } catch (e) {
-    if (e?.code === "ENOENT") return;
+    if (e?.code === "ENOENT") return void 0;
     throw e;
   }
-  const caught = readLock2(aside);
-  if (caught === seen) {
-    unlinkSync6(aside);
-    return;
-  }
   try {
-    linkSync3(aside, path);
-  } catch (e) {
-    throw new Error(`lock ${path}: a live lock was moved aside while a stale one was cleared and could not be put back (${e.code ?? e.message}); remove ${aside} by hand once no run of this tool is active`);
-  } finally {
-    rmSync17(aside, { force: true });
+    const v = JSON.parse(raw);
+    if (Number.isInteger(v?.pid) && typeof v.token === "string" && typeof v.hostname === "string") return { raw, owner: v, mtimeMs };
+  } catch {
   }
+  return { raw, mtimeMs };
 }
-async function takeFileLock(path, { waitMs = 5e3, now = Date.now, sleep: sleep2 = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+function ownerGone2(seen, probe) {
+  const o = seen.owner;
+  if (!o) return probe.now() - seen.mtimeMs >= UNPARSEABLE_GRACE_MS2;
+  if (o.hostname !== probe.host) return false;
+  if (!probe.isAlive(o.pid)) return true;
+  if (o.proc_start === null || o.proc_start === void 0) return false;
+  const cur = probe.startTimeOf(o.pid);
+  return cur !== null && cur !== o.proc_start;
+}
+function takeOverStale2(path, staleRaw, me, probe) {
+  let key = staleRaw;
+  const dead = [];
+  for (let depth = 0; depth < 16; depth++) {
+    const ticket = `${path}.takeover-${createHash11("sha256").update(key).digest("hex").slice(0, 32)}`;
+    if (createWithContent2(ticket, me)) {
+      try {
+        probe.beforeRemove?.();
+        if (readLock2(path)?.raw === staleRaw) rmSync17(path, { force: true });
+        return "removed";
+      } finally {
+        rmSync17(ticket, { force: true });
+        for (const d of dead) rmSync17(d, { force: true });
+      }
+    }
+    const t = readLock2(ticket);
+    if (!t) return "retry";
+    if (!ownerGone2(t, probe)) return "taker-busy";
+    dead.push(ticket);
+    key = `${key}\0${t.raw}`;
+  }
+  return "taker-busy";
+}
+async function takeFileLock(path, { waitMs = 5e3, pollMs = 25, now = Date.now, sleep: sleep2 = (ms) => new Promise((r) => setTimeout(r, ms)), isAlive = pidIsAlive2, startTimeOf = procStartTime2, pid = process.pid, beforeRemove } = {}) {
   mkdirSync23(dirname22(path), { recursive: true });
-  const content = JSON.stringify({ pid: process.pid, nonce: randomUUID14() });
+  const host = hostname4();
+  const token = randomUUID14();
+  const me = JSON.stringify({ pid, proc_start: startTimeOf(pid), hostname: host, token });
+  const probe = { isAlive, startTimeOf, host, now, beforeRemove };
   const end = now() + waitMs;
   for (; ; ) {
-    if (tryTake(path, content)) {
+    if (createWithContent2(path, me)) {
       return () => {
-        if (readLock2(path) === content) unlinkSync6(path);
+        if (readLock2(path)?.owner?.token === token) rmSync17(path, { force: true });
       };
     }
     const seen = readLock2(path);
-    if (seen !== null) {
-      let pid = null;
-      try {
-        pid = JSON.parse(seen)?.pid;
-      } catch {
-        pid = null;
-      }
-      if (Number.isInteger(pid) && pid > 0 && !pidAlive2(pid)) {
-        takeOverStale2(path, seen);
-        continue;
-      }
-    }
+    if (!seen) continue;
+    if (ownerGone2(seen, probe) && takeOverStale2(path, seen.raw, me, probe) !== "taker-busy") continue;
     if (now() >= end) throw new LockTimeout(`the lock ${path} stayed taken for ${waitMs} ms`);
-    await sleep2(25);
+    await sleep2(pollMs);
   }
 }
 async function withFileLock(path, fn, options) {
@@ -28077,7 +28102,7 @@ function readOwner2(checkout) {
   let mtime;
   try {
     text = readFileSync33(path, "utf8");
-    mtime = statSync12(path).mtime;
+    mtime = statSync13(path).mtime;
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw e;
@@ -28095,14 +28120,14 @@ function write(checkout, session) {
 function checkId(session, what) {
   if (typeof session !== "string" || !SESSION_RE.test(session)) throw new Error(`${what}: ${JSON.stringify(session)} is not a session id`);
 }
-async function recordOwner(checkout, session, { waitMs = OWNER_LOCK_WAIT_MS } = {}) {
-  checkId(session, "owner record");
-  return withFileLock(lockPath(checkout), () => {
-    const current = readOwner2(checkout)?.session ?? null;
-    if (current === session) return { changed: false };
-    write(checkout, session);
-    return { changed: true };
-  }, { waitMs });
+async function withOwnerRecord(checkout, fn, { waitMs = OWNER_LOCK_WAIT_MS } = {}) {
+  return withFileLock(lockPath(checkout), () => fn({
+    current: readOwner2(checkout)?.session ?? null,
+    write: (session) => {
+      checkId(session, "owner record");
+      write(checkout, session);
+    }
+  }), { waitMs });
 }
 
 // packages/opencode-plugin/src/conductor-session.mjs
@@ -28121,9 +28146,11 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
       const kind = await sessionKind(getSession?.(), sessionID, parents);
       if (kind.why) throw new Error(`conductor session not recorded: could not tell whether session ${sessionID} is a root session (${kind.why})`);
       if (kind.kind !== "root") return;
-      if (seq <= (lastWritten.get(root) ?? 0)) return;
-      await recordOwner(root, sessionID);
-      lastWritten.set(root, seq);
+      await withOwnerRecord(root, ({ current, write: write2 }) => {
+        if (seq <= (lastWritten.get(root) ?? 0)) return;
+        if (current !== sessionID) write2(sessionID);
+        lastWritten.set(root, seq);
+      });
     });
   };
 }

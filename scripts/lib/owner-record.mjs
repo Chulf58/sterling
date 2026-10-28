@@ -60,17 +60,32 @@ function checkId(session, what) {
 }
 
 /**
- * The plugin's write: `session` was prompted by the user in this checkout, so it is the owner
- * now, whatever the record held. Writes only when the record differs. Returns { changed }.
+ * Runs fn({ current, write }) under the record's lock: `current` is the session the record names
+ * (null for none) and write(session) replaces it. A caller whose decision depends on more than the
+ * record (the plugin's prompt order) makes that decision inside fn, so it cannot go stale while
+ * the lock is awaited. Returns fn's value.
  */
-export async function recordOwner(checkout, session, { waitMs = OWNER_LOCK_WAIT_MS } = {}) {
+export async function withOwnerRecord(checkout, fn, { waitMs = OWNER_LOCK_WAIT_MS } = {}) {
+  return withFileLock(lockPath(checkout), () => fn({
+    current: readOwner(checkout)?.session ?? null,
+    write: (session) => {
+      checkId(session, 'owner record');
+      write(checkout, session);
+    },
+  }), { waitMs });
+}
+
+/**
+ * `session` was prompted by the user in this checkout, so it is the owner now, whatever the record
+ * held. Writes only when the record differs. Returns { changed }.
+ */
+export async function recordOwner(checkout, session, options) {
   checkId(session, 'owner record');
-  return withFileLock(lockPath(checkout), () => {
-    const current = readOwner(checkout)?.session ?? null;
+  return withOwnerRecord(checkout, ({ current, write }) => {
     if (current === session) return { changed: false };
-    write(checkout, session);
+    write(session);
     return { changed: true };
-  }, { waitMs });
+  }, options);
 }
 
 /**

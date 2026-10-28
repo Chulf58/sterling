@@ -5,16 +5,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { world, readOwner, transitionOwner, recordOwner } from './lib/multi-session-world.mjs';
 import { ownerRecordPath, OWNER_RECORD_REL } from '../lib/owner-record.mjs';
-import { takeFileLock, LockTimeout } from '../lib/file-lock.mjs';
+import { takeFileLock, LockTimeout, UNPARSEABLE_GRACE_MS, procStartTime } from '../lib/file-lock.mjs';
 import { shellQuote, setOwnerCommand } from '../lib/owner-session.mjs';
 import { main } from '../wake-project.mjs';
-import { CONDUCTOR_SESSION_REL } from '../../packages/opencode-plugin/src/conductor-session.mjs';
+import { CONDUCTOR_SESSION_REL, createConductorSessionRecorder } from '../../packages/opencode-plugin/src/conductor-session.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const tmp = () => mkdtempSync(join(tmpdir(), 'sterling-owner-'));
@@ -69,19 +70,109 @@ test('the plugin write and a set-owner share one lock: while it is held neither 
   }
 });
 
-test('file lock: a lock of a dead process is taken over; content that is not a lock is never taken for stale', async () => {
+const lockOf = (fields) => JSON.stringify({ hostname: hostname(), token: randomUUID(), proc_start: null, ...fields });
+const deadPid = () => Number(spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim());
+
+test('file lock: a lock of a dead process is taken over; a live one is waited for and left alone; release removes only its own', async () => {
   const dir = tmp();
   const path = join(dir, 'x.lock');
   try {
-    const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' });
-    writeFileSync(path, JSON.stringify({ pid: Number(dead.stdout.trim()), nonce: 'old' }));
+    writeFileSync(path, lockOf({ pid: deadPid() }));
     const release = await takeFileLock(path, { waitMs: 500 });
-    assert.equal(JSON.parse(readFileSync(path, 'utf8')).pid, process.pid);
+    const mine = readFileSync(path, 'utf8');
+    assert.equal(JSON.parse(mine).pid, process.pid);
+    await assert.rejects(() => takeFileLock(path, { waitMs: 60 }), (e) => e instanceof LockTimeout);
+    assert.equal(readFileSync(path, 'utf8'), mine);
     release();
     assert.equal(existsSync(path), false);
+    assert.deepEqual(readdirSync(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('file lock: unparseable content is held for the grace period, then taken over', async () => {
+  const dir = tmp();
+  const path = join(dir, 'x.lock');
+  try {
     writeFileSync(path, '');
-    await assert.rejects(() => takeFileLock(path, { waitMs: 80 }), /stayed taken/);
+    await assert.rejects(() => takeFileLock(path, { waitMs: 60 }), /stayed taken/);
     assert.equal(readFileSync(path, 'utf8'), '');
+    const later = () => Date.now() + UNPARSEABLE_GRACE_MS + 1_000;
+    const release = await takeFileLock(path, { waitMs: 500, now: later });
+    release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('file lock: a live pid that now belongs to another process (pid reuse) does not keep a dead holder\'s lock', async () => {
+  const dir = tmp();
+  const path = join(dir, 'x.lock');
+  try {
+    // The pid is alive (it is this process), but its start time is not the one the lock recorded.
+    writeFileSync(path, lockOf({ pid: process.pid, proc_start: 'started-long-ago' }));
+    assert.notEqual(procStartTime(process.pid), null, 'this platform must expose /proc start times for the test to mean anything');
+    const release = await takeFileLock(path, { waitMs: 300 });
+    assert.notEqual(JSON.parse(readFileSync(path, 'utf8')).proc_start, 'started-long-ago');
+    release();
+    // The same pid WITH its real start time is a live holder.
+    writeFileSync(path, lockOf({ pid: process.pid, proc_start: procStartTime(process.pid) }));
+    await assert.rejects(() => takeFileLock(path, { waitMs: 60 }), (e) => e instanceof LockTimeout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('file lock: a slow taker that judged a lock stale after another taker already replaced it never displaces the new holder', async () => {
+  const dir = tmp();
+  const path = join(dir, 'x.lock');
+  const dead = 999_999_999;
+  try {
+    writeFileSync(path, lockOf({ pid: dead }));
+    let b = null;
+    // A reads the stale lock and asks whether its pid lives; in that gap B takes the lock over and holds it.
+    const isAliveA = (pid) => {
+      if (b === null) b = takeFileLock(path, { waitMs: 300, isAlive: (p) => p !== dead });
+      return pid !== dead;
+    };
+    const a = takeFileLock(path, { waitMs: 150, isAlive: isAliveA });
+    const releaseB = await b;
+    const held = readFileSync(path, 'utf8');
+    assert.equal(JSON.parse(held).pid, process.pid);
+    await assert.rejects(() => a, (e) => e instanceof LockTimeout, 'A must wait for B, never hold the lock beside it');
+    assert.equal(readFileSync(path, 'utf8'), held, 'B\'s lock is untouched');
+    releaseB();
+    assert.deepEqual(readdirSync(dir), [], 'no ticket or temp file is left behind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('plugin recorder: an older prompt that reaches the record lock after a newer one never overwrites it', async () => {
+  const dir = tmp();
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  try {
+    const failures = [];
+    const fenced = async (name, root, fn) => {
+      try {
+        await fn();
+      } catch (e) {
+        failures.push(e.message);
+      }
+    };
+    const session = { get: async ({ sessionID }) => ({ id: sessionID }) };
+    const onPrompt = createConductorSessionRecorder({ rootOf: () => dir, fenced, getSession: () => session, parents: new Map(), env: {} });
+    const release = await takeFileLock(`${ownerRecordPath(dir)}.lock`);
+    // The newer prompt (seq 2) waits on the lock first, the older one (seq 1) right after it.
+    const newer = onPrompt({ sessionID: 'ses_NEWER' }, 2);
+    await new Promise((r) => setTimeout(r, 5));
+    const older = onPrompt({ sessionID: 'ses_OLDER' }, 1);
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await Promise.all([newer, older]);
+    assert.deepEqual(failures, []);
+    assert.equal(readOwner(dir).session, 'ses_NEWER');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

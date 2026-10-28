@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { world, readOwner, recordOwner } from './lib/multi-session-world.mjs';
 import { main as wakeMain, wakeText } from '../wake-project.mjs';
 import { main as notifyMain, noticeText } from '../notify-project.mjs';
@@ -474,6 +474,284 @@ test('notify: bad arguments exit 2 before any call; a text may start with dashes
     const r = await notify(w, ['--project', 'proj', '--text', '--not-a-flag']);
     assert.equal(r.res.status, 'queued');
     assert.equal(w.posts[0].body.text, noticeText('sender', '--not-a-flag'));
+  } finally {
+    w.cleanup();
+  }
+});
+
+// A journal whose `sending` write runs `hook` after it is saved, like a write that waited on its lock while the world moved.
+const slowJournal = (w, hook) => () => {
+  const j = deliveryJournal(w.SENDER);
+  return { ...j, sending: async (r) => { const out = await j.sending(r); w.calls.push('journal sending'); await hook(w); return out; } };
+};
+
+test('the delivery is journaled before the final checks: the last form, inbox and activity reads come after it, the POST last', async () => {
+  const w = await ready();
+  try {
+    const { res } = await wake(w, undefined, { journal: slowJournal(w, () => {}) });
+    assert.equal(res.status, 'queued');
+    const rec = w.calls.indexOf('journal sending');
+    assert.ok(rec > 0);
+    assert.ok(w.calls.findIndex((c, i) => i > rec && c.startsWith('GET /api/form')) > rec, 'forms are read again after the journal write');
+    assert.ok(w.calls.findIndex((c, i) => i > rec && /\/inbox$/.test(c)) > rec, 'inboxes are read again after the journal write');
+    assert.ok(w.calls.indexOf('prepare') > rec, 'the transport is prepared after the journal write');
+    assert.ok(w.calls.indexOf('prepare') < w.calls.findIndex((c, i) => i > rec && c.startsWith('GET /api/shell')), 'and before the final checks');
+    assert.deepEqual(w.calls.slice(-2), ['GET /api/session/active', 'POST'], 'the closing activity read is the last read before the POST');
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('what changes while the delivery is journaled stops the POST, and the attempt is settled as certainly unsent', async () => {
+  for (const [change, reason] of [
+    [(w) => w.forms.push({ sessionID: 'ses_OWN', dir: w.ROOT }), 'input_pending'],
+    [(w) => w.active.add('ses_OWN'), 'busy'],
+    [(w) => { w.session('ses_NEW'); return recordOwner(w.ROOT, 'ses_NEW'); }, 'owner_changed'],
+  ]) {
+    const w = await ready();
+    try {
+      const r = await wake(w, undefined, { journal: slowJournal(w, change) });
+      assert.equal(r.res.reason, reason);
+      assert.equal(r.res.sent, 'none');
+      assert.equal(w.posts.length, 0);
+      const [rec] = w.journalRecords();
+      assert.equal(rec.state, 'failed');
+      assert.match(rec.why, new RegExp(`^not sent: ${reason}`));
+    } finally {
+      w.cleanup();
+    }
+  }
+});
+
+test('notify: an owner change while the notice is journaled is not sent to', async () => {
+  const w = await ready();
+  try {
+    w.session('ses_ELSE');
+    const r = await notify(w, ['--project', 'proj', '--text', 'hi'], { journal: slowJournal(w, () => recordOwner(w.ROOT, 'ses_ELSE')) });
+    assert.equal(r.code, 1);
+    assert.equal(r.res.reason, 'owner_changed');
+    assert.equal(w.posts.length, 0);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a refused resend goes back to uncertain, never to failed: its earlier attempt is still unaccounted for', async () => {
+  const w = await ready();
+  try {
+    w.sendResult = () => ({ ok: false, uncertain: true, why: 'timed out' });
+    await wake(w);
+    w.sendResult = null;
+    const r = await wake(w, undefined, { journal: slowJournal(w, (x) => x.active.add('ses_OWN')) });
+    assert.equal(r.res.reason, 'busy');
+    const [rec] = w.journalRecords();
+    assert.equal(rec.state, 'uncertain');
+    assert.equal(w.posts.length, 1);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a competing conductor of the checkout going live in the final activity read refuses a wake; a notify still goes', async () => {
+  for (const [busy, kind] of [['ses_TWO', 'wake'], ['ses_TWOKID', 'wake'], ['ses_TWO', 'notify']]) {
+    const w = await ready();
+    try {
+      w.session('ses_TWO');
+      w.session('ses_TWOKID', { parent: 'ses_TWO', dir: w.OTHER });
+      let reads = 0;
+      w.onGet = async (path) => {
+        if (path === '/api/session/active' && ++reads === 4) w.active.add(busy);
+      };
+      const r = kind === 'wake' ? await wake(w) : await notify(w, ['--project', 'proj', '--text', 'x']);
+      if (kind === 'wake') {
+        assert.equal(r.res.reason, 'ambiguous_session', busy);
+        assert.match(r.res.why, /ses_TWO \(/);
+        assert.equal(w.posts.length, 0);
+        assert.equal(reads, 4, 'the closing read of the final pass showed an unresolved id; resolving it refused with no further read');
+      } else {
+        assert.equal(r.res.status, 'queued');
+      }
+    } finally {
+      w.cleanup();
+    }
+  }
+});
+
+test('queued input in a subagent\'s inbox refuses, an ended subagent included', async () => {
+  const w = await ready();
+  try {
+    w.session('ses_KID', { parent: 'ses_OWN', dir: w.WT });
+    w.inbox.set('ses_KID', [{ id: 'msg_k', type: 'user', payload: { text: 'continue' } }]);
+    const r = await wake(w);
+    assert.equal(r.res.reason, 'input_pending');
+    assert.match(r.res.why, /its subagent ses_KID/);
+    assert.equal(w.posts.length, 0);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a subagent opening a form in its own folder after the first snapshot stops the POST', async () => {
+  const w = await ready();
+  try {
+    w.session('ses_KID', { parent: 'ses_OWN', dir: w.OTHER });
+    const r = await wake(w, undefined, { journal: slowJournal(w, (x) => x.perms.push({ sessionID: 'ses_KID', dir: x.OTHER })) });
+    assert.equal(r.res.reason, 'input_pending');
+    assert.match(r.res.why, /ses_KID: a permission request is open/);
+    assert.equal(w.posts.length, 0);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a new subagent started after the first snapshot with a running shell in its folder stops the POST', async () => {
+  const w = await ready();
+  try {
+    const r = await wake(w, undefined, { journal: slowJournal(w, (x) => {
+      x.session('ses_LATEKID', { parent: 'ses_OWN', dir: x.OTHER });
+      x.shells.set(x.OTHER, [{ id: 'shl_late', status: 'running' }]);
+    }) });
+    assert.equal(r.res.reason, 'shell_running');
+    assert.match(r.res.why, /shl_late/);
+    assert.equal(w.posts.length, 0);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a session turning busy while a running id is resolved is caught by the closing activity read', async () => {
+  const w = await ready();
+  try {
+    let journaled = false;
+    w.onGet = async (path) => {
+      // After the snapshot of the final pass, a session of another project starts: the snapshot lacks it.
+      if (journaled && path.startsWith('/api/shell') && !w.sessions.has('ses_FAR')) {
+        w.session('ses_FAR', { dir: w.OTHER });
+        w.active.add('ses_FAR');
+      }
+      // Its lookup is slow, and the owner starts a turn meanwhile.
+      if (path === '/api/session/ses_FAR') w.active.add('ses_OWN');
+    };
+    const r = await wake(w, undefined, { journal: slowJournal(w, () => { journaled = true; }) });
+    assert.equal(r.res.reason, 'busy');
+    assert.equal(w.posts.length, 0);
+    assert.equal(w.journalRecords()[0].state, 'failed');
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('an owner that moved to another folder of its checkout is checked there: a shell running in the new folder stops the POST', async () => {
+  const move = (x) => {
+    x.sessions.get('ses_OWN').location.directory = join(x.ROOT, 'sub');
+    x.shells.set(join(x.ROOT, 'sub'), [{ id: 'shl_sub', status: 'running' }]);
+  };
+  for (const when of ['while the delivery is journaled', 'after the owner was revalidated, before the final snapshot']) {
+    const w = await ready();
+    try {
+      mkdirSync(join(w.ROOT, 'sub'));
+      let journaled = false;
+      if (when.startsWith('after')) {
+        w.onGet = async (path) => {
+          if (journaled && path.startsWith('/api/session?')) {
+            journaled = false;
+            move(w);
+          }
+        };
+      }
+      const r = await wake(w, undefined, { journal: slowJournal(w, (x) => (when.startsWith('while') ? move(x) : (journaled = true))) });
+      assert.equal(r.res.reason, 'shell_running', when);
+      assert.match(r.res.why, /shl_sub/);
+      assert.equal(w.posts.length, 0);
+    } finally {
+      w.cleanup();
+    }
+  }
+});
+
+test('a --set-owner during the final shell read stops the POST: the record is re-read right before the closing activity read', async () => {
+  const w = await ready();
+  try {
+    w.session('ses_NEXT');
+    let journaled = false;
+    w.onGet = async (path) => {
+      if (journaled && path.startsWith('/api/shell')) {
+        journaled = false;
+        await recordOwner(w.ROOT, 'ses_NEXT');
+      }
+    };
+    const r = await wake(w, undefined, { journal: slowJournal(w, () => { journaled = true; }) });
+    assert.equal(r.res.reason, 'owner_changed');
+    assert.equal(w.posts.length, 0);
+    assert.match(w.journalRecords()[0].why, /^not sent: owner_changed/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a form, queued input or shell appearing while a running id is looked up is seen by the final evidence batch', async () => {
+  for (const [appear, reason] of [
+    [(w) => w.forms.push({ sessionID: 'ses_OWN', dir: w.ROOT }), 'input_pending'],
+    [(w) => w.inbox.set('ses_OWN', [{ id: 'msg_q', type: 'user', payload: { text: 'x' } }]), 'input_pending'],
+    [(w) => w.shells.set(w.ROOT, [{ id: 'shl_new', status: 'running' }]), 'shell_running'],
+  ]) {
+    const w = await ready();
+    try {
+      // A session of another project the snapshot lacks starts running at the closing read of the final pass, so a
+      // second round looks it up; the change happens during that lookup.
+      w.session('ses_FAR', { dir: w.OTHER });
+      let journaled = false;
+      let reads = 0;
+      const api = w.api;
+      const hidden = async (m, p) => {
+        if (journaled && p === '/api/session/active' && ++reads === 2) w.active.add('ses_FAR');
+        if (p.startsWith('/api/session?')) {
+          const r = await api(m, p);
+          const page = JSON.parse(r.stdout);
+          page.data = page.data.filter((s) => s.id !== 'ses_FAR');
+          return { ...r, stdout: JSON.stringify(page) };
+        }
+        if (p === '/api/session/ses_FAR' && journaled) appear(w);
+        return api(m, p);
+      };
+      const r = await wake(w, undefined, { api: hidden, journal: slowJournal(w, () => { journaled = true; }) });
+      assert.equal(r.res.reason, reason, JSON.stringify(r.res));
+      assert.ok(w.calls.includes('GET /api/session/ses_FAR'), 'the late session was looked up');
+      assert.equal(w.posts.length, 0);
+      assert.equal(w.discarded, 1, 'the prepared POST is discarded');
+    } finally {
+      w.cleanup();
+    }
+  }
+});
+
+test('a --set-owner during the closing activity request stops the POST', async () => {
+  const w = await ready();
+  try {
+    w.session('ses_NEXT');
+    let journaled = false;
+    let reads = 0;
+    w.onGet = async (path) => {
+      if (journaled && path === '/api/session/active' && ++reads === 2) await recordOwner(w.ROOT, 'ses_NEXT');
+    };
+    const r = await wake(w, undefined, { journal: slowJournal(w, () => { journaled = true; }) });
+    assert.equal(r.res.reason, 'owner_changed');
+    assert.equal(w.posts.length, 0);
+    assert.match(w.journalRecords()[0].why, /^not sent: owner_changed/);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('the owner turning busy while the transport is prepared stops the POST: preparation comes before the final checks', async () => {
+  const w = await ready();
+  try {
+    w.onPrepare = (x) => { x.active.add('ses_OWN'); };
+    const r = await wake(w);
+    assert.equal(r.res.reason, 'busy');
+    assert.equal(w.posts.length, 0);
+    assert.equal(w.discarded, 1);
+    assert.equal(w.journalRecords()[0].state, 'failed');
   } finally {
     w.cleanup();
   }
