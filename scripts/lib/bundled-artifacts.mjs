@@ -385,6 +385,8 @@ export const BIN_ENTRIES = {
   'move-store': 'scripts/move-store.mjs',
   // the no_capture no-server fallback the MCP server's session-event refusal names
   'no-capture': 'scripts/no-capture.mjs',
+  // multi-session toolkit slice 3: a message to another registered project's owner session through the OpenCode API
+  'notify-project': 'scripts/notify-project.mjs',
   // the parallel-session worktree opener commands/session.md runs in any consumer project
   'open-session': 'scripts/open-session.mjs',
   'plan-lock': 'scripts/plan-lock.mjs',
@@ -397,6 +399,8 @@ export const BIN_ENTRIES = {
   // the one-way board-to-GitHub-issues mirror skills/sync-board-issues/SKILL.md runs in any consumer project
   'sync-board-issues': 'scripts/sync-board-issues.mjs',
   update: 'scripts/update.mjs',
+  // multi-session toolkit slice 3: wake another registered project's owner session; --set-owner, --show-owners
+  'wake-project': 'scripts/wake-project.mjs',
 };
 
 // Bundle every BIN_ENTRIES script into outDir/<name>.mjs. Source-location

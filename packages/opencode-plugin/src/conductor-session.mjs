@@ -15,13 +15,16 @@
 // or one the fence already timed out) never replaces a newer prompt's record.
 // NOT guaranteed: ordering across processes (two OpenCode services on one project),
 // and a root prompt whose classification fails is not recorded at all.
-import { mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
+//
+// The record is also the checkout's OWNER record for the multi-session toolkit
+// (scripts/lib/owner-record.mjs): wake-project and notify-project send to it, and
+// `wake-project --set-owner` changes it by compare-and-set. This recorder writes through
+// recordOwner, under the same lock file, so a set-owner compare cannot straddle this write.
+import { recordOwner, OWNER_RECORD_REL } from '../../../scripts/lib/owner-record.mjs';
 import { sessionKind } from './dispatch.mjs';
 import { inWorkerChild } from './worker.mjs';
 
-export const CONDUCTOR_SESSION_REL = '.sterling/transient/opencode-conductor-session';
+export const CONDUCTOR_SESSION_REL = OWNER_RECORD_REL;
 
 // One process-wide arrival counter, shared by every location of every project.
 let counter = 0;
@@ -46,18 +49,7 @@ export function createConductorSessionRecorder({ rootOf, fenced, getSession, par
       if (kind.why) throw new Error(`conductor session not recorded: could not tell whether session ${sessionID} is a root session (${kind.why})`);
       if (kind.kind !== 'root') return;
       if (seq <= (lastWritten.get(root) ?? 0)) return;
-      const path = join(root, CONDUCTOR_SESSION_REL);
-      const text = `${sessionID}\n`;
-      let current = null;
-      try {
-        current = readFileSync(path, 'utf8');
-      } catch (e) {
-        if (e?.code !== 'ENOENT') throw e;
-      }
-      if (current !== text) {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileAtomic(path, text);
-      }
+      await recordOwner(root, sessionID);
       lastWritten.set(root, seq);
     });
   };

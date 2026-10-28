@@ -16442,9 +16442,9 @@ function legacyLockHolder(root) {
 async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs2 = opts.timeoutMs ?? 1e3;
-  const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname9(lockPath));
-  const db = new DatabaseSync4(lockPath);
+  const lockPath2 = registerLockPath(root);
+  ensureLockRoot(dirname9(lockPath2));
+  const db = new DatabaseSync4(lockPath2);
   try {
     db.exec("PRAGMA busy_timeout=0");
     const start = Date.now();
@@ -16457,8 +16457,8 @@ async function withRegisterLock(root, fn, opts = {}) {
         if (waited2 >= timeoutMs2) {
           throw refusal(
             "register_lock_held",
-            { lock_path: lockPath, waited_ms: waited2 },
-            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
+            { lock_path: lockPath2, waited_ms: waited2 },
+            `register lock at ${lockPath2} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
         await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
@@ -16486,7 +16486,7 @@ async function withRegisterLock(root, fn, opts = {}) {
       try {
         db.exec("COMMIT");
       } catch (e) {
-        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath2} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
 `);
       }
     }
@@ -21756,14 +21756,14 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir7() }) {
   const item = `${fwd2(dest)}/`;
   const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync15(join24(src, f))]));
   const hashes = Object.fromEntries(Object.entries(content).map(([f, b]) => [f, bytesHash(b)]));
-  const write = () => {
+  const write2 = () => {
     mkdirSync11(dest, { recursive: true });
     for (const [f, b] of Object.entries(content)) writeFileSync7(join24(dest, f), b);
     writeFileSync7(join24(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
   if (!existsSync15(dest)) {
-    write();
+    write2();
     rows.push({ item, status: "created", detail: `the dashboard copied out of the npm cache (OpenCode gives its own solid-js only outside node_modules)` });
   } else {
     const state = statSync7(dest).isDirectory() ? materializedState(dest) : "foreign";
@@ -21771,7 +21771,7 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir7() }) {
     else if (state === "edited") rows.push(refusal2(item, `${item} was edited after Sterling wrote it`, `delete it so Sterling can copy the dashboard again, then rerun /sterling:update`));
     else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync15(join24(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
     else {
-      write();
+      write2();
       rows.push({ item, status: "refreshed" });
     }
   }
@@ -22563,8 +22563,8 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
 var SQLITE_BUSY2 = 5;
 function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
-  const lockPath = `${path}.lock.db`;
-  const db = new DatabaseSync5(lockPath);
+  const lockPath2 = `${path}.lock.db`;
+  const db = new DatabaseSync5(lockPath2);
   try {
     db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
     try {
@@ -22572,7 +22572,7 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
       db.exec("BEGIN IMMEDIATE");
     } catch (e) {
       if ((e?.errcode & 255) !== SQLITE_BUSY2) throw e;
-      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
+      const err = new Error(`${lockPath2} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
@@ -22582,7 +22582,7 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
       try {
         db.exec("COMMIT");
       } catch (e) {
-        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+        console.error(`session-events: COMMIT of the lock at ${lockPath2} failed (${e?.message ?? e}); the lock is released by closing the connection`);
       }
     }
   } finally {
@@ -26284,9 +26284,9 @@ function stepFillTokens(tokens) {
   const n2 = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
   const input = n2(tokens?.input);
   const read = n2(tokens?.cache?.read);
-  const write = n2(tokens?.cache?.write);
-  if (input === null || read === null || write === null) return null;
-  const used = input + read + write;
+  const write2 = n2(tokens?.cache?.write);
+  if (input === null || read === null || write2 === null) return null;
+  const used = input + read + write2;
   return used > 0 ? used : null;
 }
 function createPressureWatch({ rootOf, fenced, getSession, parents, listModels, env = process.env }) {
@@ -27964,10 +27964,148 @@ function createSessionSync(deps = {}) {
   return syncOnce;
 }
 
+// scripts/lib/owner-record.mjs
+init_atomic_write();
+import { mkdirSync as mkdirSync24, readFileSync as readFileSync33, statSync as statSync12 } from "node:fs";
+import { dirname as dirname23, join as join53 } from "node:path";
+
+// scripts/lib/file-lock.mjs
+import { linkSync as linkSync3, readFileSync as readFileSync32, renameSync as renameSync13, rmSync as rmSync17, unlinkSync as unlinkSync6, writeFileSync as writeFileSync17, mkdirSync as mkdirSync23 } from "node:fs";
+import { dirname as dirname22 } from "node:path";
+import { randomUUID as randomUUID14 } from "node:crypto";
+var LockTimeout = class extends Error {
+  constructor(message) {
+    super(message);
+    this.lockTimeout = true;
+  }
+};
+var pidAlive2 = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+};
+function readLock2(path) {
+  try {
+    return readFileSync32(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+}
+function tryTake(path, content) {
+  const tmp = `${path}.tmp-${randomUUID14()}`;
+  writeFileSync17(tmp, content, { mode: 384 });
+  try {
+    linkSync3(tmp, path);
+    return true;
+  } catch (e) {
+    if (e?.code !== "EEXIST") throw e;
+    return false;
+  } finally {
+    rmSync17(tmp, { force: true });
+  }
+}
+function takeOverStale2(path, seen) {
+  const aside = `${path}.stale-${randomUUID14()}`;
+  try {
+    renameSync13(path, aside);
+  } catch (e) {
+    if (e?.code === "ENOENT") return;
+    throw e;
+  }
+  const caught = readLock2(aside);
+  if (caught === seen) {
+    unlinkSync6(aside);
+    return;
+  }
+  try {
+    linkSync3(aside, path);
+  } catch (e) {
+    throw new Error(`lock ${path}: a live lock was moved aside while a stale one was cleared and could not be put back (${e.code ?? e.message}); remove ${aside} by hand once no run of this tool is active`);
+  } finally {
+    rmSync17(aside, { force: true });
+  }
+}
+async function takeFileLock(path, { waitMs = 5e3, now = Date.now, sleep: sleep2 = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  mkdirSync23(dirname22(path), { recursive: true });
+  const content = JSON.stringify({ pid: process.pid, nonce: randomUUID14() });
+  const end = now() + waitMs;
+  for (; ; ) {
+    if (tryTake(path, content)) {
+      return () => {
+        if (readLock2(path) === content) unlinkSync6(path);
+      };
+    }
+    const seen = readLock2(path);
+    if (seen !== null) {
+      let pid = null;
+      try {
+        pid = JSON.parse(seen)?.pid;
+      } catch {
+        pid = null;
+      }
+      if (Number.isInteger(pid) && pid > 0 && !pidAlive2(pid)) {
+        takeOverStale2(path, seen);
+        continue;
+      }
+    }
+    if (now() >= end) throw new LockTimeout(`the lock ${path} stayed taken for ${waitMs} ms`);
+    await sleep2(25);
+  }
+}
+async function withFileLock(path, fn, options) {
+  const release = await takeFileLock(path, options);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+// scripts/lib/owner-record.mjs
+var OWNER_RECORD_REL = ".sterling/transient/opencode-conductor-session";
+var SESSION_RE = /^ses_[A-Za-z0-9]+$/;
+var OWNER_LOCK_WAIT_MS = 3e3;
+var ownerRecordPath = (checkout) => join53(checkout, OWNER_RECORD_REL);
+var lockPath = (checkout) => `${ownerRecordPath(checkout)}.lock`;
+function readOwner2(checkout) {
+  const path = ownerRecordPath(checkout);
+  let text;
+  let mtime;
+  try {
+    text = readFileSync33(path, "utf8");
+    mtime = statSync12(path).mtime;
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+  const session = text.replace(/\n$/, "");
+  if (!SESSION_RE.test(session)) throw new Error(`the owner record ${path} does not hold one session id; fix or remove it by hand (the plugin writes it again on the next prompt)`);
+  return { session, set_at: mtime.toISOString() };
+}
+function write(checkout, session) {
+  const path = ownerRecordPath(checkout);
+  mkdirSync24(dirname23(path), { recursive: true });
+  writeFileAtomic(path, `${session}
+`);
+}
+function checkId(session, what) {
+  if (typeof session !== "string" || !SESSION_RE.test(session)) throw new Error(`${what}: ${JSON.stringify(session)} is not a session id`);
+}
+async function recordOwner(checkout, session, { waitMs = OWNER_LOCK_WAIT_MS } = {}) {
+  checkId(session, "owner record");
+  return withFileLock(lockPath(checkout), () => {
+    const current = readOwner2(checkout)?.session ?? null;
+    if (current === session) return { changed: false };
+    write(checkout, session);
+    return { changed: true };
+  }, { waitMs });
+}
+
 // packages/opencode-plugin/src/conductor-session.mjs
-import { mkdirSync as mkdirSync23, readFileSync as readFileSync32 } from "node:fs";
-import { dirname as dirname22, join as join53 } from "node:path";
-var CONDUCTOR_SESSION_REL = ".sterling/transient/opencode-conductor-session";
 var counter = 0;
 var takePromptSeq = () => ++counter;
 var lastWritten = /* @__PURE__ */ new Map();
@@ -27984,19 +28122,7 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
       if (kind.why) throw new Error(`conductor session not recorded: could not tell whether session ${sessionID} is a root session (${kind.why})`);
       if (kind.kind !== "root") return;
       if (seq <= (lastWritten.get(root) ?? 0)) return;
-      const path = join53(root, CONDUCTOR_SESSION_REL);
-      const text = `${sessionID}
-`;
-      let current = null;
-      try {
-        current = readFileSync32(path, "utf8");
-      } catch (e) {
-        if (e?.code !== "ENOENT") throw e;
-      }
-      if (current !== text) {
-        mkdirSync23(dirname22(path), { recursive: true });
-        writeFileAtomic(path, text);
-      }
+      await recordOwner(root, sessionID);
       lastWritten.set(root, seq);
     });
   };
@@ -28005,7 +28131,7 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
 // packages/opencode-plugin/src/server.mjs
 init_dist();
 import { realpathSync as realpathSync11 } from "node:fs";
-import { basename as basename7, dirname as dirname23, join as join54, resolve as resolve17 } from "node:path";
+import { basename as basename7, dirname as dirname24, join as join54, resolve as resolve17 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
 var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update"]);
@@ -28064,8 +28190,8 @@ function sameDirectory(a, b) {
   return { equal, unresolved };
 }
 function storeDbPath(dbPath) {
-  if (typeof dbPath !== "string" || basename7(dbPath) !== "sterling.db" || basename7(dirname23(dbPath)) !== ".sterling") return dbPath;
-  const root = dirname23(dirname23(dbPath));
+  if (typeof dbPath !== "string" || basename7(dbPath) !== "sterling.db" || basename7(dirname24(dbPath)) !== ".sterling") return dbPath;
+  const root = dirname24(dirname24(dbPath));
   const store = storeRootFor(root);
   return store === root ? dbPath : join54(store, ".sterling", "sterling.db");
 }
