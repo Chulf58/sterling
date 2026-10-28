@@ -18,13 +18,18 @@
 //
 // THE CEILING. multi_session.max_sessions counts the occupied checkouts of the project: one with an OpenCode tmux
 // window, a live conductor (the OpenCode API inventory), or a launch reservation. Count, compare and reservation run
-// in one locked section (scripts/lib/launch-admission.mjs), and every piece of evidence is read inside it: the API
-// inventory (bounded by IN_LOCK_READ_MS; a slower read refuses rather than counting stale evidence) and every tmux
-// server that matters (the default one, the one this launch uses, and every socket a reservation records; one that
-// cannot be read refuses, `tmux_unreadable`). So parallel launches can never pass the ceiling together, and a session
-// that started while this launcher waited for the lock is counted. A started window stays counted until it is seen
-// gone on its own server; an uncertain start until it is seen or expires. Hand-opened sessions are counted, never
-// blocked: only this launcher refuses (`ceiling_reached`).
+// in one locked section (scripts/lib/launch-admission.mjs), and every piece of evidence is read inside it under one
+// deadline (IN_LOCK_READ_MS: the API inventory, every tmux read, every path resolution; past it `admission_timeout`):
+// the default tmux server, the one this launch uses, and every socket in the project's socket registry or named by a
+// reservation. A registered socket is never taken for empty while its recorded server runs: unreadable, missing or
+// answered by another server, it refuses (`tmux_unreadable`, naming it) until the server ends or --forget-socket drops
+// it. So parallel launches can never pass the ceiling together, and a session that started while this launcher waited
+// for the lock is counted. A started window stays counted until it is seen gone on its own server; an uncertain start
+// until it expires, or, once its window is seen, as a started record of that window. Hand-opened sessions are
+// counted, never blocked: only this launcher refuses (`ceiling_reached`).
+//
+// --forget-socket <path> (with --target only) drops one socket from the registry with every reservation naming it,
+// under the lock, and prints what it forgot. It is cleanup, so it runs with multi_session off too.
 //
 // ADMISSION, read-only through the OpenCode API, inside the same locked section (a dry run included): a live conductor
 // of this checkout refuses (`conductor_live`), an incomplete inventory refuses (`conductor_unknown`). With --session the
@@ -52,8 +57,8 @@ import { Fail, canonical, checkoutOf, getJson, isConductorCandidate, readProject
 import { nestedCheckout, realDeps } from './lib/owner-session.mjs';
 import { readMultiSession, multiSessionRefusal } from './lib/multi-session.mjs';
 import { defaultOpencodeBin } from './lib/opencode-api.mjs';
-import { admitLaunch, settleLaunch } from './lib/launch-admission.mjs';
-import { TMUX_ID_RE, defaultSocket, environmentSocket, guardedCommand, listSessions, opencodeSessionIds, isOpencodeCommand, sameServer, shq } from './lib/windows.mjs';
+import { OBSERVE_MS, admitLaunch, forgetSocket, settleLaunch } from './lib/launch-admission.mjs';
+import { TMUX_ID_RE, defaultSocket, environmentSocket, guardedCommand, listSessions, readServer, isOpencodeCommand, sameServer, shq } from './lib/windows.mjs';
 import { arg, hasFlag } from './lib/cli-args.mjs';
 import { sessionName } from './lib/launchers.mjs';
 import { resolveMainCheckout, resolveTarget, worktreePathFor } from './open-session.mjs';
@@ -62,8 +67,9 @@ const DEFAULT_ATTACH_TIMEOUT_S = 30;
 // What the reads before the window may take, beyond the wait for the terminal.
 const RUN_SLACK_MS = 90_000;
 const POLL_MS = 1000;
-// What the fresh API inventory inside the admission lock may take before the launch is refused instead.
-export const IN_LOCK_READ_MS = 60_000;
+// The one deadline of the whole locked observation (API inventory, tmux reads, path resolution); past it the launch is
+// refused, the lock released and nothing admitted.
+export const IN_LOCK_READ_MS = OBSERVE_MS;
 const DIGITS_RE = /^[1-9]\d*$/;
 const SESSION_ID_RE = /^ses_[A-Za-z0-9]+$/;
 const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -71,7 +77,7 @@ const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const PLAIN_PATH_RE = /^\/[A-Za-z0-9._/@+-]+$/;
 const AGENT_REL = join('.opencode', 'agents', 'sterling', 'conductor.md');
 export const TERMINALS = ['ghostty', 'gnome-terminal', 'kitty', 'konsole', 'x-terminal-emulator'];
-const USAGE = 'usage: open-session-window.mjs [--target <project-name|path>] (--name <label> | --checkout <session worktree folder>) [--session <ses_id>] [--detached] [--attach-timeout <seconds>] [--dry-run]';
+const USAGE = 'usage: open-session-window.mjs [--target <project-name|path>] (--name <label> | --checkout <session worktree folder>) [--session <ses_id>] [--detached] [--attach-timeout <seconds>] [--dry-run]\n       open-session-window.mjs [--target <project-name|path>] --forget-socket <socket path>';
 
 // A refusal; `detail` is added to the JSON line, `exit` is the exit code.
 class Stop extends Error {
@@ -95,7 +101,7 @@ class Started extends Error {
   }
 }
 
-const VALUE_FLAGS = ['--target', '--name', '--checkout', '--session', '--attach-timeout'];
+const VALUE_FLAGS = ['--target', '--name', '--checkout', '--session', '--attach-timeout', '--forget-socket'];
 const BOOL_FLAGS = ['--dry-run', '--detached'];
 
 // The shared exact-token parser (scripts/lib/cli-args.mjs, decision
@@ -141,6 +147,13 @@ export function parseArgs(argv) {
     const t = v['--attach-timeout'];
     if (!/^\d+$/.test(t) || Number(t) < 1 || Number(t) > 600) throw new Fail(2, `--attach-timeout must be whole seconds from 1 to 600, got '${t}'`);
     args.attachTimeout = Number(t);
+  }
+  if (v['--forget-socket'] !== undefined) {
+    if (!isAbsolute(v['--forget-socket'])) throw new Fail(2, `--forget-socket must be an absolute socket path, got ${JSON.stringify(v['--forget-socket'])}`);
+    const extra = ['--name', '--checkout', '--session', '--attach-timeout'].filter((f) => v[f] !== undefined).concat(args.dryRun ? ['--dry-run'] : [], args.detached ? ['--detached'] : []);
+    if (extra.length > 0) throw new Fail(2, `--forget-socket takes only --target; drop ${extra.join(', ')}`);
+    args.forgetSocket = v['--forget-socket'];
+    return args;
   }
   if ((args.name === undefined) === (args.checkout === undefined)) throw new Fail(2, `give exactly one of --name and --checkout\n${USAGE}`);
   return args;
@@ -324,53 +337,39 @@ async function inventory(deps, args, ctx, checkout) {
   return live;
 }
 
-// Runs `read` and refuses when it outlives `ms`: inside the admission lock a slow read is never waited out, and never
-// replaced by older evidence.
-async function bounded(ms, what, read) {
-  let timer;
-  const expired = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Stop('conductor_unknown', `${what} took longer than ${ms / 1000} s inside the admission lock; refusing rather than counting evidence read before the lock`)), ms);
-  });
-  try {
-    return await Promise.race([read(), expired]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// What occupies the project's checkouts right now, all read inside the admission lock: the fresh API inventory (which
-// also refuses a live conductor of the target), and on every tmux server that matters (the default one, the one this
-// launch uses, every socket a reservation records) each OpenCode window in a checkout of the project and any session at
-// the target folder or with the target name. A started reservation whose window is not on its server any more (no
-// session with that id on a server with that pid and start time, or no server at all) is reported gone.
-function observer(deps, args, ctx, checkout, name, socket) {
+// What occupies the project's checkouts right now, all read inside the admission lock and under its one deadline
+// (launch-admission.mjs OBSERVE_MS): the fresh API inventory (which also refuses a live conductor of the target), and
+// one reading of every socket the admission asks for, with each OpenCode window in a checkout of the project and any
+// session at the target folder or with the target name. Whether an unanswered socket may be taken as empty is the
+// admission's judgment (its socket registry), never this reader's.
+function observer(deps, args, ctx, checkout, name) {
   const { folder, shape } = checkout;
-  return async (reservations) => {
-    const live = await bounded(IN_LOCK_READ_MS, 'the OpenCode session inventory', () => inventory({ ...deps, deadline: deps.now() + IN_LOCK_READ_MS }, args, ctx, checkout));
-    const sockets = [...new Set([defaultSocket(deps.env, deps.uid), socket, ...reservations.map((r) => r.socket).filter((x) => typeof x === 'string')])];
-    const occupied = [];
-    const servers = new Map();
+  return async ({ sockets }) => {
+    const live = await inventory({ ...deps, deadline: deps.now() + IN_LOCK_READ_MS }, args, ctx, checkout);
+    const readings = {};
     for (const at of sockets) {
-      let sessions;
-      let opencode;
-      try {
-        sessions = await listSessions(deps, at);
-        opencode = await opencodeSessionIds(deps, at);
-      } catch (e) {
-        throw new Stop('tmux_unreadable', `the tmux server at ${at} could not be read (${e?.message ?? e}), so it is not known how many sessions of ${ctx.project} run there; refusing`, { socket: at });
+      const rd = await readServer(deps, at);
+      if (rd.state !== 'running') {
+        readings[at] = rd;
+        continue;
       }
-      servers.set(at, sessions);
-      for (const s of sessions) {
-        if (s.dir === folder || s.name === name) occupied.push({ checkout: folder, kind: 'window', detail: `${s.name} (${s.id} on ${at}, ${s.attached > 0 ? 'attached' : 'detached'})` });
-        else if (opencode.has(s.id)) {
+      const identities = new Set(rd.sessions.map((s) => `${s.serverPid}\t${s.serverStart}`));
+      if (identities.size > 1) {
+        readings[at] = { state: 'unreadable', why: `tmux -S ${at} listed sessions of more than one server (it restarted while it was read)` };
+        continue;
+      }
+      const windows = [];
+      for (const s of rd.sessions) {
+        if (s.dir === folder || s.name === name) windows.push({ checkout: folder, id: s.id, detail: `${s.name} (${s.id} on ${at}, ${s.attached > 0 ? 'attached' : 'detached'})` });
+        else if (rd.opencode.has(s.id)) {
           const where = checkoutOf(s.dir, shape);
-          if (where !== null) occupied.push({ checkout: where, kind: 'window', detail: `${s.name} (${s.id} on ${at})` });
+          if (where !== null) windows.push({ checkout: where, id: s.id, detail: `${s.name} (${s.id} on ${at})` });
         }
       }
+      const first = rd.sessions[0];
+      readings[at] = { state: 'running', server: first ? { pid: first.serverPid, start: first.serverStart } : null, windows, sessionIds: rd.sessions.map((s) => s.id) };
     }
-    for (const c of live) occupied.push({ checkout: c.checkout, kind: 'conductor', detail: `${c.id} (${c.why.join('; ')})` });
-    const gone = reservations.filter((r) => r.state === 'started').filter((r) => !servers.get(r.socket).some((s) => s.id === r.detail.windowId && sameServer(s, { pid: r.detail.serverPid, start: r.detail.serverStart }))).map((r) => r.id);
-    return { occupied, gone };
+    return { conductors: live.map((c) => ({ checkout: c.checkout, detail: `${c.id} (${c.why.join('; ')})` })), readings };
   };
 }
 
@@ -414,8 +413,8 @@ export async function openSessionWindow(args, rawDeps) {
   const tmuxArgs = ['-S', socket, 'new-session', '-d', '-P', '-F', '#{session_id}\t#{pid}\t#{start_time}', '-s', name, '-c', folder, ...command];
   const shown = { project: ctx.project, folder, window: name, command, resume: args.session ?? null, attach: plan.how === 'terminal' ? `terminal:${plan.terminal}` : plan.how, socket, max_sessions: ctx.maxSessions };
 
-  const admission = await deps.admit(ctx.canonicalRoot, { checkout: folder, socket, maxSessions: ctx.maxSessions, observe: observer(deps, args, ctx, checkout, name, socket), dryRun: args.dryRun, now: deps.now });
-  if (!admission.admitted) throw new Stop(admission.reason, admission.why, { counted: admission.counted });
+  const admission = await deps.admit(ctx.canonicalRoot, { checkout: folder, socket, alsoRead: [defaultSocket(deps.env, deps.uid)], maxSessions: ctx.maxSessions, observe: observer(deps, args, ctx, checkout, name), observeMs: IN_LOCK_READ_MS, dryRun: args.dryRun, now: deps.now });
+  if (!admission.admitted) throw new Stop(admission.reason, admission.why, { counted: admission.counted, ...(admission.socket ? { socket: admission.socket } : {}) });
   if (args.dryRun) return { status: 'would_start', ...shown, counted: admission.counted, tmux: tmuxArgs };
 
   // The reservation is settled once: released while nothing was created, else started or uncertain. A started settle
@@ -509,10 +508,34 @@ async function create(deps, args, { name, folder, socket, shown, plan, tmuxArgs,
   }
 }
 
+// --forget-socket: the operator drops one socket from the project's registry, with every reservation that names it, under
+// the admission lock. Cleanup, so it runs with multi_session off too. Nothing registered under that path is exit 1.
+async function forget(args, deps, io) {
+  let mainRoot;
+  try {
+    mainRoot = deps.resolveMain(args.target);
+  } catch (e) {
+    if (Number.isInteger(e?.exit)) throw new Fail(e.exit, e.message);
+    throw e;
+  }
+  const root = await canonical(deps.realpath, mainRoot, 'the main checkout');
+  const r = await deps.forget(root, args.forgetSocket);
+  if (!r.entry && r.reservations.length === 0) {
+    io.stdout(`${JSON.stringify({ status: 'not_registered', socket: r.socket })}\n`);
+    io.stderr(`open-session-window: ${r.socket} is not in the socket registry of ${root} and no launch reservation names it; nothing was forgotten\n`);
+    return 1;
+  }
+  io.stdout(`${JSON.stringify({ status: 'forgotten', socket: r.socket, server: r.entry?.server ?? null, reservations: r.reservations.map((x) => ({ id: x.id, checkout: x.checkout, state: x.state })) })}\n`);
+  const server = r.entry?.server ? `recorded server pid ${r.entry.server.pid} (started ${r.entry.server.start})` : 'no recorded server';
+  io.stderr(`open-session-window: forgot the tmux socket ${r.socket} (${server}) and ${r.reservations.length} reservation${r.reservations.length === 1 ? '' : 's'} naming it${r.reservations.map((x) => `: ${x.id} for ${x.checkout} (${x.state})`).join('')}; windows on that server are no longer counted against max_sessions\n`);
+  return 0;
+}
+
 export async function main(argv, deps, io) {
   let project;
   try {
     const args = parseArgs(argv);
+    if (args.forgetSocket) return await forget(args, deps, io);
     const result = await openSessionWindow(args, deps);
     project = result.project;
     io.stdout(`${JSON.stringify(result)}\n`);
@@ -591,6 +614,7 @@ export function launcherDeps() {
     tmux: runTmux,
     admit: admitLaunch,
     settle: settleLaunch,
+    forget: forgetSocket,
     // A terminal that outlives this process: setsid -f detaches it.
     spawnTerminal: (file, args, { env, cwd }) => new Promise((ok, fail) => {
       const child = spawn(file, args, { detached: true, stdio: 'ignore', env, cwd });

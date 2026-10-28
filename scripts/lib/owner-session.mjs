@@ -166,7 +166,7 @@ export function descendantsOf(snapshot, id) {
 
 // The top-level session (its info) an id belongs to, read from the snapshot and, for an id the snapshot lacks (it started after it),
 // from the server. Throws when the chain cannot be followed.
-async function rootOf(deps, snapshot, id) {
+async function rootOf(deps, snapshot, id, chain = []) {
   const seen = new Set();
   let current = id;
   for (let depth = 0; depth <= MAX_DEPTH; depth++) {
@@ -174,6 +174,7 @@ async function rootOf(deps, snapshot, id) {
     seen.add(current);
     const s = snapshot.get(current) ?? (await getJson(deps.api, `/api/session/${checkSessionId(current, 'parent chain')}`))?.data;
     if (s?.id !== current) throw new Fail(1, `session ${id}: cannot read ${current} in its parent chain`);
+    chain.push(s);
     const parent = parentOf(s, `session ${current}`);
     if (parent === null) return s;
     current = parent;
@@ -298,8 +299,21 @@ function runningJudge(deps, { snapshot, scope, owner, tree, kind }) {
   const one = async (id) => {
     // A running turn of the owner or its tree stops a wake only; a notify queues behind it (see admissionPass).
     if (mineIds.has(id)) return kind === 'wake' ? new Refused('busy', `owner session ${owner.id} is working (${id === owner.id ? 'busy' : `its subagent ${id} is busy`}); nothing sent`) : null;
-    const root = await rootOf(deps, snapshot, id);
-    if (root.id === owner.id) return kind === 'wake' ? new Refused('busy', `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`) : null;
+    const chain = [];
+    const root = await rootOf(deps, snapshot, id, chain);
+    if (root.id === owner.id) {
+      if (kind === 'wake') return new Refused('busy', `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
+      // A notify queues behind the running turn, but the new subagent (and every new session between it and the owner) joins
+      // the owner's tree now, so the evidence batch that follows reads its inbox, forms, permissions and folder like any other
+      // member's; admissionPass runs that batch again after this step (hazard fa5791e3).
+      for (const member of chain) {
+        if (member.id !== owner.id && !mineIds.has(member.id)) {
+          mineIds.add(member.id);
+          tree.push(member);
+        }
+      }
+      return null;
+    }
     if (kind !== 'wake' || !isConductorCandidate(root)) return null;
     const real = await canonical(deps.realpath, root.location?.directory, `session ${root.id}`);
     return checkoutOf(real, shapeOf(scope)) === scope.canonicalRoot ? competing(owner, [{ id: root.id, why: [root.id === id ? 'busy' : `its subagent ${id} is busy`] }]) : null;

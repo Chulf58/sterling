@@ -7800,15 +7800,20 @@ import { randomUUID as randomUUID4 } from "node:crypto";
 var RESERVATIONS_REL = ".sterling/transient/launch-reservations.json";
 var RESERVED_TTL_MS = 15 * 6e4;
 var UNCERTAIN_TTL_MS = 15 * 6e4;
+var OBSERVE_MS = 6e4;
 var ADMISSION_LOCK_WAIT_MS = 18e4;
 var reservationsPath = (mainRoot) => join15(mainRoot, RESERVATIONS_REL);
+var isStr = (v) => typeof v === "string";
+var shapedServer = (s) => s === null || isStr(s?.pid) && isStr(s.start) && (s.proc_start === null || isStr(s.proc_start));
+var shapedReservation = (r) => isStr(r?.id) && isStr(r.checkout) && (r.socket === null || isStr(r.socket)) && (r.state === "started" ? r.expires_at === null && isStr(r.socket) && isStr(r.detail?.windowId) && isStr(r.detail?.serverPid) && isStr(r.detail?.serverStart) : ["reserved", "uncertain"].includes(r.state) && Number.isFinite(r.expires_at));
+var shapedSocket = (e) => isStr(e?.socket) && shapedServer(e.server);
 function readReservations(mainRoot) {
   const path = reservationsPath(mainRoot);
   let text;
   try {
     text = readFileSync12(path, "utf8");
   } catch (e) {
-    if (e?.code === "ENOENT") return { version: 1, reservations: [] };
+    if (e?.code === "ENOENT") return { version: 1, reservations: [], sockets: [] };
     throw e;
   }
   let v;
@@ -7817,13 +7822,13 @@ function readReservations(mainRoot) {
   } catch {
     throw new Error(`${path} is not JSON; it is not known which launches are in flight, so no launch is admitted. Inspect it, and delete it only once no launch is running`);
   }
-  const shaped = (r) => typeof r?.id === "string" && typeof r.checkout === "string" && (r.socket === null || typeof r.socket === "string") && (r.state === "started" ? r.expires_at === null && typeof r.socket === "string" && typeof r.detail?.windowId === "string" && typeof r.detail?.serverPid === "string" && typeof r.detail?.serverStart === "string" : ["reserved", "uncertain"].includes(r.state) && Number.isFinite(r.expires_at));
-  if (v?.version !== 1 || !Array.isArray(v.reservations) || !v.reservations.every(shaped)) {
+  const sockets = v?.sockets ?? [];
+  if (v?.version !== 1 || !Array.isArray(v.reservations) || !v.reservations.every(shapedReservation) || !Array.isArray(sockets) || !sockets.every(shapedSocket)) {
     throw new Error(`${path} does not have the reservation shape; it is not known which launches are in flight, so no launch is admitted. Inspect it, and delete it only once no launch is running`);
   }
-  return v;
+  return { version: 1, reservations: v.reservations, sockets };
 }
-function writeReservations(mainRoot, state) {
+function writeState(mainRoot, state) {
   const path = reservationsPath(mainRoot);
   mkdirSync5(dirname9(path), { recursive: true });
   writeFileAtomic(path, `${JSON.stringify(state, null, 2)}
@@ -7838,31 +7843,112 @@ function holderAlive(holder, { isAlive, startTimeOf }) {
   const cur = startTimeOf(holder.pid);
   return cur === null || cur === holder.proc_start;
 }
+function serverEnded(server, { isAlive = pidIsAlive2, startTimeOf = procStartTime2 } = {}) {
+  const pid = Number(server.pid);
+  if (!isAlive(pid)) return true;
+  if (server.proc_start === null || server.proc_start === void 0) return false;
+  const cur = startTimeOf(pid);
+  return cur !== null && cur !== server.proc_start;
+}
+var sameServer = (a, b) => a.pid === b.pid && a.start === b.start;
 var withLock = (mainRoot, fn, waitMs) => withFileLock(`${reservationsPath(mainRoot)}.lock`, fn, { waitMs });
-async function admitLaunch(mainRoot, { checkout, socket = null, maxSessions, observe: observe2, dryRun = false, now = Date.now, holder = currentHolder(), isAlive = pidIsAlive2, startTimeOf = procStartTime2, waitMs = ADMISSION_LOCK_WAIT_MS }) {
+var ObserveTimeout = class extends Error {
+};
+async function within2(ms, read) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new ObserveTimeout()), ms);
+  });
+  try {
+    return await Promise.race([read(), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function admitLaunch(mainRoot, { checkout, socket = null, alsoRead = [], maxSessions, observe: observe2, dryRun = false, now = Date.now, holder = currentHolder(), isAlive = pidIsAlive2, startTimeOf = procStartTime2, serverAlive = isAlive, serverStartTimeOf = startTimeOf, waitMs = ADMISSION_LOCK_WAIT_MS, observeMs = OBSERVE_MS }) {
   if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new Error(`max_sessions must be a whole number of at least 1, got ${JSON.stringify(maxSessions)}`);
   return withLock(mainRoot, async () => {
     const state = readReservations(mainRoot);
-    const { occupied: observed, gone } = await observe2(state.reservations);
+    const before = JSON.stringify(state);
+    const registry = new Map(state.sockets.map((e) => [e.socket, { ...e }]));
+    const toRead = [...new Set([...alsoRead, socket, ...registry.keys(), ...state.reservations.map((r) => r.socket)].filter(isStr))];
+    let seen;
+    try {
+      seen = await within2(observeMs, () => observe2({ reservations: state.reservations, sockets: toRead }));
+    } catch (e) {
+      if (!(e instanceof ObserveTimeout)) throw e;
+      return { admitted: false, reason: "admission_timeout", why: `reading the OpenCode sessions and the tmux servers (${toRead.join(", ") || "none"}) took longer than ${observeMs / 1e3} s inside the admission lock; nothing was admitted or written, and the lock is released`, counted: [] };
+    }
     const t = now();
-    const probe = { isAlive, startTimeOf };
-    const occupiedNow = new Set(observed.map((o) => o.checkout));
-    const goneNow = new Set(gone);
-    const kept = state.reservations.filter((r) => {
-      if (holderAlive(r.holder, probe)) return true;
-      if (r.state === "started") return !goneNow.has(r.id);
-      return t < r.expires_at && !occupiedNow.has(r.checkout);
+    const launchers = { isAlive, startTimeOf };
+    const servers = { isAlive: serverAlive, startTimeOf: serverStartTimeOf };
+    const ended = (server) => serverEnded(server, servers);
+    const unreadable = (at, why) => ({ admitted: false, reason: "tmux_unreadable", socket: at, why: `${why}; it is not known how many sessions run there, so no launch is admitted. If that server has ended for good, or the socket can never be read again, drop it with --forget-socket ${at}`, counted: [] });
+    const windows = [];
+    for (const at of toRead) {
+      const rd = seen.readings?.[at];
+      if (!rd) throw new Error(`the observation gave no reading for the tmux socket ${at}`);
+      const entry = registry.get(at);
+      const recorded = entry?.server ?? null;
+      if (rd.state === "running") {
+        if (recorded && !(rd.server && sameServer(recorded, rd.server))) {
+          if (!ended(recorded)) {
+            return unreadable(at, rd.server ? `the socket ${at} is answered by tmux server pid ${rd.server.pid}, but its recorded server pid ${recorded.pid} still runs and can no longer be reached there` : `the socket ${at} answers with no sessions, so its server cannot be identified, while its recorded server pid ${recorded.pid} still runs`);
+          }
+          entry.server = null;
+        }
+        if (rd.server && !registry.get(at)?.server) {
+          registry.set(at, { ...registry.get(at) ?? { socket: at, first_seen: t }, socket: at, server: { pid: rd.server.pid, start: rd.server.start, proc_start: serverStartTimeOf(Number(rd.server.pid)) } });
+        }
+        for (const w of rd.windows) windows.push({ ...w, socket: at, server: rd.server });
+      } else if (rd.state === "absent") {
+        if (recorded && !ended(recorded)) {
+          return unreadable(at, `the socket ${at} cannot be reached (${rd.why}), but its recorded tmux server pid ${recorded.pid} still runs: a removed socket does not end a server or its windows, and kill -USR1 ${recorded.pid} makes tmux recreate it`);
+        }
+        if (entry) entry.server = null;
+      } else {
+        return unreadable(at, `the tmux server at ${at} could not be read (${rd.why})`);
+      }
+    }
+    const gone = (r) => {
+      const rd = seen.readings[r.socket];
+      const own = { pid: r.detail.serverPid, start: r.detail.serverStart };
+      if (rd.state === "running" && rd.server && sameServer(rd.server, own)) return !rd.sessionIds.includes(r.detail.windowId);
+      const known = registry.get(r.socket)?.server;
+      return ended(known && sameServer(known, own) ? known : { ...own, proc_start: null });
+    };
+    const promote = (r) => {
+      if (r.state === "started" || holderAlive(r.holder, launchers)) return r;
+      const w = windows.find((x) => x.checkout === r.checkout && x.server);
+      if (!w) return r;
+      return { ...r, socket: w.socket, state: "started", expires_at: null, holder: null, promoted_at: t, promoted_from: r.state, detail: { ...r.detail ?? {}, windowId: w.id, serverPid: w.server.pid, serverStart: w.server.start } };
+    };
+    const kept = state.reservations.map(promote).filter((r) => {
+      if (holderAlive(r.holder, launchers)) return true;
+      return r.state === "started" ? !gone(r) : t < r.expires_at;
     });
+    const named2 = new Set(kept.map((r) => r.socket).filter(isStr));
+    for (const [at, e] of registry) if (e.server === null && !named2.has(at)) registry.delete(at);
     const counted = /* @__PURE__ */ new Map();
     const note = (dir, why) => counted.set(dir, [...counted.get(dir) ?? [], why]);
-    for (const o of observed) note(o.checkout, o.kind === "window" ? `tmux window ${o.detail}` : `live conductor ${o.detail}`);
-    const until = (r) => holderAlive(r.holder, probe) ? ` (launcher pid ${r.holder.pid} running)` : r.state === "started" ? ` (until its window ${r.detail.windowId} on ${r.socket} is gone)` : ` (counted until ${new Date(r.expires_at).toISOString()})`;
+    for (const w of windows) note(w.checkout, `tmux window ${w.detail}`);
+    for (const c of seen.conductors) note(c.checkout, `live conductor ${c.detail}`);
+    const until = (r) => holderAlive(r.holder, launchers) ? ` (launcher pid ${r.holder.pid} running)` : r.state === "started" ? ` (until its window ${r.detail.windowId} on ${r.socket} is gone)` : ` (counted until ${new Date(r.expires_at).toISOString()})`;
     for (const r of kept) note(r.checkout, `${r.state} launch reservation ${r.id}${until(r)}`);
     const list = [...counted].map(([dir, why]) => ({ checkout: dir, why }));
-    const refuse = (reason, why) => ({ admitted: false, reason, why, counted: list });
-    const mine = observed.filter((o) => o.checkout === checkout);
-    if (mine.some((o) => o.kind === "window")) return refuse("window_exists", `${checkout} already has an OpenCode window: ${mine.map((o) => o.detail).join(", ")}`);
-    if (mine.length > 0) return refuse("conductor_live", `${checkout} already has a live conductor: ${mine.map((o) => o.detail).join(", ")}`);
+    const next = () => ({ version: 1, reservations: kept, sockets: [...registry.values()] });
+    const record = () => {
+      const after = next();
+      if (!dryRun && JSON.stringify(after) !== before) writeState(mainRoot, after);
+    };
+    const refuse = (reason, why) => {
+      record();
+      return { admitted: false, reason, why, counted: list };
+    };
+    const mineW = windows.filter((w) => w.checkout === checkout);
+    if (mineW.length > 0) return refuse("window_exists", `${checkout} already has an OpenCode window: ${mineW.map((w) => w.detail).join(", ")}`);
+    const mineC = seen.conductors.filter((c) => c.checkout === checkout);
+    if (mineC.length > 0) return refuse("conductor_live", `${checkout} already has a live conductor: ${mineC.map((c) => c.detail).join(", ")}`);
     const inFlight = kept.filter((r) => r.checkout === checkout);
     if (inFlight.length > 0) return refuse("launch_in_progress", `another launch of ${checkout} holds reservation ${inFlight.map((r) => `${r.id} (${r.state})`).join(", ")}; an uncertain one counts until it is seen or expires`);
     if (counted.size + 1 > maxSessions) {
@@ -7871,27 +7957,45 @@ async function admitLaunch(mainRoot, { checkout, socket = null, maxSessions, obs
     if (dryRun) return { admitted: true, id: null, counted: list };
     const id = `lr_${randomUUID4()}`;
     kept.push({ id, checkout, socket, state: "reserved", created_at: t, expires_at: t + RESERVED_TTL_MS, holder });
-    writeReservations(mainRoot, { version: 1, reservations: kept });
+    if (isStr(socket) && !registry.has(socket)) registry.set(socket, { socket, server: null, first_seen: t });
+    writeState(mainRoot, next());
     return { admitted: true, id, counted: list };
   }, waitMs);
 }
-async function settleLaunch(mainRoot, id, outcome, { checkout, socket, detail = {}, now = Date.now, holder = currentHolder(), waitMs = ADMISSION_LOCK_WAIT_MS } = {}) {
+async function settleLaunch(mainRoot, id, outcome, { checkout, socket, detail = {}, now = Date.now, holder = currentHolder(), serverStartTimeOf = procStartTime2, waitMs = ADMISSION_LOCK_WAIT_MS } = {}) {
   if (!["released", "started", "uncertain"].includes(outcome)) throw new Error(`unknown launch outcome ${JSON.stringify(outcome)}`);
   return withLock(mainRoot, async () => {
     const state = readReservations(mainRoot);
     const t = now();
     const rest = state.reservations.filter((r) => r.id !== id);
+    const sockets = state.sockets.map((e) => ({ ...e }));
     if (outcome !== "released") {
       const prior = state.reservations.find((r) => r.id === id);
       const at = prior?.checkout ?? checkout;
       const on = prior?.socket ?? socket ?? null;
-      if (typeof at !== "string") throw new Error(`launch reservation ${id} is gone and no checkout was given to record it again`);
-      if (outcome === "started" && (typeof on !== "string" || !["windowId", "serverPid", "serverStart"].every((k) => typeof detail[k] === "string"))) {
+      if (!isStr(at)) throw new Error(`launch reservation ${id} is gone and no checkout was given to record it again`);
+      if (outcome === "started" && (!isStr(on) || !["windowId", "serverPid", "serverStart"].every((k) => isStr(detail[k])))) {
         throw new Error(`launch reservation ${id} cannot be settled started without its socket, window id, server pid and server start time`);
       }
       rest.push({ ...prior ?? { id, created_at: t }, checkout: at, socket: on, state: outcome, expires_at: outcome === "started" ? null : t + UNCERTAIN_TTL_MS, holder: null, settled_at: t, detail, settled_by: holder });
+      if (isStr(on)) {
+        let entry = sockets.find((e) => e.socket === on);
+        if (!entry) sockets.push(entry = { socket: on, server: null, first_seen: t });
+        if (outcome === "started" && entry.server === null) entry.server = { pid: detail.serverPid, start: detail.serverStart, proc_start: serverStartTimeOf(Number(detail.serverPid)) };
+      }
     }
-    writeReservations(mainRoot, { version: 1, reservations: rest });
+    writeState(mainRoot, { version: 1, reservations: rest, sockets });
+  }, waitMs);
+}
+async function forgetSocket(mainRoot, socket, { waitMs = ADMISSION_LOCK_WAIT_MS } = {}) {
+  return withLock(mainRoot, async () => {
+    const state = readReservations(mainRoot);
+    const entry = state.sockets.find((e) => e.socket === socket) ?? null;
+    const dropped = state.reservations.filter((r) => r.socket === socket);
+    if (entry || dropped.length > 0) {
+      writeState(mainRoot, { version: 1, reservations: state.reservations.filter((r) => r.socket !== socket), sockets: state.sockets.filter((e) => e.socket !== socket) });
+    }
+    return { socket, entry, reservations: dropped };
   }, waitMs);
 }
 
@@ -7948,6 +8052,17 @@ async function listSessions(deps, socket) {
   }
   return out;
 }
+async function readServer(deps, socket) {
+  const probe = await deps.tmux(["-S", socket, "list-sessions", "-F", "#{session_id}"]);
+  if (probe.code !== 0) return { state: NO_SERVER.test(probe.stderr || "") ? "absent" : "unreadable", why: `tmux -S ${socket} list-sessions: ${errorText(probe)}` };
+  try {
+    const sessions = await listSessions(deps, socket);
+    const opencode = await opencodeSessionIds(deps, socket);
+    return { state: "running", sessions, opencode };
+  } catch (e) {
+    return { state: "unreadable", why: String(e?.message ?? e) };
+  }
+}
 async function opencodeSessionIds(deps, socket) {
   const r = await deps.tmux(["-S", socket, "list-panes", "-a", "-F", "#{session_id}	#{pane_id}	#{pane_start_command}"]);
   if (r.code !== 0) {
@@ -7970,7 +8085,7 @@ function environmentSocket(env, uid) {
   if (!m || !isAbsolute3(m[1])) throw new Error(`TMUX is ${JSON.stringify(env.TMUX)}, which names no tmux socket`);
   return m[1];
 }
-var sameServer = (row, server) => row.serverPid === server.pid && row.serverStart === server.start;
+var sameServer2 = (row, server) => row.serverPid === server.pid && row.serverStart === server.start;
 var shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 function guardedCommand(socket, server, command) {
   return ["-S", socket, "if-shell", "-F", `#{&&:#{==:#{pid},${server.pid}},#{==:#{start_time},${server.start}}}`, command, `display-message -p server_restarted ; run-shell 'exit 1'`];
@@ -11359,14 +11474,14 @@ if (launchedAs === fileURLToPath2(new URL("../scripts/open-session.mjs", import.
 var DEFAULT_ATTACH_TIMEOUT_S = 30;
 var RUN_SLACK_MS = 9e4;
 var POLL_MS = 1e3;
-var IN_LOCK_READ_MS = 6e4;
+var IN_LOCK_READ_MS = OBSERVE_MS;
 var DIGITS_RE = /^[1-9]\d*$/;
 var SESSION_ID_RE2 = /^ses_[A-Za-z0-9]+$/;
 var LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 var PLAIN_PATH_RE = /^\/[A-Za-z0-9._/@+-]+$/;
 var AGENT_REL = join25(".opencode", "agents", "sterling", "conductor.md");
 var TERMINALS = ["ghostty", "gnome-terminal", "kitty", "konsole", "x-terminal-emulator"];
-var USAGE = "usage: open-session-window.mjs [--target <project-name|path>] (--name <label> | --checkout <session worktree folder>) [--session <ses_id>] [--detached] [--attach-timeout <seconds>] [--dry-run]";
+var USAGE = "usage: open-session-window.mjs [--target <project-name|path>] (--name <label> | --checkout <session worktree folder>) [--session <ses_id>] [--detached] [--attach-timeout <seconds>] [--dry-run]\n       open-session-window.mjs [--target <project-name|path>] --forget-socket <socket path>";
 var Stop = class extends Error {
   constructor(reason, why, detail = {}, exit = 1) {
     super(`${reason}: ${why}`);
@@ -11385,7 +11500,7 @@ var Started = class extends Error {
     this.server = server;
   }
 };
-var VALUE_FLAGS = ["--target", "--name", "--checkout", "--session", "--attach-timeout"];
+var VALUE_FLAGS = ["--target", "--name", "--checkout", "--session", "--attach-timeout", "--forget-socket"];
 var BOOL_FLAGS = ["--dry-run", "--detached"];
 function parseArgs2(argv) {
   for (let i = 0; i < argv.length; i++) {
@@ -11429,6 +11544,13 @@ ${USAGE}`);
     if (!/^\d+$/.test(t) || Number(t) < 1 || Number(t) > 600) throw new Fail(2, `--attach-timeout must be whole seconds from 1 to 600, got '${t}'`);
     args.attachTimeout = Number(t);
   }
+  if (v["--forget-socket"] !== void 0) {
+    if (!isAbsolute5(v["--forget-socket"])) throw new Fail(2, `--forget-socket must be an absolute socket path, got ${JSON.stringify(v["--forget-socket"])}`);
+    const extra = ["--name", "--checkout", "--session", "--attach-timeout"].filter((f) => v[f] !== void 0).concat(args.dryRun ? ["--dry-run"] : [], args.detached ? ["--detached"] : []);
+    if (extra.length > 0) throw new Fail(2, `--forget-socket takes only --target; drop ${extra.join(", ")}`);
+    args.forgetSocket = v["--forget-socket"];
+    return args;
+  }
   if (args.name === void 0 === (args.checkout === void 0)) throw new Fail(2, `give exactly one of --name and --checkout
 ${USAGE}`);
   return args;
@@ -11456,7 +11578,7 @@ function serverRestarted(server, socket, id) {
   return new Stop("server_restarted", `the tmux server at ${socket} is no longer process ${server.pid} started at ${server.start}; session ${id} may belong to another server, refusing changes, attachment or verification`, { socket, windowId: id, serverPid: server.pid, serverStart: server.start });
 }
 function checkServer(sessions, server, socket, id) {
-  if (sessions.some((s) => !sameServer(s, server))) throw serverRestarted(server, socket, id);
+  if (sessions.some((s) => !sameServer2(s, server))) throw serverRestarted(server, socket, id);
 }
 async function tmuxOk(deps, args, what) {
   const r = await deps.tmux(args);
@@ -11589,45 +11711,34 @@ async function inventory(deps, args, ctx, checkout) {
   }
   return live;
 }
-async function bounded(ms, what, read) {
-  let timer;
-  const expired = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Stop("conductor_unknown", `${what} took longer than ${ms / 1e3} s inside the admission lock; refusing rather than counting evidence read before the lock`)), ms);
-  });
-  try {
-    return await Promise.race([read(), expired]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function observer(deps, args, ctx, checkout, name, socket) {
+function observer(deps, args, ctx, checkout, name) {
   const { folder, shape } = checkout;
-  return async (reservations) => {
-    const live = await bounded(IN_LOCK_READ_MS, "the OpenCode session inventory", () => inventory({ ...deps, deadline: deps.now() + IN_LOCK_READ_MS }, args, ctx, checkout));
-    const sockets = [.../* @__PURE__ */ new Set([defaultSocket(deps.env, deps.uid), socket, ...reservations.map((r) => r.socket).filter((x) => typeof x === "string")])];
-    const occupied = [];
-    const servers = /* @__PURE__ */ new Map();
+  return async ({ sockets }) => {
+    const live = await inventory({ ...deps, deadline: deps.now() + IN_LOCK_READ_MS }, args, ctx, checkout);
+    const readings = {};
     for (const at of sockets) {
-      let sessions;
-      let opencode;
-      try {
-        sessions = await listSessions(deps, at);
-        opencode = await opencodeSessionIds(deps, at);
-      } catch (e) {
-        throw new Stop("tmux_unreadable", `the tmux server at ${at} could not be read (${e?.message ?? e}), so it is not known how many sessions of ${ctx.project} run there; refusing`, { socket: at });
+      const rd = await readServer(deps, at);
+      if (rd.state !== "running") {
+        readings[at] = rd;
+        continue;
       }
-      servers.set(at, sessions);
-      for (const s of sessions) {
-        if (s.dir === folder || s.name === name) occupied.push({ checkout: folder, kind: "window", detail: `${s.name} (${s.id} on ${at}, ${s.attached > 0 ? "attached" : "detached"})` });
-        else if (opencode.has(s.id)) {
+      const identities = new Set(rd.sessions.map((s) => `${s.serverPid}	${s.serverStart}`));
+      if (identities.size > 1) {
+        readings[at] = { state: "unreadable", why: `tmux -S ${at} listed sessions of more than one server (it restarted while it was read)` };
+        continue;
+      }
+      const windows = [];
+      for (const s of rd.sessions) {
+        if (s.dir === folder || s.name === name) windows.push({ checkout: folder, id: s.id, detail: `${s.name} (${s.id} on ${at}, ${s.attached > 0 ? "attached" : "detached"})` });
+        else if (rd.opencode.has(s.id)) {
           const where = checkoutOf(s.dir, shape);
-          if (where !== null) occupied.push({ checkout: where, kind: "window", detail: `${s.name} (${s.id} on ${at})` });
+          if (where !== null) windows.push({ checkout: where, id: s.id, detail: `${s.name} (${s.id} on ${at})` });
         }
       }
+      const first = rd.sessions[0];
+      readings[at] = { state: "running", server: first ? { pid: first.serverPid, start: first.serverStart } : null, windows, sessionIds: rd.sessions.map((s) => s.id) };
     }
-    for (const c of live) occupied.push({ checkout: c.checkout, kind: "conductor", detail: `${c.id} (${c.why.join("; ")})` });
-    const gone = reservations.filter((r) => r.state === "started").filter((r) => !servers.get(r.socket).some((s) => s.id === r.detail.windowId && sameServer(s, { pid: r.detail.serverPid, start: r.detail.serverStart }))).map((r) => r.id);
-    return { occupied, gone };
+    return { conductors: live.map((c) => ({ checkout: c.checkout, detail: `${c.id} (${c.why.join("; ")})` })), readings };
   };
 }
 function conflict({ id, name, folder, others, socket }) {
@@ -11664,8 +11775,8 @@ async function openSessionWindow(args, rawDeps) {
   if (args.session) await checkSession(deps, args.session, checkout);
   const tmuxArgs = ["-S", socket, "new-session", "-d", "-P", "-F", "#{session_id}	#{pid}	#{start_time}", "-s", name, "-c", folder, ...command];
   const shown = { project: ctx.project, folder, window: name, command, resume: args.session ?? null, attach: plan.how === "terminal" ? `terminal:${plan.terminal}` : plan.how, socket, max_sessions: ctx.maxSessions };
-  const admission = await deps.admit(ctx.canonicalRoot, { checkout: folder, socket, maxSessions: ctx.maxSessions, observe: observer(deps, args, ctx, checkout, name, socket), dryRun: args.dryRun, now: deps.now });
-  if (!admission.admitted) throw new Stop(admission.reason, admission.why, { counted: admission.counted });
+  const admission = await deps.admit(ctx.canonicalRoot, { checkout: folder, socket, alsoRead: [defaultSocket(deps.env, deps.uid)], maxSessions: ctx.maxSessions, observe: observer(deps, args, ctx, checkout, name), observeMs: IN_LOCK_READ_MS, dryRun: args.dryRun, now: deps.now });
+  if (!admission.admitted) throw new Stop(admission.reason, admission.why, { counted: admission.counted, ...admission.socket ? { socket: admission.socket } : {} });
   if (args.dryRun) return { status: "would_start", ...shown, counted: admission.counted, tmux: tmuxArgs };
   const reservation = admission.id;
   let settled = null;
@@ -11751,10 +11862,35 @@ async function create(deps, args, { name, folder, socket, shown, plan, tmuxArgs,
     throw new Started(name, id, e?.message ?? String(e), socket, server);
   }
 }
+async function forget(args, deps, io) {
+  let mainRoot;
+  try {
+    mainRoot = deps.resolveMain(args.target);
+  } catch (e) {
+    if (Number.isInteger(e?.exit)) throw new Fail(e.exit, e.message);
+    throw e;
+  }
+  const root = await canonical(deps.realpath, mainRoot, "the main checkout");
+  const r = await deps.forget(root, args.forgetSocket);
+  if (!r.entry && r.reservations.length === 0) {
+    io.stdout(`${JSON.stringify({ status: "not_registered", socket: r.socket })}
+`);
+    io.stderr(`open-session-window: ${r.socket} is not in the socket registry of ${root} and no launch reservation names it; nothing was forgotten
+`);
+    return 1;
+  }
+  io.stdout(`${JSON.stringify({ status: "forgotten", socket: r.socket, server: r.entry?.server ?? null, reservations: r.reservations.map((x) => ({ id: x.id, checkout: x.checkout, state: x.state })) })}
+`);
+  const server = r.entry?.server ? `recorded server pid ${r.entry.server.pid} (started ${r.entry.server.start})` : "no recorded server";
+  io.stderr(`open-session-window: forgot the tmux socket ${r.socket} (${server}) and ${r.reservations.length} reservation${r.reservations.length === 1 ? "" : "s"} naming it${r.reservations.map((x) => `: ${x.id} for ${x.checkout} (${x.state})`).join("")}; windows on that server are no longer counted against max_sessions
+`);
+  return 0;
+}
 async function main2(argv, deps, io) {
   let project;
   try {
     const args = parseArgs2(argv);
+    if (args.forgetSocket) return await forget(args, deps, io);
     const result = await openSessionWindow(args, deps);
     project = result.project;
     io.stdout(`${JSON.stringify(result)}
@@ -11836,6 +11972,7 @@ function launcherDeps() {
     tmux: runTmux,
     admit: admitLaunch,
     settle: settleLaunch,
+    forget: forgetSocket,
     // A terminal that outlives this process: setsid -f detaches it.
     spawnTerminal: (file, args, { env, cwd }) => new Promise((ok, fail) => {
       const child = spawn2(file, args, { detached: true, stdio: "ignore", env, cwd });

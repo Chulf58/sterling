@@ -11,8 +11,11 @@
 // the same socket (anti-pattern 8e603e23), the pair cannot within one second of the clock.
 //
 // `deps.tmux(args)` resolves { code, stdout, stderr } and never throws. A tmux that cannot be read throws: no listing
-// is never an empty one. Only a server that is not running (no server, no socket file, a socket nobody listens on)
-// reads as no sessions.
+// is never an empty one. Nothing answering at a socket (no server, no socket file, a socket nobody listens on) is
+// reported as such, and is NOT proof that a server ended: a removed socket leaves its server and windows running
+// (anti-pattern aa3c5f4c). readServer says 'absent' and leaves that judgment to the socket registry
+// (launch-admission.mjs); listSessions, used only right after this run created a session on its own socket, reads it
+// as no sessions.
 //
 // NOT ported: CH.Hub's owner-launcher wrapper forms (scripts/wake-open-owner.sh), which Sterling does not have; a pane
 // counts as OpenCode only when its program word is called opencode (the binary templates/launcher-tmux.sh and this
@@ -86,6 +89,23 @@ export async function listSessions(deps, socket) {
     out.push({ id, name, dir, serverPid, serverStart, attached: Number(attached), windows: Number(windows) });
   }
   return out;
+}
+
+/**
+ * One read of the server at `socket`: { state: 'running', sessions, opencode } with every session and the ids of those
+ * holding an OpenCode pane; { state: 'absent', why } when nothing answers at that path; { state: 'unreadable', why }
+ * for anything else (a permission error, a malformed answer, a server that ended between the two reads).
+ */
+export async function readServer(deps, socket) {
+  const probe = await deps.tmux(['-S', socket, 'list-sessions', '-F', '#{session_id}']);
+  if (probe.code !== 0) return { state: NO_SERVER.test(probe.stderr || '') ? 'absent' : 'unreadable', why: `tmux -S ${socket} list-sessions: ${errorText(probe)}` };
+  try {
+    const sessions = await listSessions(deps, socket);
+    const opencode = await opencodeSessionIds(deps, socket);
+    return { state: 'running', sessions, opencode };
+  } catch (e) {
+    return { state: 'unreadable', why: String(e?.message ?? e) };
+  }
 }
 
 /** The ids of the sessions holding at least one OpenCode pane, from one list-panes -a. */

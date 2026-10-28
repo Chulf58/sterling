@@ -7591,7 +7591,7 @@ function descendantsOf(snapshot, id) {
   }
   return out;
 }
-async function rootOf(deps, snapshot, id) {
+async function rootOf(deps, snapshot, id, chain = []) {
   const seen = /* @__PURE__ */ new Set();
   let current = id;
   for (let depth = 0; depth <= MAX_DEPTH2; depth++) {
@@ -7599,6 +7599,7 @@ async function rootOf(deps, snapshot, id) {
     seen.add(current);
     const s = snapshot.get(current) ?? (await getJson(deps.api, `/api/session/${checkSessionId(current, "parent chain")}`))?.data;
     if (s?.id !== current) throw new Fail(1, `session ${id}: cannot read ${current} in its parent chain`);
+    chain.push(s);
     const parent = parentOf(s, `session ${current}`);
     if (parent === null) return s;
     current = parent;
@@ -7682,8 +7683,18 @@ function runningJudge(deps, { snapshot, scope, owner, tree, kind }) {
   const known = /* @__PURE__ */ new Map();
   const one = async (id) => {
     if (mineIds.has(id)) return kind === "wake" ? new Refused("busy", `owner session ${owner.id} is working (${id === owner.id ? "busy" : `its subagent ${id} is busy`}); nothing sent`) : null;
-    const root = await rootOf(deps, snapshot, id);
-    if (root.id === owner.id) return kind === "wake" ? new Refused("busy", `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`) : null;
+    const chain = [];
+    const root = await rootOf(deps, snapshot, id, chain);
+    if (root.id === owner.id) {
+      if (kind === "wake") return new Refused("busy", `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
+      for (const member of chain) {
+        if (member.id !== owner.id && !mineIds.has(member.id)) {
+          mineIds.add(member.id);
+          tree.push(member);
+        }
+      }
+      return null;
+    }
     if (kind !== "wake" || !isConductorCandidate(root)) return null;
     const real = await canonical(deps.realpath, root.location?.directory, `session ${root.id}`);
     return checkoutOf(real, shapeOf(scope)) === scope.canonicalRoot ? competing(owner, [{ id: root.id, why: [root.id === id ? "busy" : `its subagent ${id} is busy`] }]) : null;

@@ -618,6 +618,50 @@ test('a notify to a busy session still refuses on a form, permission request, qu
   }
 });
 
+// A subagent of the target that starts after the snapshot and is running at the closing read: a notify queues behind the owner's
+// own turn, but the new subagent's inbox, forms, permission requests and folder are still checked, because it joined the tree.
+test('a notify still refuses when a subagent that starts during the final admission has input pending or a running shell', async () => {
+  const cases = [
+    ['an open form', 'input_pending', (w) => w.forms.push({ sessionID: 'ses_LATE', dir: w.OTHER })],
+    ['a permission request', 'input_pending', (w) => w.perms.push({ sessionID: 'ses_LATE', dir: w.OTHER })],
+    ['queued input', 'input_pending', (w) => w.inbox.set('ses_LATE', [{ id: 'msg_q', type: 'user', payload: { text: 'later' } }])],
+    ['a running shell in its folder', 'shell_running', (w) => w.shells.set(w.OTHER, [{ id: 'shl_1', status: 'running' }])],
+  ];
+  for (const [what, reason, appear] of cases) {
+    for (const route of ['owner', 'holder']) {
+      const w = await ready();
+      try {
+        const target = route === 'owner' ? 'ses_OWN' : 'ses_LANE';
+        claims(w, route === 'holder' ? held(w) : free());
+        let reads = 0;
+        w.onGet = async (path) => {
+          if (path === '/api/session/active' && ++reads === 2) {
+            w.session('ses_LATE', { parent: target, dir: w.OTHER });
+            w.active.add('ses_LATE');
+            appear(w);
+          }
+        };
+        // ses_LATE is not in the session listing (it started after the snapshot): only a direct read finds its parent.
+        const api = w.api;
+        const hidden = async (m, p) => {
+          const r = await api(m, p);
+          if (p === '/api/session' || p.startsWith('/api/session?')) {
+            const body = JSON.parse(r.stdout);
+            return { ...r, stdout: JSON.stringify({ ...body, data: body.data.filter((x) => x.id !== 'ses_LATE') }) };
+          }
+          return r;
+        };
+        const r = await notify(w, [], { api: hidden });
+        assert.equal(r.res.status, 'refused', `${what}, ${route}: ${JSON.stringify(r.res)}`);
+        assert.ok([reason, 'holder_busy_form'].includes(r.res.reason), `${what}, ${route}: ${r.res.reason}`);
+        assert.deepEqual(w.posts, [], `${what}, ${route}`);
+      } finally {
+        w.cleanup();
+      }
+    }
+  }
+});
+
 // --- the real reader, on temp stores (the machine's live stores are never read) ---
 
 const NOW = Date.parse('2026-10-28T12:00:00.000Z');

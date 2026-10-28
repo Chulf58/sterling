@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { main, windowName, terminalCommand, TERMINALS, parseArgs } from '../open-session-window.mjs';
-import { admitLaunch, settleLaunch, readReservations, reservationsPath } from '../lib/launch-admission.mjs';
+import { admitLaunch, settleLaunch, forgetSocket, readReservations, reservationsPath } from '../lib/launch-admission.mjs';
 import { takeFileLock } from '../lib/file-lock.mjs';
 import { isOpencodeCommand } from '../lib/windows.mjs';
 import { sessionName } from '../lib/launchers.mjs';
@@ -81,11 +81,16 @@ function world(t, over = {}) {
     ...over.state,
   };
   const srv = (socket) => {
-    if (!state.servers.has(socket)) state.servers.set(socket, { up: false, pid: SERVER_PID, start: SERVER_START, sessions: [], nextSession: 0, unreadable: null });
+    // up: it answers at its socket; alive: its process runs (a removed socket leaves it alive, anti-pattern aa3c5f4c);
+    // missing: the socket file is gone; unreadable: the errno a connection gets.
+    if (!state.servers.has(socket)) state.servers.set(socket, { up: false, alive: false, missing: false, pid: SERVER_PID, start: SERVER_START, sessions: [], nextSession: 0, unreadable: null });
     return state.servers.get(socket);
   };
   // The default server under the names the tests use: state.server (running), state.serverPid, state.tmux (its sessions).
-  Object.defineProperty(state, 'server', { get: () => srv(SOCKET).up, set: (v) => { srv(SOCKET).up = v; } });
+  Object.defineProperty(state, 'server', { get: () => srv(SOCKET).up, set: (v) => { srv(SOCKET).up = v; srv(SOCKET).alive = v; } });
+  // A tmux server process is alive when some server with that pid runs; its /proc start time follows its tmux start.
+  const serverAlive = (pid) => [...state.servers.values()].some((sv) => sv.alive && Number(sv.pid) === pid);
+  const serverStartTimeOf = (pid) => [...state.servers.values()].find((sv) => sv.alive && Number(sv.pid) === pid)?.start.replace(/^/, 'p') ?? null;
   Object.defineProperty(state, 'serverPid', { get: () => srv(SOCKET).pid, set: (v) => { srv(SOCKET).pid = v; } });
   Object.defineProperty(state, 'tmux', { get: () => srv(SOCKET).sessions });
   const attachedOf = (s) => (s.attachAt !== undefined && state.now >= s.attachAt ? 1 : s.attached);
@@ -109,6 +114,7 @@ function world(t, over = {}) {
     if (state.onTmux) { const r = await state.onTmux(raw, state, args[0]); if (r) return r; }
     const sv = srv(socket);
     if (sv.unreadable) return refuse(`error connecting to ${socket} (${sv.unreadable})`);
+    if (sv.missing) return refuse(`error connecting to ${socket} (No such file or directory)`);
     if (raw[2] === 'if-shell' && raw[4] !== `#{&&:#{==:#{pid},${sv.pid}},#{==:#{start_time},${sv.start}}}`) return { code: 1, stdout: 'server_restarted\n', stderr: '' };
     ids(sv);
     switch (args[0]) {
@@ -128,6 +134,7 @@ function world(t, over = {}) {
         assert.ok(opts.d && opts['-s'] && opts['-c'] && command.length > 0, `new-session: ${args.join(' ')}`);
         if (sv.sessions.some((x) => x.name === opts['-s'])) return refuse(`duplicate session: ${opts['-s']}`);
         sv.up = true;
+        sv.alive = true;
         const pane = state.nextPane++;
         const made = { id: `$${sv.nextSession++}`, name: opts['-s'], path: opts['-c'], windows: 1, attached: 0, panes: [{ id: `%${pane}`, pid: 4000 + pane, cmd: state.paneCmd ?? shown(command) }] };
         sv.sessions.push(made);
@@ -194,8 +201,12 @@ function world(t, over = {}) {
     findExecutable: (name) => state.onPath[name] ?? null,
     tmux,
     api,
-    admit: admitLaunch,
-    settle: settleLaunch,
+    admit: (root, o) => {
+      if (state.onAdmit) state.onAdmit();
+      return admitLaunch(root, { ...o, serverAlive, serverStartTimeOf, ...(state.observeMs ? { observeMs: state.observeMs } : {}) });
+    },
+    settle: (root, id, outcome, o) => settleLaunch(root, id, outcome, { ...o, serverStartTimeOf }),
+    forget: forgetSocket,
     spawnTerminal: async (file, args, opts) => {
       calls.push({ kind: 'spawn', file, args, opts });
       const s = byTarget(srv(args[args.indexOf('-S') + 1]), terminalTarget(args));
@@ -710,7 +721,8 @@ test('the ceiling is project-wide across tmux servers: a window started on anoth
   assert.deepEqual([r.code, r.json.reason], [1, 'ceiling_reached'], r.text);
   assert.ok(r.json.counted.some((c) => c.checkout === w.S('s2')));
   // Its window is gone from ITS server: the reservation is dropped and the next launch is admitted.
-  w.srv(WORK).sessions.length = 0;
+  // The last session there closed, so that tmux server exited (exit-empty).
+  Object.assign(w.srv(WORK), { sessions: [], up: false, alive: false });
   r = await open(w, 's3');
   assert.equal(r.json.status, 'started', r.text);
   assert.deepEqual(reservations(w).map((x) => [x.checkout, x.socket]), [[w.S('s3'), SOCKET]]);
@@ -743,4 +755,85 @@ test('a malformed TMUX refuses rather than guessing the server', async (t) => {
   const r = await open(w);
   assert.deepEqual([r.code, r.json.reason], [1, 'tmux_unreadable']);
   assert.deepEqual(effects(w), []);
+});
+
+// --- second review round: the socket registry and one deadline over the locked observation ---
+
+test('an uncertain launch on another socket is promoted once its window is seen, so that socket stays read: max_sessions=2 starts no third window', async (t) => {
+  const w = world(t);
+  w.state.multi = { enabled: true, max_sessions: 2 };
+  w.deps.env = { TMUX: `${WORK},999,3` };
+  // tmux created the session on WORK but the client timed out: start_uncertain.
+  w.state.onTmux = (raw, s, verb) => {
+    if (verb !== 'new-session') return null;
+    const sv = w.srv(WORK);
+    Object.assign(sv, { up: true, alive: true });
+    sv.sessions.push({ id: '$0', name: windowName(w.S('s2')), path: w.S('s2'), windows: 1, attached: 0, panes: [{ id: '%1', pid: 300, cmd: BIN }] });
+    sv.nextSession = 1;
+    return { code: null, stdout: '', stderr: 'timed out' };
+  };
+  let r = await open(w, 's2');
+  assert.equal(r.json.status, 'start_uncertain', r.text);
+  w.state.onTmux = null;
+  w.deps.env = {};
+  r = await open(w, 's3');
+  assert.equal(r.json.status, 'started', r.text);
+  const promoted = reservations(w).find((x) => x.checkout === w.S('s2'));
+  assert.deepEqual([promoted.state, promoted.socket, promoted.detail.windowId], ['started', WORK, '$0']);
+  w.state.now += 24 * 3600_000;
+  r = await open(w, 's4');
+  assert.deepEqual([r.code, r.json.reason], [1, 'ceiling_reached'], r.text);
+  assert.equal(w.srv(WORK).sessions.length + w.state.tmux.length, 2);
+});
+
+test('a started window whose socket file is removed while its server runs refuses later launches as tmux_unreadable naming the socket', async (t) => {
+  const w = world(t);
+  w.state.multi = { enabled: true, max_sessions: 2 };
+  w.deps.env = { TMUX: `${WORK},999,3` };
+  assert.equal((await open(w, 's2')).json.status, 'started');
+  w.deps.env = {};
+  w.srv(WORK).missing = true;
+  w.state.now += 24 * 3600_000;
+  const r = await open(w, 's3');
+  assert.deepEqual([r.code, r.json.reason, r.json.socket], [1, 'tmux_unreadable', WORK], r.text);
+  assert.match(r.json.why, /still runs: a removed socket does not end a server/);
+  assert.deepEqual(reservations(w).map((x) => [x.checkout, x.state]), [[w.S('s2'), 'started']]);
+  assert.equal(tmuxCalls(w, 'new-session').length, 1);
+});
+
+test('a stalled path resolution inside the lock is cut off by the one deadline: refused, nothing written, the lock released', async (t) => {
+  const w = world(t);
+  w.state.observeMs = 100;
+  const realpath = w.deps.realpath;
+  let stall = false;
+  w.state.onAdmit = () => { stall = true; };
+  w.deps.realpath = (p) => (stall ? new Promise(() => {}) : realpath(p));
+  let r = await open(w, 's2');
+  assert.deepEqual([r.code, r.json.reason], [1, 'admission_timeout'], r.text);
+  assert.equal(existsSync(reservationsPath(w.ROOT)), false);
+  assert.deepEqual(effects(w), []);
+  w.state.onAdmit = null;
+  stall = false;
+  r = await open(w, 's2');
+  assert.equal(r.json.status, 'started', r.text);
+});
+
+test('--forget-socket is the escape for a permission-denied socket: it says what it forgot, and the next launch proceeds', async (t) => {
+  const w = world(t);
+  w.deps.env = { TMUX: `${WORK},999,3` };
+  assert.equal((await open(w, 's2')).json.status, 'started');
+  w.deps.env = {};
+  w.srv(WORK).unreadable = 'Permission denied';
+  let r = await open(w, 's3');
+  assert.deepEqual([r.json.reason, r.json.socket], ['tmux_unreadable', WORK]);
+  assert.match(r.json.why, /--forget-socket \/tmp\/tmux-1000\/work/);
+  r = await launch(w, `--forget-socket=${WORK}`);
+  assert.deepEqual([r.code, r.json.status, r.json.socket, r.json.server.pid, r.json.reservations.map((x) => x.checkout)], [0, 'forgotten', WORK, SERVER_PID, [w.S('s2')]]);
+  assert.match(r.err, /forgot the tmux socket \/tmp\/tmux-1000\/work \(recorded server pid 4242/);
+  r = await open(w, 's3');
+  assert.equal(r.json.status, 'started', r.text);
+  r = await launch(w, '--forget-socket', '/tmp/none');
+  assert.deepEqual([r.code, r.json.status], [1, 'not_registered']);
+  assert.throws(() => parseArgs(['--forget-socket', WORK, '--name', 's2']), /takes only --target/);
+  assert.throws(() => parseArgs(['--forget-socket', 'rel']), /absolute socket path/);
 });
