@@ -455,10 +455,12 @@ test('notify --all: one queued prompt per other project with an owner and multi_
     assert.equal(n.code, 0);
     assert.deepEqual(n.all.map((r) => [r.project, r.status]).sort(), [['other', 'queued'], ['proj', 'queued'], ['quiet', 'skipped']]);
     assert.deepEqual(w.posts.map((p) => p.path).sort(), ['/api/session/ses_FAR/prompt', '/api/session/ses_OWN/prompt']);
-    w.active.add('ses_FAR');
+    // A destination that refuses makes the run partial (exit 1). A busy owner no longer refuses a notify (user ruling
+    // 2026-10-28, 'Queue it, like CH.Hub': it queues behind the turn), so the refusal here is queued input.
+    w.inbox.set('ses_FAR', [{ id: 'msg_q', type: 'user', payload: { text: 'later' } }]);
     const partial = await notify(w, ['--all', '--text', 'again']);
     assert.equal(partial.code, 1);
-    assert.equal(partial.all.find((r) => r.project === 'other').reason, 'busy');
+    assert.equal(partial.all.find((r) => r.project === 'other').reason, 'input_pending');
   } finally {
     w.cleanup();
   }

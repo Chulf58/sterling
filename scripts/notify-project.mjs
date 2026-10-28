@@ -10,40 +10,63 @@
 // The text goes, prefixed with the sending project's name, as one queued prompt to the recorded owner of the
 // target checkout (scripts/lib/owner-record.mjs) and to no other session. It passes the same admission as a
 // wake (scripts/lib/owner-session.mjs), except that another live conductor of the checkout does not refuse
-// it: the point is to reach the owner. It is journaled before the POST (scripts/lib/delivery-journal.mjs):
+// it (the point is to reach the owner) and a recipient that is only running a turn does not either: the notice
+// is queued and lands when the turn ends (user ruling 2026-10-28, 'Queue it, like CH.Hub'). A form, permission
+// request, queued input or running shell still refuses it. It is journaled before the POST (scripts/lib/delivery-journal.mjs):
 // after a `sent: maybe` result, run the SAME command again; it looks the prompt up and resends it with the
 // same message id only when it is absent, so the owner never sees it twice.
+//
+// --item <board item id> routes by the item's claim (scripts/lib/claim-route.mjs): a held claim sends the notice to its
+// holder in the holder's checkout, never to the owner; no claim or an expired one goes to the owner. It does not
+// combine with --all or --checkout.
 //
 // --all sends to every other registered project whose main checkout has an owner record and whose
 // multi_session is on; the others are listed as skipped. One JSON line per project. Exit 0 only when every
 // destination was queued (or found delivered); exit 2 for bad arguments.
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Fail, deliver, realDeps, senderName } from './lib/owner-session.mjs';
+import { Fail, deliver, parseFlags, realDeps, senderName } from './lib/owner-session.mjs';
 import { projectContext } from './lib/session-inventory.mjs';
+import { isItemRef } from './lib/claim-route.mjs';
 
 export const noticeText = (sender, text) => `[Sterling notice from project ${sender}] ${text}`;
 
-const USAGE = 'usage: notify-project.mjs (--project <registry name> [--checkout <folder>] | --all) --text <message> [--dry-run]\n'
+const USAGE = 'usage: notify-project.mjs (--project <registry name> [--checkout <folder> | --item <board item id>] | --all) --text <message> [--dry-run]\n'
   + 'After a sent: maybe result, run the same command again: it resends with the same message id only when the prompt is absent.';
-const OWN_FLAGS = new Set(['--project', '--text', '--all', '--dry-run', '--checkout']);
+const OWN_FLAGS = new Set(['--project', '--text', '--all', '--dry-run', '--checkout', '--item']);
 
-export function parseArgs(argv) {
-  const args = { dryRun: false, all: false };
+// --text is read here, not by the shared parser, because a message may start with dashes: only this script's own flags are
+// refused as its value. It may be given once, as `--text value` or `--text=value`. Everything else goes to parseFlags.
+function splitText(argv) {
+  const rest = [];
+  const texts = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--dry-run') args.dryRun = true;
-    else if (a === '--all') args.all = true;
-    else if (a === '--project' || a === '--text' || a === '--checkout') {
+    if (a === '--text') {
       const v = argv[++i];
-      // A message may start with dashes; only this script's own flags are refused as a value.
-      if (v === undefined || (a === '--text' ? OWN_FLAGS.has(v) : v.startsWith('--'))) throw new Fail(2, `${a} needs a value`);
-      args[a.slice(2)] = v;
-    } else throw new Fail(2, `unknown argument '${a}'\n${USAGE}`);
+      if (v === undefined || OWN_FLAGS.has(v)) throw new Fail(2, '--text needs a value');
+      texts.push(v);
+    } else if (a.startsWith('--text=')) texts.push(a.slice('--text='.length));
+    else rest.push(a);
   }
+  if (texts.length > 1) throw new Fail(2, `--text: given more than once (${texts.length} occurrences) — refusing rather than silently taking the first or last value`);
+  return { rest, text: texts[0] };
+}
+
+export function parseArgs(argv) {
+  const { rest, text } = splitText(argv);
+  const got = parseFlags(rest, { values: ['--project', '--checkout', '--item'], bools: ['--dry-run', '--all'], usage: USAGE });
+  const args = { dryRun: got['dry-run'] === true, all: got.all === true };
+  for (const k of ['project', 'checkout', 'item']) if (got[k] !== undefined) args[k] = got[k];
+  if (text !== undefined) args.text = text;
   if (args.text === undefined || args.text.trim() === '') throw new Fail(2, USAGE);
   if (args.all === (args.project !== undefined)) throw new Fail(2, 'give either --project <registry name> or --all');
   if (args.all && args.checkout !== undefined) throw new Fail(2, '--checkout is for one project: it does not combine with --all');
+  if (args.item !== undefined) {
+    if (args.all) throw new Fail(2, '--item is for one project: it does not combine with --all');
+    if (args.checkout !== undefined) throw new Fail(2, '--item names its checkout itself (the holder\'s), so it does not combine with --checkout');
+    if (!isItemRef(args.item)) throw new Fail(2, `--item takes a board item id, 8-character prefix or slug, got ${JSON.stringify(args.item)}`);
+  }
   return args;
 }
 
@@ -75,7 +98,7 @@ export async function main(argv, deps, io) {
     const registry = await deps.listProjects();
     const sender = await senderName(deps, registry);
     const text = noticeText(sender, args.text);
-    const one = (project) => deliver('notify', { project, checkout: args.checkout, dryRun: args.dryRun, body: args.text }, deps, registry, text);
+    const one = (project) => deliver('notify', { project, checkout: args.checkout, item: args.item, dryRun: args.dryRun, body: args.text }, deps, registry, text);
     let results;
     if (args.all) {
       const { targets, skipped } = await allTargets(deps, registry, sender);
