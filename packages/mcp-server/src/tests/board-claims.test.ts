@@ -182,6 +182,35 @@ test('a cross-project read (target_project) shows the other board claim state', 
   }
 });
 
+test('a cross-project read judges the claim by the TARGET project lease, and refuses when that config is unreadable', () => {
+  const h = harness(60); // the caller's lease is 60
+  try {
+    writeFileSync(join(h.beta, '.sterling', 'config.json'), JSON.stringify({ board_claims: { lease_minutes: 120 } }));
+    const betaStore = new SterlingStore(join(h.beta, '.sterling', 'sterling.db'));
+    let betaId: string;
+    try {
+      const betaTools = new SterlingTools({ store: betaStore, repoRoot: h.beta, now: () => T0 });
+      betaId = addItem(betaTools, 'Beta task\nsee src/b.ts').id;
+      betaStore.claimTodo(betaId, { session: 'beta-sess', checkout: 'beta-main', now: T0 });
+    } finally {
+      betaStore.close();
+    }
+    h.clock.now = at(90); // past the caller's 60, inside the target's 120
+    const stateOf = (r: Loose) => (r.claim_state as ClaimState).state;
+    assert.equal(stateOf(h.tools.foreignBoardGet(betaId, 'beta')), 'held', 'board_get uses the target lease');
+    assert.equal(stateOf(h.tools.foreignBoardQuery({ target_project: 'beta' }).records[0] as Loose), 'held', 'board_query text uses the target lease');
+    assert.equal(stateOf(h.tools.foreignBoardQuery({ target_project: 'beta', projection: 'digest' }).records[0] as Loose), 'held', 'board_query digest uses the target lease');
+    assert.equal(h.tools.foreignBoardQuery({ target_project: 'beta', readiness: ['in_progress'] }).records.length, 1, 'the readiness filter sees it claimed');
+    h.clock.now = at(121);
+    assert.equal(stateOf(h.tools.foreignBoardGet(betaId, 'beta')), 'expired', 'past the target lease it expires');
+
+    writeFileSync(join(h.beta, '.sterling', 'config.json'), '{ not json');
+    assert.throws(() => h.tools.foreignBoardGet(betaId, 'beta'), /store settings could not be read.*malformed/s, 'an unreadable target config is refused, never defaulted to the caller lease');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('a claimed item reads readiness in_progress, held or expired, and the readiness filter follows it', () => {
   const h = harness(60);
   try {

@@ -12,6 +12,8 @@ export interface HandoffTarget {
   dbPath: string;
   /** this session's own project: its registry name, or its folder name when it is not registered */
   selfName: string;
+  /** the target's own config board_claims.lease_minutes, from the config read that validated the route (an unreadable config is refused above, never defaulted) */
+  leaseMinutes: number;
 }
 
 function canonical(p: string): string {
@@ -119,5 +121,5 @@ export function resolveHandoffTarget(
   if (route.storage !== 'sqlite') throw refuse(`its storage is ${route.storage}; ${w.sqliteOnly}`);
   const dbPath = join(root, '.sterling', 'sterling.db');
   if (!existsSync(dbPath)) throw refuse(`it has no store at ${dbPath}, and ${w.neverCreates}`);
-  return { name: resolvedName, root, dbPath, selfName };
+  return { name: resolvedName, root, dbPath, selfName, leaseMinutes: route.config.board_claims.lease_minutes };
 }
