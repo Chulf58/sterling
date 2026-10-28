@@ -9297,17 +9297,27 @@ async function opencodeApi(bin, method, path, body, timeoutMs = 0, { maxStdout =
     await sleep(delay);
   }
 }
-async function runAttempt(bin, args, method, path, timeoutMs, deadline, password, maxStdout) {
-  const dir = await mkdtemp(join12(tmpdir(), "sterling-api-"));
-  let out = null;
-  let reader = null;
+async function replyFiles(fs = {}) {
+  const { mkdtemp: makeDir = mkdtemp, open: openFile = open, rm: remove = rm } = fs;
+  const dir = await makeDir(join12(tmpdir(), "sterling-api-"));
+  const handles = [];
+  let removed = false;
   try {
-    try {
-      out = await open(join12(dir, "stdout"), "w", 384);
-      reader = await open(join12(dir, "stdout"), "r");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    handles.push(await openFile(join12(dir, "stdout"), "w", 384));
+    handles.push(await openFile(join12(dir, "stdout"), "r"));
+    removed = true;
+    await remove(dir, { recursive: true, force: true });
+    return { out: handles[0], reader: handles[1] };
+  } catch (e) {
+    const cleanup = await Promise.allSettled([...handles.map((h) => h.close()), ...removed ? [] : [remove(dir, { recursive: true, force: true })]]);
+    const failed = cleanup.filter((r) => r.status === "rejected").map((r) => r.reason);
+    if (failed.length > 0) throw new AggregateError([e, ...failed], `preparing the reply files failed (${e.message}), and so did cleaning them up`);
+    throw e;
+  }
+}
+async function runPrepared(bin, args, method, path, timeoutMs, deadline, password, maxStdout, files) {
+  const { out, reader } = files;
+  try {
     const remaining = Math.ceil(deadline - performance.now());
     if (remaining <= 0) return { code: 124, stdout: "", stderr: `${bin} timed out after ${timeoutMs} ms and was killed` };
     const result = await runToFile(bin, args, out.fd, Number.isFinite(remaining) ? remaining : 0, password);
@@ -9319,9 +9329,12 @@ ${result.stderr}` : over };
     }
     return { code: result.code, stdout: await readAll(reader, size), stderr: result.stderr };
   } finally {
-    await out?.close();
-    await reader?.close();
+    await out.close();
+    await reader.close();
   }
+}
+async function runAttempt(bin, args, method, path, timeoutMs, deadline, password, maxStdout) {
+  return runPrepared(bin, args, method, path, timeoutMs, deadline, password, maxStdout, await replyFiles());
 }
 function defaultOpencodeBin({ pathVar = process.env.PATH ?? "", home = homedir6(), exists = existsSync9 } = {}) {
   for (const dir of pathVar.split(delimiter)) if (dir && exists(join12(dir, "opencode"))) return join12(dir, "opencode");
@@ -9340,8 +9353,7 @@ var provenNotSent = (stderr) => {
   const first = String(stderr ?? "").trimStart().split("\n")[0];
   return NOT_SENT.some((re) => re.test(first));
 };
-async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api: api2 = opencodeApi, timeoutMs = 3e4 } = {}) {
-  const r = await api2(bin, method, path, body === void 0 ? void 0 : JSON.stringify(body), timeoutMs);
+function sendOutcome(r) {
   const text = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();
   if (r.code === 124) return { ok: false, uncertain: true, why: `timed out${text ? `: ${text}` : ""}` };
   if (r.code !== 0) return { ok: false, uncertain: !provenNotSent(r.stderr), why: `exit ${r.code}${text ? `: ${text}` : ""}` };
@@ -9350,6 +9362,9 @@ async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api: ap
   } catch (e) {
     return { ok: false, uncertain: true, why: `the response was not JSON (${e.message})${text ? `: ${text}` : ""}` };
   }
+}
+async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api: api2 = opencodeApi, timeoutMs = 3e4 } = {}) {
+  return sendOutcome(await api2(bin, method, path, body === void 0 ? void 0 : JSON.stringify(body), timeoutMs));
 }
 
 // scripts/open-session.mjs

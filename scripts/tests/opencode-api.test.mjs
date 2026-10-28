@@ -310,3 +310,45 @@ test('opencodeApi reports a binary that cannot start as a failed call', async ()
   assert.equal(r.code, 1);
   assert.match(r.stderr, /ENOENT/);
 });
+
+test('replyFiles: a failed unlink of the reply folder closes both descriptors before it rejects', async () => {
+  const { mkdtemp: realMkdtemp, open: realOpen, rm: realRm } = await import('node:fs/promises');
+  let dir;
+  const opened = [];
+  const fs = {
+    mkdtemp: async (prefix) => (dir = await realMkdtemp(prefix)),
+    open: async (...a) => {
+      const h = await realOpen(...a);
+      opened.push(h);
+      return h;
+    },
+    rm: async () => { throw Object.assign(new Error('EACCES: permission denied, rmdir'), { code: 'EACCES' }); },
+  };
+  try {
+    await assert.rejects(() => lib.replyFiles(fs), /EACCES/);
+    assert.equal(opened.length, 2);
+    // A closed FileHandle reports fd -1.
+    assert.deepEqual(opened.map((h) => h.fd), [-1, -1], 'both descriptors are closed');
+  } finally {
+    await Promise.all(opened.map((h) => (h.fd === -1 ? null : h.close())));
+    if (dir) await realRm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replyFiles: a failed second open closes the first descriptor and removes the folder', async () => {
+  const { mkdtemp: realMkdtemp, open: realOpen } = await import('node:fs/promises');
+  let dir;
+  const opened = [];
+  const fs = {
+    mkdtemp: async (prefix) => (dir = await realMkdtemp(prefix)),
+    open: async (...a) => {
+      if (opened.length === 1) throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
+      const h = await realOpen(...a);
+      opened.push(h);
+      return h;
+    },
+  };
+  await assert.rejects(() => lib.replyFiles(fs), /EMFILE/);
+  assert.equal(opened[0].fd, -1);
+  assert.equal(existsSync(dir), false);
+});

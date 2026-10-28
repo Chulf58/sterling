@@ -170,17 +170,34 @@ export async function opencodeApi(bin, method, path, body, timeoutMs = 0, { maxS
   }
 }
 
-async function runAttempt(bin, args, method, path, timeoutMs, deadline, password, maxStdout) {
-  const dir = await mkdtemp(join(tmpdir(), 'sterling-api-'));
-  let out = null;
-  let reader = null;
+// The reply file pair: opened twice (one descriptor for the child's stdout, one to read it back), then unlinked
+// with its directory, so the reply lives only as long as the descriptors. This function owns both handles until it
+// returns them: any failure, the unlink of the folder included, closes every handle it opened before it rejects, so
+// a caller never holds a half-prepared pair it could not discard. `fs` is a seam for tests.
+export async function replyFiles(fs = {}) {
+  const { mkdtemp: makeDir = mkdtemp, open: openFile = open, rm: remove = rm } = fs;
+  const dir = await makeDir(join(tmpdir(), 'sterling-api-'));
+  const handles = [];
+  let removed = false;
   try {
-    try {
-      out = await open(join(dir, 'stdout'), 'w', 0o600);
-      reader = await open(join(dir, 'stdout'), 'r');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    handles.push(await openFile(join(dir, 'stdout'), 'w', 0o600));
+    handles.push(await openFile(join(dir, 'stdout'), 'r'));
+    removed = true; // one removal attempt only: a failed one is not repeated below
+    await remove(dir, { recursive: true, force: true });
+    return { out: handles[0], reader: handles[1] };
+  } catch (e) {
+    const cleanup = await Promise.allSettled([...handles.map((h) => h.close()), ...(removed ? [] : [remove(dir, { recursive: true, force: true })])]);
+    const failed = cleanup.filter((r) => r.status === 'rejected').map((r) => r.reason);
+    if (failed.length > 0) throw new AggregateError([e, ...failed], `preparing the reply files failed (${e.message}), and so did cleaning them up`);
+    throw e;
+  }
+}
+
+// Runs the child into prepared reply files and reads the reply back; closes the files whatever happens.
+// runToFile spawns synchronously when it is called, so a caller's first await here is the request itself.
+async function runPrepared(bin, args, method, path, timeoutMs, deadline, password, maxStdout, files) {
+  const { out, reader } = files;
+  try {
     const remaining = Math.ceil(deadline - performance.now());
     if (remaining <= 0) return { code: 124, stdout: '', stderr: `${bin} timed out after ${timeoutMs} ms and was killed` };
     const result = await runToFile(bin, args, out.fd, Number.isFinite(remaining) ? remaining : 0, password);
@@ -191,9 +208,49 @@ async function runAttempt(bin, args, method, path, timeoutMs, deadline, password
     }
     return { code: result.code, stdout: await readAll(reader, size), stderr: result.stderr };
   } finally {
-    await out?.close();
-    await reader?.close();
+    await out.close();
+    await reader.close();
   }
+}
+
+async function runAttempt(bin, args, method, path, timeoutMs, deadline, password, maxStdout) {
+  return runPrepared(bin, args, method, path, timeoutMs, deadline, password, maxStdout, await replyFiles());
+}
+
+/**
+ * One `opencode api` call made ready ahead of time: the registration is read, the arguments are built and the reply
+ * files are open. Returns { send, discard }. send() starts the child at once (its only await is the request itself;
+ * the deadline counts from send()) and answers like opencodeApi; it never retries and runs once. discard() closes the
+ * files of a call that will not be sent. A registration that cannot be used is answered by send() as opencodeApi
+ * answers it, with nothing started.
+ */
+export async function prepareApiCall(bin, method, path, body, timeoutMs = 0, { maxStdout = MAX_STDOUT } = {}) {
+  let service;
+  try {
+    service = readService(serviceFilePath());
+  } catch (err) {
+    return { send: async () => ({ code: 1, stdout: '', stderr: err.message }), discard: async () => {} };
+  }
+  if (service.password.includes('\0')) {
+    return { send: async () => ({ code: 1, stdout: '', stderr: 'OpenCode service password cannot be used in the child environment' }), discard: async () => {} };
+  }
+  const args = ['api', method.toLowerCase(), path, ...(body === undefined ? [] : ['-d', body]), '--server', service.url];
+  const files = await replyFiles();
+  let used = false;
+  return {
+    send: () => {
+      if (used) throw new Error('a prepared OpenCode API call runs once');
+      used = true;
+      const deadline = timeoutMs > 0 ? performance.now() + timeoutMs : Infinity;
+      return runPrepared(bin, args, method, path, timeoutMs, deadline, service.password, maxStdout, files);
+    },
+    discard: async () => {
+      if (used) return;
+      used = true;
+      await files.out.close();
+      await files.reader.close();
+    },
+  };
 }
 
 // The in-process transport for a script that only reads (inventory scans). On 2026-10-26 a dry-run
@@ -321,12 +378,10 @@ const provenNotSent = (stderr) => {
   return NOT_SENT.some((re) => re.test(first));
 };
 
-// A mutating call: exactly one request, never retried (opencodeApi retries only a GET that never reached the
-// server). A body is sent as JSON. Answers { ok, data, uncertain, why }: on failure `uncertain` is false only when
-// the failure proves the request was never accepted (provenNotSent); a timeout, a signal, a reset after the send,
-// a 5xx or a success reply that is unusable are uncertain, so a caller must check before it sends again.
-export async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api = opencodeApi, timeoutMs = 30_000 } = {}) {
-  const r = await api(bin, method, path, body === undefined ? undefined : JSON.stringify(body), timeoutMs);
+// What a mutating call's result means: { ok, data } or { ok: false, uncertain, why }. `uncertain` is false only when the
+// failure proves the request was never accepted (provenNotSent); a timeout, a signal, a reset after the send, a 5xx or
+// a success reply that is unusable are uncertain, so a caller must check before it sends again.
+function sendOutcome(r) {
   const text = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim();
   if (r.code === 124) return { ok: false, uncertain: true, why: `timed out${text ? `: ${text}` : ''}` };
   if (r.code !== 0) return { ok: false, uncertain: !provenNotSent(r.stderr), why: `exit ${r.code}${text ? `: ${text}` : ''}` };
@@ -335,4 +390,23 @@ export async function apiSend(method, path, body, { bin = defaultOpencodeBin(), 
   } catch (e) {
     return { ok: false, uncertain: true, why: `the response was not JSON (${e.message})${text ? `: ${text}` : ''}` };
   }
+}
+
+/**
+ * A mutating call made ready ahead of time, for a caller whose last check must be followed by the request with no
+ * wait between (scripts/lib/owner-session.mjs): the transport is prepared here, and the returned send() starts it at
+ * once. Returns { send, discard }; send() answers like apiSend, runs once and is never retried. An injected `api`
+ * (tests) is called by send() as apiSend calls it.
+ */
+export async function prepareSend(method, path, body, { bin = defaultOpencodeBin(), api, prepare = prepareApiCall, timeoutMs = 30_000 } = {}) {
+  const text = body === undefined ? undefined : JSON.stringify(body);
+  if (api) return { send: async () => sendOutcome(await api(bin, method, path, text, timeoutMs)), discard: async () => {} };
+  const call = await prepare(bin, method, path, text, timeoutMs);
+  return { send: async () => sendOutcome(await call.send()), discard: () => call.discard() };
+}
+
+// A mutating call: exactly one request, never retried (opencodeApi retries only a GET that never reached the
+// server). A body is sent as JSON. Answers { ok, data, uncertain, why } (sendOutcome).
+export async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api = opencodeApi, timeoutMs = 30_000 } = {}) {
+  return sendOutcome(await api(bin, method, path, body === undefined ? undefined : JSON.stringify(body), timeoutMs));
 }
