@@ -30,7 +30,7 @@
 // owner_set, the owner list. Exit 1: refused or failed. Exit 2: bad arguments, an unknown project or checkout.
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Fail, Refused, deliver, realDeps, resolveCheckout, senderName, usableOwner } from './lib/owner-session.mjs';
+import { Fail, Refused, deliver, parseFlags, realDeps, resolveCheckout, senderName, usableOwner } from './lib/owner-session.mjs';
 import { isItemRef } from './lib/claim-route.mjs';
 import { checkSessionId, projectContext, sessionCheckouts, canonical, isUnder } from './lib/session-inventory.mjs';
 
@@ -43,18 +43,9 @@ const USAGE = 'usage: wake-project.mjs --project <registry name> [--checkout <fo
   + '       wake-project.mjs --show-owners [--project <registry name> [--checkout <folder>]]';
 
 export function parseArgs(argv) {
-  const args = { dryRun: false, setOwner: false, showOwners: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--dry-run') args.dryRun = true;
-    else if (a === '--set-owner') args.setOwner = true;
-    else if (a === '--show-owners') args.showOwners = true;
-    else if (a === '--project' || a === '--session' || a === '--checkout' || a === '--item') {
-      const v = argv[++i];
-      if (v === undefined || v.startsWith('--')) throw new Fail(2, `${a} needs a value`);
-      args[a.slice(2)] = v;
-    } else throw new Fail(2, `unknown argument '${a}'\n${USAGE}`);
-  }
+  const got = parseFlags(argv, { values: ['--project', '--session', '--checkout', '--item'], bools: ['--dry-run', '--set-owner', '--show-owners'], usage: USAGE });
+  const args = { dryRun: got['dry-run'] === true, setOwner: got['set-owner'] === true, showOwners: got['show-owners'] === true };
+  for (const k of ['project', 'session', 'checkout', 'item']) if (got[k] !== undefined) args[k] = got[k];
   if (args.showOwners && args.setOwner) throw new Fail(2, '--show-owners and --set-owner do not combine');
   if (args.item !== undefined) {
     if (args.showOwners || args.setOwner) throw new Fail(2, '--item goes with a wake only');

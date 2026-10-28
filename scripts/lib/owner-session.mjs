@@ -23,6 +23,7 @@ import { readdir, readlink, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { registryPath, readRegistrySnapshotReadOnly } from '@sterling/store';
 import { createHttpApi, prepareSend } from './opencode-api.mjs';
+import { arg, hasFlag } from './cli-args.mjs';
 import { readOwner, transitionOwner } from './owner-record.mjs';
 import { ClaimProblem, readItemClaim, realClaimReader, recheckClaim, summarize as summarizeClaim } from './claim-route.mjs';
 import { readMultiSession } from './multi-session.mjs';
@@ -55,6 +56,37 @@ const SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
 export const shellQuote = (word) => (SAFE_WORD.test(word) ? word : `'${String(word).replace(/'/g, `'\\''`)}'`);
 export function setOwnerCommand({ project, session, checkout }) {
   return ['node', 'bin/wake-project.mjs', '--set-owner', '--project', shellQuote(project), '--session', shellQuote(session), ...(checkout ? ['--checkout', shellQuote(checkout)] : [])].join(' ');
+}
+
+/**
+ * The shared flag reader of wake-project and notify-project, on the one exact-token parser (cli-args.mjs): `--flag value` and
+ * `--flag=value` both work, a flag given twice or a value that looks like another flag is exit 2, and any other token is an
+ * unknown argument. `values` are the flags that take a value, `bools` the ones that do not. Returns { name: value } for the
+ * values given and { name: true } for the booleans given, keyed without the dashes.
+ */
+export function parseFlags(argv, { values, bools, usage }) {
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i];
+    const name = t.includes('=') ? t.slice(0, t.indexOf('=')) : t;
+    if (bools.includes(t)) continue;
+    if (!values.includes(name)) throw new Fail(2, `unknown argument '${t}'\n${usage}`);
+    if (t === name) {
+      const next = argv[++i];
+      if (next === undefined) throw new Fail(2, `${name} needs a value`);
+    }
+  }
+  const out = {};
+  try {
+    for (const v of values) {
+      const got = arg(v, argv);
+      if (got === '') throw new Fail(2, `${v} needs a value`);
+      if (got !== undefined) out[v.slice(2)] = got;
+    }
+    for (const b of bools) if (hasFlag(b, argv)) out[b.slice(2)] = true;
+  } catch (e) {
+    throw e instanceof Fail ? e : new Fail(2, e.message);
+  }
+  return out;
 }
 
 // The session checkout that `key` nests with, if any: one that holds it or that it holds. A session is placed by the folder
@@ -226,9 +258,12 @@ export async function admissionPass(deps, { registry, project, scope, owner: giv
   if (inv.unknown) return new Refused('unknown', `the sessions of ${project} cannot be read in full; nothing sent`);
   const here = inv.live.filter((e) => e.checkout === scope.canonicalRoot);
   const mine = here.find((e) => e.id === owner.id);
-  if (mine) {
+  // A notify queues behind a turn that is running (user ruling 2026-10-28, board c3ef9ea3: 'Queue it, like CH.Hub'): the
+  // prompt lands when the turn ends. Only the busy words are dropped for it; any other reason still refuses.
+  const blocking = kind === 'wake' ? mine?.why : mine?.why.filter((w) => !busyWord([w]));
+  if (mine && blocking.length > 0) {
     const why = mine.why.join(', ');
-    return busyWord(mine.why) ? new Refused('busy', `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused('input_pending', `owner session ${owner.id} is waiting on input (${why}); nothing sent`);
+    return busyWord(blocking) ? new Refused('busy', `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused('input_pending', `owner session ${owner.id} is waiting on input (${why}); nothing sent`);
   }
   const others = here.filter((e) => e.id !== owner.id);
   if (kind === 'wake' && others.length > 0) return competing(owner, others);
@@ -261,9 +296,10 @@ function runningJudge(deps, { snapshot, scope, owner, tree, kind }) {
   // id -> null (irrelevant), or the Refused its running means.
   const known = new Map();
   const one = async (id) => {
-    if (mineIds.has(id)) return new Refused('busy', `owner session ${owner.id} is working (${id === owner.id ? 'busy' : `its subagent ${id} is busy`}); nothing sent`);
+    // A running turn of the owner or its tree stops a wake only; a notify queues behind it (see admissionPass).
+    if (mineIds.has(id)) return kind === 'wake' ? new Refused('busy', `owner session ${owner.id} is working (${id === owner.id ? 'busy' : `its subagent ${id} is busy`}); nothing sent`) : null;
     const root = await rootOf(deps, snapshot, id);
-    if (root.id === owner.id) return new Refused('busy', `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
+    if (root.id === owner.id) return kind === 'wake' ? new Refused('busy', `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`) : null;
     if (kind !== 'wake' || !isConductorCandidate(root)) return null;
     const real = await canonical(deps.realpath, root.location?.directory, `session ${root.id}`);
     return checkoutOf(real, shapeOf(scope)) === scope.canonicalRoot ? competing(owner, [{ id: root.id, why: [root.id === id ? 'busy' : `its subagent ${id} is busy`] }]) : null;
@@ -403,7 +439,7 @@ export async function deliver(kind, args, deps, registry, text) {
       out.checkout = scope.canonicalRoot;
       out.session = claim.holder_session;
       first = await usableOwner(deps, claim.holder_session, scope);
-      if (!first.ok) throw new Refused('holder_missing', `the claim on item ${args.item} is held by session ${claim.holder_session}, but ${first.why.replace(/^session \S+ /, 'it ')}; not sending it to anyone else, nothing sent`);
+      if (!first.ok) throw new Refused('holder_missing', holderGone(args.item, claim.holder_session, first.why));
     } else {
       recorded = deps.readOwner(scope.root);
       if (recorded === null) {
@@ -429,11 +465,19 @@ export async function deliver(kind, args, deps, registry, text) {
     }
   } catch (raw) {
     const e = asRefused(raw);
-    // Input waiting at a claim holder is the holder's own word for it.
-    if (e instanceof Refused) return { ...out, status: 'refused', reason: out.claim?.state === 'held' && e.reason === 'input_pending' ? 'holder_busy_form' : e.reason, why: e.why };
+    // On a holder route the refusals speak of the holder: input waiting is the holder's own word for it, and a recipient that
+    // is gone at ANY point (the first checks or the final admission) is holder_missing, never owner_missing.
+    if (e instanceof Refused) {
+      const holder = out.claim?.state === 'held';
+      if (holder && e.reason === 'owner_missing') return { ...out, status: 'refused', reason: 'holder_missing', why: holderGone(args.item, out.session, e.why) };
+      return { ...out, status: 'refused', reason: holder && e.reason === 'input_pending' ? 'holder_busy_form' : e.reason, why: e.why };
+    }
     return { ...out, status: 'failed', code: e instanceof Fail ? e.code : 1, error: String(e?.message ?? e) };
   }
 }
+
+// A held claim whose holder cannot take the message, as a sentence: `why` is the owner-style reason ("session X ...; nothing sent").
+const holderGone = (item, session, why) => `the claim on item ${item} is held by session ${session}, but ${why.replace(/^session \S+ /, 'it ').replace(/; nothing sent$/, '')}; not sending it to anyone else, nothing sent`;
 
 // A claim problem leaves as the refusal of the same word.
 const asRefused = (e) => (e instanceof ClaimProblem ? new Refused(e.reason, e.why) : e);
@@ -441,11 +485,15 @@ const asRefused = (e) => (e instanceof ClaimProblem ? new Refused(e.reason, e.wh
 async function admitAndSend(kind, args, deps, registry, text, { out, scope, owner, recorded, route }) {
   const journal = args.dryRun ? null : deps.journal();
   const target = { project: args.project, checkout: scope.canonicalRoot };
+  // The resolved item a message is about is part of its identity: a notice for item A is not a retry of the same text for item
+  // B, even in one checkout, so recovery never settles B's notice with A's receipt. On an item route the recipient is part of
+  // it too. A retry of the SAME notice (same item, same recipient) still finds its own record.
+  const item = route?.before.id ?? null;
   // Recovery first: a prompt this sender may have sent to this checkout is settled before anything new goes out.
   let resend = null;
   for (const p of journal ? journal.pending(target.project, target.checkout) : []) {
     const seen = await receipt(deps, p);
-    const same = p.kind === kind && p.body === args.body;
+    const same = p.kind === kind && p.body === args.body && (p.item ?? null) === item && (!route || p.session === owner.id);
     if (seen === 'delivered') {
       await journal.settle(p.id, 'delivered', 'found in the session after an uncertain send');
       if (same) return { ...out, status: 'delivered', sent: 'yes', id: p.id, session: p.session, reconciled: true };
@@ -466,7 +514,7 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
   // the last check and the POST. A crash from here on leaves `sending`, which the next run settles by receipt or resends
   // under the same id. A refusal below is certainly unsent: a new record is settled failed, a resend goes back to
   // uncertain (its earlier attempt is still unaccounted for).
-  await journal.sending({ id, kind, body: args.body, text: prompt, sender: deps.senderRoot ?? null, ...target, session: owner.id });
+  await journal.sending({ id, kind, body: args.body, item, text: prompt, sender: deps.senderRoot ?? null, ...target, session: owner.id });
   let post = null;
   try {
     // The transport is made ready before the last checks, so its preparation (temp files, arguments) is not a wait
@@ -476,14 +524,14 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
     if (!still.ok) throw new Refused('owner_missing', `${still.why}; nothing sent`);
     const last = await admissionPass(deps, { registry, project: args.project, scope, owner: still, kind });
     if (last) throw last;
-    // The owner record is the target runtime's: re-read synchronously after the closing activity read, so a /new or a
-    // --set-owner at any point of the admission sends nothing. Nothing is awaited from here to the POST.
+    // Two synchronous re-reads follow the closing activity read, then the POST; nothing is awaited between them. The claim
+    // (--item, owner route and holder route alike) comes FIRST: its read is a database read that can block, so the owner
+    // record, which is the target runtime's and changes with a /new or a --set-owner, is checked after it, last before the send.
+    if (route) recheckClaim(deps, route.root, args.project, route.item, route.before);
     if (recorded) {
       const now = deps.readOwner(scope.root);
       if (now?.session !== recorded.session) throw new Refused('owner_changed', `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? 'none'} during the admission; nothing sent`);
     }
-    // --item: the claim is read again in the same synchronous step, for the owner route and the holder route alike.
-    if (route) recheckClaim(deps, route.root, args.project, route.item, route.before);
   } catch (raw) {
     const e = asRefused(raw);
     const why = `not sent: ${e instanceof Refused ? `${e.reason}: ${e.why}` : String(e?.message ?? e)}`;

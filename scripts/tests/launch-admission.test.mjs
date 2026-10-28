@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { admitLaunch, settleLaunch, readReservations, reservationsPath, RESERVED_TTL_MS, STARTED_TTL_MS, UNCERTAIN_TTL_MS } from '../lib/launch-admission.mjs';
+import { admitLaunch, settleLaunch, readReservations, reservationsPath, RESERVED_TTL_MS, UNCERTAIN_TTL_MS } from '../lib/launch-admission.mjs';
 
 const LIB = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'launch-admission.mjs');
 
@@ -19,10 +19,11 @@ function fixture(t) {
 }
 
 // An observation that yields to the event loop before answering, so parallel admissions interleave inside it.
-const yielding = (occupied = []) => async () => {
+// `gone` lists the started reservations whose window the observation saw gone.
+const yielding = (occupied = [], gone = []) => async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 2));
-  return occupied;
+  return { occupied, gone };
 };
 
 const seed = (main, reservations) => {
@@ -44,7 +45,7 @@ test('N parallel admissions against max_sessions=k admit exactly k; the rest are
 test('the ceiling holds across processes: parallel launcher processes admit exactly k, and their reservations outlive them', async (t) => {
   const main = fixture(t);
   const code = `import { admitLaunch } from ${JSON.stringify(LIB)};
-    const r = await admitLaunch(process.argv[1], { checkout: process.argv[2], maxSessions: 2, observe: async () => { await new Promise((ok) => setTimeout(ok, 5)); return []; } });
+    const r = await admitLaunch(process.argv[1], { checkout: process.argv[2], maxSessions: 2, observe: async () => { await new Promise((ok) => setTimeout(ok, 5)); return { occupied: [], gone: [] }; } });
     process.stdout.write(JSON.stringify(r));`;
   const env = { ...process.env };
   delete env.CLAUDE_CODE_SESSION_ID;
@@ -71,8 +72,8 @@ test('uncertain starts and reservations of dead launchers stay counted until the
   const main = fixture(t);
   const now = 1_800_000_000_000;
   seed(main, [
-    { id: 'lr_unc', checkout: '/w/a', state: 'uncertain', created_at: now - 1000, expires_at: now + UNCERTAIN_TTL_MS, holder: null },
-    { id: 'lr_dead', checkout: '/w/b', state: 'reserved', created_at: now - 1000, expires_at: now + RESERVED_TTL_MS, holder: deadHolder },
+    { id: 'lr_unc', checkout: '/w/a', socket: null, state: 'uncertain', created_at: now - 1000, expires_at: now + UNCERTAIN_TTL_MS, holder: null },
+    { id: 'lr_dead', checkout: '/w/b', socket: '/tmp/s', state: 'reserved', created_at: now - 1000, expires_at: now + RESERVED_TTL_MS, holder: deadHolder },
   ]);
   const results = await Promise.all(['/w/c', '/w/d', '/w/e'].map((checkout) => admitLaunch(main, { checkout, maxSessions: 3, observe: yielding(), now: () => now })));
   assert.equal(results.filter((r) => r.admitted).length, 1, JSON.stringify(results));
@@ -90,7 +91,7 @@ test('uncertain starts and reservations of dead launchers stay counted until the
 test('an uncertain start whose checkout is now observed is carried by the observation and its reservation is dropped', async (t) => {
   const main = fixture(t);
   const now = 1_800_000_000_000;
-  seed(main, [{ id: 'lr_unc', checkout: '/w/a', state: 'uncertain', created_at: now, expires_at: now + UNCERTAIN_TTL_MS, holder: null }]);
+  seed(main, [{ id: 'lr_unc', checkout: '/w/a', socket: null, state: 'uncertain', created_at: now, expires_at: now + UNCERTAIN_TTL_MS, holder: null }]);
   const r = await admitLaunch(main, { checkout: '/w/b', maxSessions: 2, observe: yielding([{ checkout: '/w/a', kind: 'window', detail: 'x ($1)' }]), now: () => now });
   assert.equal(r.admitted, true);
   assert.deepEqual(r.counted, [{ checkout: '/w/a', why: ['tmux window x ($1)'] }]);
@@ -125,18 +126,19 @@ test('a dry run evaluates the same and writes nothing', async (t) => {
   assert.equal(existsSync(reservationsPath(main)), false);
 });
 
-test('settling: released removes the reservation, started and uncertain keep it for their TTL with the holder cleared', async (t) => {
+test('settling: released removes the reservation, uncertain keeps it for its TTL, started until its window is gone; the holder is cleared', async (t) => {
   const main = fixture(t);
   const now = 1_800_000_000_000;
   const a = await admitLaunch(main, { checkout: '/w/a', maxSessions: 5, observe: yielding(), now: () => now });
   const b = await admitLaunch(main, { checkout: '/w/b', maxSessions: 5, observe: yielding(), now: () => now });
   const c = await admitLaunch(main, { checkout: '/w/c', maxSessions: 5, observe: yielding(), now: () => now });
   await settleLaunch(main, a.id, 'released', { now: () => now });
-  await settleLaunch(main, b.id, 'started', { detail: { windowId: '$4', serverPid: '9' }, now: () => now });
+  await assert.rejects(settleLaunch(main, b.id, 'started', { detail: { windowId: '$4', serverPid: '9' }, now: () => now }), /server start time/);
+  await settleLaunch(main, b.id, 'started', { socket: '/tmp/s', detail: { windowId: '$4', serverPid: '9', serverStart: '1700000000' }, now: () => now });
   await settleLaunch(main, c.id, 'uncertain', { now: () => now });
   const rows = Object.fromEntries(readReservations(main).reservations.map((r) => [r.checkout, r]));
   assert.deepEqual(Object.keys(rows).sort(), ['/w/b', '/w/c']);
-  assert.deepEqual([rows['/w/b'].state, rows['/w/b'].expires_at, rows['/w/b'].holder, rows['/w/b'].detail.windowId], ['started', now + STARTED_TTL_MS, null, '$4']);
+  assert.deepEqual([rows['/w/b'].state, rows['/w/b'].expires_at, rows['/w/b'].holder, rows['/w/b'].detail.windowId, rows['/w/b'].socket], ['started', null, null, '$4', '/tmp/s']);
   assert.deepEqual([rows['/w/c'].state, rows['/w/c'].expires_at], ['uncertain', now + UNCERTAIN_TTL_MS]);
   // A reservation that is gone is written again on an uncertain settle, so the start is never lost.
   await settleLaunch(main, 'lr_gone', 'uncertain', { checkout: '/w/z', now: () => now });
@@ -156,4 +158,26 @@ test('a reservation file that is not the reservation shape refuses every admissi
 test('max_sessions must be a whole number of at least 1', async (t) => {
   const main = fixture(t);
   await assert.rejects(admitLaunch(main, { checkout: '/w/a', maxSessions: 0, observe: yielding() }), /at least 1/);
+});
+
+test('a started reservation counts until the observation reports its window gone, however much time passes', async (t) => {
+  const main = fixture(t);
+  const now = 1_800_000_000_000;
+  seed(main, [{ id: 'lr_run', checkout: '/w/a', socket: '/tmp/tmux-1000/work', state: 'started', created_at: now, expires_at: null, holder: null, detail: { windowId: '$3', serverPid: '9', serverStart: '1700000000' } }]);
+  const later = now + 30 * 24 * 3600_000;
+  let r = await admitLaunch(main, { checkout: '/w/b', maxSessions: 1, observe: yielding(), now: () => later });
+  assert.equal(r.reason, 'ceiling_reached');
+  assert.match(r.why, /until its window \$3 on \/tmp\/tmux-1000\/work is gone/);
+  r = await admitLaunch(main, { checkout: '/w/b', maxSessions: 1, observe: yielding([], ['lr_run']), now: () => later });
+  assert.equal(r.admitted, true);
+  assert.deepEqual(readReservations(main).reservations.map((x) => x.id), [r.id]);
+});
+
+test('the observation gets the reservations on file and its refusal writes nothing', async (t) => {
+  const main = fixture(t);
+  const first = await admitLaunch(main, { checkout: '/w/a', socket: '/tmp/s1', maxSessions: 5, observe: yielding() });
+  let seen;
+  await assert.rejects(admitLaunch(main, { checkout: '/w/b', maxSessions: 5, observe: async (rs) => { seen = rs; throw new Error('tmux unreadable'); } }), /tmux unreadable/);
+  assert.deepEqual(seen.map((r) => [r.id, r.socket]), [[first.id, '/tmp/s1']]);
+  assert.deepEqual(readReservations(main).reservations.map((r) => r.id), [first.id]);
 });

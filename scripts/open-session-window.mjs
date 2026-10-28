@@ -18,19 +18,24 @@
 //
 // THE CEILING. multi_session.max_sessions counts the occupied checkouts of the project: one with an OpenCode tmux
 // window, a live conductor (the OpenCode API inventory), or a launch reservation. Count, compare and reservation run
-// in one locked section (scripts/lib/launch-admission.mjs) with a fresh tmux read inside it, so parallel launches can
-// never pass the ceiling together; an uncertain start stays counted until it is seen or expires. Hand-opened sessions
-// are counted, never blocked: only this launcher refuses (`ceiling_reached`).
+// in one locked section (scripts/lib/launch-admission.mjs), and every piece of evidence is read inside it: the API
+// inventory (bounded by IN_LOCK_READ_MS; a slower read refuses rather than counting stale evidence) and every tmux
+// server that matters (the default one, the one this launch uses, and every socket a reservation records; one that
+// cannot be read refuses, `tmux_unreadable`). So parallel launches can never pass the ceiling together, and a session
+// that started while this launcher waited for the lock is counted. A started window stays counted until it is seen
+// gone on its own server; an uncertain start until it is seen or expires. Hand-opened sessions are counted, never
+// blocked: only this launcher refuses (`ceiling_reached`).
 //
-// ADMISSION, before anything is created (a dry run included), read-only through the OpenCode API: a live conductor of
-// this checkout refuses (`conductor_live`), an incomplete inventory refuses (`conductor_unknown`). With --session the
+// ADMISSION, read-only through the OpenCode API, inside the same locked section (a dry run included): a live conductor
+// of this checkout refuses (`conductor_live`), an incomplete inventory refuses (`conductor_unknown`). With --session the
 // session must exist, be a top-level conductor and run in this checkout (`session_not_found`, `session_not_conductor`,
 // `session_other_checkout`); it may itself be live, being the conductor whose window this is.
 //
-// THE SESSION IS FOLLOWED BY ITS ID AND SERVER PID. new-session prints #{session_id} and #{pid}; every later look names
-// the session by its id. The server's own socket is read right after the creation, and every later tmux command, the
-// terminal's attach and every command in a note names that server with -S. Every later mutation (mouse on, both attach
-// paths) runs behind a server-side if-shell pid guard, because a restarted server at the same socket can reuse the id.
+// THE SERVER IS NAMED AND THE SESSION FOLLOWED BY ITS ID. Every tmux call names its server with -S: the one a plain tmux
+// here reaches (TMUX inside tmux, else the default socket). new-session prints #{session_id}, #{pid} and #{start_time};
+// every later look names the session by its id, and every later mutation (mouse on, both attach paths) runs behind a
+// server-side if-shell guard on the server's pid AND start time, because a restarted server at the same socket can
+// reuse the id and the pid (anti-pattern 8e603e23).
 //
 // THIS SCRIPT NEVER KILLS A SESSION: a client can attach to one between any look at it and a kill. A session for the
 // same folder that appears around the creation is `window_conflict`: both are left running and named. A failed creation
@@ -39,7 +44,6 @@
 //
 // Exit 0: started or would_start; 1: refused or failed; 2: bad arguments, multi_session off, unregistered project.
 // One JSON line on stdout.
-import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { basename, delimiter, isAbsolute, join, resolve } from 'node:path';
@@ -49,13 +53,18 @@ import { nestedCheckout, realDeps } from './lib/owner-session.mjs';
 import { readMultiSession, multiSessionRefusal } from './lib/multi-session.mjs';
 import { defaultOpencodeBin } from './lib/opencode-api.mjs';
 import { admitLaunch, settleLaunch } from './lib/launch-admission.mjs';
-import { TMUX_ID_RE, guardedCommand, listSessions, opencodeSessionIds, isOpencodeCommand, shq } from './lib/windows.mjs';
+import { TMUX_ID_RE, defaultSocket, environmentSocket, guardedCommand, listSessions, opencodeSessionIds, isOpencodeCommand, sameServer, shq } from './lib/windows.mjs';
+import { arg, hasFlag } from './lib/cli-args.mjs';
+import { sessionName } from './lib/launchers.mjs';
 import { resolveMainCheckout, resolveTarget, worktreePathFor } from './open-session.mjs';
 
 const DEFAULT_ATTACH_TIMEOUT_S = 30;
 // What the reads before the window may take, beyond the wait for the terminal.
 const RUN_SLACK_MS = 90_000;
 const POLL_MS = 1000;
+// What the fresh API inventory inside the admission lock may take before the launch is refused instead.
+export const IN_LOCK_READ_MS = 60_000;
+const DIGITS_RE = /^[1-9]\d*$/;
 const SESSION_ID_RE = /^ses_[A-Za-z0-9]+$/;
 const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 // The binary's path goes into a tmux command and into the pane's start command, which the pane check reads: only a plain path.
@@ -77,42 +86,61 @@ class Stop extends Error {
 
 // A failure after the tmux session was created: the session exists and is left as it is.
 class Started extends Error {
-  constructor(window, id, message, socket = null, serverPid = null) {
+  constructor(window, id, message, socket = null, server = null) {
     super(message);
     this.window = window;
     this.id = id;
     this.socket = socket;
-    this.serverPid = serverPid;
+    this.server = server;
   }
 }
 
+const VALUE_FLAGS = ['--target', '--name', '--checkout', '--session', '--attach-timeout'];
+const BOOL_FLAGS = ['--dry-run', '--detached'];
+
+// The shared exact-token parser (scripts/lib/cli-args.mjs, decision
+// sanctioned-script-store-writes-one-containment-helper-one-arg-parser): `--flag value` and `--flag=value` both work, a
+// repeated flag is refused, never last-wins.
 export function parseArgs(argv) {
-  const args = { dryRun: false, detached: false, attachTimeout: DEFAULT_ATTACH_TIMEOUT_S };
-  const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (seen.has(a)) throw new Fail(2, `${a} was given twice`);
-    seen.add(a);
-    if (a === '--dry-run') args.dryRun = true;
-    else if (a === '--detached') args.detached = true;
-    else if (['--target', '--name', '--checkout', '--session', '--attach-timeout'].includes(a)) {
-      const v = argv[++i];
-      if (v === undefined || v.startsWith('--')) throw new Fail(2, `${a} needs a value`);
-      if (a === '--target') args.target = v;
-      else if (a === '--name') {
-        if (!LABEL_RE.test(v)) throw new Fail(2, `--name '${v}' is not a session label (letters, digits, '-' and '_', starting with a letter or digit)`);
-        args.name = v;
-      } else if (a === '--checkout') {
-        if (!isAbsolute(v)) throw new Fail(2, `--checkout must be an absolute folder, got ${JSON.stringify(v)}`);
-        args.checkout = v;
-      } else if (a === '--session') {
-        if (!SESSION_ID_RE.test(v)) throw new Fail(2, `--session must be an OpenCode session id (ses_ and letters or digits), got ${JSON.stringify(v)}`);
-        args.session = v;
-      } else {
-        if (!/^\d+$/.test(v) || Number(v) < 1 || Number(v) > 600) throw new Fail(2, `--attach-timeout must be whole seconds from 1 to 600, got '${v}'`);
-        args.attachTimeout = Number(v);
-      }
-    } else throw new Fail(2, `unknown argument '${a}'\n${USAGE}`);
+    const tok = argv[i];
+    const flag = tok.split('=')[0];
+    if (BOOL_FLAGS.includes(flag)) {
+      if (tok.includes('=')) throw new Fail(2, `${flag} takes no value`);
+      continue;
+    }
+    if (!VALUE_FLAGS.includes(flag)) throw new Fail(2, `unknown argument '${tok}'\n${USAGE}`);
+    if (!tok.includes('=')) i++;
+  }
+  const v = {};
+  const args = { attachTimeout: DEFAULT_ATTACH_TIMEOUT_S };
+  try {
+    for (const f of VALUE_FLAGS) {
+      v[f] = arg(f, argv);
+      if (v[f] === '' || (v[f] === undefined && hasFlag(f, argv))) throw new Error(`${f} needs a value`);
+    }
+    args.dryRun = hasFlag('--dry-run', argv);
+    args.detached = hasFlag('--detached', argv);
+  } catch (e) {
+    throw new Fail(2, e.message);
+  }
+  args.target = v['--target'];
+  if (v['--name'] !== undefined) {
+    if (!LABEL_RE.test(v['--name'])) throw new Fail(2, `--name '${v['--name']}' is not a session label (letters, digits, '-' and '_', starting with a letter or digit)`);
+    args.name = v['--name'];
+  }
+  if (v['--checkout'] !== undefined) {
+    if (!isAbsolute(v['--checkout'])) throw new Fail(2, `--checkout must be an absolute folder, got ${JSON.stringify(v['--checkout'])}`);
+    args.checkout = v['--checkout'];
+  }
+  if (v['--session'] !== undefined) {
+    if (!SESSION_ID_RE.test(v['--session'])) throw new Fail(2, `--session must be an OpenCode session id (ses_ and letters or digits), got ${JSON.stringify(v['--session'])}`);
+    args.session = v['--session'];
+  }
+  if (v['--attach-timeout'] !== undefined) {
+    const t = v['--attach-timeout'];
+    if (!/^\d+$/.test(t) || Number(t) < 1 || Number(t) > 600) throw new Fail(2, `--attach-timeout must be whole seconds from 1 to 600, got '${t}'`);
+    args.attachTimeout = Number(t);
   }
   if ((args.name === undefined) === (args.checkout === undefined)) throw new Fail(2, `give exactly one of --name and --checkout\n${USAGE}`);
   return args;
@@ -122,14 +150,11 @@ export function parseArgs(argv) {
  * The tmux session name of a checkout's OpenCode window: the name the checkout's generated launcher uses
  * (scripts/lib/launchers.mjs sessionName, plus -opencode), so that launcher reattaches to it. No dot or colon.
  */
-export function windowName(folder) {
-  const base = basename(folder).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
-  return `sterling-${base}-${createHash('sha256').update(resolve(folder).replace(/\\/g, '/')).digest('hex').slice(0, 4)}-opencode`;
-}
+export const windowName = (folder) => `${sessionName(folder)}-opencode`;
 
 /** The arguments that open `terminal` on the guarded attach of session `target` (its id) on the server at `socket`. */
-export function terminalCommand(terminal, folder, socket, target, serverPid) {
-  const attach = ['bash', '-c', 'tmux "$@" || read -rp "tmux attach failed. Press Enter to close. "', '_', ...guardedCommand(socket, serverPid, `attach-session -t '${target}'`)];
+export function terminalCommand(terminal, folder, socket, target, server) {
+  const attach = ['bash', '-c', 'tmux "$@" || read -rp "tmux attach failed. Press Enter to close. "', '_', ...guardedCommand(socket, server, `attach-session -t '${target}'`)];
   switch (terminal) {
     case 'ghostty': return [`--working-directory=${folder}`, '-e', ...attach];
     case 'gnome-terminal': return [`--working-directory=${folder}`, '--', ...attach];
@@ -143,17 +168,17 @@ const tmuxAt = (socket) => `tmux -S ${shq(socket)}`;
 const attachCommand = (socket, id, name) => `${tmuxAt(socket)} attach-session -t ${shq(id)} (the session ${name})`;
 const describeSessions = (sessions) => sessions.map((s) => `${s.name} (${s.id}, ${s.attached > 0 ? 'attached' : 'detached'}, folder ${s.dir})`).join(', ');
 
-function serverRestarted(serverPid, socket, id) {
-  return new Stop('server_restarted', `the tmux server at ${socket} is no longer process ${serverPid}; session ${id} may belong to another server, refusing changes, attachment or verification`, { socket, windowId: id, serverPid });
+function serverRestarted(server, socket, id) {
+  return new Stop('server_restarted', `the tmux server at ${socket} is no longer process ${server.pid} started at ${server.start}; session ${id} may belong to another server, refusing changes, attachment or verification`, { socket, windowId: id, serverPid: server.pid, serverStart: server.start });
 }
 
-function checkServer(sessions, serverPid, socket, id) {
-  if (sessions.some((s) => s.serverPid !== serverPid)) throw serverRestarted(serverPid, socket, id);
+function checkServer(sessions, server, socket, id) {
+  if (sessions.some((s) => !sameServer(s, server))) throw serverRestarted(server, socket, id);
 }
 
 async function tmuxOk(deps, args, what) {
   const r = await deps.tmux(args);
-  if (r.code !== 0) throw new Error(`${what}: tmux ${args[0]} failed: ${(r.stderr || r.stdout || '').trim()}`);
+  if (r.code !== 0) throw new Error(`${what}: tmux ${args.join(' ')} failed: ${(r.stderr || r.stdout || '').trim()}`);
   return r.stdout;
 }
 
@@ -166,20 +191,9 @@ async function waitFor(deps, seconds, probe) {
   }
 }
 
-// The socket of the server this run's tmux calls reach, asked of the server itself. tmux answers for a session that does
-// not exist and prints an empty line for an unknown format variable (tmux 3.4), so the answer must be one absolute path.
-async function serverSocket(deps, id) {
-  const out = await tmuxOk(deps, ['display-message', '-p', '-t', id, '#{socket_path}'], 'reading the socket path of the tmux server');
-  const path = out.endsWith('\n') ? out.slice(0, -1) : out;
-  if (!isAbsolute(path) || /\p{Cc}/u.test(path)) {
-    throw new Error(`tmux gave no usable socket path for the server of the session ${id} (${JSON.stringify(out)}), so nothing can name that server when it attaches to the session`);
-  }
-  return path;
-}
-
 // The OpenCode pane of the session `id`: its only pane, running OpenCode by the shared pane check.
-async function openCodePane(deps, id) {
-  const out = await tmuxOk(deps, ['list-panes', '-s', '-t', id, '-F', '#{pane_id}\t#{pane_pid}\t#{pane_start_command}'], `panes of ${id}`);
+async function openCodePane(deps, socket, id) {
+  const out = await tmuxOk(deps, ['-S', socket, 'list-panes', '-s', '-t', id, '-F', '#{pane_id}\t#{pane_pid}\t#{pane_start_command}'], `panes of ${id}`);
   const panes = out.split('\n').filter((l) => l !== '').map((l) => {
     const [pane, pid, ...cmd] = l.split('\t');
     return { id: pane, pid, cmd: cmd.join('\t') };
@@ -297,7 +311,6 @@ async function checkSession(deps, id, { folder, shape }) {
 // One conductor per checkout: read the project's sessions with the shared inventory, refuse while a conductor of THIS
 // checkout is live, and hand back the live conductors of the other checkouts for the ceiling count. Nothing here writes.
 async function inventory(deps, args, ctx, checkout) {
-  if (args.session) await checkSession(deps, args.session, checkout);
   const verdict = await readProjectInventory(deps, ctx.registry, ctx.project, undefined);
   if (verdict.unknown) {
     throw new Stop('conductor_unknown', `the sessions of ${ctx.project} could not all be read, so it is not known whether a conductor of ${checkout.folder} is live or how many sessions run; refusing, as an unknown state is never taken for a free checkout`);
@@ -311,22 +324,53 @@ async function inventory(deps, args, ctx, checkout) {
   return live;
 }
 
-// What occupies the project's checkouts right now: every OpenCode tmux window in one of them, any tmux session at the
-// target folder or with the target name (it stands in the window's place), and the live conductors the inventory read.
-function observer(deps, { folder, shape }, name, live) {
-  return async () => {
-    const sessions = await listSessions(deps);
-    const opencode = await opencodeSessionIds(deps);
-    const out = [];
-    for (const s of sessions) {
-      if (s.dir === folder || s.name === name) out.push({ checkout: folder, kind: 'window', detail: `${s.name} (${s.id}, ${s.attached > 0 ? 'attached' : 'detached'})` });
-      else if (opencode.has(s.id)) {
-        const at = checkoutOf(s.dir, shape);
-        if (at !== null) out.push({ checkout: at, kind: 'window', detail: `${s.name} (${s.id})` });
+// Runs `read` and refuses when it outlives `ms`: inside the admission lock a slow read is never waited out, and never
+// replaced by older evidence.
+async function bounded(ms, what, read) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Stop('conductor_unknown', `${what} took longer than ${ms / 1000} s inside the admission lock; refusing rather than counting evidence read before the lock`)), ms);
+  });
+  try {
+    return await Promise.race([read(), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// What occupies the project's checkouts right now, all read inside the admission lock: the fresh API inventory (which
+// also refuses a live conductor of the target), and on every tmux server that matters (the default one, the one this
+// launch uses, every socket a reservation records) each OpenCode window in a checkout of the project and any session at
+// the target folder or with the target name. A started reservation whose window is not on its server any more (no
+// session with that id on a server with that pid and start time, or no server at all) is reported gone.
+function observer(deps, args, ctx, checkout, name, socket) {
+  const { folder, shape } = checkout;
+  return async (reservations) => {
+    const live = await bounded(IN_LOCK_READ_MS, 'the OpenCode session inventory', () => inventory({ ...deps, deadline: deps.now() + IN_LOCK_READ_MS }, args, ctx, checkout));
+    const sockets = [...new Set([defaultSocket(deps.env, deps.uid), socket, ...reservations.map((r) => r.socket).filter((x) => typeof x === 'string')])];
+    const occupied = [];
+    const servers = new Map();
+    for (const at of sockets) {
+      let sessions;
+      let opencode;
+      try {
+        sessions = await listSessions(deps, at);
+        opencode = await opencodeSessionIds(deps, at);
+      } catch (e) {
+        throw new Stop('tmux_unreadable', `the tmux server at ${at} could not be read (${e?.message ?? e}), so it is not known how many sessions of ${ctx.project} run there; refusing`, { socket: at });
+      }
+      servers.set(at, sessions);
+      for (const s of sessions) {
+        if (s.dir === folder || s.name === name) occupied.push({ checkout: folder, kind: 'window', detail: `${s.name} (${s.id} on ${at}, ${s.attached > 0 ? 'attached' : 'detached'})` });
+        else if (opencode.has(s.id)) {
+          const where = checkoutOf(s.dir, shape);
+          if (where !== null) occupied.push({ checkout: where, kind: 'window', detail: `${s.name} (${s.id} on ${at})` });
+        }
       }
     }
-    for (const c of live) out.push({ checkout: c.checkout, kind: 'conductor', detail: `${c.id} (${c.why.join('; ')})` });
-    return out;
+    for (const c of live) occupied.push({ checkout: c.checkout, kind: 'conductor', detail: `${c.id} (${c.why.join('; ')})` });
+    const gone = reservations.filter((r) => r.state === 'started').filter((r) => !servers.get(r.socket).some((s) => s.id === r.detail.windowId && sameServer(s, { pid: r.detail.serverPid, start: r.detail.serverStart }))).map((r) => r.id);
+    return { occupied, gone };
   };
 }
 
@@ -346,47 +390,56 @@ export async function openSessionWindow(args, rawDeps) {
   if (rawDeps.platform !== 'linux') throw new Stop('unsupported_platform', `the session-window launcher runs on Linux (WSL included) with tmux only; this is ${rawDeps.platform}`);
   if (!rawDeps.findExecutable('tmux')) throw new Stop('no_tmux', 'tmux is not on PATH; the session-window launcher needs it');
   const deps = { ...rawDeps, deadline: rawDeps.now() + RUN_SLACK_MS + args.attachTimeout * 1000 };
+  let socket;
+  try {
+    socket = environmentSocket(deps.env, deps.uid);
+  } catch (e) {
+    throw new Stop('tmux_unreadable', `${e.message}; refusing rather than guessing the tmux server`);
+  }
   const ctx = await projectOf(deps, args);
   const checkout = await checkoutFolder(deps, args, ctx);
   const { folder } = checkout;
   const name = windowName(folder);
 
-  const clash = (await listSessions(deps)).filter((s) => s.name === name || s.dir === folder);
+  // A cheap early refusal on the server this launch uses; the locked admission looks again, on every server that matters.
+  const clash = (await listSessions(deps, socket)).filter((s) => s.name === name || s.dir === folder);
   if (clash.length > 0) {
-    throw new Stop('window_exists', `tmux session ${clash.map((s) => `${s.name} (${s.attached > 0 ? 'attached' : 'detached'}, folder ${s.dir})`).join(', ')} already is or stands in the place of this checkout's window; not attaching to it and starting nothing`);
+    throw new Stop('window_exists', `tmux session ${clash.map((s) => `${s.name} (${s.attached > 0 ? 'attached' : 'detached'}, folder ${s.dir})`).join(', ')} on ${socket} already is or stands in the place of this checkout's window; not attaching to it and starting nothing`);
   }
   const bin = openCodeBinary(deps);
   const command = [bin, ...(args.session ? ['--session', args.session] : [])];
   const plan = attachPlan(args, deps);
-  // The slowest read: outside the lock. Its live conductors join the fresh tmux read inside the locked admission.
-  const live = await inventory(deps, args, ctx, checkout);
-  const tmuxArgs = ['new-session', '-d', '-P', '-F', '#{session_id}\t#{pid}', '-s', name, '-c', folder, ...command];
-  const shown = { project: ctx.project, folder, window: name, command, resume: args.session ?? null, attach: plan.how === 'terminal' ? `terminal:${plan.terminal}` : plan.how, max_sessions: ctx.maxSessions };
+  // Which session --session names is identity, not occupancy: it is checked before the lock.
+  if (args.session) await checkSession(deps, args.session, checkout);
+  const tmuxArgs = ['-S', socket, 'new-session', '-d', '-P', '-F', '#{session_id}\t#{pid}\t#{start_time}', '-s', name, '-c', folder, ...command];
+  const shown = { project: ctx.project, folder, window: name, command, resume: args.session ?? null, attach: plan.how === 'terminal' ? `terminal:${plan.terminal}` : plan.how, socket, max_sessions: ctx.maxSessions };
 
-  const admission = await deps.admit(ctx.canonicalRoot, { checkout: folder, maxSessions: ctx.maxSessions, observe: observer(deps, checkout, name, live), dryRun: args.dryRun, now: deps.now });
+  const admission = await deps.admit(ctx.canonicalRoot, { checkout: folder, socket, maxSessions: ctx.maxSessions, observe: observer(deps, args, ctx, checkout, name, socket), dryRun: args.dryRun, now: deps.now });
   if (!admission.admitted) throw new Stop(admission.reason, admission.why, { counted: admission.counted });
   if (args.dryRun) return { status: 'would_start', ...shown, counted: admission.counted, tmux: tmuxArgs };
 
-  // The reservation is settled exactly once: released while nothing was created, else started or uncertain.
+  // The reservation is settled once: released while nothing was created, else started or uncertain. A started settle
+  // is final: a later failure (the terminal, the attach wait) leaves it counted until its window is seen gone.
   const reservation = admission.id;
-  let settled = false;
+  let settled = null;
   const settle = async (outcome, detail = {}) => {
-    settled = true;
+    if (settled === 'started') return {};
+    settled = outcome;
     try {
-      await deps.settle(ctx.canonicalRoot, reservation, outcome, { checkout: folder, detail, now: deps.now });
+      await deps.settle(ctx.canonicalRoot, reservation, outcome, { checkout: folder, socket, detail, now: deps.now });
       return {};
     } catch (e) {
-      return { reservationError: `the launch reservation ${reservation} could not be settled ${outcome} (${e?.message ?? e}); it stays counted until it expires` };
+      return { reservationError: `the launch reservation ${reservation} could not be settled ${outcome} (${e?.message ?? e}); it stays counted as reserved until it expires` };
     }
   };
   try {
-    return await create(deps, args, { name, folder, shown, plan, tmuxArgs, settle });
+    return await create(deps, args, { name, folder, socket, shown, plan, tmuxArgs, settle });
   } finally {
-    if (!settled) await settle('released');
+    if (settled === null) await settle('released');
   }
 }
 
-async function create(deps, args, { name, folder, shown, plan, tmuxArgs, settle }) {
+async function create(deps, args, { name, folder, socket, shown, plan, tmuxArgs, settle }) {
   // A nonzero client result does not prove the server rejected the creation; only a definite tmux rejection without
   // creation output is safe to report as not started. Never retry the creation.
   let creation;
@@ -402,53 +455,46 @@ async function create(deps, args, { name, folder, shown, plan, tmuxArgs, settle 
       await settle('released');
       throw new Fail(1, error);
     }
-    const [partialId, partialPid] = printed.trim().split('\t');
+    const [partialId, partialPid, partialStart] = printed.trim().split('\t');
     const windowId = TMUX_ID_RE.test(partialId ?? '') ? partialId : null;
-    const serverPid = /^[1-9]\d*$/.test(partialPid ?? '') ? partialPid : null;
-    let socket = null;
-    let socketError;
-    try {
-      socket = await serverSocket(deps, windowId ?? `=${name}`);
-    } catch (e) {
-      socketError = String(e?.message ?? e);
-    }
-    const kept = await settle('uncertain', { windowId, serverPid, socket, window: name });
-    const where = socket === null ? 'the server this launcher reached (its socket path could not be read)' : `the server shown by ${tmuxAt(socket)} list-sessions`;
-    const note = `OpenCode may already be running in tmux session ${name} for ${folder}; inspect ${where} for that session before any retry; this script never retries or kills it, and the launch stays counted against max_sessions until it is seen or expires`;
-    return { status: 'start_uncertain', ...shown, uncertain: ['new-session'], windowId, serverPid, socket, ...(socketError === undefined ? {} : { socketError }), creationOutput: printed, error, note, ...kept };
+    const serverPid = DIGITS_RE.test(partialPid ?? '') ? partialPid : null;
+    const serverStart = DIGITS_RE.test(partialStart ?? '') ? partialStart : null;
+    const kept = await settle('uncertain', { windowId, serverPid, serverStart, window: name });
+    const note = `OpenCode may already be running in tmux session ${name} for ${folder}; inspect the server shown by ${tmuxAt(socket)} list-sessions for that session before any retry; this script never retries or kills it, and the launch stays counted against max_sessions until it is seen or expires`;
+    return { status: 'start_uncertain', ...shown, uncertain: ['new-session'], windowId, serverPid, serverStart, creationOutput: printed, error, note, ...kept };
   }
-  const [id, serverPid] = printed.trim().split('\t');
-  if (!TMUX_ID_RE.test(id ?? '') || !/^[1-9]\d*$/.test(serverPid ?? '')) {
+  const [id, serverPid, serverStart] = printed.trim().split('\t');
+  if (!TMUX_ID_RE.test(id ?? '') || !DIGITS_RE.test(serverPid ?? '') || !DIGITS_RE.test(serverStart ?? '')) {
     await settle('uncertain', { window: name });
-    throw new Started(name, null, `tmux started the session ${name} but printed ${JSON.stringify(printed)}, not its session id and server pid, so it cannot be told from another session or server`);
+    throw new Started(name, null, `tmux started the session ${name} but printed ${JSON.stringify(printed)}, not its session id, server pid and server start time, so it cannot be told from another session or server`, socket);
   }
-  let socket = null;
+  const server = { pid: serverPid, start: serverStart };
+  const detail = { windowId: id, serverPid, serverStart, window: name };
   try {
-    socket = await serverSocket(deps, id);
-    const configured = await deps.tmux(guardedCommand(socket, serverPid, `set-option -t '${id}' mouse on`));
-    if (configured.stdout.trim() === 'server_restarted') throw serverRestarted(serverPid, socket, id);
+    const configured = await deps.tmux(guardedCommand(socket, server, `set-option -t '${id}' mouse on`));
+    if (configured.stdout.trim() === 'server_restarted') throw serverRestarted(server, socket, id);
     if (configured.code !== 0) throw new Error(`setting mouse on: tmux set-option failed: ${(configured.stderr || configured.stdout).trim()}`);
-    const sessions = await listSessions(deps);
-    checkServer(sessions, serverPid, socket, id);
+    const sessions = await listSessions(deps, socket);
+    checkServer(sessions, server, socket, id);
     const made = sessions.find((s) => s.id === id);
     const others = sessions.filter((s) => s.id !== id && s.dir === folder);
     if (!made) throw new Error(`tmux session ${name} (${id}) is not listed right after it was created (OpenCode may have exited at once)${others.length > 0 ? `; another session is on the folder: ${describeSessions(others)}` : ''}`);
     if (others.length > 0) throw conflict({ id, name, folder, others, socket });
     if (made.name !== name || made.dir !== folder) throw new Error(`tmux session ${id} is now ${made.name} in ${made.dir}, not the ${name} in ${folder} this run created`);
     if (made.windows !== 1) throw new Error(`tmux session ${name} (${id}) has ${made.windows} windows, expected 1`);
-    const pane = await openCodePane(deps, id);
+    const pane = await openCodePane(deps, socket, id);
     if (!pane) throw new Error(`tmux session ${name} (${id}) does not hold exactly one OpenCode pane`);
-    const kept = await settle('started', { windowId: id, serverPid, socket, window: name });
-    const done = { ...shown, windowId: id, socket, serverPid, pane: pane.id, ...kept };
+    const kept = await settle('started', detail);
+    const done = { ...shown, windowId: id, serverPid, serverStart, pane: pane.id, ...kept };
     if (plan.how === 'inline') return { status: 'started', ...done };
     if (plan.how === 'detached') return { status: 'started', ...done, attached: false, note: `no terminal is attached; attach with ${attachCommand(socket, id, name)}` };
     const env = { ...deps.env };
     delete env.TMUX;
     delete env.TMUX_PANE;
-    await deps.spawnTerminal('setsid', ['-f', plan.file, ...terminalCommand(plan.terminal, folder, socket, id, serverPid)], { env, cwd: folder });
+    await deps.spawnTerminal('setsid', ['-f', plan.file, ...terminalCommand(plan.terminal, folder, socket, id, server)], { env, cwd: folder });
     const seen = await waitFor(deps, args.attachTimeout, async (d) => {
-      const now = await listSessions(d);
-      checkServer(now, serverPid, socket, id);
+      const now = await listSessions(d, socket);
+      checkServer(now, server, socket, id);
       const s = now.find((x) => x.id === id);
       if (!s) throw new Error(`tmux session ${name} (${id}) is gone, so the terminal has nothing to attach to`);
       return s.attached > 0;
@@ -456,15 +502,10 @@ async function create(deps, args, { name, folder, shown, plan, tmuxArgs, settle 
     if (seen) return { status: 'started', ...done, attached: true };
     return { status: 'started_unattached', ...done, attached: false, note: `no terminal attached within ${args.attachTimeout} s; the session is left running: ${attachCommand(socket, id, name)}` };
   } catch (e) {
-    // The window exists (a conflict included) or may: it stays counted. A failure after a 'started' settle (the terminal,
-    // the attach wait) settles the same reservation again as uncertain, the longer-counted state.
-    if (e instanceof Stop) {
-      if (e.reason === 'window_conflict') await settle('started', { windowId: id, serverPid, socket, window: name });
-      else await settle('uncertain', { windowId: id, serverPid, socket, window: name });
-      throw e;
-    }
-    await settle('uncertain', { windowId: id, serverPid, socket, window: name });
-    throw new Started(name, id, e?.message ?? String(e), socket, serverPid);
+    // The window exists (a conflict included) or may: it stays counted (settle keeps a started reservation as it is).
+    await settle(e instanceof Stop && e.reason === 'window_conflict' ? 'started' : 'uncertain', detail);
+    if (e instanceof Stop) throw e;
+    throw new Started(name, id, e?.message ?? String(e), socket, server);
   }
 }
 
@@ -482,8 +523,9 @@ export async function main(argv, deps, io) {
     if (result.reservationError) io.stderr(`open-session-window: ${result.reservationError}\n`);
     // The terminal is taken over until the user detaches, so the result is printed first.
     if (result.status === 'started' && result.attach === 'inline') {
-      const code = await deps.attachInline(result.windowId, result.socket, result.serverPid);
-      checkServer(await listSessions(deps), result.serverPid, result.socket, result.windowId);
+      const server = { pid: result.serverPid, start: result.serverStart };
+      const code = await deps.attachInline(result.windowId, result.socket, server);
+      checkServer(await listSessions(deps, result.socket), server, result.socket, result.windowId);
       return code;
     }
     return 0;
@@ -495,7 +537,7 @@ export async function main(argv, deps, io) {
     }
     if (e instanceof Started) {
       const note = 'the tmux session was created and is left as it is: look at it before running again; this script never retries or kills it';
-      io.stdout(`${JSON.stringify({ status: 'started_unverified', project, window: e.window, windowId: e.id, socket: e.socket, serverPid: e.serverPid, error: e.message, note })}\n`);
+      io.stdout(`${JSON.stringify({ status: 'started_unverified', project, window: e.window, windowId: e.id, socket: e.socket, serverPid: e.server?.pid ?? null, serverStart: e.server?.start ?? null, error: e.message, note })}\n`);
       io.stderr(`open-session-window: ${e.message}; ${note}\n`);
       return 1;
     }
@@ -536,6 +578,7 @@ export function launcherDeps() {
   return {
     ...realDeps(),
     platform: process.platform,
+    uid: process.getuid?.(),
     env: process.env,
     isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -558,8 +601,8 @@ export function launcherDeps() {
       });
     }),
     // Attaches this terminal to the session `target` (its id) on the server `socket` names, behind the pid guard.
-    attachInline: (target, socket, serverPid) => new Promise((done) => {
-      const child = spawn('tmux', guardedCommand(socket, serverPid, `attach-session -t '${target}'`), { stdio: 'inherit' });
+    attachInline: (target, socket, server) => new Promise((done) => {
+      const child = spawn('tmux', guardedCommand(socket, server, `attach-session -t '${target}'`), { stdio: 'inherit' });
       child.once('error', (e) => {
         process.stderr.write(`open-session-window: cannot run tmux attach-session: ${e.message}\n`);
         done(1);

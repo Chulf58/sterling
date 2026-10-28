@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../../packages/mcp-server/dist/tools.js';
+import { ownerRecordPath } from '../lib/owner-record.mjs';
 import { world, readOwner } from './lib/multi-session-world.mjs';
 import { main as wakeMain } from '../wake-project.mjs';
 import { main as notifyMain, noticeText } from '../notify-project.mjs';
@@ -411,6 +412,209 @@ test('--item: bad arguments exit 2 before any claim read or call', async () => {
     assert.match(json()[0].error, /--item <board item id>/);
   } finally {
     w.cleanup();
+  }
+});
+
+// --- review round: item identity in recovery, claim-then-owner order, late holder loss, shared parser, queueing a notify ---
+
+const ITEM_B = 'def67890';
+const FULL_B = `${ITEM_B}-0000-4000-8000-000000000002`;
+const lost = (body, session, w) => { w.land(session, body); return { ok: false, uncertain: true, why: 'reset after send' }; };
+async function notifyItem(w, item, extra = [], over) {
+  const { io, json, out } = w.io();
+  const code = await notifyMain(['--project', 'proj', '--text', TEXT, '--item', item, ...extra], deps(w, over), io);
+  return { code, res: json()[0], out };
+}
+// Item A is held by ses_LANE and item B by ses_LANE2, both in the session worktree.
+async function twoItems() {
+  const w = await ready();
+  w.session('ses_LANE2', { dir: w.WT });
+  claims(w, (req) => (req.ref === ITEM ? held(w) : held(w, { id: FULL_B, holder_session: 'ses_LANE2' })));
+  return w;
+}
+
+test('recovery knows the item: identical text for item B is not "delivered" because the notice for item A landed with its reply lost', async () => {
+  const w = await twoItems();
+  try {
+    w.sendResult = lost;
+    const a = await notifyItem(w, ITEM);
+    assert.equal(a.res.sent, 'maybe');
+    w.sendResult = null;
+    const b = await notifyItem(w, ITEM_B);
+    assert.equal(b.res.status, 'queued', JSON.stringify(b.res));
+    assert.equal(b.res.session, 'ses_LANE2');
+    assert.deepEqual(w.posts.map((p) => p.path), ['/api/session/ses_LANE/prompt', '/api/session/ses_LANE2/prompt']);
+    const rec = Object.fromEntries(w.journalRecords().map((j) => [j.id, j]));
+    assert.deepEqual([rec[a.res.id].item, rec[a.res.id].session, rec[a.res.id].state], [FULL, 'ses_LANE', 'delivered']);
+    assert.deepEqual([rec[b.res.id].item, rec[b.res.id].session], [FULL_B, 'ses_LANE2']);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('recovery still finds a retry of the SAME notice (same item, same recipient) and sends nothing new', async () => {
+  const w = await twoItems();
+  try {
+    w.sendResult = lost;
+    const a = await notifyItem(w, ITEM);
+    w.sendResult = null;
+    const again = await notifyItem(w, ITEM);
+    assert.deepEqual([again.res.status, again.res.reconciled, again.res.id, again.res.session], ['delivered', true, a.res.id, 'ses_LANE']);
+    assert.equal(w.posts.length, 1);
+    // An uncertain notice that never landed is resent under its own id for the same item.
+    w.sendResult = () => ({ ok: false, uncertain: true, why: 'timed out' });
+    const b = await notifyItem(w, ITEM_B);
+    assert.equal(b.res.sent, 'maybe');
+    w.sendResult = null;
+    const retry = await notifyItem(w, ITEM_B);
+    assert.deepEqual([retry.res.status, retry.res.resent, retry.res.id], ['queued', true, b.res.id]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('recovery: a pending notice for another item of the SAME recipient that is not in the session blocks, never resent as this one', async () => {
+  const w = await ready();
+  try {
+    claims(w, (req) => (req.ref === ITEM ? held(w) : held(w, { id: FULL_B })));
+    w.sendResult = () => ({ ok: false, uncertain: true, why: 'timed out' });
+    await notifyItem(w, ITEM);
+    w.sendResult = null;
+    const b = await notifyItem(w, ITEM_B);
+    assert.equal(b.res.reason, 'unresolved_delivery');
+    assert.equal(w.posts.length, 1);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('an owner change DURING the claim re-read stops the send: the owner record is checked after the claim, last before the POST', async () => {
+  const w = await ready();
+  try {
+    claims(w, (_req, n) => {
+      if (n === 2) writeFileSync(ownerRecordPath(w.ROOT), 'ses_NEW\n');
+      return free();
+    });
+    for (const run of [notify, wake]) {
+      const r = await run(w);
+      assert.equal(r.res.reason, 'owner_changed', JSON.stringify(r.res));
+      assert.deepEqual([r.res.sent, w.posts.length], ['none', 0]);
+      writeFileSync(ownerRecordPath(w.ROOT), 'ses_OWN\n');
+      w.reads.length = 0;
+    }
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('--item: a holder that disappears after the first checks is holder_missing at every later point, never owner_missing', async () => {
+  const points = [
+    ['while the transport is prepared', (w) => { w.onPrepare = (x) => { x.sessions.delete('ses_LANE'); }; }],
+    ['during the first admission', (w) => { w.onGet = async (path) => { if (path.startsWith('/api/shell')) { w.onGet = null; w.sessions.delete('ses_LANE'); } }; }],
+  ];
+  for (const [when, setup] of points) {
+    for (const run of [notify, wake]) {
+      const w = await ready();
+      try {
+        claims(w, held(w));
+        setup(w);
+        const r = await run(w);
+        assert.deepEqual([r.res.status, r.res.reason, r.res.sent], ['refused', 'holder_missing', 'none'], `${when}: ${JSON.stringify(r.res)}`);
+        assert.match(r.res.why, /claim on item abc12345 is held by session ses_LANE/);
+        assert.deepEqual(w.posts, []);
+      } finally {
+        w.cleanup();
+      }
+    }
+  }
+});
+
+test('shared parser: a repeated flag is exit 2, --flag=value works, a notify text may still start with dashes', async () => {
+  const w = await ready();
+  try {
+    claims(w, held(w));
+    const bad = [
+      [wakeMain, ['--project', 'proj', '--item', 'abc12345', '--item', 'def67890']],
+      [wakeMain, ['--project', 'proj', '--item=abc12345', '--item', 'def67890']],
+      [wakeMain, ['--project', 'proj', '--project', 'other', '--item', ITEM]],
+      [wakeMain, ['--project', 'proj', '--dry-run', '--dry-run']],
+      [wakeMain, ['--project', 'proj', '--dry-run=yes']],
+      [wakeMain, ['--project', 'proj', '--item=']],
+      [notifyMain, ['--project', 'proj', '--text', 'a', '--item', 'abc12345', '--item', 'def67890']],
+      [notifyMain, ['--project', 'proj', '--text', 'a', '--text', 'b']],
+      [notifyMain, ['--project', 'proj', '--text=a', '--text', 'b']],
+      [notifyMain, ['--project=proj', '--project', 'proj', '--text', 'a']],
+    ];
+    for (const [main, argv] of bad) {
+      const { io, json } = w.io();
+      assert.equal(await main(argv, deps(w), io), 2, argv.join(' '));
+      assert.equal(json().at(-1).status, 'failed');
+    }
+    assert.deepEqual([w.reads, w.posts, w.calls.filter((c) => c !== 'claim')], [[], [], []]);
+    const a = await wake(w, [], undefined);
+    assert.equal(a.res.status, 'queued');
+    const { io, json } = w.io();
+    assert.equal(await wakeMain(['--project=proj', `--item=${ITEM}`, '--dry-run'], deps(w), io), 0);
+    assert.equal(json()[0].status, 'would_queue');
+    const n = w.io();
+    assert.equal(await notifyMain(['--project=proj', `--item=${ITEM}`, '--text=--not-a-flag'], deps(w), n.io), 0);
+    assert.equal(w.posts.at(-1).body.text, noticeText('sender', '--not-a-flag'));
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a notify queues behind a running turn of the holder or owner; a wake to the same session is refused busy', async () => {
+  const routes = [
+    ['claim holder', 'ses_LANE', (w) => claims(w, held(w)), (w, extra) => notify(w, extra)],
+    ['owner', 'ses_OWN', (w) => claims(w, free()), (w, extra) => notify(w, extra)],
+  ];
+  for (const [what, target, install, send] of routes) {
+    const w = await ready();
+    try {
+      install(w);
+      w.active.add(target);
+      const w1 = await wake(w);
+      assert.deepEqual([w1.res.status, w1.res.reason, w.posts.length], ['refused', 'busy', 0], what);
+      const n = await send(w);
+      assert.equal(n.res.status, 'queued', `${what}: ${JSON.stringify(n.res)}`);
+      assert.deepEqual([w.posts.length, w.posts[0].path, w.posts[0].body.delivery], [1, `/api/session/${target}/prompt`, 'queue'], what);
+    } finally {
+      w.cleanup();
+    }
+  }
+  // Plain notify (no --item) to a busy owner, and a busy subagent of the owner's tree.
+  const w = await ready();
+  try {
+    w.active.add('ses_OWN');
+    w.session('ses_KID', { parent: 'ses_OWN' });
+    w.active.add('ses_KID');
+    const { io, json } = w.io();
+    assert.equal(await notifyMain(['--project', 'proj', '--text', TEXT], w.deps(), io), 0);
+    assert.equal(json()[0].status, 'queued');
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('a notify to a busy session still refuses on a form, permission request, queued input or running shell', async () => {
+  const cases = [
+    ['a form', 'holder_busy_form', (w) => w.forms.push({ sessionID: 'ses_LANE', dir: w.WT })],
+    ['a permission request', 'holder_busy_form', (w) => w.perms.push({ sessionID: 'ses_LANE', dir: w.WT })],
+    ['queued input', 'holder_busy_form', (w) => w.inbox.set('ses_LANE', [{ id: 'msg_q', type: 'user', payload: { text: 'later' } }])],
+    ['a running shell', 'shell_running', (w) => w.shells.set(w.WT, [{ id: 'shl_1', status: 'running' }])],
+  ];
+  for (const [what, reason, setup] of cases) {
+    const w = await ready();
+    try {
+      claims(w, held(w));
+      w.active.add('ses_LANE');
+      setup(w);
+      const r = await notify(w);
+      assert.deepEqual([r.res.status, r.res.reason, w.posts.length], ['refused', reason, 0], what);
+    } finally {
+      w.cleanup();
+    }
   }
 });
 

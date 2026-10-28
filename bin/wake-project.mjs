@@ -3582,9 +3582,9 @@ var ZodEffects = class extends ZodType {
     const { status, ctx } = this._processInputParams(input);
     const effect = this._def.effect || null;
     const checkCtx = {
-      addIssue: (arg) => {
-        addIssueToContext(ctx, arg);
-        if (arg.fatal) {
+      addIssue: (arg2) => {
+        addIssueToContext(ctx, arg2);
+        if (arg2.fatal) {
           status.abort();
         } else {
           status.dirty();
@@ -4049,14 +4049,14 @@ var ostring = () => stringType().optional();
 var onumber = () => numberType().optional();
 var oboolean = () => booleanType().optional();
 var coerce = {
-  string: ((arg) => ZodString.create({ ...arg, coerce: true })),
-  number: ((arg) => ZodNumber.create({ ...arg, coerce: true })),
-  boolean: ((arg) => ZodBoolean.create({
-    ...arg,
+  string: ((arg2) => ZodString.create({ ...arg2, coerce: true })),
+  number: ((arg2) => ZodNumber.create({ ...arg2, coerce: true })),
+  boolean: ((arg2) => ZodBoolean.create({
+    ...arg2,
     coerce: true
   })),
-  bigint: ((arg) => ZodBigInt.create({ ...arg, coerce: true })),
-  date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
+  bigint: ((arg2) => ZodBigInt.create({ ...arg2, coerce: true })),
+  date: ((arg2) => ZodDate.create({ ...arg2, coerce: true }))
 };
 var NEVER = INVALID;
 
@@ -6089,8 +6089,8 @@ function getForeignBoardItem(dbPath, ref, where, opts = {}) {
     if (/^[0-9a-f]{8}$/i.test(ref))
       steps.push([`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND id LIKE ? || '%' LIMIT 10`, ref.toLowerCase()]);
     let rows = [];
-    for (const [sql, arg] of steps) {
-      const got = budget.step(db, () => db.prepare(sql).all(arg));
+    for (const [sql, arg2] of steps) {
+      const got = budget.step(db, () => db.prepare(sql).all(arg2));
       if (got === void 0)
         return cut(budget.exhausted("during the lookup"));
       if (got.length) {
@@ -6467,6 +6467,53 @@ async function prepareSend(method, path, body, { bin = defaultOpencodeBin(), api
   } };
   const call = await prepare(bin, method, path, text, timeoutMs);
   return { send: async () => sendOutcome(await call.send()), discard: () => call.discard() };
+}
+
+// scripts/lib/cli-args.mjs
+function normalizeFlag(name) {
+  return name.startsWith("-") ? name : `--${name}`;
+}
+var FLAG_SHAPED_VALUE = /^-{1,2}[A-Za-z]/;
+function occurrences(flag, argv) {
+  const eq = `${flag}=`;
+  const found = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === flag) {
+      const next = argv[i + 1];
+      if (next !== void 0 && FLAG_SHAPED_VALUE.test(next)) {
+        throw new Error(`${flag}: the value '${next}' looks like another flag \u2014 refusing to read it as ${flag}'s value`);
+      }
+      found.push(next);
+    } else if (tok.startsWith(eq)) {
+      found.push(tok.slice(eq.length));
+    }
+  }
+  return found;
+}
+function presenceCount(flag, argv) {
+  const eq = `${flag}=`;
+  let count = 0;
+  for (const tok of argv) {
+    if (tok === flag || tok.startsWith(eq)) count++;
+  }
+  return count;
+}
+function arg(name, argv = process.argv.slice(2)) {
+  const flag = normalizeFlag(name);
+  const found = occurrences(flag, argv);
+  if (found.length > 1) {
+    throw new Error(`${flag}: given more than once (${found.length} occurrences) \u2014 refusing rather than silently taking the first or last value`);
+  }
+  return found.length ? found[0] : void 0;
+}
+function hasFlag(name, argv = process.argv.slice(2)) {
+  const flag = normalizeFlag(name);
+  const count = presenceCount(flag, argv);
+  if (count > 1) {
+    throw new Error(`${flag}: given more than once (${count} occurrences) \u2014 refusing rather than silently taking the first or last value`);
+  }
+  return count === 1;
 }
 
 // scripts/lib/owner-record.mjs
@@ -7464,6 +7511,31 @@ var shellQuote = (word) => SAFE_WORD.test(word) ? word : `'${String(word).replac
 function setOwnerCommand({ project, session, checkout }) {
   return ["node", "bin/wake-project.mjs", "--set-owner", "--project", shellQuote(project), "--session", shellQuote(session), ...checkout ? ["--checkout", shellQuote(checkout)] : []].join(" ");
 }
+function parseFlags(argv, { values, bools, usage }) {
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i];
+    const name = t.includes("=") ? t.slice(0, t.indexOf("=")) : t;
+    if (bools.includes(t)) continue;
+    if (!values.includes(name)) throw new Fail(2, `unknown argument '${t}'
+${usage}`);
+    if (t === name) {
+      const next = argv[++i];
+      if (next === void 0) throw new Fail(2, `${name} needs a value`);
+    }
+  }
+  const out = {};
+  try {
+    for (const v of values) {
+      const got = arg(v, argv);
+      if (got === "") throw new Fail(2, `${v} needs a value`);
+      if (got !== void 0) out[v.slice(2)] = got;
+    }
+    for (const b of bools) if (hasFlag(b, argv)) out[b.slice(2)] = true;
+  } catch (e) {
+    throw e instanceof Fail ? e : new Fail(2, e.message);
+  }
+  return out;
+}
 function nestedCheckout(all, key) {
   return all.find((c) => c.key !== key && (isUnder(c.key, key) || isUnder(key, c.key)));
 }
@@ -7580,9 +7652,10 @@ async function admissionPass(deps, { registry, project, scope, owner: given, kin
   if (inv.unknown) return new Refused("unknown", `the sessions of ${project} cannot be read in full; nothing sent`);
   const here = inv.live.filter((e) => e.checkout === scope.canonicalRoot);
   const mine = here.find((e) => e.id === owner.id);
-  if (mine) {
+  const blocking = kind === "wake" ? mine?.why : mine?.why.filter((w) => !busyWord([w]));
+  if (mine && blocking.length > 0) {
     const why = mine.why.join(", ");
-    return busyWord(mine.why) ? new Refused("busy", `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused("input_pending", `owner session ${owner.id} is waiting on input (${why}); nothing sent`);
+    return busyWord(blocking) ? new Refused("busy", `owner session ${owner.id} is working (${why}); nothing sent`) : new Refused("input_pending", `owner session ${owner.id} is waiting on input (${why}); nothing sent`);
   }
   const others = here.filter((e) => e.id !== owner.id);
   if (kind === "wake" && others.length > 0) return competing(owner, others);
@@ -7608,9 +7681,9 @@ function runningJudge(deps, { snapshot, scope, owner, tree, kind }) {
   const mineIds = /* @__PURE__ */ new Set([owner.id, ...tree.map((s) => s.id)]);
   const known = /* @__PURE__ */ new Map();
   const one = async (id) => {
-    if (mineIds.has(id)) return new Refused("busy", `owner session ${owner.id} is working (${id === owner.id ? "busy" : `its subagent ${id} is busy`}); nothing sent`);
+    if (mineIds.has(id)) return kind === "wake" ? new Refused("busy", `owner session ${owner.id} is working (${id === owner.id ? "busy" : `its subagent ${id} is busy`}); nothing sent`) : null;
     const root = await rootOf(deps, snapshot, id);
-    if (root.id === owner.id) return new Refused("busy", `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`);
+    if (root.id === owner.id) return kind === "wake" ? new Refused("busy", `owner session ${owner.id} is working (its new subagent ${id} is busy); nothing sent`) : null;
     if (kind !== "wake" || !isConductorCandidate(root)) return null;
     const real = await canonical(deps.realpath, root.location?.directory, `session ${root.id}`);
     return checkoutOf(real, shapeOf(scope)) === scope.canonicalRoot ? competing(owner, [{ id: root.id, why: [root.id === id ? "busy" : `its subagent ${id} is busy`] }]) : null;
@@ -7725,7 +7798,7 @@ async function deliver(kind, args, deps, registry, text) {
       out.checkout = scope.canonicalRoot;
       out.session = claim.holder_session;
       first = await usableOwner(deps, claim.holder_session, scope);
-      if (!first.ok) throw new Refused("holder_missing", `the claim on item ${args.item} is held by session ${claim.holder_session}, but ${first.why.replace(/^session \S+ /, "it ")}; not sending it to anyone else, nothing sent`);
+      if (!first.ok) throw new Refused("holder_missing", holderGone(args.item, claim.holder_session, first.why));
     } else {
       recorded = deps.readOwner(scope.root);
       if (recorded === null) {
@@ -7751,18 +7824,24 @@ async function deliver(kind, args, deps, registry, text) {
     }
   } catch (raw) {
     const e = asRefused(raw);
-    if (e instanceof Refused) return { ...out, status: "refused", reason: out.claim?.state === "held" && e.reason === "input_pending" ? "holder_busy_form" : e.reason, why: e.why };
+    if (e instanceof Refused) {
+      const holder = out.claim?.state === "held";
+      if (holder && e.reason === "owner_missing") return { ...out, status: "refused", reason: "holder_missing", why: holderGone(args.item, out.session, e.why) };
+      return { ...out, status: "refused", reason: holder && e.reason === "input_pending" ? "holder_busy_form" : e.reason, why: e.why };
+    }
     return { ...out, status: "failed", code: e instanceof Fail ? e.code : 1, error: String(e?.message ?? e) };
   }
 }
+var holderGone = (item, session, why) => `the claim on item ${item} is held by session ${session}, but ${why.replace(/^session \S+ /, "it ").replace(/; nothing sent$/, "")}; not sending it to anyone else, nothing sent`;
 var asRefused = (e) => e instanceof ClaimProblem ? new Refused(e.reason, e.why) : e;
 async function admitAndSend(kind, args, deps, registry, text, { out, scope, owner, recorded, route }) {
   const journal = args.dryRun ? null : deps.journal();
   const target = { project: args.project, checkout: scope.canonicalRoot };
+  const item = route?.before.id ?? null;
   let resend = null;
   for (const p of journal ? journal.pending(target.project, target.checkout) : []) {
     const seen = await receipt(deps, p);
-    const same = p.kind === kind && p.body === args.body;
+    const same = p.kind === kind && p.body === args.body && (p.item ?? null) === item && (!route || p.session === owner.id);
     if (seen === "delivered") {
       await journal.settle(p.id, "delivered", "found in the session after an uncertain send");
       if (same) return { ...out, status: "delivered", sent: "yes", id: p.id, session: p.session, reconciled: true };
@@ -7779,7 +7858,7 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
   const id = resend?.id ?? newMessageId(deps.now());
   const prompt = resend?.text ?? text;
   if (args.dryRun) return { ...out, status: "would_queue", session: owner.id, text: prompt };
-  await journal.sending({ id, kind, body: args.body, text: prompt, sender: deps.senderRoot ?? null, ...target, session: owner.id });
+  await journal.sending({ id, kind, body: args.body, item, text: prompt, sender: deps.senderRoot ?? null, ...target, session: owner.id });
   let post = null;
   try {
     post = await deps.prepareSend("POST", `/api/session/${owner.id}/prompt`, { id, text: prompt, delivery: "queue" });
@@ -7787,11 +7866,11 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
     if (!still.ok) throw new Refused("owner_missing", `${still.why}; nothing sent`);
     const last = await admissionPass(deps, { registry, project: args.project, scope, owner: still, kind });
     if (last) throw last;
+    if (route) recheckClaim(deps, route.root, args.project, route.item, route.before);
     if (recorded) {
       const now = deps.readOwner(scope.root);
       if (now?.session !== recorded.session) throw new Refused("owner_changed", `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? "none"} during the admission; nothing sent`);
     }
-    if (route) recheckClaim(deps, route.root, args.project, route.item, route.before);
   } catch (raw) {
     const e = asRefused(raw);
     const why2 = `not sent: ${e instanceof Refused ? `${e.reason}: ${e.why}` : String(e?.message ?? e)}`;
@@ -7860,19 +7939,9 @@ function realDeps() {
 var wakeText = (sender, item) => item === void 0 ? `Sterling project ${sender} woke this session. Read your board (board_query, readiness ready) and work what is ready under your conductor rules: plan it, dispatch subagents for the reading and the work, and keep this session for decisions and review.` : `Sterling project ${sender} woke this session about board item ${item}, which this session holds. Read it (board_get) and work it under your conductor rules: plan it, dispatch subagents for the reading and the work, and keep this session for decisions and review.`;
 var USAGE = "usage: wake-project.mjs --project <registry name> [--checkout <folder> | --item <board item id>] [--dry-run]\n       wake-project.mjs --set-owner --project <registry name> --session <full session id> [--checkout <folder>]\n       wake-project.mjs --show-owners [--project <registry name> [--checkout <folder>]]";
 function parseArgs(argv) {
-  const args = { dryRun: false, setOwner: false, showOwners: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--dry-run") args.dryRun = true;
-    else if (a === "--set-owner") args.setOwner = true;
-    else if (a === "--show-owners") args.showOwners = true;
-    else if (a === "--project" || a === "--session" || a === "--checkout" || a === "--item") {
-      const v = argv[++i];
-      if (v === void 0 || v.startsWith("--")) throw new Fail(2, `${a} needs a value`);
-      args[a.slice(2)] = v;
-    } else throw new Fail(2, `unknown argument '${a}'
-${USAGE}`);
-  }
+  const got = parseFlags(argv, { values: ["--project", "--session", "--checkout", "--item"], bools: ["--dry-run", "--set-owner", "--show-owners"], usage: USAGE });
+  const args = { dryRun: got["dry-run"] === true, setOwner: got["set-owner"] === true, showOwners: got["show-owners"] === true };
+  for (const k of ["project", "session", "checkout", "item"]) if (got[k] !== void 0) args[k] = got[k];
   if (args.showOwners && args.setOwner) throw new Fail(2, "--show-owners and --set-owner do not combine");
   if (args.item !== void 0) {
     if (args.showOwners || args.setOwner) throw new Fail(2, "--item goes with a wake only");
