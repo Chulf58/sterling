@@ -31851,7 +31851,7 @@ function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "b
   const dbPath = join11(root, ".sterling", "sterling.db");
   if (!existsSync4(dbPath))
     throw refuse(`it has no store at ${dbPath}, and ${w.neverCreates}`);
-  return { name: resolvedName, root, dbPath, selfName };
+  return { name: resolvedName, root, dbPath, selfName, leaseMinutes: route.config.board_claims.lease_minutes };
 }
 
 // packages/mcp-server/dist/attestation-proof.js
@@ -39582,7 +39582,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     } catch (e) {
       throw new Error(`${tool}: target_project '${target_project}' could not be read: ${e?.message ?? String(e)}. Nothing was written.`);
     }
-    return { source: { source_project: target.name, source_root: target.root }, result };
+    return { source: { source_project: target.name, source_root: target.root }, result, claimOpts: { ...this.claimReadOptions(), leaseMinutes: target.leaseMinutes } };
   }
   /** What every foreign read discloses about the other store: a schema-version difference, unreadable rows, a cut-short read. */
   static foreignDisclosures(read, notes) {
@@ -39646,7 +39646,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw new Error(`board_query: source:'system' cannot go with target_project \u2014 only another project's user board is read, never its maintenance queue. Nothing was read.`);
     }
     const after = filter.cursor !== void 0 && filter.offset === void 0 ? decodeBoardCursor("board_query", filter.cursor) : void 0;
-    const { source, result: read } = this.readForeignTarget(filter.target_project, "board_query", (dbPath) => readForeignBoard(dbPath, { ...this.foreignBoardRead, ...after ? { after: { updated_at: after.updated_at, id: after.id } } : {} }));
+    const { source, result: read, claimOpts: targetClaimOpts } = this.readForeignTarget(filter.target_project, "board_query", (dbPath) => readForeignBoard(dbPath, { ...this.foreignBoardRead, ...after ? { after: { updated_at: after.updated_at, id: after.id } } : {} }));
     let matching = read.items;
     if (filter.contains) {
       const needle = filter.contains.toLowerCase();
@@ -39666,11 +39666,10 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       }
       const all = read.items;
       const wanted = new Set(filter.readiness);
-      const claimOpts = this.claimReadOptions();
       const states = new Map(boardReadinessOf(all, all, (slug) => read.slugHolders.get(slug)).map((r) => [r.id, r.state]));
       matching = matching.filter((t) => {
         const state = states.get(String(t.id));
-        return state !== void 0 && wanted.has(reportedReadiness(state, claimStateOf(t, claimOpts).claim_state));
+        return state !== void 0 && wanted.has(reportedReadiness(state, claimStateOf(t, targetClaimOpts).claim_state));
       });
     }
     if (filter.handoff_to_item_id !== void 0) {
@@ -39690,10 +39689,10 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       notes.push(`cap reached \u2014 showing ${records.length} of ${ordered.length} matching items; page with cursor:"${page.next_cursor}"` + (filter.cursor === void 0 ? ` or offset:${page.offset + records.length}` : "") + `, or raise cap`);
     }
     const disclosures = _SterlingTools.foreignDisclosures(read, notes);
-    const derived = projection === "text" || projection === "full" ? _SterlingTools.foreignDerived(read, records, this.claimReadOptions()) : /* @__PURE__ */ new Map();
+    const derived = projection === "text" || projection === "full" ? _SterlingTools.foreignDerived(read, records, targetClaimOpts) : /* @__PURE__ */ new Map();
     const projected = records.map((r) => {
       const base2 = projection === "text" ? textRowRecord(r) : projection === "headline" ? headlineRecord(r) : projection === "digest" ? digestRecord(r) : { ...r };
-      const claim = projection === "digest" ? claimStateOf(r, this.claimReadOptions()) : {};
+      const claim = projection === "digest" ? claimStateOf(r, targetClaimOpts) : {};
       return { ...base2, ...derived.get(String(r.id)), ...claim, ...source };
     });
     return {
@@ -39719,7 +39718,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * historical-id archive is not searched there, and the result says so.
    */
   foreignBoardGet(id, target_project) {
-    const { source, result } = this.readForeignTarget(target_project, "board_get", (dbPath) => getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead));
+    const { source, result, claimOpts } = this.readForeignTarget(target_project, "board_get", (dbPath) => getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead));
     if ("refused" in result.lookup) {
       throw new Error(`board_get: '${id}' ${result.lookup.refused} (a full uuid, exact slug or 8-char prefix; the maintenance queue is not read and the historical-id archive is not searched for another project)`);
     }
@@ -39730,7 +39729,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     return {
       ...hit,
       ...label ? { label } : {},
-      ..._SterlingTools.foreignDerived(result.board, [hit], this.claimReadOptions()).get(String(hit.id)),
+      ..._SterlingTools.foreignDerived(result.board, [hit], claimOpts).get(String(hit.id)),
       ...source,
       historical_ids: "not searched: the historical-id archive is read for this project only",
       ...disclosures,

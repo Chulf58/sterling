@@ -17,13 +17,13 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { ProjectRegistry } from '@sterling/store';
-import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { defaultBranch } from './lib/branch-manager.mjs';
 import { arg, hasFlag } from './lib/cli-args.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
+import { apiSend } from './lib/opencode-api.mjs';
 import { ContainmentError, containedPath, existsContained, readContained, writeContained, unlinkContained } from './lib/contained-fs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -203,44 +203,25 @@ export function resolveTarget(value, { cwd = process.cwd(), projects = registere
   throw new SessionRefusal(`REFUSED: --target '${value}' is neither a directory (no such directory: ${asPath}) nor a registered project (no such registered project; run list-projects.mjs to see them)`);
 }
 
-/** Run the opencode CLI: PATH first, then ~/.opencode/bin/opencode. Returns { status, stdout, stderr, error }. */
-export function runOpencode(args) {
-  let last;
-  for (const bin of ['opencode', join(homedir(), '.opencode', 'bin', 'opencode')]) {
-    last = spawnSync(bin, args, { encoding: 'utf8', timeout: 30_000 });
-    if (last.error?.code !== 'ENOENT') break;
-  }
-  return { status: last.status, stdout: last.stdout ?? '', stderr: last.stderr ?? '', error: last.error };
-}
-
 const AGENT = 'sterling/conductor';
 
 /**
- * Create an OpenCode session located in the worktree (`opencode api POST /api/session`), so
- * the session has an id before anyone types. `run` is injectable (a test never reaches a
- * server). Exactly one POST per call, never retried: a retry after a lost response could
- * create a second session. Returns { id } or throws SessionRefusal.
+ * Create an OpenCode session located in the worktree (POST /api/session through the file-based
+ * client, scripts/lib/opencode-api.mjs), so the session has an id before anyone types. `send` is
+ * injectable (a test never reaches a server). Exactly one POST per call, never retried: a retry
+ * after a lost response could create a second session. Returns { id } or throws SessionRefusal.
  */
-export function createOpencodeSession({ path, title, run = runOpencode }) {
+export async function createOpencodeSession({ path, title, send = apiSend }) {
   const body = { location: { directory: path }, title, agent: AGENT };
-  const r = run(['api', 'POST', '/api/session', '-d', JSON.stringify(body)]);
-  const serverText = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim();
+  const r = await send('POST', '/api/session', body);
   let why;
-  let uncertain = false;
-  if (r.error) why = `${r.error.code ?? r.error.message}${r.error.code ? ` (${r.error.message})` : ''}${serverText ? `: ${serverText}` : ''}`;
-  else if (r.status !== 0) why = `exit ${r.status}${serverText ? `: ${serverText}` : ''}`;
+  let uncertain = r.uncertain === true;
+  if (!r.ok) why = r.why;
   else {
     uncertain = true; // the server answered success, so a session may exist whatever the body says
-    let id;
-    try {
-      id = JSON.parse(r.stdout)?.data?.id;
-    } catch (e) {
-      why = `the response was not JSON (${e.message})${serverText ? `: ${serverText}` : ''}`;
-    }
-    if (why === undefined) {
-      if (typeof id === 'string' && id) return { id };
-      why = `the response has no data.id${serverText ? `: ${serverText}` : ''}`;
-    }
+    const id = r.data?.data?.id;
+    if (typeof id === 'string' && id) return { id };
+    why = 'the response has no data.id';
   }
   throw new SessionRefusal(`REFUSED: --create-session could not create the OpenCode session (${why}). The worktree ${path} was created and is kept.${uncertain ? ' The server answered success, so a session MAY have been created anyway: check the OpenCode session list before retrying.' : ''} Start the OpenCode server with \`opencode service start\` and retry, or start it by hand: cd "${path}" && opencode`);
 }
@@ -292,7 +273,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-function main() {
+async function main() {
   const opts = parseArgs(process.argv.slice(2));
   try {
     if (opts.remove !== undefined) {
@@ -314,7 +295,7 @@ function main() {
     }
     let startCmd = 'opencode';
     if (opts.createSession) {
-      const made = createOpencodeSession({ path, title: `${basename(mainRoot)} ${label}` });
+      const made = await createOpencodeSession({ path, title: `${basename(mainRoot)} ${label}` });
       console.log(`session: ${made.id}`);
       startCmd = `opencode --session ${made.id}`;
     }

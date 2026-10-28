@@ -11994,7 +11994,11 @@ export class SterlingTools {
    * wording), its store read raw and read-only under a time budget, and nothing
    * is written there. Returns the read with the target it came from.
    */
-  private readForeignTarget<T>(target_project: string, tool: 'board_query' | 'board_get', read: (dbPath: string) => T): { source: ForeignSource; result: T } {
+  private readForeignTarget<T>(
+    target_project: string,
+    tool: 'board_query' | 'board_get',
+    read: (dbPath: string) => T
+  ): { source: ForeignSource; result: T; claimOpts: BoardReadinessOptions } {
     // This board's hand-off trackers, read only when the name is not a current
     // registry name: a receiver renamed since the hand-off stays readable under
     // the name its trackers carry (GitHub issue #117).
@@ -12012,7 +12016,8 @@ export class SterlingTools {
     } catch (e) {
       throw new Error(`${tool}: target_project '${target_project}' could not be read: ${(e as Error)?.message ?? String(e)}. Nothing was written.`);
     }
-    return { source: { source_project: target.name, source_root: target.root }, result };
+    // A claim in another project is judged by THAT project's lease, not this one's.
+    return { source: { source_project: target.name, source_root: target.root }, result, claimOpts: { ...this.claimReadOptions(), leaseMinutes: target.leaseMinutes } };
   }
 
   /** What every foreign read discloses about the other store: a schema-version difference, unreadable rows, a cut-short read. */
@@ -12091,7 +12096,7 @@ export class SterlingTools {
     // A cursor's rows are read first, so its page is reached even when the
     // budget runs out before the rows ahead of it are counted.
     const after = filter.cursor !== undefined && filter.offset === undefined ? decodeBoardCursor('board_query', filter.cursor) : undefined;
-    const { source, result: read } = this.readForeignTarget(filter.target_project, 'board_query', (dbPath) =>
+    const { source, result: read, claimOpts: targetClaimOpts } = this.readForeignTarget(filter.target_project, 'board_query', (dbPath) =>
       readForeignBoard(dbPath, { ...this.foreignBoardRead, ...(after ? { after: { updated_at: after.updated_at, id: after.id } } : {}) })
     );
     let matching = read.items;
@@ -12117,11 +12122,10 @@ export class SterlingTools {
       type Input = Parameters<typeof boardReadinessOf>[0][number];
       const all = read.items as unknown as Input[];
       const wanted = new Set<string>(filter.readiness);
-      const claimOpts = this.claimReadOptions();
       const states = new Map(boardReadinessOf(all, all, (slug) => read.slugHolders.get(slug)).map((r) => [r.id, r.state]));
       matching = matching.filter((t) => {
         const state = states.get(String(t.id));
-        return state !== undefined && wanted.has(reportedReadiness(state, claimStateOf(t, claimOpts).claim_state));
+        return state !== undefined && wanted.has(reportedReadiness(state, claimStateOf(t, targetClaimOpts).claim_state));
       });
     }
     if (filter.handoff_to_item_id !== undefined) {
@@ -12145,12 +12149,12 @@ export class SterlingTools {
       );
     }
     const disclosures = SterlingTools.foreignDisclosures(read, notes);
-    const derived = projection === 'text' || projection === 'full' ? SterlingTools.foreignDerived(read, records, this.claimReadOptions()) : new Map<string, Record<string, unknown>>();
+    const derived = projection === 'text' || projection === 'full' ? SterlingTools.foreignDerived(read, records, targetClaimOpts) : new Map<string, Record<string, unknown>>();
     const projected = records.map((r) => {
       const base =
         projection === 'text' ? textRowRecord(r) : projection === 'headline' ? headlineRecord(r) : projection === 'digest' ? digestRecord(r) : { ...r };
       // A digest row carries claim_state from the row, as the local read does.
-      const claim = projection === 'digest' ? claimStateOf(r, this.claimReadOptions()) : {};
+      const claim = projection === 'digest' ? claimStateOf(r, targetClaimOpts) : {};
       return { ...base, ...derived.get(String(r.id)), ...claim, ...source };
     });
     return {
@@ -12177,7 +12181,7 @@ export class SterlingTools {
    * historical-id archive is not searched there, and the result says so.
    */
   foreignBoardGet(id: string, target_project: string): Record<string, unknown> {
-    const { source, result } = this.readForeignTarget(target_project, 'board_get', (dbPath) =>
+    const { source, result, claimOpts } = this.readForeignTarget(target_project, 'board_get', (dbPath) =>
       getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead)
     );
     if ('refused' in result.lookup) {
@@ -12193,7 +12197,7 @@ export class SterlingTools {
     return {
       ...hit,
       ...(label ? { label } : {}),
-      ...SterlingTools.foreignDerived(result.board, [hit], this.claimReadOptions()).get(String(hit.id)),
+      ...SterlingTools.foreignDerived(result.board, [hit], claimOpts).get(String(hit.id)),
       ...source,
       historical_ids: 'not searched: the historical-id archive is read for this project only',
       ...disclosures,
