@@ -14,6 +14,10 @@
 // after a `sent: maybe` result, run the SAME command again; it looks the prompt up and resends it with the
 // same message id only when it is absent, so the owner never sees it twice.
 //
+// --item <board item id> routes by the item's claim (scripts/lib/claim-route.mjs): a held claim sends the notice to its
+// holder in the holder's checkout, never to the owner; no claim or an expired one goes to the owner. It does not
+// combine with --all or --checkout.
+//
 // --all sends to every other registered project whose main checkout has an owner record and whose
 // multi_session is on; the others are listed as skipped. One JSON line per project. Exit 0 only when every
 // destination was queued (or found delivered); exit 2 for bad arguments.
@@ -21,12 +25,13 @@ import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Fail, deliver, realDeps, senderName } from './lib/owner-session.mjs';
 import { projectContext } from './lib/session-inventory.mjs';
+import { isItemRef } from './lib/claim-route.mjs';
 
 export const noticeText = (sender, text) => `[Sterling notice from project ${sender}] ${text}`;
 
-const USAGE = 'usage: notify-project.mjs (--project <registry name> [--checkout <folder>] | --all) --text <message> [--dry-run]\n'
+const USAGE = 'usage: notify-project.mjs (--project <registry name> [--checkout <folder> | --item <board item id>] | --all) --text <message> [--dry-run]\n'
   + 'After a sent: maybe result, run the same command again: it resends with the same message id only when the prompt is absent.';
-const OWN_FLAGS = new Set(['--project', '--text', '--all', '--dry-run', '--checkout']);
+const OWN_FLAGS = new Set(['--project', '--text', '--all', '--dry-run', '--checkout', '--item']);
 
 export function parseArgs(argv) {
   const args = { dryRun: false, all: false };
@@ -34,7 +39,7 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--all') args.all = true;
-    else if (a === '--project' || a === '--text' || a === '--checkout') {
+    else if (a === '--project' || a === '--text' || a === '--checkout' || a === '--item') {
       const v = argv[++i];
       // A message may start with dashes; only this script's own flags are refused as a value.
       if (v === undefined || (a === '--text' ? OWN_FLAGS.has(v) : v.startsWith('--'))) throw new Fail(2, `${a} needs a value`);
@@ -44,6 +49,11 @@ export function parseArgs(argv) {
   if (args.text === undefined || args.text.trim() === '') throw new Fail(2, USAGE);
   if (args.all === (args.project !== undefined)) throw new Fail(2, 'give either --project <registry name> or --all');
   if (args.all && args.checkout !== undefined) throw new Fail(2, '--checkout is for one project: it does not combine with --all');
+  if (args.item !== undefined) {
+    if (args.all) throw new Fail(2, '--item is for one project: it does not combine with --all');
+    if (args.checkout !== undefined) throw new Fail(2, '--item names its checkout itself (the holder\'s), so it does not combine with --checkout');
+    if (!isItemRef(args.item)) throw new Fail(2, `--item takes a board item id, 8-character prefix or slug, got ${JSON.stringify(args.item)}`);
+  }
   return args;
 }
 
@@ -75,7 +85,7 @@ export async function main(argv, deps, io) {
     const registry = await deps.listProjects();
     const sender = await senderName(deps, registry);
     const text = noticeText(sender, args.text);
-    const one = (project) => deliver('notify', { project, checkout: args.checkout, dryRun: args.dryRun, body: args.text }, deps, registry, text);
+    const one = (project) => deliver('notify', { project, checkout: args.checkout, item: args.item, dryRun: args.dryRun, body: args.text }, deps, registry, text);
     let results;
     if (args.all) {
       const { targets, skipped } = await allTargets(deps, registry, sender);

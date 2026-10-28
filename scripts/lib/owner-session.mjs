@@ -24,6 +24,7 @@ import { basename, isAbsolute, join } from 'node:path';
 import { registryPath, readRegistrySnapshotReadOnly } from '@sterling/store';
 import { createHttpApi, prepareSend } from './opencode-api.mjs';
 import { readOwner, transitionOwner } from './owner-record.mjs';
+import { ClaimProblem, readItemClaim, realClaimReader, recheckClaim, summarize as summarizeClaim } from './claim-route.mjs';
 import { readMultiSession } from './multi-session.mjs';
 import { deliveryJournal, newMessageId } from './delivery-journal.mjs';
 import { resolveProjectRoots } from './worktree-root.mjs';
@@ -372,19 +373,46 @@ export async function deliver(kind, args, deps, registry, text) {
   const out = { project: args.project, sent: 'none' };
   try {
     const ctx = await projectContext(deps, registry, args.project);
-    const scope = await resolveCheckout(deps, ctx, args.checkout);
+    let scope = await resolveCheckout(deps, ctx, args.checkout);
     if (args.checkout !== undefined) out.checkout = scope.canonicalRoot;
     const settings = deps.readMultiSession(ctx.root);
     if (!settings.enabled && !args.dryRun) {
       throw new Refused('multi_session_off', `${args.project} has the multi-session toolkit off (multi_session.enabled is false), so it takes no ${kind}; it turns it on with config_set path "multi_session.enabled" value true`);
     }
-    const recorded = deps.readOwner(scope.root);
-    if (recorded === null) {
-      throw new Refused('no_owner', `no owner session is recorded for ${scope.main ? args.project : `the checkout ${scope.canonicalRoot} of ${args.project}`}; the plugin records the session the user last prompted there, or run ${setOwnerCommand({ project: args.project, session: '<id>', checkout: scope.main ? undefined : scope.canonicalRoot })} from that project`);
+    // --item: the claim on the board item decides the destination (claim-route.mjs). A held claim makes its holder the
+    // recipient, in the holder's checkout, and the owner record is not consulted; no claim or an expired one leaves the
+    // owner as the recipient. Either way the claim is read again right before the send (admitAndSend).
+    let route = null;
+    if (args.item !== undefined) {
+      if (args.checkout !== undefined) throw new Fail(2, '--item names its checkout itself (the holder\'s), so it does not combine with --checkout');
+      const before = readItemClaim(deps, ctx.root, args.project, args.item);
+      out.item = args.item;
+      out.claim = summarizeClaim(args.item, before);
+      route = { item: args.item, before, root: ctx.root, holder: before.state === 'held' };
     }
-    out.session = recorded.session;
-    const first = await usableOwner(deps, recorded.session, scope);
-    if (!first.ok) throw new Refused('owner_missing', `${first.why}; nothing sent`);
+    let recorded = null;
+    let first;
+    if (route?.holder) {
+      const claim = route.before;
+      try {
+        scope = await resolveCheckout(deps, ctx, claim.checkout);
+      } catch (e) {
+        if (!(e instanceof Fail)) throw e;
+        throw new Refused('holder_missing', `the claim on item ${args.item} is held by session ${claim.holder_session} from ${claim.checkout}, which is not a usable checkout of ${args.project} (${e.message}); not sending it to anyone else, nothing sent`);
+      }
+      out.checkout = scope.canonicalRoot;
+      out.session = claim.holder_session;
+      first = await usableOwner(deps, claim.holder_session, scope);
+      if (!first.ok) throw new Refused('holder_missing', `the claim on item ${args.item} is held by session ${claim.holder_session}, but ${first.why.replace(/^session \S+ /, 'it ')}; not sending it to anyone else, nothing sent`);
+    } else {
+      recorded = deps.readOwner(scope.root);
+      if (recorded === null) {
+        throw new Refused('no_owner', `no owner session is recorded for ${scope.main ? args.project : `the checkout ${scope.canonicalRoot} of ${args.project}`}; the plugin records the session the user last prompted there, or run ${setOwnerCommand({ project: args.project, session: '<id>', checkout: scope.main ? undefined : scope.canonicalRoot })} from that project`);
+      }
+      out.session = recorded.session;
+      first = await usableOwner(deps, recorded.session, scope);
+      if (!first.ok) throw new Refused('owner_missing', `${first.why}; nothing sent`);
+    }
     let release = null;
     if (!args.dryRun) {
       try {
@@ -395,17 +423,22 @@ export async function deliver(kind, args, deps, registry, text) {
       }
     }
     try {
-      return await admitAndSend(kind, args, deps, registry, text, { out, scope, owner: first, recorded });
+      return await admitAndSend(kind, args, deps, registry, text, { out, scope, owner: first, recorded, route });
     } finally {
       if (release) await release();
     }
-  } catch (e) {
-    if (e instanceof Refused) return { ...out, status: 'refused', reason: e.reason, why: e.why };
+  } catch (raw) {
+    const e = asRefused(raw);
+    // Input waiting at a claim holder is the holder's own word for it.
+    if (e instanceof Refused) return { ...out, status: 'refused', reason: out.claim?.state === 'held' && e.reason === 'input_pending' ? 'holder_busy_form' : e.reason, why: e.why };
     return { ...out, status: 'failed', code: e instanceof Fail ? e.code : 1, error: String(e?.message ?? e) };
   }
 }
 
-async function admitAndSend(kind, args, deps, registry, text, { out, scope, owner, recorded }) {
+// A claim problem leaves as the refusal of the same word.
+const asRefused = (e) => (e instanceof ClaimProblem ? new Refused(e.reason, e.why) : e);
+
+async function admitAndSend(kind, args, deps, registry, text, { out, scope, owner, recorded, route }) {
   const journal = args.dryRun ? null : deps.journal();
   const target = { project: args.project, checkout: scope.canonicalRoot };
   // Recovery first: a prompt this sender may have sent to this checkout is settled before anything new goes out.
@@ -445,9 +478,14 @@ async function admitAndSend(kind, args, deps, registry, text, { out, scope, owne
     if (last) throw last;
     // The owner record is the target runtime's: re-read synchronously after the closing activity read, so a /new or a
     // --set-owner at any point of the admission sends nothing. Nothing is awaited from here to the POST.
-    const now = deps.readOwner(scope.root);
-    if (now?.session !== recorded.session) throw new Refused('owner_changed', `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? 'none'} during the admission; nothing sent`);
-  } catch (e) {
+    if (recorded) {
+      const now = deps.readOwner(scope.root);
+      if (now?.session !== recorded.session) throw new Refused('owner_changed', `the owner of the checkout changed from ${recorded.session} to ${now?.session ?? 'none'} during the admission; nothing sent`);
+    }
+    // --item: the claim is read again in the same synchronous step, for the owner route and the holder route alike.
+    if (route) recheckClaim(deps, route.root, args.project, route.item, route.before);
+  } catch (raw) {
+    const e = asRefused(raw);
     const why = `not sent: ${e instanceof Refused ? `${e.reason}: ${e.why}` : String(e?.message ?? e)}`;
     await post?.discard();
     await journal.settle(id, resend ? 'uncertain' : 'failed', resend ? `${resend.why ?? 'an earlier attempt may have been sent'}; a resend was refused (${why})` : why);
@@ -502,6 +540,7 @@ export function realDeps() {
     readOwner,
     transitionOwner,
     readMultiSession,
+    readClaim: (req) => realClaimReader(req),
     runLock: (key) => holdRunLock(key),
     senderRoot,
     cwd: process.cwd(),
