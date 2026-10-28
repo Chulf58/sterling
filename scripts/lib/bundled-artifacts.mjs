@@ -373,6 +373,8 @@ export const BIN_ENTRIES = {
   'domain-doctor': 'scripts/domain-doctor.mjs',
   // the domain map and --apply that commands/domains.md runs in a consumer project
   domains: 'scripts/domains.mjs',
+  // the cross-project expired-claim reader (slice 4 of the multi-session toolkit); read-only inspection, no multi_session.enabled needed
+  'expired-claims': 'scripts/expired-claims.mjs',
   'fs-remove': 'scripts/fs-remove.mjs',
   'handoff-projection': 'scripts/handoff-projection.mjs',
   init: 'scripts/init-impl.mjs',

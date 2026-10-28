@@ -337,42 +337,34 @@ test('CLI: --target <registry name> run from another folder opens the session in
   }
 });
 
-const okRun = (calls) => (args) => {
-  calls.push(args);
-  return { status: 0, stdout: JSON.stringify({ data: { id: 'ses_abc', location: { directory: '/w' } } }), stderr: '' };
+const okSend = (calls) => async (method, path, body) => {
+  calls.push({ method, path, body });
+  return { ok: true, data: { data: { id: 'ses_abc', location: { directory: '/w' } } } };
 };
 
-test('createOpencodeSession: posts the worktree location, title and agent, and returns the id', () => {
+test('createOpencodeSession: posts the worktree location, title and agent, and returns the id', async () => {
   const calls = [];
-  const r = createOpencodeSession({ path: '/w/proj.worktrees/s', title: 'proj s', run: okRun(calls) });
+  const r = await createOpencodeSession({ path: '/w/proj.worktrees/s', title: 'proj s', send: okSend(calls) });
   assert.deepEqual(r, { id: 'ses_abc' });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].slice(0, 3), ['api', 'POST', '/api/session']);
-  assert.deepEqual(JSON.parse(calls[0][4]), { location: { directory: '/w/proj.worktrees/s' }, title: 'proj s', agent: 'sterling/conductor' });
+  assert.deepEqual([calls[0].method, calls[0].path], ['POST', '/api/session']);
+  assert.deepEqual(calls[0].body, { location: { directory: '/w/proj.worktrees/s' }, title: 'proj s', agent: 'sterling/conductor' });
 });
 
-test('createOpencodeSession: every failure shape refuses after exactly one POST, naming opencode service start and the server text', () => {
+test('createOpencodeSession: every failure shape refuses after exactly one POST, naming opencode service start and the server text', async () => {
   const bad = [
-    [{ status: 1, stdout: '', stderr: 'connection refused' }, /connection refused/, false],
-    [{ status: 0, stdout: 'not json', stderr: '' }, /not JSON/, true],
-    [{ status: 0, stdout: '{"data":{}}', stderr: '' }, /no data\.id/, true],
-    [{ status: null, stdout: '', stderr: '', error: new Error('spawn opencode ENOENT') }, /ENOENT/, false],
+    [{ ok: false, uncertain: false, why: 'exit 1: connection refused' }, /connection refused/, false],
+    [{ ok: false, uncertain: true, why: 'exit 1: read ECONNRESET' }, /ECONNRESET/, true],
+    [{ ok: false, uncertain: true, why: 'the response was not JSON (x): not json' }, /not JSON/, true],
+    [{ ok: true, data: { data: {} } }, /no data\.id/, true],
+    [{ ok: false, uncertain: true, why: 'timed out' }, /timed out/, true],
   ];
   for (const [result, why, maybeCreated] of bad) {
     let posts = 0;
-    assert.throws(() => createOpencodeSession({ path: '/w', title: 't', run: () => (posts++, result) }),
+    await assert.rejects(createOpencodeSession({ path: '/w', title: 't', send: async () => (posts++, result) }),
       (e) => e instanceof SessionRefusal && e.exit === 2 && /opencode service start/.test(e.message) && /kept/.test(e.message) && why.test(e.message) && /MAY have been created/.test(e.message) === maybeCreated);
     assert.equal(posts, 1, 'no retry');
   }
-});
-
-test('createOpencodeSession: a spawn error keeps the server text captured before it and its error code', () => {
-  let posts = 0;
-  const err = Object.assign(new Error('spawnSync opencode ETIMEDOUT'), { code: 'ETIMEDOUT' });
-  const run = () => (posts++, { status: null, stdout: '', stderr: 'database is locked', error: err });
-  assert.throws(() => createOpencodeSession({ path: '/w', title: 't', run }),
-    (e) => e instanceof SessionRefusal && e.exit === 2 && /ETIMEDOUT/.test(e.message) && /database is locked/.test(e.message) && /opencode service start/.test(e.message));
-  assert.equal(posts, 1);
 });
 
 test('CLI: --create-session makes exactly one API call and prints the id; without it no API call is made', () => {
@@ -388,7 +380,11 @@ if [ "$1" = "api" ]; then echo "$@" >> "${log}"; echo '{"data":{"id":"ses_fake1"
 exit 0
 `, { mode: 0o755 });
     // a real setup must run: the suite environment may carry STERLING_OPENCODE_SETUP_DISABLE=1
-    const env = cleanEnv({ HOME: f.home, PATH: `${bin}:${process.env.PATH}` });
+    // the client reads the shared server's registration from $XDG_STATE_HOME/opencode/service.json
+    const state = join(f.base, 'state');
+    mkdirSync(join(state, 'opencode'), { recursive: true });
+    writeFileSync(join(state, 'opencode', 'service.json'), JSON.stringify({ url: 'http://127.0.0.1:1', password: 'test-pass' }));
+    const env = cleanEnv({ HOME: f.home, XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` });
     delete env.STERLING_OPENCODE_SETUP_DISABLE;
     const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env, cwd: f.main });
     const plain = run(['--name', 'nocall']);
@@ -399,7 +395,8 @@ exit 0
     assert.equal(made.status, 0, made.stderr);
     const calls = readFileSync(log, 'utf8').trim().split('\n');
     assert.equal(calls.length, 1);
-    assert.match(calls[0], /^api POST \/api\/session /);
+    assert.match(calls[0], /^api post \/api\/session -d /);
+    assert.match(calls[0], /--server http:\/\/127\.0\.0\.1:1$/);
     assert.match(calls[0], /sterling\/conductor/);
     assert.match(made.stdout, /^session: ses_fake1$/m);
     assert.match(made.stdout, /&& opencode --session ses_fake1/);

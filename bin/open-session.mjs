@@ -8,7 +8,7 @@ var __export = (target, all) => {
 
 // scripts/open-session.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync5, readFileSync as readFileSync7, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync5, readFileSync as readFileSync8, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5795,8 +5795,8 @@ var ProjectRegistry = class {
       const own = this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(input.repo_path);
       if (own) {
         this.db.prepare("UPDATE projects SET name = ?, stack_tags = ?, toolchains = ?, sterling_version = ?, last_init_at = ? WHERE repo_path = ?").run(input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.repo_path);
-        const open = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
-        if (!open)
+        const open2 = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
+        if (!open2)
           this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, own.project_key, input.at);
         return;
       }
@@ -5968,8 +5968,7 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
 // scripts/open-session.mjs
-import { homedir as homedir6 } from "node:os";
-import { basename as basename4, dirname as dirname5, join as join12, resolve as resolve8 } from "node:path";
+import { basename as basename4, dirname as dirname5, join as join13, resolve as resolve8 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/opencode-install.mjs
@@ -7477,10 +7476,10 @@ var FENCE_KINDS = {
 };
 var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
 var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
-var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
+var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
 function classify(line) {
-  for (const [kind, { open, close }] of Object.entries(FENCE_KINDS)) {
-    if (line === open) return { kind, role: "open" };
+  for (const [kind, { open: open2, close }] of Object.entries(FENCE_KINDS)) {
+    if (line === open2) return { kind, role: "open" };
     if (line === close) return { kind, role: "close" };
   }
   return null;
@@ -7972,9 +7971,9 @@ var HandoffGitError = class extends HandoffSettingError {
   }
 };
 var GIT_TIMEOUT_MS = 3e4;
-function trackedHandoffFiles(root, { spawn = spawnSync3 } = {}) {
+function trackedHandoffFiles(root, { spawn: spawn2 = spawnSync3 } = {}) {
   const run = (args) => {
-    const r = spawn("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const r = spawn2("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
     const name = `git ${args[0]}`;
     if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
     if (r.status !== 0) {
@@ -9189,6 +9188,170 @@ function hasFlag(name, argv = process.argv.slice(2)) {
   return count === 1;
 }
 
+// scripts/lib/opencode-api.mjs
+import { spawn } from "node:child_process";
+import { existsSync as existsSync9, readFileSync as readFileSync7 } from "node:fs";
+import { mkdtemp, open, rm } from "node:fs/promises";
+import { homedir as homedir6, tmpdir } from "node:os";
+import { delimiter, join as join12 } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+var LOOPBACK = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+$/;
+function readService(file) {
+  let text;
+  try {
+    text = readFileSync7(file, "utf8");
+  } catch (err) {
+    throw new Error(`OpenCode service file ${file} unreadable (${err.code ?? "read error"}); is the shared OpenCode server running?`);
+  }
+  let s;
+  try {
+    s = JSON.parse(text);
+  } catch {
+    throw new Error(`OpenCode service file ${file} is not valid JSON`);
+  }
+  const url = typeof s?.url === "string" ? s.url.replace(/\/+$/, "") : "";
+  if (!LOOPBACK.test(url)) throw new Error(`OpenCode service file ${file}: url is not a loopback http URL`);
+  if (typeof s.password !== "string" || !s.password) throw new Error(`OpenCode service file ${file} has no password`);
+  return { url, password: s.password };
+}
+var MAX_STDERR = 1024 * 1024;
+var MAX_STDOUT = 64 * 1024 * 1024;
+var serviceFilePath = () => join12(process.env.XDG_STATE_HOME ?? join12(homedir6(), ".local", "state"), "opencode", "service.json");
+var CLI_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_.*|TZ|TMPDIR|TMP|TEMP|XDG_.*|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|OPENCODE_.*)$/;
+function runToFile(bin, args, fd, timeoutMs, password) {
+  return new Promise((resolve9) => {
+    let child;
+    try {
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "OPENCODE_PASSWORD" && CLI_ENV.test(key)));
+      env.OPENCODE_PASSWORD = password;
+      child = spawn(bin, args, { stdio: ["ignore", fd, "pipe"], env });
+    } catch {
+      resolve9({ code: 1, stderr: "OpenCode API process could not start" });
+      return;
+    }
+    let stderr = "";
+    let cut = false;
+    let timer = null;
+    let settled = false;
+    const keepTail = () => {
+      if (stderr.length > MAX_STDERR) {
+        stderr = stderr.slice(-MAX_STDERR);
+        cut = true;
+      }
+    };
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      keepTail();
+      resolve9({ ...result, stderr: result.stderr ?? (cut ? `[stderr cut to its last ${MAX_STDERR} characters]
+${stderr}` : stderr) });
+    };
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (s) => {
+      stderr += s;
+      if (stderr.length > 2 * MAX_STDERR) keepTail();
+    });
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        child.stderr.destroy();
+        settle({ code: 124, stderr: `${bin} timed out after ${timeoutMs} ms and was killed` });
+      }, timeoutMs);
+    }
+    child.on("error", (e) => settle({ code: 1, stderr: String(e.message) }));
+    child.on("close", (code) => settle({ code: typeof code === "number" ? code : 1 }));
+  });
+}
+async function readAll(reader, size) {
+  const buf = Buffer.alloc(size);
+  let at = 0;
+  while (at < size) {
+    const { bytesRead } = await reader.read(buf, at, size - at, at);
+    if (bytesRead === 0) break;
+    at += bytesRead;
+  }
+  return buf.subarray(0, at).toString("utf8");
+}
+async function opencodeApi(bin, method, path, body, timeoutMs = 0, { maxStdout = MAX_STDOUT } = {}) {
+  const deadline = timeoutMs > 0 ? performance.now() + timeoutMs : Infinity;
+  let service;
+  try {
+    service = readService(serviceFilePath());
+  } catch (err) {
+    return { code: 1, stdout: "", stderr: err.message };
+  }
+  if (service.password.includes("\0")) {
+    return { code: 1, stdout: "", stderr: "OpenCode service password cannot be used in the child environment" };
+  }
+  const args = ["api", method.toLowerCase(), path, ...body === void 0 ? [] : ["-d", body], "--server", service.url];
+  let result;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const remaining = Math.ceil(deadline - performance.now());
+    if (remaining <= 0) return result ?? { code: 124, stdout: "", stderr: `${bin} timed out after ${timeoutMs} ms and was killed` };
+    result = await runAttempt(bin, args, method, path, timeoutMs, deadline, service.password, maxStdout);
+    const diagnostic = `Error: Could not reach server at ${service.url}`;
+    if (method.toUpperCase() !== "GET" || result.code === 0 || result.code === 124 || result.stdout !== "" || result.stderr.split("\n")[0] !== diagnostic || attempt === 2) return result;
+    const delay = [250, 1e3][attempt];
+    if (performance.now() + delay >= deadline) return result;
+    await sleep(delay);
+  }
+}
+async function runAttempt(bin, args, method, path, timeoutMs, deadline, password, maxStdout) {
+  const dir = await mkdtemp(join12(tmpdir(), "sterling-api-"));
+  let out = null;
+  let reader = null;
+  try {
+    try {
+      out = await open(join12(dir, "stdout"), "w", 384);
+      reader = await open(join12(dir, "stdout"), "r");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    const remaining = Math.ceil(deadline - performance.now());
+    if (remaining <= 0) return { code: 124, stdout: "", stderr: `${bin} timed out after ${timeoutMs} ms and was killed` };
+    const result = await runToFile(bin, args, out.fd, Number.isFinite(remaining) ? remaining : 0, password);
+    const { size } = await reader.stat();
+    if (size > maxStdout) {
+      const over = `${bin} api ${method.toUpperCase()} ${path}: reply is ${size} bytes, over the ${maxStdout}-byte limit; not read`;
+      return { code: result.code !== 0 ? result.code : 1, stdout: "", stderr: result.stderr ? `${over}
+${result.stderr}` : over };
+    }
+    return { code: result.code, stdout: await readAll(reader, size), stderr: result.stderr };
+  } finally {
+    await out?.close();
+    await reader?.close();
+  }
+}
+function defaultOpencodeBin({ pathVar = process.env.PATH ?? "", home = homedir6(), exists = existsSync9 } = {}) {
+  for (const dir of pathVar.split(delimiter)) if (dir && exists(join12(dir, "opencode"))) return join12(dir, "opencode");
+  const installed = join12(home, ".opencode", "bin", "opencode");
+  return exists(installed) ? installed : "opencode";
+}
+var NOT_SENT = [
+  /^OpenCode service file /,
+  /^OpenCode service password cannot be used/,
+  /^OpenCode API process could not start/,
+  /^spawn \S+ (ENOENT|EACCES|EPERM)\b/,
+  /^Error: Could not reach server at /,
+  /^HTTP 4\d\d\b/
+];
+var provenNotSent = (stderr) => {
+  const first = String(stderr ?? "").trimStart().split("\n")[0];
+  return NOT_SENT.some((re) => re.test(first));
+};
+async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api: api2 = opencodeApi, timeoutMs = 3e4 } = {}) {
+  const r = await api2(bin, method, path, body === void 0 ? void 0 : JSON.stringify(body), timeoutMs);
+  const text = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();
+  if (r.code === 124) return { ok: false, uncertain: true, why: `timed out${text ? `: ${text}` : ""}` };
+  if (r.code !== 0) return { ok: false, uncertain: !provenNotSent(r.stderr), why: `exit ${r.code}${text ? `: ${text}` : ""}` };
+  try {
+    return { ok: true, data: JSON.parse(r.stdout) };
+  } catch (e) {
+    return { ok: false, uncertain: true, why: `the response was not JSON (${e.message})${text ? `: ${text}` : ""}` };
+  }
+}
+
 // scripts/open-session.mjs
 var here = dirname5(fileURLToPath2(new URL("../scripts/open-session.mjs", import.meta.url).href));
 var pluginRoot = resolve8(here, "..");
@@ -9218,7 +9381,7 @@ function resolveMainCheckout(target) {
   return linked ? linked.mainRoot : realpathSync6(top.stdout);
 }
 function worktreePathFor(mainRoot, label) {
-  return join12(dirname5(mainRoot), `${basename4(mainRoot)}.worktrees`, label);
+  return join13(dirname5(mainRoot), `${basename4(mainRoot)}.worktrees`, label);
 }
 function checkLabel(label) {
   if (!LABEL_SHAPE.test(label)) {
@@ -9233,7 +9396,7 @@ function registeredWorktrees(mainRoot) {
 function nextDefaultLabel(mainRoot) {
   for (let n = 2; ; n++) {
     const label = `session-${n}`;
-    if (!existsSync9(worktreePathFor(mainRoot, label)) && !branchExists(mainRoot, `${BRANCH_PREFIX}${label}`)) return label;
+    if (!existsSync10(worktreePathFor(mainRoot, label)) && !branchExists(mainRoot, `${BRANCH_PREFIX}${label}`)) return label;
   }
 }
 function openSession({ target, name, setup = setupOpenCode, pluginRootDir = pluginRoot }) {
@@ -9242,7 +9405,7 @@ function openSession({ target, name, setup = setupOpenCode, pluginRootDir = plug
   checkLabel(label);
   const branch = `${BRANCH_PREFIX}${label}`;
   const path = worktreePathFor(mainRoot, label);
-  if (existsSync9(path) || registeredWorktrees(mainRoot).includes(path)) {
+  if (existsSync10(path) || registeredWorktrees(mainRoot).includes(path)) {
     throw new SessionRefusal(`REFUSED: the worktree ${path} already exists; pick another --name, or remove it first with --remove ${label}`);
   }
   if (branchExists(mainRoot, branch)) {
@@ -9251,13 +9414,13 @@ function openSession({ target, name, setup = setupOpenCode, pluginRootDir = plug
   const base2 = defaultBranch(mainRoot);
   mkdirSync5(dirname5(path), { recursive: true });
   gitOrThrow(mainRoot, ["worktree", "add", "-b", branch, path, base2]);
-  const mainConfig = join12(mainRoot, ".sterling", "config.json");
+  const mainConfig = join13(mainRoot, ".sterling", "config.json");
   let copied = null;
   let result;
   try {
     containedPath(path, ".sterling", "dir");
-    if (!existsContained(path, CONFIG_REL3, "file") && existsSync9(mainConfig)) {
-      copied = readFileSync7(mainConfig, "utf8");
+    if (!existsContained(path, CONFIG_REL3, "file") && existsSync10(mainConfig)) {
+      copied = readFileSync8(mainConfig, "utf8");
       writeContained(path, CONFIG_REL3, copied);
     }
     result = setup({ projectDir: path, pluginRoot: pluginRootDir });
@@ -9305,7 +9468,7 @@ function registeredProjects() {
     registry.close();
   }
 }
-var isDirectory = (p) => existsSync9(p) && statSync4(p).isDirectory();
+var isDirectory = (p) => existsSync10(p) && statSync4(p).isDirectory();
 function resolveTarget(value, { cwd = process.cwd(), projects = registeredProjects } = {}) {
   const asPath = resolve8(cwd, value);
   const dir = isDirectory(asPath);
@@ -9322,35 +9485,18 @@ function resolveTarget(value, { cwd = process.cwd(), projects = registeredProjec
   if (roots.length > 1) throw new SessionRefusal(`REFUSED: --target '${value}' names ${roots.length} registered projects (${roots.join(", ")}); pass the path of the one you mean`);
   throw new SessionRefusal(`REFUSED: --target '${value}' is neither a directory (no such directory: ${asPath}) nor a registered project (no such registered project; run list-projects.mjs to see them)`);
 }
-function runOpencode(args) {
-  let last;
-  for (const bin of ["opencode", join12(homedir6(), ".opencode", "bin", "opencode")]) {
-    last = spawnSync6(bin, args, { encoding: "utf8", timeout: 3e4 });
-    if (last.error?.code !== "ENOENT") break;
-  }
-  return { status: last.status, stdout: last.stdout ?? "", stderr: last.stderr ?? "", error: last.error };
-}
 var AGENT = "sterling/conductor";
-function createOpencodeSession({ path, title, run = runOpencode }) {
+async function createOpencodeSession({ path, title, send = apiSend }) {
   const body = { location: { directory: path }, title, agent: AGENT };
-  const r = run(["api", "POST", "/api/session", "-d", JSON.stringify(body)]);
-  const serverText = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();
+  const r = await send("POST", "/api/session", body);
   let why;
-  let uncertain = false;
-  if (r.error) why = `${r.error.code ?? r.error.message}${r.error.code ? ` (${r.error.message})` : ""}${serverText ? `: ${serverText}` : ""}`;
-  else if (r.status !== 0) why = `exit ${r.status}${serverText ? `: ${serverText}` : ""}`;
+  let uncertain = r.uncertain === true;
+  if (!r.ok) why = r.why;
   else {
     uncertain = true;
-    let id;
-    try {
-      id = JSON.parse(r.stdout)?.data?.id;
-    } catch (e) {
-      why = `the response was not JSON (${e.message})${serverText ? `: ${serverText}` : ""}`;
-    }
-    if (why === void 0) {
-      if (typeof id === "string" && id) return { id };
-      why = `the response has no data.id${serverText ? `: ${serverText}` : ""}`;
-    }
+    const id = r.data?.data?.id;
+    if (typeof id === "string" && id) return { id };
+    why = "the response has no data.id";
   }
   throw new SessionRefusal(`REFUSED: --create-session could not create the OpenCode session (${why}). The worktree ${path} was created and is kept.${uncertain ? " The server answered success, so a session MAY have been created anyway: check the OpenCode session list before retrying." : ""} Start the OpenCode server with \`opencode service start\` and retry, or start it by hand: cd "${path}" && opencode`);
 }
@@ -9399,7 +9545,7 @@ function parseArgs(argv) {
   if (opts.remove !== void 0 && opts.createSession) usage("--remove and --create-session cannot be combined");
   return opts;
 }
-function main() {
+async function main() {
   const opts = parseArgs(process.argv.slice(2));
   try {
     if (opts.remove !== void 0) {
@@ -9423,7 +9569,7 @@ ${p}
     }
     let startCmd = "opencode";
     if (opts.createSession) {
-      const made = createOpencodeSession({ path, title: `${basename4(mainRoot)} ${label}` });
+      const made = await createOpencodeSession({ path, title: `${basename4(mainRoot)} ${label}` });
       console.log(`session: ${made.id}`);
       startCmd = `opencode --session ${made.id}`;
     }
@@ -9431,7 +9577,7 @@ ${p}
 Start the session in the worktree (never move an existing session into it):
   cd "${path}" && ${startCmd}`);
     console.log("Parallel sessions share the main checkout's board: claim a board task before working on it, so another session does not take the same one.");
-    console.log(`When the session is finished and its work is merged: node "${join12(pluginRoot, "bin", "open-session.mjs")}" --target "${mainRoot}" --remove ${label}`);
+    console.log(`When the session is finished and its work is merged: node "${join13(pluginRoot, "bin", "open-session.mjs")}" --target "${mainRoot}" --remove ${label}`);
   } catch (err) {
     if (!(err instanceof SessionRefusal)) throw err;
     console.error(err.message);
@@ -9447,7 +9593,6 @@ export {
   removeSession,
   resolveMainCheckout,
   resolveTarget,
-  runOpencode,
   worktreePathFor
 };
 /*! Bundled license information:

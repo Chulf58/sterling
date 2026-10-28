@@ -11766,6 +11766,7 @@ __export(dist_exports2, {
   readBoardSnapshot: () => readBoardSnapshot,
   readForeignBoard: () => readForeignBoard,
   readPgCredentials: () => readPgCredentials,
+  readRegistrySnapshotReadOnly: () => readRegistrySnapshotReadOnly,
   recordCentralTerms: () => recordCentralTerms,
   recordCentralityHits: () => recordCentralityHits,
   registryPath: () => registryPath,
