@@ -142,6 +142,12 @@ test('settling: released removes the reservation, uncertain keeps it for its TTL
   assert.deepEqual([rows['/w/b'].state, rows['/w/b'].expires_at, rows['/w/b'].holder, rows['/w/b'].detail.windowId, rows['/w/b'].socket], ['started', null, null, '$4', WORK]);
   assert.deepEqual([rows['/w/c'].state, rows['/w/c'].expires_at], ['uncertain', now + UNCERTAIN_TTL_MS]);
   assert.deepEqual(state.sockets, [{ socket: WORK, server: { pid: '9', start: '1700000000', proc_start: 'p9' }, first_seen: now }]);
+  // A reservation that is gone is written again on an uncertain settle, with the checkout given, so the start is never lost.
+  await settleLaunch(main, 'lr_gone', 'uncertain', { checkout: '/w/z', now: () => now });
+  const recreated = readReservations(main).reservations.find((r) => r.id === 'lr_gone');
+  assert.deepEqual([recreated?.checkout, recreated?.state, recreated?.expires_at], ['/w/z', 'uncertain', now + UNCERTAIN_TTL_MS]);
+  // Without a checkout it cannot be recorded again, and says so.
+  await assert.rejects(settleLaunch(main, 'lr_gone2', 'uncertain', { now: () => now }), /is gone and no checkout was given/);
 });
 
 test('a started reservation counts until its window is seen gone on its own server, however much time passes', async (t) => {
