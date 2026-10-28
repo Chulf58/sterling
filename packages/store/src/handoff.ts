@@ -294,7 +294,7 @@ export interface ResolveSentHandoffsOptions {
  * column, no occupancy table) reads keyless rows and no history, so trackers
  * resolve by their root's current row, then by name.
  */
-function readRegistrySnapshotReadOnly(path: string, busyTimeoutMs: number): RegistrySnapshot {
+export function readRegistrySnapshotReadOnly(path: string, busyTimeoutMs: number): RegistrySnapshot {
   const db = openForeignDbReadOnly(path, busyTimeoutMs);
   try {
     db.exec('BEGIN');

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { likelyReset, readProjectInventory, readProjectInventories, readSessionSnapshot, topLevelSessionsAt, parseGitWorktrees, STALE_SUBAGENT_NOTICE_MS, Fail } from '../lib/session-inventory.mjs';
+import { resolveProject, likelyReset, readProjectInventory, readProjectInventories, readSessionSnapshot, topLevelSessionsAt, parseGitWorktrees, STALE_SUBAGENT_NOTICE_MS, Fail } from '../lib/session-inventory.mjs';
 
 const ROOT = '/work/proj';
 const WT = '/work/proj.worktrees/branch';
@@ -630,3 +630,561 @@ test('an observed running session the observed snapshot lacks leaves the project
   const [verdict] = await readProjectInventories({ ...deps }, registry, [{ project: 'proj', owner: 'ses_owner' }], { snapshot, active: ['ses_unlisted'] });
   assert.equal(verdict.unknown, true);
 });
+
+// ---- Restored from CH.Hub: behaviour the port kept, driven through readProjectInventories directly. ----
+
+const readAll = (deps, registry, owners = {}, extra = {}) => readProjectInventories({ ...deps, ...extra }, registry, registry.map((r) => ({ project: r.name, owner: owners[r.name] })));
+const TWO_ROWS = [{ name: 'proj', repo_path: ROOT }, { name: 'other', repo_path: '/work/other' }];
+
+test('parseGitWorktrees reads the paths of `git worktree list --porcelain -z`, unquoted', () => {
+  const out = ['worktree /p/proj', 'HEAD abc', 'branch refs/heads/main', '', 'worktree /p/proj.worktrees/session 2', 'HEAD def', 'detached', '', ''].join('\0');
+  assert.deepEqual(parseGitWorktrees(out), ['/p/proj', '/p/proj.worktrees/session 2']);
+  assert.deepEqual(parseGitWorktrees(''), []);
+});
+
+test('resolveProject: a registered name gives its root without a trailing slash; none is exit 2, two roots is exit 1', () => {
+  assert.equal(resolveProject([{ name: 'a', repo_path: '/w/a/' }, { name: 'a', repo_path: '/w/a' }], 'a'), '/w/a');
+  assert.throws(() => resolveProject([], 'a'), (e) => e instanceof Fail && e.code === 2 && /not in the Sterling project registry/.test(e.message));
+  assert.throws(() => resolveProject([{ name: 'a', repo_path: '/w/a' }, { name: 'a', repo_path: '/v/a' }], 'a'), (e) => e instanceof Fail && e.code === 1 && /ambiguous/.test(e.message));
+  assert.throws(() => resolveProject('1 registered Sterling project:', 'a'), (e) => e instanceof Fail && e.code === 1);
+});
+
+test('a session page that holds sessions is still refused with no cursor, a cursor that is not an object, or a next cursor that is a number or empty', async () => {
+  const { deps } = machine();
+  for (const cursor of [undefined, null, 'next', ['c1'], { next: 7 }, { next: '' }, { next: {} }]) {
+    const page = cursor === undefined ? { data: [row('ses_a')] } : { data: [row('ses_a')], cursor };
+    const snapshot = pagedApi({ '/api/session?limit=1000': page });
+    await assert.rejects(() => readSessionSnapshot({ ...deps, api: snapshot.api }), /no usable cursor/, JSON.stringify(cursor));
+    const folder = pagedApi({ [`/api/session?directory=${encodeURIComponent(ROOT)}`]: page });
+    await assert.rejects(() => topLevelSessionsAt(folder.api, ROOT), /no usable cursor/, JSON.stringify(cursor));
+  }
+});
+
+test('the inventory reads the active list and the snapshot once, and traces a child request in another folder', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  w.forms = [{ sessionID: 'ses_child' }];
+  const [inventory] = await readAll(deps, TWO_ROWS, { proj: 'ses_owner' });
+  assert.equal(inventory.project, 'proj');
+  assert.equal(inventory.owner, 'ses_owner');
+  assert.equal(inventory.live.find((s) => s.id === 'ses_extra').why.includes('its subagent ses_child: a question form is open'), true);
+  assert.equal(w.calls.filter((p) => p.startsWith('/api/session/active')).length, 1);
+  assert.equal(w.calls.filter((p) => p === '/api/session?limit=1000').length, 1);
+  assert.ok(w.calls.some((p) => p.includes('directory%5D=%2Felsewhere')));
+});
+
+test('a nested quiet child permission in a different folder is traced to its conductor', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  w.rows.push(row('ses_nested', '/nested', 'ses_child'));
+  w.perms = [{ sessionID: 'ses_nested' }];
+  const inventory = await readProjectInventory({ ...deps }, REGISTRY, 'proj');
+  assert.deepEqual(inventory.live, [{ id: 'ses_extra', dir: WT, busy: false, why: ['its subagent ses_nested: a permission request is open'], checkout: WT }]);
+  assert.ok(w.calls.includes('/api/permission/request?location%5Bdirectory%5D=%2Fnested'));
+});
+
+test('two projects share one global session snapshot and partition explicit conductors correctly', async () => {
+  const { w, deps } = machine();
+  w.rows[0].agent = 'sterling/conductor';
+  w.rows.push({ ...row('ses_y', '/work/other'), agent: 'sterling/conductor' });
+  w.active = { ses_owner: {}, ses_y: {} };
+  const inventories = await readAll(deps, TWO_ROWS);
+  assert.deepEqual(inventories.map((i) => [i.project, i.live.map((s) => s.id)]), [['proj', ['ses_owner']], ['other', ['ses_y']]]);
+  assert.equal(w.calls.filter((p) => p === '/api/session?limit=1000').length, 1);
+});
+
+test('a removed-folder historical child does not make the inventory unknown or query its location', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  const gone = '/work/proj.worktrees/removed';
+  w.rows.push({ ...row('ses_completed', gone, 'ses_extra'), outcome: 'succeeded' });
+  deps.realpath = async (path) => {
+    if (path === gone) throw Object.assign(new Error('removed'), { code: 'ENOENT' });
+    return path;
+  };
+  const api = deps.api;
+  deps.api = async (method, path) => {
+    if (!path.includes(encodeURIComponent(gone))) return api(method, path);
+    w.calls.push(path);
+    return { code: 1, stderr: 'HTTP 404 Not Found', stdout: '{"_tag":"LocationNotFoundError"}' };
+  };
+  const inventory = await readProjectInventory({ ...deps }, REGISTRY, 'proj');
+  assert.equal(inventory.unknown, undefined, 'a removed historical child leaves a healthy inventory');
+  assert.ok(!w.calls.some((path) => path.includes(encodeURIComponent(gone))));
+});
+
+test('snapshot pages plus location reads plus candidate inboxes bound a nine-project pass independently of child history', async () => {
+  const { w, deps } = machine();
+  w.rows.length = 0;
+  w.active = {};
+  const names = Array.from({ length: 9 }, (_, i) => `p${i}`);
+  const registry = names.map((name) => ({ name, repo_path: `/work/${name}` }));
+  for (const [i, name] of names.entries()) {
+    for (let j = 0; j < 50; j++) {
+      const id = `ses_p${i}c${j}`;
+      w.rows.push(row(id, `/work/${name}`));
+      if (j === 0) {
+        w.rows.at(-1).time.updated = NOW - STALE_SUBAGENT_NOTICE_MS;
+        w.inbox[id] = [{ type: 'synthetic', payload: { metadata: { source: 'subagent', state: 'completed', childID: `${id}child0` } } }];
+      }
+      for (let k = 0; k < 10; k++) w.rows.push({ ...row(`${id}child${k}`, `/work/${name}`, id), outcome: 'succeeded' });
+    }
+    w.rows.push({ ...row(`ses_archived${i}`, `/work/${name}`), time: { created: 1, updated: NOW, archived: NOW } });
+    w.rows.push({ ...row(`ses_worker${i}`, `/work/${name}`), agent: 'sterling-maintenance-worker' });
+  }
+  const api = deps.api;
+  let inboxes = 0;
+  let maxInboxes = 0;
+  let pages = 0;
+  deps.api = async (method, path) => {
+    const url = new URL(path, 'http://fake');
+    if (url.pathname === '/api/session' && !url.searchParams.has('directory') && !url.searchParams.has('parentID')) {
+      w.calls.push(path);
+      const from = Number(url.searchParams.get('cursor') ?? 0);
+      pages++;
+      return { code: 0, stdout: JSON.stringify({ data: w.rows.slice(from, from + 100), cursor: { next: String(from + 100) } }) };
+    }
+    if (path.endsWith('/inbox')) {
+      inboxes++;
+      maxInboxes = Math.max(maxInboxes, inboxes);
+      await new Promise((resolve) => setImmediate(resolve));
+      try { return await api(method, path); } finally { inboxes--; }
+    }
+    return api(method, path);
+  };
+  const inventories = await readAll(deps, registry);
+  assert.equal(inventories.length, 9);
+  assert.ok(inventories.every((inventory) => inventory.live.length === 0));
+  assert.equal(w.calls.filter((p) => new URL(p, 'http://fake').searchParams.has('parentID')).length, 0, 'no per-parent descendant listings');
+  assert.equal(pages, Math.ceil(w.rows.length / 100) + 1);
+  assert.equal(w.calls.filter((p) => p.endsWith('/inbox')).length, 450);
+  assert.equal(w.calls.filter((p) => p === '/api/session/active').length, 1);
+  assert.ok(maxInboxes <= 8 && maxInboxes > 1, `inbox concurrency ${maxInboxes}`);
+  // Only the nine completed-notice candidates need current metadata after their inbox.
+  const metadataReads = w.calls.filter((path) => /^\/api\/session\/ses_[A-Za-z0-9]+$/.test(path));
+  assert.deepEqual(new Set(metadataReads), new Set(names.map((_, i) => `/api/session/ses_p${i}c0`)));
+  assert.equal(metadataReads.length, names.length);
+  for (const path of metadataReads) assert.ok(w.calls.indexOf(path) > w.calls.indexOf(`${path}/inbox`));
+  assert.equal(w.calls.length, pages + 1 + 2 * names.length + 450 + names.length);
+});
+
+test('a failed inbox read keeps the shared workers bounded and other projects healthy', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  w.rows.length = 0;
+  for (let i = 0; i < 24; i++) w.rows.push(row(`ses_inbox${i}`, i < 12 ? ROOT : '/work/other'));
+  const api = deps.api;
+  let running = 0;
+  let maximum = 0;
+  deps.api = async (method, path) => {
+    if (!path.endsWith('/inbox')) return api(method, path);
+    running++;
+    maximum = Math.max(maximum, running);
+    try {
+      if (path === '/api/session/ses_inbox0/inbox') return { code: 1, stderr: 'HTTP 503 Unavailable' };
+      await new Promise((resolve) => setImmediate(resolve));
+      return await api(method, path);
+    } finally { running--; }
+  };
+  const inventories = await readAll(deps, TWO_ROWS);
+  assert.equal(inventories[0].unknown, true);
+  assert.deepEqual(inventories[1].live, []);
+  assert.ok(maximum <= 8, `inbox concurrency ${maximum}`);
+  assert.equal(running, 0);
+});
+
+test('removed top-level history reads one inbox and only its attributed project stays unknown', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  const removed = '/work/proj.worktrees/removed';
+  w.rows.push(row('ses_removed', removed));
+  w.inbox.ses_removed = [{ type: 'user' }];
+  deps.realpath = async (path) => {
+    if (path === removed) throw Object.assign(new Error('removed'), { code: 'ENOENT' });
+    return path;
+  };
+  const inventories = await readAll(deps, TWO_ROWS);
+  assert.equal(inventories[0].unknown, true);
+  assert.deepEqual(inventories[1].live, []);
+  assert.ok(!inventories[1].unknown);
+  assert.equal(w.calls.filter((path) => path === '/api/session/ses_removed/inbox').length, 1);
+});
+
+test('an unreadable project root degrades only its inventory; a different project is read', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  w.rows.push(row('ses_y', '/work/other'));
+  deps.realpath = async (path) => {
+    if (path === ROOT) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    return path;
+  };
+  const inventories = await readAll(deps, TWO_ROWS);
+  assert.equal(inventories[0].unknown, true);
+  assert.deepEqual(inventories[1].live, []);
+  assert.ok(!inventories[1].unknown);
+});
+
+test('input that arrives after the inbox read is captured empty for every project and appears on the next pass', async () => {
+  const { w, deps } = machine();
+  w.active = {};
+  w.rows.splice(0, w.rows.length, row('ses_extra'));
+  deps.realpath = async (path) => (path === '/work/other' ? ROOT : path);
+  const api = deps.api;
+  let arrived = false;
+  deps.api = async (method, path) => {
+    const result = await api(method, path);
+    if (!arrived && path === '/api/session/ses_extra/inbox') {
+      arrived = true;
+      w.inbox.ses_extra = [{ type: 'user' }]; // The reply is already captured empty.
+    }
+    return result;
+  };
+  const owners = { proj: 'ses_owner', other: 'ses_owner' };
+  const first = await readAll(deps, TWO_ROWS, owners);
+  assert.ok(arrived);
+  assert.ok(first.every((inventory) => !inventory.unknown && inventory.live.length === 0));
+  const second = await readAll(deps, TWO_ROWS, owners);
+  assert.deepEqual(second.map((inventory) => inventory.live.map((session) => session.id)), [['ses_extra'], ['ses_extra']]);
+  assert.equal(w.calls.filter((call) => call === '/api/session/ses_extra/inbox').length, 2);
+});
+
+test('a shared directory resolution failure preserves every dependent occurrence without degrading unrelated projects', async () => {
+  const { w, deps } = machine();
+  const dir = `${ROOT}/nested`;
+  w.rows.splice(0, w.rows.length, row('ses_extra', dir));
+  w.active = {};
+  w.inbox.ses_extra = [{ type: 'user' }];
+  let denied = false;
+  deps.realpath = async (path) => {
+    if (path === '/work/other') return ROOT;
+    if (path === dir && denied) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    return path;
+  };
+  const registry = [...TWO_ROWS, { name: 'third', repo_path: '/work/third' }];
+  const owners = { proj: 'ses_owner', other: 'ses_owner' };
+  const prior = { proj: { ses_extra: {} }, other: { ses_extra: {} } };
+  const healthy = await readAll(deps, registry, owners, { priorSessions: prior });
+  assert.deepEqual(healthy.map((inventory) => !!inventory.unknown), [false, false, false]);
+  assert.deepEqual(healthy.map((inventory) => inventory.live.map((s) => s.id)), [['ses_extra'], ['ses_extra'], []]);
+  denied = true;
+  for (let i = 0; i < 2; i++) {
+    const inventories = await readAll(deps, registry, owners, { priorSessions: prior });
+    assert.deepEqual(inventories.map((inventory) => !!inventory.unknown), [true, true, false]);
+    assert.deepEqual(inventories[2].live, []);
+  }
+});
+
+test('an active session in a vanished folder with no prior membership makes every project unknown', async () => {
+  const { w, deps } = machine();
+  w.rows.splice(0, w.rows.length, row('ses_extra', '/old-alias/proj'));
+  w.active = { ses_extra: {} };
+  deps.realpath = async (path) => {
+    if (path === '/old-alias/proj') throw Object.assign(new Error('removed'), { code: 'ENOENT' });
+    return path;
+  };
+  const inventories = await readAll(deps, TWO_ROWS);
+  assert.ok(inventories.every((inventory) => inventory.unknown));
+});
+
+test('a registered session worktree whose folder is gone (prunable) is skipped; a folder that links to a registered one counts under its resolved path', async () => {
+  const m = checkoutMachine([], { registered: ['/work/proj.worktrees/session-gone', '/work/real/proj.worktrees/session-2'], folders: ['session-2', 'session-gone'] });
+  m.deps.realpath = async (p) => {
+    if (p === '/work/proj.worktrees/session-gone') throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    return p.startsWith(S2) ? p.replace('/work/proj.worktrees', '/work/real/proj.worktrees') : p;
+  };
+  m.w.active = { ses_s2: {} };
+  const inventory = await checkoutInventory(m);
+  assert.equal(inventory.unknown, undefined);
+  assert.deepEqual(inventory.live.map((s) => [s.id, s.checkout]), [['ses_s2', '/work/real/proj.worktrees/session-2']]);
+});
+
+test('a registered folder that resolves around the main folder is never a checkout, whatever git registers', async () => {
+  const m = checkoutMachine([row('ses_y', '/work/other')], { registered: ['/work'], folders: ['session-2'] });
+  m.deps.realpath = linked({ [S2]: '/work' });
+  m.w.active = { ses_y: {} };
+  const inventory = await checkoutInventory(m);
+  assert.equal(inventory.unknown, undefined);
+  assert.deepEqual(inventory.live.map((s) => s.id), []);
+});
+
+test('the discovery reads get the time left of the run, and none starts once the deadline has passed; without a deadline the bound is still finite', async () => {
+  const m = checkoutMachine();
+  const timeouts = [];
+  let listings = 0;
+  const readdir = m.deps.readdir;
+  m.deps.readdir = async (...args) => { listings++; return readdir(...args); };
+  m.deps.gitWorktrees = async (root, ms) => { timeouts.push(ms); return [ROOT, S2, S3]; };
+  const inventory = (extra) => readProjectInventory({ ...m.deps, ...extra }, REGISTRY, 'proj', 'ses_owner');
+  assert.equal((await inventory({ deadline: NOW + 3_000 })).unknown, undefined);
+  assert.deepEqual(timeouts, [3_000], 'the git read gets what is left of the run');
+  timeouts.length = 0;
+  listings = 0;
+  assert.equal((await inventory({ deadline: NOW })).unknown, true);
+  assert.deepEqual(timeouts, [], 'no git read starts after the deadline');
+  assert.equal(listings, 0, 'no folder read starts after the deadline either');
+  assert.equal((await inventory({})).unknown, undefined);
+  assert.equal(timeouts.length, 1);
+  assert.ok(Number.isFinite(timeouts[0]) && timeouts[0] > 0, 'with no deadline the git read still has a finite bound');
+});
+
+test('a session folder under the resolved path of a linked session worktree folder stays attributed to that project when a child cannot be resolved', async () => {
+  const BOX = '/work/box';
+  const m = checkoutMachine([row('ses_y', '/work/other'), row('ses_box', `${BOX}/session-2`)], { registered: [`${BOX}/session-2`], folders: ['session-2'] });
+  m.deps.realpath = async (p) => {
+    if (p === '/work/proj.worktrees') return BOX;
+    if (p === S2 || p === `${BOX}/session-2`) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return p;
+  };
+  m.w.active = { ses_y: {}, ses_box: {} };
+  const inventories = await bothProjects(m);
+  assert.equal(inventories[0].unknown, true);
+  assert.equal(inventories[1].unknown, undefined, 'other has nothing to do with the folder that failed');
+  assert.deepEqual(inventories[1].live.map((s) => s.id), ['ses_y']);
+});
+
+test('a recorded owner that runs in a session worktree is no owner in the inventory, and the sole live main conductor stays the only one', async () => {
+  const m = checkoutMachine();
+  m.w.active = { ses_owner: {} };
+  const inventory = await readProjectInventory({ ...m.deps }, REGISTRY, 'proj', 'ses_s2');
+  assert.equal(inventory.unknown, undefined);
+  assert.equal(inventory.owner, undefined);
+  assert.deepEqual(inventory.live.map((s) => s.id), ['ses_owner']);
+});
+
+test('the inventory lists the top-level conductors of every checkout with their creation order; a subagent, an archived session, another agent and a conductor in an unregistered folder are left out', async () => {
+  const m = checkoutMachine([
+    rowAt('ses_new', ROOT, RESET_AT + 5_000), row('ses_kid', ROOT, 'ses_owner'),
+    rowAt('ses_arch', ROOT, 9, { time: { created: 9, updated: NOW, archived: 10 } }), rowAt('ses_worker', ROOT, 9, { agent: 'sterling-maintenance-worker' }), row('ses_unregistered', WT),
+  ]);
+  const inventory = await checkoutInventory(m);
+  assert.deepEqual(inventory.tops.map((t) => [t.id, t.checkout, t.created]).sort(), [['ses_new', ROOT, RESET_AT + 5_000], ['ses_owner', ROOT, 1], ['ses_s2', S2, 1], ['ses_s3', S3, 1]]);
+  assert.deepEqual(inventory.tops.find((t) => t.id === 'ses_new'), { id: 'ses_new', created: RESET_AT + 5_000, updated: RESET_AT + 5_000, checkout: ROOT });
+});
+
+// ---- Restored from CH.Hub, round 2: shared observations, prior membership and request dependencies. ----
+// The watcher kept the previous pass's sessions between ticks; here the caller passes them as deps.priorSessions
+// ({ project: { sessionId: { requestPending } } }), which is the only thing the inventory reads of that state.
+
+const THREE_ROWS = [...TWO_ROWS, { name: 'third', repo_path: '/work/third' }];
+const priorFor = (projects, sessions, extra = {}) => Object.fromEntries(projects.map((p) => [p, Object.fromEntries(sessions.map((s) => [s, { ...extra }]))]));
+const inboxCalls = (w, id) => w.calls.filter((path) => (id ? path === `/api/session/${id}/inbox` : path.endsWith('/inbox'))).length;
+
+for (const kind of ['form', 'permission']) {
+  test(`one shared ${kind} observation gives every project the same verdict and sees post-pass requests on the next pass`, async () => {
+    const { w, deps } = machine();
+    w.rows.splice(0, w.rows.length, row('ses_extra'));
+    w.active = {};
+    let plannedOther = false;
+    deps.realpath = async (path) => {
+      if (path === '/work/other') { plannedOther = true; return ROOT; }
+      return path;
+    };
+    const api = deps.api;
+    const observed = new Set();
+    let opened = false;
+    deps.api = async (method, path) => {
+      const result = await api(method, path);
+      if (path.startsWith('/api/form?') || path.startsWith('/api/permission/request?') || path.endsWith('/inbox')) {
+        assert.ok(plannedOther, 'every project is planned before the shared observation pass');
+        observed.add(path.split('?')[0]);
+        if (!opened && observed.size === 3) {
+          opened = true; // All three replies were captured empty; the new request is after that observation set.
+          w[kind === 'form' ? 'forms' : 'perms'] = [{ sessionID: 'ses_extra' }];
+        }
+      }
+      return result;
+    };
+    const owners = { proj: 'ses_owner', other: 'ses_owner' };
+    const first = await readAll(deps, TWO_ROWS, owners);
+    assert.ok(opened);
+    assert.ok(first.every((inventory) => !inventory.unknown && inventory.live.length === 0));
+    const second = await readAll(deps, TWO_ROWS, owners);
+    assert.deepEqual(second.map((inventory) => inventory.live.map((session) => session.id)), [['ses_extra'], ['ses_extra']]);
+    assert.equal(w.calls.filter((path) => path.startsWith('/api/form?')).length, 2);
+    assert.equal(w.calls.filter((path) => path.startsWith('/api/permission/request?')).length, 2);
+    assert.equal(inboxCalls(w), 2);
+  });
+}
+
+for (const fault of ['inbox', 'form', 'permission', 'metadata']) {
+  test(`one failed shared ${fault} source only degrades its dependent projects`, async () => {
+    const { w, deps } = machine();
+    w.rows.splice(0, w.rows.length, row('ses_shared'), row('ses_z', '/work/third'));
+    w.active = {};
+    deps.realpath = async (path) => (path === '/work/other' ? ROOT : path);
+    if (fault === 'metadata') {
+      w.rows[0].time.updated = 1;
+      w.inbox.ses_shared = [{ type: 'synthetic', payload: { metadata: { source: 'subagent', state: 'completed', childID: 'ses_child' } } }];
+    }
+    const form = `/api/form?location%5Bdirectory%5D=${encodeURIComponent(ROOT)}`;
+    const permission = `/api/permission/request?location%5Bdirectory%5D=${encodeURIComponent(ROOT)}`;
+    const target = { inbox: '/api/session/ses_shared/inbox', metadata: '/api/session/ses_shared', form, permission }[fault];
+    const api = deps.api;
+    deps.api = async (method, path) => {
+      if (path !== target) return api(method, path);
+      w.calls.push(path);
+      return { code: 1, stderr: 'HTTP 503 Unavailable' };
+    };
+    const inventories = await readAll(deps, THREE_ROWS);
+    assert.deepEqual(inventories.map((inventory) => !!inventory.unknown), [true, true, false]);
+    assert.deepEqual(inventories[2].live, []);
+    assert.equal(w.calls.filter((path) => path === target).length, 1);
+    assert.equal(w.calls.filter((path) => path === form).length, 1);
+    assert.equal(w.calls.filter((path) => path === permission).length, 1);
+  });
+}
+
+for (const activity of ['conductor', 'child']) {
+  test(`an active vanished alias preserves prior projects for a running ${activity}`, async () => {
+    const { w, deps } = machine();
+    const alias = '/old-alias/proj';
+    w.rows.splice(0, w.rows.length, row('ses_extra', alias));
+    if (activity === 'child') w.rows.push(row('ses_aliaschild', '/elsewhere', 'ses_extra'));
+    w.active = { [activity === 'child' ? 'ses_aliaschild' : 'ses_extra']: {} };
+    let gone = false;
+    deps.realpath = async (path) => {
+      if (path === '/work/other') return ROOT;
+      if (path === alias) {
+        if (gone) throw Object.assign(new Error('removed alias'), { code: 'ENOENT' });
+        return ROOT;
+      }
+      return path;
+    };
+    const owners = { proj: 'ses_owner', other: 'ses_owner' };
+    const healthy = await readAll(deps, THREE_ROWS, owners);
+    assert.deepEqual(healthy.map((inventory) => !!inventory.unknown), [false, false, false]);
+    assert.deepEqual(healthy.map((inventory) => inventory.live.map((s) => s.id)), [['ses_extra'], ['ses_extra'], []]);
+    const priorSessions = priorFor(['proj', 'other'], ['ses_extra']);
+    gone = true;
+    for (let pass = 0; pass < 2; pass++) {
+      const inventories = await readAll(deps, THREE_ROWS, owners, { priorSessions });
+      assert.deepEqual(inventories.map((inventory) => !!inventory.unknown), [true, true, false]);
+    }
+    w.active = {};
+    const before = inboxCalls(w);
+    const idle = await readAll(deps, THREE_ROWS, owners, { priorSessions });
+    assert.ok(idle.every((inventory) => !inventory.unknown && inventory.live.length === 0), 'idle removed alias history remains ignored');
+    assert.equal(inboxCalls(w), before + 1, 'prior membership needs one empty inbox read before removed history can be ignored');
+  });
+}
+
+for (const input of ['pending', 'unreadable']) {
+  test(`a quiet vanished alias with ${input} input stays unknown until one empty inbox read`, async () => {
+    const { w, deps } = machine();
+    const alias = '/old-alias/proj';
+    w.rows.splice(0, w.rows.length, row('ses_extra', alias));
+    w.active = {};
+    w.inbox.ses_extra = [{ type: 'user' }];
+    let gone = false;
+    let rejectInbox = input === 'unreadable';
+    deps.realpath = async (path) => {
+      if (path === '/work/other') return ROOT;
+      if (path === alias) {
+        if (gone) throw Object.assign(new Error('removed alias'), { code: 'ENOENT' });
+        return ROOT;
+      }
+      return path;
+    };
+    const api = deps.api;
+    deps.api = async (method, path) => {
+      if (gone && rejectInbox && path === '/api/session/ses_extra/inbox') {
+        w.calls.push(path);
+        return { code: 1, stderr: 'HTTP 503 Unavailable' };
+      }
+      return api(method, path);
+    };
+    const owners = { proj: 'ses_owner', other: 'ses_owner' };
+    const healthy = await readAll(deps, THREE_ROWS, owners);
+    assert.deepEqual(healthy.map((inventory) => inventory.live.map((s) => s.why)), [[['input is already queued']], [['input is already queued']], []]);
+    const priorSessions = priorFor(['proj', 'other'], ['ses_extra']);
+    gone = true;
+    for (let pass = 0; pass < 2; pass++) {
+      const before = inboxCalls(w);
+      const inventories = await readAll(deps, THREE_ROWS, owners, { priorSessions });
+      assert.deepEqual(inventories.map((inventory) => !!inventory.unknown), [true, true, false]);
+      assert.equal(inboxCalls(w), before + 1);
+    }
+    rejectInbox = false;
+    w.inbox.ses_extra = [];
+    const before = inboxCalls(w);
+    const idle = await readAll(deps, THREE_ROWS, owners, { priorSessions });
+    assert.ok(idle.every((inventory) => !inventory.unknown && inventory.live.length === 0));
+    assert.equal(inboxCalls(w), before + 1, 'one empty read proves the removed prior session is quiet');
+  });
+}
+
+for (const kind of ['form', 'permission']) {
+  test(`an unfinished quiet child with a missing ${kind} location keeps its parent's project unknown until the child ends`, async () => {
+    const { w, deps } = machine();
+    const dir = '/work/proj.worktrees/waiting-child';
+    w.rows[1].outcome = 'succeeded'; // The parent's old outcome does not complete its child.
+    w.rows[2].location.directory = dir;
+    w.active = {};
+    w[kind === 'form' ? 'forms' : 'perms'] = [{ sessionID: 'ses_child' }];
+    let gone = false;
+    deps.realpath = async (path) => {
+      if (path === dir && gone) throw Object.assign(new Error('removed'), { code: 'ENOENT' });
+      return path;
+    };
+    const owners = { proj: 'ses_owner' };
+    const healthy = await readAll(deps, TWO_ROWS, owners);
+    assert.deepEqual(healthy.map((inventory) => !!inventory.unknown), [false, false]);
+    assert.ok(healthy[0].live[0].why.some((why) => why.startsWith('its subagent ses_child: ')));
+    const priorSessions = priorFor(['proj'], ['ses_extra'], { requestPending: true });
+    gone = true;
+    for (let pass = 0; pass < 2; pass++) {
+      const inventories = await readAll(deps, TWO_ROWS, owners, { priorSessions });
+      assert.deepEqual(inventories.map((inventory) => !!inventory.unknown), [true, false]);
+    }
+    w.rows[2].outcome = 'succeeded';
+    const ended = await readAll(deps, TWO_ROWS, owners, { priorSessions });
+    assert.ok(ended.every((inventory) => !inventory.unknown && inventory.live.length === 0), "the child's own terminal outcome establishes removed history");
+  });
+}
+
+for (const kind of ['form', 'permission']) {
+  for (const startQueued of [false, true]) {
+    test(`a quiet top-level ${kind} survives a missing folder after ${startQueued ? 'queued input turns into a request' : 'direct observation'}`, async () => {
+      const { w, deps } = machine();
+      w.active = {};
+      w.rows[1].outcome = 'succeeded'; // A conductor's prior turn outcome does not close its request.
+      const requests = kind === 'form' ? 'forms' : 'perms';
+      if (startQueued) w.inbox.ses_extra = [{ type: 'user' }];
+      else w[requests] = [{ sessionID: 'ses_extra' }];
+      let gone = false;
+      deps.realpath = async (path) => {
+        if (path === '/work/other') return ROOT;
+        if (path === WT && gone) throw Object.assign(new Error('removed folder'), { code: 'ENOENT' });
+        return path;
+      };
+      const owners = { proj: 'ses_owner', other: 'ses_owner' };
+      const first = await readAll(deps, THREE_ROWS, owners);
+      assert.ok(first.every((inventory) => !inventory.unknown));
+      if (startQueued) {
+        w.inbox.ses_extra = [];
+        w[requests] = [{ sessionID: 'ses_extra' }];
+        const second = await readAll(deps, THREE_ROWS, owners);
+        assert.ok(second[0].live[0].why.some((why) => /form|permission/.test(why)));
+      }
+      const pending = priorFor(['proj', 'other'], ['ses_extra'], { requestPending: true });
+      gone = true;
+      for (let pass = 0; pass < 2; pass++) {
+        const before = inboxCalls(w, 'ses_extra');
+        const inventories = await readAll(deps, THREE_ROWS, owners, { priorSessions: pending });
+        assert.deepEqual(inventories.map((inventory) => !!inventory.unknown), [true, true, false]);
+        assert.equal(inboxCalls(w, 'ses_extra'), before + 1, 'the empty inbox is observed but does not establish request absence');
+      }
+      gone = false;
+      w[requests] = [];
+      w.inbox.ses_extra = [{ type: 'user' }];
+      const reread = await readAll(deps, THREE_ROWS, owners, { priorSessions: pending });
+      assert.ok(reread.every((inventory) => !inventory.unknown), 'successful request reads clear the reason');
+      assert.deepEqual(reread[0].live.map((s) => s.why), [['input is already queued']]);
+      gone = true;
+      w.inbox.ses_extra = [];
+      const absent = priorFor(['proj', 'other'], ['ses_extra'], { requestPending: false });
+      const idle = await readAll(deps, THREE_ROWS, owners, { priorSessions: absent });
+      assert.ok(idle.every((inventory) => !inventory.unknown && inventory.live.length === 0), 'verified request absence and an empty inbox leave idle removed history healthy');
+    });
+  }
+}

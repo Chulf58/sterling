@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { fork } from 'node:child_process';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { ProjectRegistry, registryPath, readForeignBoard, boardClaimView, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
+import { registryPath, readRegistrySnapshotReadOnly, readForeignBoard, boardClaimView, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { resolveStoreRoute } from '@sterling/store/routing';
 import { boardDisplayLabel } from '@sterling/schemas';
 
@@ -119,12 +119,9 @@ export function collectExpiredClaims({ projects, now = Date.now(), timeoutMs = C
 /** The registered projects, from the registry file; refuses a missing registry rather than creating one. */
 export function registeredProjects(regPath = registryPath()) {
   if (!existsSync(regPath)) throw new Error(`there is no project registry at ${regPath} (projects are registered by /sterling:init)`);
-  const registry = new ProjectRegistry(regPath);
-  try {
-    return registry.list().map((r) => ({ project: r.name, root: r.repo_path }));
-  } finally {
-    registry.close();
-  }
+  // Read-only: a writable ProjectRegistry open would migrate the file and checkpoint its WAL (hazard 8616e72d).
+  const { rows } = readRegistrySnapshotReadOnly(regPath, 1_000);
+  return rows.map((r) => ({ project: r.name, root: r.repo_path }));
 }
 
 /** The whole report: expired claims across projects, and the projects that could not be read in full. */

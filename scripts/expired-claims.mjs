@@ -37,7 +37,8 @@ async function main(argv) {
     process.exit(2);
   }
   console.log(json ? JSON.stringify(report, null, 2) : render(report));
-  process.exit(report.degraded.length > 0 ? 1 : 0);
+  // exitCode, not process.exit(): exiting right after a large console.log truncates a piped stdout (hazard b5b3f7db).
+  process.exitCode = report.degraded.length > 0 ? 1 : 0;
 }
 
 // import.meta.url is rewritten to name this scripts/ source inside the bin/ bundle (hazard

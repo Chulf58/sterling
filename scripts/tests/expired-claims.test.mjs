@@ -3,7 +3,8 @@
 // (STERLING_REGISTRY_DB points at a temp file). Hazard ddf7ad45: OPENCODE vars are cleared.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -25,6 +26,9 @@ const env = (reg) => {
   delete e.OPENCODE_SESSION_ID;
   return e;
 };
+
+/** name -> bytes of every file in a directory; -shm is skipped (a reader's read-mark legitimately changes it). */
+const dirBytes = (dir) => Object.fromEntries(readdirSync(dir).filter((n) => !n.endsWith('-shm')).sort().map((n) => [n, readFileSync(join(dir, n))]));
 
 function project(base, name, { lease, claimAgeMinutes, config }) {
   const root = join(base, name);
@@ -97,7 +101,10 @@ test('each project is judged by its own lease; unreadable, missing and unsupport
 test('the reader writes nothing and renews nothing: the claim and the store are unchanged after a read', async () => {
   const f = fixture({ only: { lease: 60, claimAgeMinutes: 90 } });
   try {
+    const before = dirBytes(join(f.roots.only, '.sterling'));
+    assert.ok(Object.keys(before).includes('sterling.db'));
     await run(process.execPath, [script, '--json'], { env: env(f.reg) });
+    assert.deepEqual(dirBytes(join(f.roots.only, '.sterling')), before, 'every file of the target store dir is byte-identical (no -wal/-shm litter either)');
     const store = new SterlingStore(join(f.roots.only, '.sterling', 'sterling.db'));
     try {
       const todo = store.query({ types: ['todo'] })[0];
@@ -107,6 +114,78 @@ test('the reader writes nothing and renews nothing: the claim and the store are 
     }
   } finally {
     f.cleanup();
+  }
+});
+
+// Hazard 8616e72d: the registry is opened read-only, so a legacy-schema file and a file with a hot -wal
+// are left byte-identical (main file and -wal; -shm legitimately changes with a reader's read-mark).
+const fileBytes = (p) => (existsSync(p) ? readFileSync(p) : null);
+const walPair = (db) => ({ main: fileBytes(db), wal: fileBytes(`${db}-wal`) });
+
+test('the registry is read read-only: a legacy-schema registry and a registry with a hot -wal are byte-identical after a run', async () => {
+  const f = fixture({ only: { lease: 60, claimAgeMinutes: 90 } });
+  const legacy = mkdtempSync(join(tmpdir(), 'expired-claims-legacy-'));
+  let hot;
+  try {
+    // Legacy: no project_key column, no occupancy table, rollback journal.
+    const legacyReg = join(legacy, 'registry.db');
+    const old = new DatabaseSync(legacyReg);
+    old.exec('CREATE TABLE projects (repo_path TEXT PRIMARY KEY, name TEXT NOT NULL, stack_tags TEXT NOT NULL, toolchains TEXT NOT NULL, sterling_version TEXT, first_init_at TEXT NOT NULL, last_init_at TEXT NOT NULL, last_seen_at TEXT)');
+    old.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(f.roots.only, 'only', '[]', '[]', null, minutesAgo(9), minutesAgo(9), null);
+    old.close();
+    const legacyBefore = walPair(legacyReg);
+    const legacyOut = JSON.parse((await run(process.execPath, [script, '--json'], { env: env(legacyReg) })).stdout);
+    assert.deepEqual(legacyOut.expired.map((c) => c.project), ['only'], 'the legacy registry is still read');
+    assert.deepEqual(walPair(legacyReg), legacyBefore, 'legacy registry unchanged');
+
+    // Hot WAL: the project row exists ONLY in an uncheckpointed -wal held open by a writer.
+    const hotReg = join(legacy, 'hot.db');
+    new ProjectRegistry(hotReg).close();
+    hot = new DatabaseSync(hotReg);
+    hot.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0');
+    hot.prepare('INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at, project_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(f.roots.only, 'only', '[]', '[]', null, minutesAgo(9), minutesAgo(9), null, 'key-1');
+    const hotBefore = walPair(hotReg);
+    assert.ok(hotBefore.wal && hotBefore.wal.length > 0, 'the fixture really has a hot -wal');
+    const hotOut = JSON.parse((await run(process.execPath, [script, '--json'], { env: env(hotReg) })).stdout);
+    assert.deepEqual(hotOut.expired.map((c) => c.project), ['only'], 'the row that lives only in the -wal is read');
+    assert.deepEqual(walPair(hotReg), hotBefore, 'main file and -wal unchanged');
+  } finally {
+    hot?.close();
+    rmSync(legacy, { recursive: true, force: true });
+    f.cleanup();
+  }
+});
+
+test('a report larger than the pipe buffer reaches a reader that starts late, untruncated', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'expired-claims-pipe-'));
+  const reg = join(base, 'registry.db');
+  const registry = new ProjectRegistry(reg);
+  try {
+    const root = join(base, 'big');
+    mkdirSync(join(root, '.sterling'), { recursive: true });
+    writeFileSync(join(root, '.sterling', 'config.json'), '{}');
+    const store = new SterlingStore(join(root, '.sterling', 'sterling.db'));
+    const COUNT = 300;
+    try {
+      const tools = new SterlingTools({ store, repoRoot: root, now: () => minutesAgo(200) });
+      for (let i = 0; i < COUNT; i++) {
+        const id = tools.boardAdd({ text: `item ${i} ${'x'.repeat(500)}`, source: 'user', objective: 'standalone' }).record.id;
+        store.claimTodo(id, { session: `s${i}`, checkout: 'main', now: minutesAgo(200) });
+      }
+    } finally {
+      store.close();
+    }
+    registry.register({ repo_path: root, name: 'big', stack_tags: [], toolchains: [], sterling_version: null, at: minutesAgo(1000) });
+    registry.close();
+    // The reader process starts one second after the writer has finished producing output.
+    const late = `(sleep 1; node -e "let n=0,b=[];process.stdin.on('data',d=>{n+=d.length;b.push(d)}).on('end',()=>{const r=JSON.parse(Buffer.concat(b));console.log(n+' '+r.expired.length)})")`;
+    const { stdout } = await run('sh', ['-c', `${JSON.stringify(process.execPath)} ${JSON.stringify(script)} --json | ${late}`], { env: env(reg), maxBuffer: 1 << 20 });
+    const [bytes, claims] = stdout.trim().split(' ').map(Number);
+    assert.equal(claims, COUNT, 'all claims arrive');
+    assert.ok(bytes > 65_536 * 2, `the report (${bytes} bytes) is well past the pipe buffer`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
 

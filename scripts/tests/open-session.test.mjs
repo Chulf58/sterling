@@ -354,6 +354,7 @@ test('createOpencodeSession: posts the worktree location, title and agent, and r
 test('createOpencodeSession: every failure shape refuses after exactly one POST, naming opencode service start and the server text', async () => {
   const bad = [
     [{ ok: false, uncertain: false, why: 'exit 1: connection refused' }, /connection refused/, false],
+    [{ ok: false, uncertain: true, why: 'exit 1: read ECONNRESET' }, /ECONNRESET/, true],
     [{ ok: false, uncertain: true, why: 'the response was not JSON (x): not json' }, /not JSON/, true],
     [{ ok: true, data: { data: {} } }, /no data\.id/, true],
     [{ ok: false, uncertain: true, why: 'timed out' }, /timed out/, true],

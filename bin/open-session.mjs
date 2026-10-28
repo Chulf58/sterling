@@ -9328,11 +9328,23 @@ function defaultOpencodeBin({ pathVar = process.env.PATH ?? "", home = homedir6(
   const installed = join12(home, ".opencode", "bin", "opencode");
   return exists(installed) ? installed : "opencode";
 }
+var NOT_SENT = [
+  /^OpenCode service file /,
+  /^OpenCode service password cannot be used/,
+  /^OpenCode API process could not start/,
+  /^spawn \S+ (ENOENT|EACCES|EPERM)\b/,
+  /^Error: Could not reach server at /,
+  /^HTTP 4\d\d\b/
+];
+var provenNotSent = (stderr) => {
+  const first = String(stderr ?? "").trimStart().split("\n")[0];
+  return NOT_SENT.some((re) => re.test(first));
+};
 async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api: api2 = opencodeApi, timeoutMs = 3e4 } = {}) {
   const r = await api2(bin, method, path, body === void 0 ? void 0 : JSON.stringify(body), timeoutMs);
   const text = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();
   if (r.code === 124) return { ok: false, uncertain: true, why: `timed out${text ? `: ${text}` : ""}` };
-  if (r.code !== 0) return { ok: false, uncertain: false, why: `exit ${r.code}${text ? `: ${text}` : ""}` };
+  if (r.code !== 0) return { ok: false, uncertain: !provenNotSent(r.stderr), why: `exit ${r.code}${text ? `: ${text}` : ""}` };
   try {
     return { ok: true, data: JSON.parse(r.stdout) };
   } catch (e) {

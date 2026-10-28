@@ -305,15 +305,31 @@ export function defaultOpencodeBin({ pathVar = process.env.PATH ?? '', home = ho
   return exists(installed) ? installed : 'opencode';
 }
 
+// Failures that prove no request left this process: the registration could not be used, the binary could not start,
+// or the CLI's own pre-request health check failed. A server's 4xx is a proven rejection too. Anything else (a
+// timeout, a reset after the send, a signal, a 5xx, an unusable reply) may have been delivered.
+const NOT_SENT = [
+  /^OpenCode service file /,
+  /^OpenCode service password cannot be used/,
+  /^OpenCode API process could not start/,
+  /^spawn \S+ (ENOENT|EACCES|EPERM)\b/,
+  /^Error: Could not reach server at /,
+  /^HTTP 4\d\d\b/,
+];
+const provenNotSent = (stderr) => {
+  const first = String(stderr ?? '').trimStart().split('\n')[0];
+  return NOT_SENT.some((re) => re.test(first));
+};
+
 // A mutating call: exactly one request, never retried (opencodeApi retries only a GET that never reached the
-// server). A body is sent as JSON. Answers { ok, data, uncertain, why }: `uncertain` is true when the server
-// answered success but the reply is unusable, or the request may have been delivered (a timeout), so a caller
-// must check before it sends again.
+// server). A body is sent as JSON. Answers { ok, data, uncertain, why }: on failure `uncertain` is false only when
+// the failure proves the request was never accepted (provenNotSent); a timeout, a signal, a reset after the send,
+// a 5xx or a success reply that is unusable are uncertain, so a caller must check before it sends again.
 export async function apiSend(method, path, body, { bin = defaultOpencodeBin(), api = opencodeApi, timeoutMs = 30_000 } = {}) {
   const r = await api(bin, method, path, body === undefined ? undefined : JSON.stringify(body), timeoutMs);
   const text = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim();
   if (r.code === 124) return { ok: false, uncertain: true, why: `timed out${text ? `: ${text}` : ''}` };
-  if (r.code !== 0) return { ok: false, uncertain: false, why: `exit ${r.code}${text ? `: ${text}` : ''}` };
+  if (r.code !== 0) return { ok: false, uncertain: !provenNotSent(r.stderr), why: `exit ${r.code}${text ? `: ${text}` : ''}` };
   try {
     return { ok: true, data: JSON.parse(r.stdout) };
   } catch (e) {
