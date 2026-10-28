@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { readMultiSession, multiSessionRefusal } from '../lib/multi-session.mjs';
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'multi-session.mjs');
@@ -64,7 +64,8 @@ test('a present but malformed key throws loudly', () => {
 test('refusal message names the key and how to set it', () => {
   const msg = multiSessionRefusal('launch a session');
   assert.match(msg, /multi_session\.enabled/);
-  assert.match(msg, /System tab/);
+  assert.doesNotMatch(msg, /System tab/);
+  assert.match(msg, /\.sterling\/config\.json/);
   assert.match(msg, /config_set/);
 });
 
@@ -81,5 +82,65 @@ test('requireMultiSession exits 2 with the refusal when off, and returns setting
   } finally {
     rmSync(off, { recursive: true });
     rmSync(on, { recursive: true });
+  }
+});
+
+test('a config whose root is not a plain JSON object throws, never reads as default off', () => {
+  for (const bad of [null, false, true, 0, 5, '', 'x', []]) {
+    const root = project(bad);
+    try {
+      assert.throws(() => readMultiSession(root), /not a JSON object/, JSON.stringify(bad));
+    } finally {
+      rmSync(root, { recursive: true });
+    }
+  }
+});
+
+test('a multi_session value of the wrong type throws via the schema', () => {
+  for (const bad of [null, false, 'on', []]) {
+    const root = project({ multi_session: bad });
+    try {
+      assert.throws(() => readMultiSession(root), /multi_session/, JSON.stringify(bad));
+    } finally {
+      rmSync(root, { recursive: true });
+    }
+  }
+});
+
+function linkedWorktree(mainConfig, worktreeConfig) {
+  const base = mkdtempSync(join(tmpdir(), 'multi-session-wt-'));
+  const main = join(base, 'main');
+  const wt = join(base, 'wt');
+  mkdirSync(main);
+  const git = (...args) => execFileSync('git', args, { cwd: main, stdio: 'pipe' });
+  git('init', '-q');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+  git('worktree', 'add', '-q', wt);
+  for (const [dir, cfg] of [[main, mainConfig], [wt, worktreeConfig]]) {
+    if (cfg === undefined) continue;
+    mkdirSync(join(dir, '.sterling'));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(cfg));
+  }
+  return { base, main, wt };
+}
+
+test('a linked worktree without its own config reads the main checkout config', () => {
+  const { base, wt } = linkedWorktree({ multi_session: { enabled: true, max_sessions: 3 } });
+  try {
+    assert.deepEqual(readMultiSession(wt), { enabled: true, max_sessions: 3, source: 'config' });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('the main checkout config wins over a worktree copy; a worktree-only config is used when main has none', () => {
+  const both = linkedWorktree({ multi_session: { enabled: true, max_sessions: 2 } }, { multi_session: { enabled: false } });
+  const only = linkedWorktree(undefined, { multi_session: { enabled: true, max_sessions: 4 } });
+  try {
+    assert.deepEqual(readMultiSession(both.wt), { enabled: true, max_sessions: 2, source: 'config' });
+    assert.deepEqual(readMultiSession(only.wt), { enabled: true, max_sessions: 4, source: 'config' });
+  } finally {
+    rmSync(both.base, { recursive: true, force: true });
+    rmSync(only.base, { recursive: true, force: true });
   }
 });

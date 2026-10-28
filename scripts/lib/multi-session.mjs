@@ -1,38 +1,42 @@
 // Reader for the per-project multi-session opt-in (config.multi_session; decision
-// sterling-ports-ch-hub-s-whole-multi-session-toolkit-session). Dependency-light on
-// purpose: no workspace imports, so any script can use it.
+// sterling-ports-ch-hub-s-whole-multi-session-toolkit-session). Defaults and
+// validation belong to configSchema.shape.multi_session in @sterling/schemas, which
+// this file imports as board-ready.mjs does (bin/ scripts are esbuild-bundled, so
+// there is no runtime workspace import there).
 //
-// An ABSENT key (or absent config file) is the shipped default "off", never an error
-// (hazard e0d280ee: a posture line must not collapse absent into unusable). A key that
-// is PRESENT but malformed throws: the author believes they set something.
+// Only a MISSING config file or a MISSING multi_session key reads as the default
+// "off" (hazard e0d280ee: a posture line must not collapse absent into unusable). A
+// config that is not a JSON object, or a multi_session value the schema refuses,
+// throws: the author believes they set something.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-const DEFAULT_MAX_SESSIONS = 1;
+import { configSchema } from '@sterling/schemas';
+import { resolveStoreRoot } from './worktree-root.mjs';
 
 /** Returns { enabled, max_sessions, source: 'default' | 'config' }. */
 export function readMultiSession(projectRoot) {
-  const configPath = join(projectRoot, '.sterling', 'config.json');
-  if (!existsSync(configPath)) return { enabled: false, max_sessions: DEFAULT_MAX_SESSIONS, source: 'default' };
+  // A linked worktree has no .sterling/ of its own: the main checkout's config wins.
+  const configPath = join(resolveStoreRoot(projectRoot), '.sterling', 'config.json');
+  const schema = configSchema.shape.multi_session;
+  if (!existsSync(configPath)) return { ...schema.parse({}), source: 'default' };
   const raw = JSON.parse(readFileSync(configPath, 'utf8'));
-  const declared = raw && typeof raw === 'object' ? raw.multi_session : undefined;
-  if (declared === undefined) return { enabled: false, max_sessions: DEFAULT_MAX_SESSIONS, source: 'default' };
-  if (declared === null || typeof declared !== 'object' || Array.isArray(declared)) {
-    throw new Error('config multi_session must be an object {enabled, max_sessions}');
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${configPath} is not a JSON object — multi_session cannot be read`);
   }
-  const enabled = declared.enabled === undefined ? false : declared.enabled;
-  const max = declared.max_sessions === undefined ? DEFAULT_MAX_SESSIONS : declared.max_sessions;
-  if (typeof enabled !== 'boolean') throw new Error('config multi_session.enabled must be true or false');
-  if (!Number.isInteger(max) || max < 1) throw new Error('config multi_session.max_sessions must be a positive integer');
-  return { enabled, max_sessions: max, source: 'config' };
+  if (raw.multi_session === undefined) return { ...schema.parse({}), source: 'default' };
+  const parsed = schema.safeParse(raw.multi_session);
+  if (!parsed.success) {
+    throw new Error(`config multi_session in ${configPath} is invalid: ${parsed.error.issues.map((i) => `${['multi_session', ...i.path].join('.')}: ${i.message}`).join('; ')}`);
+  }
+  return { ...parsed.data, source: 'config' };
 }
 
 /** Refusal text for a NEW launch or delivery while the toolkit is off. */
 export function multiSessionRefusal(action) {
   return (
     `refused: ${action} needs the multi-session toolkit, which is off for this project ` +
-    '(multi_session.enabled is false by default). Set multi_session.enabled to true in the TUI System tab, ' +
-    'or with config_set path "multi_session.enabled" value true (set multi_session.max_sessions for more than 1 session).'
+    '(multi_session.enabled is false by default). Turn it on with config_set path "multi_session.enabled" value true, ' +
+    'or by editing .sterling/config.json (set multi_session.max_sessions for more than 1 session).'
   );
 }
 
