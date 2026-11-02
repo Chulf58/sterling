@@ -25418,7 +25418,8 @@ If that session has ended (a /new whose hand-over did not run, or a crash), adop
 function handoverFailedText(error, from) {
   const why = error?.cause instanceof Error ? error.cause.message : error?.message ?? String(error);
   const moved = error?.partial?.adopted;
-  const done = Array.isArray(moved) ? moved.length ? `it stopped part-way: adopted ${moved.length} (${moved.map(itemName).join(", ")}) before the failure; those stay adopted` : "it stopped before adopting any claim" : "it may have stopped part-way, and which claims moved is not known";
+  const uncertain = error?.cause?.name === "StoreOutcomeUncertainError";
+  const done = Array.isArray(moved) ? moved.length ? `it stopped part-way: adopted ${moved.length} (${moved.map(itemName).join(", ")}) before the failure; those stay adopted` + (uncertain ? ", and whether the last claim was adopted is not known" : "") : uncertain ? "it stopped part-way, and whether the last claim was adopted is not known" : "it stopped before adopting any claim" : "it may have stopped part-way, and which claims moved is not known";
   return `BOARD CLAIM HAND-OVER FAILED (${why}): ${done}. Claims session '${from}' still holds in this checkout are listed under CLAIMS HELD BY AN EARLIER SESSION; finish with board_adopt from_session '${from}' (safe to repeat).`;
 }
 
