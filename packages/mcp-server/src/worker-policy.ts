@@ -123,7 +123,13 @@ export class WorkerPolicyRefusal extends Error {
 
 // `retiredTermDecisions` reads the active retired terms for the retired_term_use
 // lane; a view without it allows no retired_term_use write (fail closed).
-type RecordView = Pick<MountedStores, 'projectStoreHolds' | 'get'> & Partial<Pick<MountedStores, 'retiredTermDecisions'>>;
+type RecordView = Pick<MountedStores, 'projectStoreHolds' | 'get'> & Partial<Pick<MountedStores, 'retiredTermDecisions' | 'withWriteFence'>>;
+
+/** The checkout-evidence gate (SterlingTools.workerProvenanceGate). */
+export interface ProvenanceGate {
+  workerProvenanceGate(ownerRef: string, claimed: string[], joinPaths?: string[]): { owner: string; items: string[]; check: () => void; snapshot?: unknown } | undefined;
+  withWorkerSnapshot<T>(snapshot: unknown, fn: () => T): T;
+}
 
 /** The root field a knowledge_edit field, append field or array_remove
  *  selector names: `files[path=x].role` -> `files`. */
@@ -137,8 +143,58 @@ const FIELD_WRITES = new Set(['knowledge_update', 'knowledge_edit', 'knowledge_a
 export class WorkerGuard {
   constructor(
     private readonly args: WorkerPolicyArgs,
-    private readonly records: RecordView
+    private readonly records: RecordView,
+    private readonly provenance?: ProvenanceGate
   ) {}
+
+  /**
+   * Checkout evidence (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use), after
+   * authorize allowed a mutation: proves, outside the lock, that every
+   * reconcile debt the write touches is payable from the owner's authoritative
+   * committed snapshot, then runs the tool with the store's write fence armed,
+   * so the proof is revalidated under the lock of the first owner write.
+   * Covers writes with and without resolves, knowledge_line_ref_fix, and a
+   * removal of a reconcile_needed item. A hold refuses with nothing written:
+   * 'provenance_not_integrated' while another checkout's change has not landed
+   * in the target, 'provenance_needs_conductor' for unknown, unreadable or
+   * unresolvable evidence.
+   */
+  runChecked(tool: string, input: Record<string, unknown>, allowed: Authorized, run: () => unknown): unknown {
+    if (!this.provenance) return run();
+    let owner: string | undefined;
+    let claimed: string[] = [];
+    if (tool === 'maintenance_remove') {
+      const item = this.records.get(String(input.id)) as unknown as { system_reason?: string; feature_link?: string } | undefined;
+      if (item?.system_reason !== 'reconcile_needed' || !item.feature_link) return run();
+      owner = item.feature_link;
+      claimed = [String(input.id)];
+    } else {
+      owner = String(input.id);
+      claimed = Array.isArray(input.resolves) ? (input.resolves as unknown[]).map(String) : [];
+    }
+    let fence: ReturnType<ProvenanceGate['workerProvenanceGate']>;
+    try {
+      const joinPaths =
+        tool === 'knowledge_append' && input.field === 'files' && Array.isArray(input.entries)
+          ? (input.entries as unknown[]).map((e) => normalizeRepoPath(String((e as { path?: unknown } | null)?.path ?? '')))
+          : [];
+      fence = this.provenance.workerProvenanceGate(owner, claimed, joinPaths);
+    } catch (e) {
+      const err = e as Error & { hold?: string };
+      if (err?.name !== 'ProvenanceHold') throw e;
+      throw new WorkerPolicyRefusal(tool, err.hold === 'conductor' ? 'provenance_needs_conductor' : 'provenance_not_integrated', err.message, [allowed.item_id]);
+    }
+    if (!fence) return run();
+    if (!this.records.withWriteFence) {
+      throw new WorkerPolicyRefusal(tool, 'provenance_unfenced', 'the store cannot revalidate checkout evidence under its write lock', [allowed.item_id]);
+    }
+    // The proof's snapshot and the fence wrap the SAME call: the write's
+    // baselines and any attestation come from the snapshot, and the fence
+    // re-checks owner, debt, tree and HEAD inside the write's transaction.
+    const gate = this.provenance;
+    return this.records.withWriteFence(fence.owner, fence.items, fence.check, () => gate.withWorkerSnapshot(fence.snapshot, run));
+  }
 
   /** The policy as it stands now, or a refusal naming why there is none. */
   private load(tool: string): WorkerPolicy {
@@ -369,8 +425,8 @@ export function guardWorkerTools(server: McpServer, guard: WorkerGuard): void {
   (server as unknown as { registerTool: typeof register }).registerTool = (name, config, cb) =>
     register(name, config, (...a: unknown[]) => {
       const allowed = guard.authorize(name, (a[0] ?? {}) as Record<string, unknown>);
-      const result = cb(...a);
-      if (!allowed) return result;
+      if (!allowed) return cb(...a);
+      const result = guard.runChecked(name, (a[0] ?? {}) as Record<string, unknown>, allowed, () => cb(...a));
       const finish = (r: unknown) => stampReceipt(name, r, { run_id: allowed.run_id, item_id: allowed.item_id, resolved: guard.closed(allowed.closes) });
       return result instanceof Promise ? result.then(finish) : finish(result);
     });

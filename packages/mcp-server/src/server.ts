@@ -426,7 +426,7 @@ export function createSterlingServer(
   // pin it (worker-policy-busy.test.ts).
   const toolWrappers: string[] = [];
   if (opts.workerPolicy) {
-    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store, tools));
     toolWrappers.push('worker_policy');
   }
   // A StoreBusyError that reaches the wire still raw came from a tool whose

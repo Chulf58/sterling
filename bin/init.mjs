@@ -4387,7 +4387,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, OBSERVATION_COMMIT, reconcileObservationSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4915,6 +4915,29 @@ var init_records = __esm({
       objective: external_exports.string().optional(),
       file_keys: external_exports.array(external_exports.string()).optional()
     }).passthrough();
+    OBSERVATION_COMMIT = external_exports.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, "40- or 64-hex commit required");
+    reconcileObservationSchema = external_exports.object({
+      path: repoPath,
+      checkout: external_exports.discriminatedUnion("kind", [
+        external_exports.object({ kind: external_exports.literal("store") }).strict(),
+        external_exports.object({ kind: external_exports.literal("checkout"), worktree: external_exports.string().min(1), branch: external_exports.string().min(1).optional() }).strict(),
+        external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+      ]),
+      commit: OBSERVATION_COMMIT.optional(),
+      state: external_exports.discriminatedUnion("kind", [
+        external_exports.object({ kind: external_exports.literal("file"), mode: external_exports.enum(["100644", "100755", "120000"]), blob: OBSERVATION_COMMIT }).strict(),
+        external_exports.object({ kind: external_exports.literal("absent") }).strict(),
+        external_exports.object({ kind: external_exports.literal("unreadable") }).strict(),
+        external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+      ])
+    }).strict().superRefine((o, ctx) => {
+      const unknown2 = o.state.kind === "unknown" || o.checkout.kind === "unknown";
+      if (unknown2 && (o.state.kind !== "unknown" || o.checkout.kind !== "unknown" || o.commit !== void 0)) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "an unknown observation has an unknown checkout, an unknown state and no commit" });
+      }
+      if (!unknown2 && o.commit === void 0)
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["commit"], message: "an observation is bound to the commit its checkout was at" });
+    });
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4979,7 +5002,9 @@ var init_records = __esm({
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional(),
       // Which session works on this task now (see todoClaimSchema). User items only.
-      claim: todoClaimSchema.optional()
+      claim: todoClaimSchema.optional(),
+      // Checkout evidence (reconcileObservationSchema). reconcile_needed items only.
+      observations: external_exports.array(reconcileObservationSchema).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -4990,6 +5015,9 @@ var init_records = __esm({
       }
       if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
+      }
+      if (rec.observations !== void 0 && (rec.source !== TODO_SYSTEM_SOURCE || rec.system_reason !== "reconcile_needed")) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["observations"], message: `observations is checkout evidence on reconcile_needed maintenance items only` });
       }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -8160,6 +8188,10 @@ var init_mounted = __esm({
        *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
        *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
        *  is caller-writable — so the field and the mount can disagree in both directions. */
+      /** The project store's write fence (SterlingStore.withWriteFence); worker targets are project-held. */
+      withWriteFence(owner, items2, check, fn) {
+        return this.project.withWriteFence(owner, items2, check, fn);
+      }
       projectStoreHolds(id) {
         return this.project.projectStoreHolds(id);
       }
@@ -10501,6 +10533,40 @@ CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journ
   }
 });
 
+// packages/store/dist/observations.js
+function observationKey(o) {
+  const c = o.checkout;
+  const s2 = o.state;
+  return JSON.stringify([o.path, c.kind, c.worktree ?? "", c.branch ?? "", o.commit ?? "", s2.kind, s2.mode ?? "", s2.blob ?? ""]);
+}
+function unknownObservation(path) {
+  return { path, checkout: { kind: "unknown" }, state: { kind: "unknown" } };
+}
+function resolveDebtOwner(link, get, aliases) {
+  if (!link)
+    return void 0;
+  let canonical3 = link;
+  for (const a of aliases)
+    if (a.historical_id === link)
+      canonical3 = a.canonical_id;
+  let record = get(canonical3);
+  const seen = /* @__PURE__ */ new Set();
+  while (record && record.status === "superseded") {
+    if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record.id) || !record.superseded_by)
+      return void 0;
+    seen.add(record.id);
+    record = get(record.superseded_by);
+  }
+  return record?.id;
+}
+var DEBT_OWNER_HOP_CAP;
+var init_observations = __esm({
+  "packages/store/dist/observations.js"() {
+    "use strict";
+    DEBT_OWNER_HOP_CAP = 32;
+  }
+});
+
 // packages/store/dist/index.js
 var dist_exports = {};
 __export(dist_exports, {
@@ -10513,6 +10579,7 @@ __export(dist_exports, {
   BoardSnapshotError: () => BoardSnapshotError,
   ClaimAdoptionIncomplete: () => ClaimAdoptionIncomplete,
   ClaimMovedError: () => ClaimMovedError,
+  DEBT_OWNER_HOP_CAP: () => DEBT_OWNER_HOP_CAP,
   DECLARED_CAPTURE_OWED_PREFIX: () => DECLARED_CAPTURE_OWED_PREFIX,
   DEFAULT_BUSY_TIMEOUT_MS: () => DEFAULT_BUSY_TIMEOUT_MS,
   DEFAULT_CLAIM_LEASE_MINUTES: () => DEFAULT_CLAIM_LEASE_MINUTES,
@@ -10602,6 +10669,7 @@ __export(dist_exports, {
   hasRecordCentralityHit: () => hasRecordCentralityHit,
   journalDemotionRequired: () => journalDemotionRequired,
   missingDomainWarning: () => missingDomainWarning,
+  observationKey: () => observationKey,
   openForeignDbReadOnly: () => openForeignDbReadOnly,
   pgDialect: () => pgDialect,
   pgDialectFor: () => pgDialectFor,
@@ -10622,12 +10690,14 @@ __export(dist_exports, {
   releaseMoveLock: () => releaseMoveLock,
   renderCappedPathList: () => renderCappedPathList,
   rescopeMoveBundle: () => rescopeMoveBundle,
+  resolveDebtOwner: () => resolveDebtOwner,
   resolveDomainMounts: () => resolveDomainMounts,
   resolveReceiverLocation: () => resolveReceiverLocation,
   resolveSentHandoffs: () => resolveSentHandoffs,
   sentHandoffOf: () => sentHandoffOf,
   setStoreDriverFactory: () => setStoreDriverFactory,
   sqliteDialect: () => sqliteDialect,
+  unknownObservation: () => unknownObservation,
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
@@ -10995,6 +11065,28 @@ function systemTodoTextsEquivalent(reason, a, b) {
   const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
   return strip(a) === strip(b);
 }
+function evidenceOf(t) {
+  const obs = Array.isArray(t.observations) ? t.observations : [];
+  return [...obs, ...(t.file_keys ?? []).filter((k) => !obs.some((o) => o.path === k)).map((k) => unknownObservation(k))];
+}
+function foldObservations(prior, incoming, supersede = []) {
+  const replacedPaths = new Set(incoming.filter((o) => o.checkout.kind === "store").map((o) => o.path));
+  const drop = new Set(supersede);
+  const out = /* @__PURE__ */ new Map();
+  for (const o of prior) {
+    const k = observationKey(o);
+    if (drop.has(k) && o.checkout.kind === "store" && replacedPaths.has(o.path))
+      continue;
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  for (const o of incoming) {
+    const k = observationKey(o);
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  return [...out.values()].sort((a, b) => observationKey(a) < observationKey(b) ? -1 : observationKey(a) > observationKey(b) ? 1 : 0);
+}
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
@@ -11020,6 +11112,8 @@ var init_dist2 = __esm({
     init_pg_bridge();
     init_pg_driver();
     init_sqlite_driver();
+    init_observations();
+    init_observations();
     StoreRowDecodeError = class extends Error {
       op;
       constructor(op, cause) {
@@ -11810,6 +11904,8 @@ var init_dist2 = __esm({
         let served;
         this.tx(() => {
           this.assertNoMoveInFlight(op, [id]);
+          if (this.writeFence && id === this.writeFence.owner)
+            this.passWriteFence();
           const current = this.get(id);
           if (!current)
             throw new Error(`${op}: no record '${id}'`);
@@ -11977,9 +12073,12 @@ var init_dist2 = __esm({
        */
       pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
         const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+        const aliases = this.recordAliases();
         for (const r of rows) {
           const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
-          if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+          if (t.source !== "system" || t.system_reason !== "reconcile_needed")
+            continue;
+          if (t.feature_link !== ownerId && resolveDebtOwner(t.feature_link, (id) => this.get(id), aliases) !== ownerId)
             continue;
           const currentFiles = t.file_keys ?? [];
           const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
@@ -12001,7 +12100,13 @@ var init_dist2 = __esm({
           }
           const owner = this.get(ownerId);
           const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
-          this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
+          const keptObservations = (t.observations ?? []).filter((o) => !prunedPaths.includes(o.path));
+          this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({
+            ...cur,
+            file_keys: keptFiles,
+            text,
+            ...t.observations ? { observations: keptObservations } : {}
+          }), {}, { suppressReconcilePrune: true });
         }
       }
       /**
@@ -12149,12 +12254,18 @@ var init_dist2 = __esm({
               nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
             }
             const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
-            if (textChanged2 || filesChanged2) {
+            const participants = [survivor, ...folded, candidate];
+            const anyEvidence = participants.some((t) => Array.isArray(t.observations));
+            const priorEvidence = [survivor, ...folded].flatMap((t) => evidenceOf(t));
+            const nextObservations = anyEvidence ? foldObservations(priorEvidence, evidenceOf(candidate), options.supersede_observations) : [];
+            const evidenceChanged = anyEvidence && JSON.stringify((survivor.observations ?? []).map(observationKey)) !== JSON.stringify(nextObservations.map(observationKey));
+            if (textChanged2 || filesChanged2 || evidenceChanged) {
               existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
                 ...cur,
                 updated_at: candidate.updated_at,
                 ...textChanged2 ? { text: nextText } : {},
-                ...filesChanged2 ? { file_keys: unionFiles } : {}
+                ...filesChanged2 ? { file_keys: unionFiles } : {},
+                ...evidenceChanged ? { observations: nextObservations } : {}
               }), {});
               textUpdated = textChanged2;
             } else {
@@ -13206,8 +13317,11 @@ var init_dist2 = __esm({
           }
           checkedRemoval = parsed.data;
         }
+        const direct = this.txDepth === 0;
         this.tx(() => {
           this.assertNoMoveInFlight("remove", [id]);
+          if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id)))
+            this.passWriteFence();
           const record = this.get(id);
           const isSystemDrain = record && record.type === "todo" && record.source === "system";
           if (checkedRemoval) {
@@ -13871,6 +13985,53 @@ var init_dist2 = __esm({
        * whole thing exactly once.
        */
       txDepth = 0;
+      /**
+       * WRITE FENCE (decision
+       * maintenance-reconciliation-retains-checkout-evidence-and-use): the worker
+       * policy proves checkout evidence OUTSIDE the lock (git), then runs the tool
+       * with a fence armed on the owner record and the items the proof covered.
+       * The first write to the owner (any applyInPlace on it, which is where
+       * resolves drain and reconcile pruning happen) or the first direct removal
+       * of a fenced item runs `check` INSIDE that write's transaction, under the
+       * write lock, before anything changes; the check throws when the owner, an
+       * item or the set of affected items moved since the proof. The proof covers
+       * ONE such write (whose transaction also holds the resolves drain and the
+       * reconcile pruning it causes); a second fenced write in the same call is
+       * refused, since the proof no longer describes the store it would change. A
+       * fold into a fenced item is NOT a trigger, so evidence that arrives mid-call
+       * is seen by the owner write's check and refuses it.
+       */
+      writeFence;
+      withWriteFence(owner, items2, check, fn) {
+        if (this.writeFence)
+          throw new Error("withWriteFence: a write fence is already armed on this store; nothing was written.");
+        const fence = { owner, items: new Set(items2), check, passed: false };
+        this.writeFence = fence;
+        const release = () => {
+          if (this.writeFence === fence)
+            this.writeFence = void 0;
+        };
+        let result;
+        try {
+          result = fn();
+        } catch (e) {
+          release();
+          throw e;
+        }
+        if (result && typeof result.then === "function") {
+          return result.finally(release);
+        }
+        release();
+        return result;
+      }
+      passWriteFence() {
+        const fence = this.writeFence;
+        if (fence.passed) {
+          throw new Error("write fence: this call already made the one write its checkout-evidence proof covers; a second write to the fenced record or a fenced item is refused, nothing more was written.");
+        }
+        fence.check();
+        fence.passed = true;
+      }
       /** Open read transactions on this handle (readTx). A write may not start inside one. */
       readDepth = 0;
       /**

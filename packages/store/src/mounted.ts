@@ -757,6 +757,11 @@ export class MountedStores {
    *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
    *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
    *  is caller-writable — so the field and the mount can disagree in both directions. */
+  /** The project store's write fence (SterlingStore.withWriteFence); worker targets are project-held. */
+  withWriteFence<T>(owner: string, items: Iterable<string>, check: () => void, fn: () => T): T {
+    return this.project.withWriteFence(owner, items, check, fn);
+  }
+
   projectStoreHolds(id: string): boolean {
     return this.project.projectStoreHolds(id);
   }

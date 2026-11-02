@@ -2981,7 +2981,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve7.call(this, root, ref);
+      let _sch = resolve8.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3008,7 +3008,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve7(root, ref) {
+    function resolve8(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3639,7 +3639,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve7(baseURI, relativeURI, options) {
+    function resolve8(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3897,7 +3897,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve7,
+      resolve: resolve8,
       resolveComponent,
       equal,
       serialize,
@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname11, isAbsolute as isAbsolute2, join as join16, resolve as resolve6 } from "node:path";
+import { dirname as dirname11, isAbsolute as isAbsolute2, join as join17, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13000,12 +13000,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve7) => {
+    return new Promise((resolve8) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve7();
+        resolve8();
       } else {
-        this._stdout.once("drain", resolve7);
+        this._stdout.once("drain", resolve8);
       }
     });
   }
@@ -17934,6 +17934,29 @@ var todoBoardItemReadSchema = external_exports.object({
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
+var OBSERVATION_COMMIT = external_exports.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, "40- or 64-hex commit required");
+var reconcileObservationSchema = external_exports.object({
+  path: repoPath,
+  checkout: external_exports.discriminatedUnion("kind", [
+    external_exports.object({ kind: external_exports.literal("store") }).strict(),
+    external_exports.object({ kind: external_exports.literal("checkout"), worktree: external_exports.string().min(1), branch: external_exports.string().min(1).optional() }).strict(),
+    external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+  ]),
+  commit: OBSERVATION_COMMIT.optional(),
+  state: external_exports.discriminatedUnion("kind", [
+    external_exports.object({ kind: external_exports.literal("file"), mode: external_exports.enum(["100644", "100755", "120000"]), blob: OBSERVATION_COMMIT }).strict(),
+    external_exports.object({ kind: external_exports.literal("absent") }).strict(),
+    external_exports.object({ kind: external_exports.literal("unreadable") }).strict(),
+    external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+  ])
+}).strict().superRefine((o, ctx) => {
+  const unknown3 = o.state.kind === "unknown" || o.checkout.kind === "unknown";
+  if (unknown3 && (o.state.kind !== "unknown" || o.checkout.kind !== "unknown" || o.commit !== void 0)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "an unknown observation has an unknown checkout, an unknown state and no commit" });
+  }
+  if (!unknown3 && o.commit === void 0)
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["commit"], message: "an observation is bound to the commit its checkout was at" });
+});
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
   // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -17998,7 +18021,9 @@ var todoSchema = base.extend({
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional(),
   // Which session works on this task now (see todoClaimSchema). User items only.
-  claim: todoClaimSchema.optional()
+  claim: todoClaimSchema.optional(),
+  // Checkout evidence (reconcileObservationSchema). reconcile_needed items only.
+  observations: external_exports.array(reconcileObservationSchema).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -18009,6 +18034,9 @@ var todoSchema = base.extend({
   }
   if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
+  }
+  if (rec.observations !== void 0 && (rec.source !== TODO_SYSTEM_SOURCE || rec.system_reason !== "reconcile_needed")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["observations"], message: `observations is checkout evidence on reconcile_needed maintenance items only` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -21485,6 +21513,10 @@ var MountedStores = class {
    *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
    *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
    *  is caller-writable — so the field and the mount can disagree in both directions. */
+  /** The project store's write fence (SterlingStore.withWriteFence); worker targets are project-held. */
+  withWriteFence(owner, items, check2, fn) {
+    return this.project.withWriteFence(owner, items, check2, fn);
+  }
   projectStoreHolds(id) {
     return this.project.projectStoreHolds(id);
   }
@@ -23651,6 +23683,34 @@ var SqliteDriver = class {
   }
 };
 
+// packages/store/dist/observations.js
+function observationKey(o) {
+  const c = o.checkout;
+  const s2 = o.state;
+  return JSON.stringify([o.path, c.kind, c.worktree ?? "", c.branch ?? "", o.commit ?? "", s2.kind, s2.mode ?? "", s2.blob ?? ""]);
+}
+function unknownObservation(path) {
+  return { path, checkout: { kind: "unknown" }, state: { kind: "unknown" } };
+}
+var DEBT_OWNER_HOP_CAP = 32;
+function resolveDebtOwner(link, get, aliases) {
+  if (!link)
+    return void 0;
+  let canonical2 = link;
+  for (const a of aliases)
+    if (a.historical_id === link)
+      canonical2 = a.canonical_id;
+  let record2 = get(canonical2);
+  const seen = /* @__PURE__ */ new Set();
+  while (record2 && record2.status === "superseded") {
+    if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record2.id) || !record2.superseded_by)
+      return void 0;
+    seen.add(record2.id);
+    record2 = get(record2.superseded_by);
+  }
+  return record2?.id;
+}
+
 // packages/store/dist/index.js
 var storeDriverFactory;
 function classifyClaimPath(repoRoot, path) {
@@ -24149,6 +24209,28 @@ function systemTodoTextsEquivalent(reason, a, b) {
     return a === b;
   const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
   return strip(a) === strip(b);
+}
+function evidenceOf(t) {
+  const obs = Array.isArray(t.observations) ? t.observations : [];
+  return [...obs, ...(t.file_keys ?? []).filter((k) => !obs.some((o) => o.path === k)).map((k) => unknownObservation(k))];
+}
+function foldObservations(prior, incoming, supersede = []) {
+  const replacedPaths = new Set(incoming.filter((o) => o.checkout.kind === "store").map((o) => o.path));
+  const drop = new Set(supersede);
+  const out = /* @__PURE__ */ new Map();
+  for (const o of prior) {
+    const k = observationKey(o);
+    if (drop.has(k) && o.checkout.kind === "store" && replacedPaths.has(o.path))
+      continue;
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  for (const o of incoming) {
+    const k = observationKey(o);
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  return [...out.values()].sort((a, b) => observationKey(a) < observationKey(b) ? -1 : observationKey(a) > observationKey(b) ? 1 : 0);
 }
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
@@ -24778,6 +24860,8 @@ var SterlingStore = class _SterlingStore {
     let served;
     this.tx(() => {
       this.assertNoMoveInFlight(op, [id]);
+      if (this.writeFence && id === this.writeFence.owner)
+        this.passWriteFence();
       const current = this.get(id);
       if (!current)
         throw new Error(`${op}: no record '${id}'`);
@@ -24945,9 +25029,12 @@ var SterlingStore = class _SterlingStore {
    */
   pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
     const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    const aliases = this.recordAliases();
     for (const r of rows) {
       const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
-      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed")
+        continue;
+      if (t.feature_link !== ownerId && resolveDebtOwner(t.feature_link, (id) => this.get(id), aliases) !== ownerId)
         continue;
       const currentFiles = t.file_keys ?? [];
       const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
@@ -24969,7 +25056,13 @@ var SterlingStore = class _SterlingStore {
       }
       const owner = this.get(ownerId);
       const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
-      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
+      const keptObservations = (t.observations ?? []).filter((o) => !prunedPaths.includes(o.path));
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({
+        ...cur,
+        file_keys: keptFiles,
+        text,
+        ...t.observations ? { observations: keptObservations } : {}
+      }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -25117,12 +25210,18 @@ var SterlingStore = class _SterlingStore {
           nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
         }
         const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
-        if (textChanged2 || filesChanged2) {
+        const participants = [survivor, ...folded, candidate];
+        const anyEvidence = participants.some((t) => Array.isArray(t.observations));
+        const priorEvidence = [survivor, ...folded].flatMap((t) => evidenceOf(t));
+        const nextObservations = anyEvidence ? foldObservations(priorEvidence, evidenceOf(candidate), options.supersede_observations) : [];
+        const evidenceChanged = anyEvidence && JSON.stringify((survivor.observations ?? []).map(observationKey)) !== JSON.stringify(nextObservations.map(observationKey));
+        if (textChanged2 || filesChanged2 || evidenceChanged) {
           existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
             ...cur,
             updated_at: candidate.updated_at,
             ...textChanged2 ? { text: nextText } : {},
-            ...filesChanged2 ? { file_keys: unionFiles } : {}
+            ...filesChanged2 ? { file_keys: unionFiles } : {},
+            ...evidenceChanged ? { observations: nextObservations } : {}
           }), {});
           textUpdated = textChanged2;
         } else {
@@ -26174,8 +26273,11 @@ var SterlingStore = class _SterlingStore {
       }
       checkedRemoval = parsed.data;
     }
+    const direct = this.txDepth === 0;
     this.tx(() => {
       this.assertNoMoveInFlight("remove", [id]);
+      if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id)))
+        this.passWriteFence();
       const record2 = this.get(id);
       const isSystemDrain = record2 && record2.type === "todo" && record2.source === "system";
       if (checkedRemoval) {
@@ -26839,6 +26941,53 @@ var SterlingStore = class _SterlingStore {
    * whole thing exactly once.
    */
   txDepth = 0;
+  /**
+   * WRITE FENCE (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use): the worker
+   * policy proves checkout evidence OUTSIDE the lock (git), then runs the tool
+   * with a fence armed on the owner record and the items the proof covered.
+   * The first write to the owner (any applyInPlace on it, which is where
+   * resolves drain and reconcile pruning happen) or the first direct removal
+   * of a fenced item runs `check` INSIDE that write's transaction, under the
+   * write lock, before anything changes; the check throws when the owner, an
+   * item or the set of affected items moved since the proof. The proof covers
+   * ONE such write (whose transaction also holds the resolves drain and the
+   * reconcile pruning it causes); a second fenced write in the same call is
+   * refused, since the proof no longer describes the store it would change. A
+   * fold into a fenced item is NOT a trigger, so evidence that arrives mid-call
+   * is seen by the owner write's check and refuses it.
+   */
+  writeFence;
+  withWriteFence(owner, items, check2, fn) {
+    if (this.writeFence)
+      throw new Error("withWriteFence: a write fence is already armed on this store; nothing was written.");
+    const fence = { owner, items: new Set(items), check: check2, passed: false };
+    this.writeFence = fence;
+    const release = () => {
+      if (this.writeFence === fence)
+        this.writeFence = void 0;
+    };
+    let result;
+    try {
+      result = fn();
+    } catch (e) {
+      release();
+      throw e;
+    }
+    if (result && typeof result.then === "function") {
+      return result.finally(release);
+    }
+    release();
+    return result;
+  }
+  passWriteFence() {
+    const fence = this.writeFence;
+    if (fence.passed) {
+      throw new Error("write fence: this call already made the one write its checkout-evidence proof covers; a second write to the fenced record or a fenced item is refused, nothing more was written.");
+    }
+    fence.check();
+    fence.passed = true;
+  }
   /** Open read transactions on this handle (readTx). A write may not start inside one. */
   readDepth = 0;
   /**
@@ -29404,7 +29553,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
+        await new Promise((resolve8) => setTimeout(resolve8, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -29421,7 +29570,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -29499,7 +29648,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve7(parseResult.data);
+            resolve8(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -29760,12 +29909,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve7, interval);
+      const timeoutId = setTimeout(resolve8, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -30865,7 +31014,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
+      await new Promise((resolve8) => setTimeout(resolve8, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -31434,8 +31583,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync10, existsSync as existsSync8 } from "node:fs";
-import { join as join15, dirname as dirname9 } from "node:path";
+import { readFileSync as readFileSync11, existsSync as existsSync8 } from "node:fs";
+import { join as join16, dirname as dirname9 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
 function holdRoutedStores(opened, reopen, announce) {
@@ -31539,9 +31688,57 @@ var FIELD_WRITES = /* @__PURE__ */ new Set(["knowledge_update", "knowledge_edit"
 var WorkerGuard = class {
   args;
   records;
-  constructor(args2, records) {
+  provenance;
+  constructor(args2, records, provenance) {
     this.args = args2;
     this.records = records;
+    this.provenance = provenance;
+  }
+  /**
+   * Checkout evidence (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use), after
+   * authorize allowed a mutation: proves, outside the lock, that every
+   * reconcile debt the write touches is payable from the owner's authoritative
+   * committed snapshot, then runs the tool with the store's write fence armed,
+   * so the proof is revalidated under the lock of the first owner write.
+   * Covers writes with and without resolves, knowledge_line_ref_fix, and a
+   * removal of a reconcile_needed item. A hold refuses with nothing written:
+   * 'provenance_not_integrated' while another checkout's change has not landed
+   * in the target, 'provenance_needs_conductor' for unknown, unreadable or
+   * unresolvable evidence.
+   */
+  runChecked(tool, input, allowed, run) {
+    if (!this.provenance)
+      return run();
+    let owner;
+    let claimed = [];
+    if (tool === "maintenance_remove") {
+      const item = this.records.get(String(input.id));
+      if (item?.system_reason !== "reconcile_needed" || !item.feature_link)
+        return run();
+      owner = item.feature_link;
+      claimed = [String(input.id)];
+    } else {
+      owner = String(input.id);
+      claimed = Array.isArray(input.resolves) ? input.resolves.map(String) : [];
+    }
+    let fence;
+    try {
+      const joinPaths = tool === "knowledge_append" && input.field === "files" && Array.isArray(input.entries) ? input.entries.map((e) => normalizeRepoPath(String(e?.path ?? ""))) : [];
+      fence = this.provenance.workerProvenanceGate(owner, claimed, joinPaths);
+    } catch (e) {
+      const err = e;
+      if (err?.name !== "ProvenanceHold")
+        throw e;
+      throw new WorkerPolicyRefusal(tool, err.hold === "conductor" ? "provenance_needs_conductor" : "provenance_not_integrated", err.message, [allowed.item_id]);
+    }
+    if (!fence)
+      return run();
+    if (!this.records.withWriteFence) {
+      throw new WorkerPolicyRefusal(tool, "provenance_unfenced", "the store cannot revalidate checkout evidence under its write lock", [allowed.item_id]);
+    }
+    const gate = this.provenance;
+    return this.records.withWriteFence(fence.owner, fence.items, fence.check, () => gate.withWorkerSnapshot(fence.snapshot, run));
   }
   /** The policy as it stands now, or a refusal naming why there is none. */
   load(tool) {
@@ -31749,19 +31946,19 @@ function guardWorkerTools(server, guard) {
   const register = server.registerTool.bind(server);
   server.registerTool = (name, config2, cb) => register(name, config2, (...a) => {
     const allowed = guard.authorize(name, a[0] ?? {});
-    const result = cb(...a);
     if (!allowed)
-      return result;
+      return cb(...a);
+    const result = guard.runChecked(name, a[0] ?? {}, allowed, () => cb(...a));
     const finish = (r) => stampReceipt(name, r, { run_id: allowed.run_id, item_id: allowed.item_id, resolved: guard.closed(allowed.closes) });
     return result instanceof Promise ? result.then(finish) : finish(result);
   });
 }
 
 // packages/mcp-server/dist/tools.js
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync7, readFileSync as readFileSync9, readdirSync as readdirSync3, realpathSync as realpathSync5, renameSync as renameSync3, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename3, dirname as dirname8, isAbsolute, join as join14, relative, sep } from "node:path";
+import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync6, mkdirSync as mkdirSync7, readFileSync as readFileSync10, readdirSync as readdirSync3, realpathSync as realpathSync6, renameSync as renameSync3, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { basename as basename4, dirname as dirname8, isAbsolute, join as join15, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/handoff-target.js
@@ -32415,6 +32612,132 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
   }
 }
 
+// scripts/hooks/lib/reconcile-origins.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { lstatSync as lstatSync5, readFileSync as readFileSync9, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
+import { basename as basename3, join as join14, resolve as resolve6 } from "node:path";
+var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+function git2(root, args2, input) {
+  const r = spawnSync2("git", ["-C", root, ...args2], { input, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  return { ok: !r.error && r.status === 0, status: r.status, out: r.stdout ? r.stdout.toString("utf8") : "", err: r.error?.message ?? (r.stderr ? r.stderr.toString("utf8").trim() : "") };
+}
+var realOr = (p) => {
+  try {
+    return realpathSync5(p);
+  } catch {
+    return p;
+  }
+};
+function headCommit2(root) {
+  const r = git2(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+  const head = r.out.trim();
+  return r.ok && HEX.test(head) ? head : null;
+}
+function checkoutIdentity(root, storeRoot) {
+  const head = headCommit2(root);
+  const r = git2(root, ["rev-parse", "--absolute-git-dir", "--git-common-dir", "--show-toplevel", "--show-prefix"]);
+  if (!head || !r.ok) return null;
+  const [gitDir, commonDir, top, prefix = ""] = r.out.split("\n");
+  const common = realOr(resolve6(root, commonDir));
+  const sameTop = storeRoot && realOr(top) === realOr(storeRoot);
+  let checkout;
+  if (sameTop) checkout = { kind: "store" };
+  else {
+    const branch = git2(root, ["symbolic-ref", "-q", "HEAD"]).out.trim();
+    checkout = { kind: "checkout", worktree: realOr(gitDir) === common ? "main" : basename3(gitDir), ...branch ? { branch } : {} };
+  }
+  return { head, prefix: prefix.trim(), checkout };
+}
+function workingState(root, rel) {
+  let st;
+  try {
+    st = lstatSync5(join14(root, rel));
+  } catch (e) {
+    return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
+  }
+  let mode;
+  let bytes;
+  let filters = true;
+  try {
+    if (st.isSymbolicLink()) {
+      mode = "120000";
+      bytes = Buffer.from(readlinkSync(join14(root, rel)));
+      filters = false;
+    } else if (st.isFile()) {
+      mode = st.mode & 73 ? "100755" : "100644";
+      bytes = readFileSync9(join14(root, rel));
+    } else return { kind: "unreadable" };
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const r = git2(root, ["hash-object", "--stdin", ...filters ? [`--path=${rel}`] : ["--no-filters"]], bytes);
+  const blob = r.out.trim();
+  return r.ok && HEX.test(blob) ? { kind: "file", mode, blob } : { kind: "unreadable" };
+}
+function observePaths(root, paths, storeRoot) {
+  const id = checkoutIdentity(root, storeRoot);
+  if (!id) return null;
+  const observations = [...new Set(paths)].sort().map((path) => ({ path, checkout: id.checkout, commit: id.head, state: workingState(root, path) }));
+  return { head: id.head, checkout: id.checkout, observations };
+}
+function treeState(root, commit, rel, prefix = "") {
+  const name = prefix + rel;
+  const r = git2(root, ["--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", name]);
+  if (!r.ok) return null;
+  for (const entry of r.out.split("\0")) {
+    const tab = entry.indexOf("	");
+    if (tab < 0) continue;
+    const [mode, type, oid] = entry.slice(0, tab).split(" ");
+    if (entry.slice(tab + 1) !== name) continue;
+    return type === "blob" && /^(100644|100755|120000)$/.test(mode) ? { kind: "file", mode, blob: oid } : { kind: "other" };
+  }
+  return { kind: "absent" };
+}
+var sameState = (a, b) => !!a && !!b && a.kind === b.kind && (a.kind !== "file" || a.mode === b.mode && a.blob === b.blob);
+function proveObservation(treeRoot, target, obs, { prefix = "" } = {}) {
+  const at = (c) => String(c).slice(0, 8);
+  const held = (hold, why) => ({ ok: false, hold, why: `${obs.path}: ${why}` });
+  const kind = obs?.state?.kind;
+  if (kind === "unknown" || kind === void 0) return held("conductor", "no checkout evidence was kept for this debt (legacy or incomplete item)");
+  if (kind === "unreadable") return held("conductor", `the observing checkout could not read the file at ${at(obs.commit)}`);
+  const atTarget = treeState(treeRoot, target, obs.path, prefix);
+  if (!atTarget) return held("conductor", `git could not read ${at(target)}`);
+  if (sameState(atTarget, obs.state)) return { ok: true, via: "target_holds_observed_state" };
+  if (!HEX.test(obs.commit ?? "") || !git2(treeRoot, ["cat-file", "-e", `${obs.commit}^{commit}`]).ok) {
+    return held("conductor", `the observed commit ${at(obs.commit)} is not in this repository and the target does not hold the observed state`);
+  }
+  const where = obs.checkout?.kind === "checkout" ? `checkout '${obs.checkout.worktree}'${obs.checkout.branch ? ` (${obs.checkout.branch})` : ""}` : "the store checkout";
+  const atCommit = treeState(treeRoot, obs.commit, obs.path, prefix);
+  if (!atCommit) return held("conductor", `git could not read ${at(obs.commit)}`);
+  if (!sameState(atCommit, obs.state)) {
+    return obs.checkout?.kind === "store" ? held("integration", `the store checkout's uncommitted change observed on ${at(obs.commit)} is not committed in the target yet`) : held("conductor", `the uncommitted change ${where} observed on ${at(obs.commit)} is not what the target holds, and no commit can be shown to carry it`);
+  }
+  const anc = git2(treeRoot, ["merge-base", "--is-ancestor", obs.commit, target]);
+  if (anc.ok) return { ok: true, via: "committed_ancestor" };
+  if (anc.status === 1) return held("integration", `the commit ${where} observed (${at(obs.commit)}) is not in ${at(target)} yet`);
+  return held("conductor", `git could not compare ${at(obs.commit)} with ${at(target)}`);
+}
+function itemProvenance(item, treeRoot, target, opts = {}) {
+  const obs = Array.isArray(item?.observations) ? item.observations : [];
+  const holds = [];
+  for (const key of item?.file_keys ?? []) {
+    if (!obs.some((o) => o.path === key)) holds.push({ hold: "conductor", why: `${key}: no checkout evidence was kept for this debt (legacy or incomplete item)` });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const o of obs) {
+    const k = JSON.stringify(o);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const r = proveObservation(treeRoot, target, o, opts);
+    if (!r.ok) holds.push({ hold: r.hold, why: r.why });
+  }
+  return { payable: holds.length === 0, conductor: holds.some((h) => h.hold === "conductor"), holds };
+}
+function prefixOf(root) {
+  const r = git2(root, ["rev-parse", "--show-prefix"]);
+  return r.ok ? r.out.trim() : null;
+}
+
 // packages/mcp-server/dist/tools.js
 var BOARD_READINESS_STATES = ["ready", "research", "waiting", "blocked", "delegated", "in_progress"];
 function reportedReadiness(state, claim) {
@@ -32579,7 +32902,22 @@ var HistoricalIdError = class extends Error {
     this.alias = alias;
   }
 };
+var ProvenanceHold = class extends Error {
+  hold;
+  reasons;
+  constructor(hold, reasons) {
+    super(hold === "conductor" ? `checkout evidence needs the conductor: ${reasons.join("; ")}` : `checkout evidence is not integrated yet (held, not failed): ${reasons.join("; ")}`);
+    this.hold = hold;
+    this.reasons = reasons;
+    this.name = "ProvenanceHold";
+  }
+};
 var WRITE_REFUSED_FIELDS = [
+  // Checkout evidence on reconcile debt (decision
+  // maintenance-reconciliation-retains-checkout-evidence-and-use): only the
+  // minters write it (an internal parameter, never a payload field), so no
+  // caller can forge or erase what a checkout observed.
+  "observations",
   "id",
   "created_at",
   "updated_at",
@@ -32652,11 +32990,11 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   }
   if (path === "storage" || path.startsWith("storage."))
     throw new StorageTransitionRequiredError(path);
-  const configDir = join14(repoRoot, ".sterling");
-  const configPath = join14(configDir, "config.json");
+  const configDir = join15(repoRoot, ".sterling");
+  const configPath = join15(configDir, "config.json");
   let dirLst;
   try {
-    dirLst = lstatSync5(configDir);
+    dirLst = lstatSync6(configDir);
   } catch (e) {
     if (e.code !== "ENOENT") {
       throw new Error(`config_set: could not stat .sterling at the project root (${e.message}). Nothing was written.`);
@@ -32669,15 +33007,15 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (dirLst.isSymbolicLink()) {
     throw new Error(`config_set: .sterling is a symlink at the project root \u2014 refusing a structured write beneath a linked directory. Nothing was written.`);
   }
-  const realDir = realpathSync5(configDir);
-  const realRoot = realpathSync5(repoRoot);
+  const realDir = realpathSync6(configDir);
+  const realRoot = realpathSync6(repoRoot);
   const relDir = relative(realRoot, realDir);
   if (relDir === ".." || relDir.startsWith(`..${sep}`) || isAbsolute(relDir)) {
     throw new Error(`config_set: .sterling resolves outside the project root (${realDir}) \u2014 refusing. Nothing was written.`);
   }
   let fileLst;
   try {
-    fileLst = lstatSync5(configPath);
+    fileLst = lstatSync6(configPath);
   } catch (e) {
     if (e.code !== "ENOENT") {
       throw new Error(`config_set: could not stat .sterling/config.json (${e.message}). Nothing was written.`);
@@ -32692,7 +33030,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync9(configPath);
+    currentBytes = readFileSync10(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -32756,7 +33094,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join14(configDir, `config.json.tmp-${randomUUID5()}`);
+  const tmpPath = join15(configDir, `config.json.tmp-${randomUUID5()}`);
   writeFileSync4(tmpPath, serialized);
   let renamed = false;
   try {
@@ -32768,7 +33106,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync9(configPath);
+      raceBytes = readFileSync10(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -32811,6 +33149,8 @@ var SterlingTools = class _SterlingTools {
   newId;
   repoRoot;
   checkoutRoot;
+  /** Bound only by the worker policy around one proven call (withWorkerSnapshot). */
+  workerSnapshot;
   domains;
   registryPath;
   foreignBoardRead;
@@ -32960,14 +33300,25 @@ var SterlingTools = class _SterlingTools {
     const type = record2.type;
     if (type !== "feature_article" && type !== "reference_material")
       return void 0;
-    const { root, unresolved } = this.treeRootFor(record2);
+    const bound = this.workerSnapshot && this.workerSnapshot.ownerId === record2.id ? this.workerSnapshot : void 0;
+    const { root, unresolved } = bound ? { root: bound.root, unresolved: false } : this.authoritativeTreeFor(record2);
     if (unresolved || !root)
       return void 0;
+    if (bound) {
+      const fromSnapshot = {};
+      for (const rel of _SterlingTools.baselineablePaths(record2)) {
+        if (only && !only.has(rel))
+          continue;
+        if (bound.baselines[rel] !== void 0)
+          fromSnapshot[rel] = bound.baselines[rel];
+      }
+      return Object.keys(fromSnapshot).length ? fromSnapshot : void 0;
+    }
     const baselines = {};
     for (const rel of _SterlingTools.baselineablePaths(record2)) {
       if (only && !only.has(rel))
         continue;
-      const shape = lstatSync5(join14(root, rel), { throwIfNoEntry: false });
+      const shape = lstatSync6(join15(root, rel), { throwIfNoEntry: false });
       if (!shape || !shape.isFile())
         continue;
       const hash = this.hashFile(rel, root);
@@ -33086,11 +33437,42 @@ var SterlingTools = class _SterlingTools {
    * abstains LOUD rather than resolving against the wrong tree (the
    * comsoft-juiced false-deletion class).
    */
-  treeRootFor(record2) {
+  /**
+   * The AUTHORITATIVE tree of a record (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use): a mapped
+   * working_tree resolves as treeRootFor does, and a record of the project
+   * itself resolves to the project store's checkout (repoRoot), never to the
+   * checkout this server happens to run in. Baselines and attested closes use
+   * it, so a session in another worktree cannot re-baseline shared records to
+   * its unmerged bytes. The read-time drift check keeps treeRootFor: it
+   * OBSERVES the checkout it runs in, and records that checkout as evidence.
+   */
+  authoritativeTreeFor(record2, workingTrees = this.config.working_trees) {
+    const tree = this.treeRootFor(record2, workingTrees);
+    if (tree.unresolved)
+      return tree;
+    const name = record2.working_tree;
+    if (!name || !workingTrees?.[name] && !this.declaresForeignTree(name))
+      return { root: this.repoRoot, unresolved: false };
+    return tree;
+  }
+  /** The tree a write on `record` resolves: the bound worker snapshot's root when this call is a proven worker write on that record (the fence re-checks it against the routing on disk), otherwise authoritativeTreeFor. */
+  workerTreeFor(record2) {
+    const bound = this.workerSnapshot;
+    return bound && bound.ownerId === record2.id ? { root: bound.root, unresolved: false } : this.authoritativeTreeFor(record2);
+  }
+  /** config.working_trees as it stands ON DISK now, read the way the server reads its config at start (server.ts openStoreArg); the cached config can be stale after config_set. */
+  freshWorkingTrees() {
+    if (!this.repoRoot)
+      return this.config.working_trees;
+    const path = join15(this.repoRoot, ".sterling", "config.json");
+    return parseConfig(existsSync7(path) ? JSON.parse(readFileSync10(path, "utf8")) : {}).working_trees;
+  }
+  treeRootFor(record2, workingTrees = this.config.working_trees) {
     const name = record2.working_tree;
     if (!name)
       return { root: this.checkoutRoot, unresolved: false };
-    const mapped = this.config.working_trees?.[name];
+    const mapped = workingTrees?.[name];
     if (!mapped) {
       if (!this.declaresForeignTree(name))
         return { root: this.checkoutRoot, unresolved: false };
@@ -33100,7 +33482,7 @@ var SterlingTools = class _SterlingTools {
       return { root: mapped, unresolved: false };
     if (!this.repoRoot)
       return { root: void 0, unresolved: true };
-    return { root: join14(this.repoRoot, mapped), unresolved: false };
+    return { root: join15(this.repoRoot, mapped), unresolved: false };
   }
   /**
    * Does a record's working_tree name a tree OTHER than this project? A
@@ -33193,7 +33575,7 @@ var SterlingTools = class _SterlingTools {
     const strict2 = opts.strict === true;
     const run = (args2) => {
       try {
-        return spawnSync2("git", ["-C", treeRoot, ...args2], { encoding: "utf8", windowsHide: true });
+        return spawnSync3("git", ["-C", treeRoot, ...args2], { encoding: "utf8", windowsHide: true });
       } catch {
         return void 0;
       }
@@ -33294,7 +33676,7 @@ var SterlingTools = class _SterlingTools {
    */
   runGit(treeRoot, args2) {
     try {
-      const r = spawnSync2("git", ["-C", treeRoot, ...args2], { encoding: "utf8", windowsHide: true });
+      const r = spawnSync3("git", ["-C", treeRoot, ...args2], { encoding: "utf8", windowsHide: true });
       return { status: r.status, stdout: typeof r.stdout === "string" ? r.stdout : "" };
     } catch {
       return void 0;
@@ -33701,6 +34083,11 @@ var SterlingTools = class _SterlingTools {
    * against. Every abnormal shape now returns undefined, and the caller's
    * `unavailable:article_unresolved` disclosure is what the reader sees.
    */
+  /** The live owner of a reconcile item's debt: resolveDebtOwner (alias, then supersede chain), then the live attestable record. Internal links only. */
+  debtOwnerOf(link) {
+    const id = resolveDebtOwner(link, (x) => this.store.get(x), this.store.recordAliases());
+    return id ? this.liveArticleFor(id, ATTESTABLE_OWNER_TYPES) : void 0;
+  }
   liveArticleFor(link, types = ["feature_article"]) {
     let record2 = this.store.get(link);
     const seen = /* @__PURE__ */ new Set();
@@ -33758,7 +34145,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash4("sha256").update(readFileSync9(join14(root, rel))).digest("hex");
+      return createHash4("sha256").update(readFileSync10(join15(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -33822,7 +34209,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync4(join14(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync4(join15(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -34506,6 +34893,8 @@ var SterlingTools = class _SterlingTools {
   knowledgeCreate(type, fields, opts) {
     const persistSkips = opts?.deferCheckSkipped !== true;
     this.refuseServerOwnedFields(fields, "knowledge_create");
+    if (opts?.internalMint === true && opts.observations)
+      fields = { ...fields, observations: opts.observations };
     const ts = this.now();
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
     const operationId = randomUUID5();
@@ -34720,11 +35109,12 @@ var SterlingTools = class _SterlingTools {
    * overdue records costs N scans, not N write transactions. The dedupe rule
    * itself stays in the store (enqueueWouldBeNoop shares enqueueSystemTodo's key).
    */
-  mintAtRead(args2) {
+  mintAtRead(args2, observeIn) {
     try {
       if (this.store.enqueueWouldBeNoop({ system_reason: args2.reason, text: args2.text, file_keys: args2.file_keys, feature_link: args2.feature_link }))
         return void 0;
-      this.maintenanceEnqueue(args2);
+      const observations = observeIn && args2.reason === "reconcile_needed" && args2.file_keys?.length ? observePaths(observeIn, args2.file_keys, this.repoRoot)?.observations : void 0;
+      this.maintenanceEnqueue(args2, observations);
       return void 0;
     } catch (err) {
       return { reason: args2.reason, error: err instanceof Error ? err.message : String(err) };
@@ -34780,7 +35170,7 @@ var SterlingTools = class _SterlingTools {
         if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
         if (rel && tree?.root) {
-          const stat = statSync4(join14(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync4(join15(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
@@ -34802,8 +35192,9 @@ var SterlingTools = class _SterlingTools {
         }
       }
       let featureMintFailed;
+      let mintRoot;
       const featureMint = (args2) => {
-        const failed = this.mintAtRead(args2);
+        const failed = this.mintAtRead(args2, mintRoot);
         featureMintFailed ??= failed;
       };
       if (record2.type === "feature_article" && this.repoRoot) {
@@ -34815,6 +35206,7 @@ var SterlingTools = class _SterlingTools {
         if (tree.unresolved)
           return { ...record2, verify_before_use: true };
         const treeRoot = tree.root ?? this.checkoutRoot ?? this.repoRoot;
+        mintRoot = treeRoot;
         const drifts = [];
         const parkedFiles = [];
         let liveBytes = 0;
@@ -37210,7 +37602,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     if (!laneAllowed) {
       throw new Error(`resolves: names '${id}' (${it.system_reason ?? "unknown"} lane) \u2014 only ${[..._SterlingTools.UPDATE_RESOLVABLE_LANES].join(", ")} items close via resolves; every other lane, including promotion_review, closes only through its own mechanism. The one exception is ${_SterlingTools.APPEND_JOIN_RESOLVABLE_LANE}, which closes ONLY on a knowledge_append to the files[] of an existing feature_article where an APPENDED entry's path is one of the item's own file_keys \u2014 any other write naming it is refused here. Nothing was written.`);
     }
-    const inChain = it.feature_link !== void 0 && chain.has(it.feature_link);
+    const inChain = it.feature_link !== void 0 && (chain.has(it.feature_link) || chain.has(this.debtOwnerOf(it.feature_link)?.id ?? ""));
     const marksThisArticle = isSplit && (it.text ?? "").startsWith(options.splitMarker);
     if (!inChain && !marksThisArticle && !joinsThisArticle) {
       throw new Error(isSplit ? `resolves: names '${id}', whose feature_link does not match this split's parent (or its supersedes-chain ancestors), and whose text does not match the article-oversize marker for the parent's slug; nothing was written.` : `resolves: names '${id}', whose feature_link does not match this record or any of its supersedes-chain ancestors; nothing was written.`);
@@ -38376,9 +38768,9 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     try {
       if (!this.repoRoot)
         throw new Error("no project root is known to this server");
-      if (!existsSync7(join14(this.repoRoot, ".sterling")))
+      if (!existsSync7(join15(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      ledgerPath = join14(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
+      ledgerPath = join15(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
       mkdirSync7(dirname8(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
@@ -38415,7 +38807,7 @@ ${JSON.stringify(entry)}
     const MIN_LINE_BYTES = 30;
     if (statSync4(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync9(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync10(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -38433,7 +38825,7 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join14(dirname8(ledgerPath), knowledgeWritesTempFile(basename3(ledgerPath), process.pid, randomUUID5()));
+    const tmp = join15(dirname8(ledgerPath), knowledgeWritesTempFile(basename4(ledgerPath), process.pid, randomUUID5()));
     try {
       writeFileSync4(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
@@ -38481,7 +38873,7 @@ ${JSON.stringify(entry)}
   removeExpiredDomainWriteLedgers() {
     if (!this.repoRoot)
       return void 0;
-    const dir = join14(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
+    const dir = join15(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
     const gone = (err) => err?.code === "ENOENT";
     const text = (err) => err instanceof Error ? err.message : String(err);
     let names;
@@ -38502,7 +38894,7 @@ ${JSON.stringify(entry)}
       const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name);
       if (name !== legacy && ownerPid === null)
         continue;
-      const path = join14(dir, name);
+      const path = join15(dir, name);
       let mtimeMs;
       try {
         mtimeMs = statSync4(path).mtimeMs;
@@ -38542,7 +38934,7 @@ ${JSON.stringify(entry)}
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join14(this.checkoutRoot ?? this.repoRoot, ".sterling", "transient", "session-events.json");
+    const eventsPath = join15(this.checkoutRoot ?? this.repoRoot, ".sterling", "transient", "session-events.json");
     const at = this.now();
     appendSessionEventsAt(eventsPath, entries.map((e) => ({ ...e, at })));
     return { at };
@@ -38898,7 +39290,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
       // keeps the claim check for every source, system items included.
-      opts?.internalMint === true ? { internalMint: true } : void 0
+      opts?.internalMint === true ? { internalMint: true, ...opts.observations ? { observations: opts.observations } : {} } : void 0
     );
     const notices = [];
     if (source === "user" && objective === void 0) {
@@ -40059,6 +40451,172 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * attestation candidate and the caller should perform its ordinary removal.
    * Every other outcome THROWS, with nothing written.
    */
+  /**
+   * THE WORKER'S CHECKOUT-EVIDENCE GATE (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use), run by the
+   * worker policy before EVERY worker mutation on a record that owns files,
+   * with or without resolves, and before a worker removal of a reconcile_needed
+   * item. Everything that runs git or reads files happens here, OUTSIDE the
+   * write lock:
+   * - T is the captured HEAD of the owner's authoritative tree;
+   * - every open reconcile_needed item linked to the owner must be PAYABLE from
+   *   T (itemProvenance: each observation integrated into T, no unknown or
+   *   unreadable evidence), because any write to the owner re-baselines its
+   *   files and may prune those items;
+   * - every claimed article_missing item's paths must be committed regular files
+   *   in T whose bytes in the tree are T's (collectAttestationEvidence), so a
+   *   join never lands a path that exists only in another checkout.
+   * A failure throws a ProvenanceHold naming each path and why. Success returns
+   * the fence the policy arms around the tool: `check` runs INSIDE the first
+   * owner write's (or direct item removal's) transaction and refuses with
+   * nothing written when the owner, a covered item, or the SET of linked
+   * reconcile items moved since this proof (a late fold, a new prune
+   * candidate). Returns undefined when the record owns no files and claims no
+   * article_missing item: nothing here applies, and other lanes keep their
+   * grants unchanged. The proofs cover the captured commit and the bytes read,
+   * not edits nobody has observed yet.
+   */
+  workerProvenanceGate(ownerRef, claimed, joinPaths = []) {
+    const owner = this.debtOwnerOf(ownerRef) ?? this.store.get(ownerRef);
+    if (!owner)
+      return void 0;
+    const ownerId = owner.id;
+    const claimedItems = claimed.map((id) => this.store.get(id)).filter((t) => !!t && t.type === "todo" && t.source === "system");
+    const joins = claimedItems.filter((t) => t.system_reason === "article_missing");
+    const owns = ATTESTABLE_OWNER_TYPES.includes(owner.type);
+    if (!owns && !joins.length)
+      return void 0;
+    const owned = new Set(_SterlingTools.baselineablePaths(owner));
+    const linkedNow = () => this.store.query({ types: ["todo"], cap: 1e5 }).filter((t) => {
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || !t.feature_link)
+        return false;
+      if (t.feature_link === ownerId)
+        return true;
+      const live = this.debtOwnerOf(t.feature_link);
+      return live ? live.id === ownerId : (t.file_keys ?? []).some((k) => owned.has(k));
+    });
+    const holder = this.store.projectStoreHolds(ownerId);
+    const linked = owns ? linkedNow() : [];
+    const version2 = (r) => r?.version;
+    const ownerVersion = version2(owner);
+    const expected = new Map([...linked, ...claimedItems].map((t) => [t.id, version2(t)]));
+    const linkedIds = linked.map((t) => t.id).sort();
+    let snapshot;
+    const fence = {
+      owner: ownerId,
+      items: [...expected.keys()],
+      // Runs INSIDE the first owner write's (or direct item removal's)
+      // transaction: the live owner, its version, its complete linked debt and
+      // every covered item are as proven, and when a snapshot was taken, the
+      // owner's authoritative tree and that tree's HEAD are still the ones the
+      // proof read. The HEAD read is one git query; nothing here claims git and
+      // SQLite move atomically, and the baselines the write stores come from
+      // the captured snapshot, not from the working files.
+      check: () => {
+        const moved = [];
+        const live = this.liveArticleFor(ownerId, ATTESTABLE_OWNER_TYPES) ?? this.store.get(ownerId);
+        if (!live || live.id !== ownerId || version2(live) !== ownerVersion || this.store.projectStoreHolds(ownerId) !== holder)
+          moved.push(`record '${ownerId}'`);
+        const nowLinked = owns ? linkedNow() : [];
+        if (JSON.stringify(nowLinked.map((t) => t.id).sort()) !== JSON.stringify(linkedIds))
+          moved.push(`the set of reconcile_needed items linked to '${ownerId}'`);
+        for (const [id, v] of expected) {
+          const cur = this.store.get(id);
+          if (!cur || version2(cur) !== v)
+            moved.push(`item ${id}`);
+          else if (cur.system_reason === "reconcile_needed" && !linkedNow().some((t) => t.id === id))
+            moved.push(`item ${id}'s owner`);
+        }
+        if (snapshot && live) {
+          const tree2 = this.authoritativeTreeFor(live, this.freshWorkingTrees());
+          if (tree2.unresolved || tree2.root !== snapshot.root)
+            moved.push(`the authoritative tree of '${ownerId}' (was ${snapshot.root})`);
+          else if (headCommit2(snapshot.root) !== snapshot.head)
+            moved.push(`HEAD of ${snapshot.root} (was ${snapshot.head.slice(0, 8)})`);
+        }
+        if (moved.length) {
+          throw new Error(`version conflict: ${moved.join(", ")} changed after its checkout evidence was ${snapshot ? `proven against ${snapshot.head.slice(0, 8)}` : "read"}; nothing was written. Re-read and retry.`);
+        }
+      }
+    };
+    if (!owned.size && !joins.length)
+      return { ...fence };
+    const tree = this.authoritativeTreeFor(owner, this.freshWorkingTrees());
+    if (tree.unresolved || !tree.root) {
+      throw new ProvenanceHold("conductor", [`record '${ownerId}': its authoritative tree cannot be resolved (unmapped working_tree or no repo root)`]);
+    }
+    const root = tree.root;
+    const head = headCommit2(root);
+    const prefix = prefixOf(root);
+    if (!head || prefix === null)
+      throw new ProvenanceHold("conductor", [`git could not report HEAD of ${root}`]);
+    const holds = [];
+    for (const item of linked)
+      holds.push(...itemProvenance(item, root, head, { prefix }).holds.map((h) => ({ hold: h.hold, why: `item ${item.id}: ${h.why}` })));
+    for (const join18 of joins) {
+      const keys = (join18.file_keys ?? []).filter((k) => joinPaths.includes(k));
+      if (!keys.length)
+        continue;
+      try {
+        const evidence = collectAttestationEvidence({ root, keys, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
+        if (evidence.head_commit !== head)
+          holds.push({ hold: "integration", why: `item ${join18.id}: HEAD moved while it was checked` });
+        for (const [key, ev] of Object.entries(evidence.perPath)) {
+          if (ev.kind !== "present")
+            holds.push({ hold: "integration", why: `item ${join18.id}: ${key} is not a committed file in ${head.slice(0, 8)} yet` });
+        }
+      } catch (err) {
+        holds.push({ hold: "integration", why: `item ${join18.id}: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+    if (holds.length)
+      throw new ProvenanceHold(holds.some((h) => h.hold === "conductor") ? "conductor" : "integration", holds.map((h) => h.why));
+    const baselines = {};
+    const stamped = [.../* @__PURE__ */ new Set([...owned, ...joinPaths])].sort();
+    if (stamped.length) {
+      let evidence;
+      try {
+        evidence = collectAttestationEvidence({ root, keys: stamped, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
+      } catch (err) {
+        throw new ProvenanceHold("integration", [`record '${ownerId}': ${err instanceof AttestationRefusal ? err.message : err instanceof Error ? err.message : String(err)}`]);
+      }
+      if (evidence.head_commit !== head)
+        throw new ProvenanceHold("integration", [`HEAD of ${root} moved while it was checked`]);
+      for (const [rel, ev] of Object.entries(evidence.perPath))
+        if (ev.kind === "present")
+          baselines[rel] = ev.sha256;
+    }
+    snapshot = { ownerId, root, head, baselines };
+    return { ...fence, snapshot };
+  }
+  /**
+   * Run `fn` with a worker proof's snapshot bound (worker policy only; never
+   * reachable from a tool payload). While bound, computeBaselines takes the
+   * owner's baselines from the snapshot, and an attested close refuses unless
+   * it attests the same live owner at the same tree and HEAD.
+   */
+  withWorkerSnapshot(snapshot, fn) {
+    if (!snapshot)
+      return fn();
+    if (this.workerSnapshot)
+      throw new Error("withWorkerSnapshot: a worker snapshot is already bound; nothing was written.");
+    this.workerSnapshot = snapshot;
+    const release = () => {
+      if (this.workerSnapshot === snapshot)
+        this.workerSnapshot = void 0;
+    };
+    let result;
+    try {
+      result = fn();
+    } catch (e) {
+      release();
+      throw e;
+    }
+    if (result && typeof result.then === "function")
+      return result.finally(release);
+    release();
+    return result;
+  }
   attestAlreadyPaidClose(op, item) {
     const it = item;
     if (it.source !== "system" || it.system_reason !== "reconcile_needed")
@@ -40076,7 +40634,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (!it.feature_link) {
       throw new Error(`${op}: reconcile_needed item '${it.id}' carries no feature_link, so there is no ${ATTESTABLE_OWNER_NOUN} whose baseline this close could attest \u2014 and removing it bare would leave H7 re-minting it on the next touch of the same bytes (board 8c8b6d78). Nothing was written.`);
     }
-    const routing = this.liveArticleFor(it.feature_link, ATTESTABLE_OWNER_TYPES);
+    const routing = this.debtOwnerOf(it.feature_link);
     if (!routing) {
       throw new Error(`${op}: reconcile_needed item '${it.id}' has feature_link '${it.feature_link}', which does not resolve to a LIVE ${ATTESTABLE_OWNER_NOUN} (missing, retired into a broken chain, or a type that carries no file_baselines \u2014 settlement mints these items only against ${ATTESTABLE_OWNER_TYPES.join(" / ")}) \u2014 there is nothing to attest against. Nothing was written.`);
     }
@@ -40084,6 +40642,14 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       return this.store.withTransactionForRecord(it.id, () => this.closeDomainHeldInTransaction(op, it, routing.id, keys));
     }
     const prepared = this.collectAttestationProof(op, it.id, routing, keys);
+    const bound = this.workerSnapshot;
+    if (bound) {
+      const head = prepared.evidence?.head_commit ?? prepared.head_commit;
+      const root = prepared.root;
+      if (routing.id !== bound.ownerId || head !== bound.head || root !== void 0 && root !== bound.root) {
+        throw new Error(`${op}: item '${it.id}' cannot be closed: its checkout evidence was proven for '${bound.ownerId}' at ${bound.head.slice(0, 8)} in ${bound.root}, and this close would attest '${routing.id}' at ${String(head).slice(0, 8)}${root ? ` in ${root}` : ""}. Nothing was written.`);
+      }
+    }
     return this.store.withTransactionForRecord(routing.id, () => this.attestInTransaction(op, it.id, routing.id, prepared));
   }
   /**
@@ -40136,7 +40702,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (changed.length) {
       throw new Error(`${op}: item '${fresh.id}' changed under this call \u2014 ${changed.join("; ")}. The close was decided on the item as it was before, so it refuses rather than remove a different debt. Retry. Nothing was written.`);
     }
-    const relinked = fresh.feature_link ? this.liveArticleFor(fresh.feature_link, ATTESTABLE_OWNER_TYPES) : void 0;
+    const relinked = fresh.feature_link ? this.debtOwnerOf(fresh.feature_link) : void 0;
     if (!relinked || relinked.id !== ownerId) {
       throw new Error(`${op}: item '${fresh.id}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' \u2014 its feature_link now resolves to '${relinked?.id ?? "nothing live"}'. Nothing was written.`);
     }
@@ -40162,7 +40728,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    */
   collectAttestationProof(op, itemId, article, keys) {
     const rec = article;
-    const tree = this.treeRootFor(rec);
+    const tree = this.workerTreeFor(rec);
     if (tree.unresolved || !tree.root) {
       throw new Error(`${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` + (tree.unresolved ? ` (working_tree='${String(rec.working_tree)}' is not mapped in config.working_trees)` : ` (no repo root is configured)`) + ` \u2014 an attestation must prove the bytes the record actually describes, never another tree's same-named files. Nothing was written.`);
     }
@@ -40250,7 +40816,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (!ATTESTABLE_OWNER_TYPES.includes(article.type)) {
       throw new Error(`${op}: '${articleId}' is a ${article.type}, not ${ATTESTABLE_OWNER_TYPES.join(" or ")} \u2014 only an ${ATTESTABLE_OWNER_NOUN} carries the baselines this close attests. Nothing was written.`);
     }
-    const relinked = freshItem.feature_link ? this.liveArticleFor(freshItem.feature_link, ATTESTABLE_OWNER_TYPES) : void 0;
+    const relinked = freshItem.feature_link ? this.debtOwnerOf(freshItem.feature_link) : void 0;
     if (!relinked || relinked.id !== article.id) {
       throw new Error(`${op}: item '${itemId}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${article.id}' \u2014 its feature_link now resolves to '${relinked?.id ?? "nothing live"}'. Nothing was written.`);
     }
@@ -40258,7 +40824,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (fault) {
       throw new Error(`${op}: cannot attest the baseline of the ${ATTESTABLE_OWNER_NOUN} '${article.id}', because it ${fault}. ${_SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`);
     }
-    const tree = this.treeRootFor(article);
+    const tree = this.workerTreeFor(article);
     if (tree.unresolved || !tree.root) {
       throw new Error(`${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` + (tree.unresolved ? ` (working_tree='${String(article.working_tree)}' is not mapped in config.working_trees)` : ` (no repo root is configured)`) + ` \u2014 an attestation must prove the bytes the record actually describes, never another tree's same-named files. Nothing was written.`);
     }
@@ -40448,7 +41014,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (!this.repoRoot) {
       throw new Error(`board_remove: '${itemId}' was handed over from another project, and this server has no project root to clear its evidence file in. Nothing was removed.`);
     }
-    const path = join14(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
+    const path = join15(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
     try {
       unlinkSync2(path);
     } catch (e) {
@@ -40469,8 +41035,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, and its evidence file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
     if (!this.repoRoot)
       throw fail("this server has no project root");
-    const dir = join14(this.repoRoot, HANDOFFS_DIR_REL);
-    const path = join14(dir, `${transferId}.evidence.json`);
+    const dir = join15(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join15(dir, `${transferId}.evidence.json`);
     const file = { transfer_id: transferId, item_id: itemId, ...evidence ? { evidence } : {}, ...outcome ? { outcome } : {} };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
@@ -40497,8 +41063,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
     if (!this.repoRoot)
       throw fail("this server has no project root");
-    const dir = join14(this.repoRoot, HANDOFFS_DIR_REL);
-    const path = join14(dir, `${transferId}.json`);
+    const dir = join15(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join15(dir, `${transferId}.json`);
     const closure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...note !== void 0 ? { note } : {} };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
@@ -40709,7 +41275,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       for (const rel of new Set(a.files.map((f) => f.path))) {
         let present;
         try {
-          present = lstatSync5(join14(tree.root, rel), { throwIfNoEntry: false }) !== void 0;
+          present = lstatSync6(join15(tree.root, rel), { throwIfNoEntry: false }) !== void 0;
         } catch (err) {
           failures.push(`'${rel}' could not be checked in ${tree.root} (${err.code ?? err.message})`);
           continue;
@@ -41257,14 +41823,14 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
     }
     return result;
   }
-  maintenanceEnqueue(args2) {
+  maintenanceEnqueue(args2, observations) {
     return this.boardAdd({
       text: args2.text,
       source: "system",
       system_reason: args2.reason,
       file_keys: args2.file_keys,
       feature_link: args2.feature_link
-    }, { internalMint: true });
+    }, { internalMint: true, ...observations ? { observations } : {} });
   }
   maintenanceQuery(filter = {}) {
     return this.boardQuery({
@@ -41391,8 +41957,8 @@ var StoreArgInPostgresStorageError = class extends Error {
   }
 };
 function openStoreArg(storePath2) {
-  const configPath = join15(dirname9(storePath2), "config.json");
-  const raw = existsSync8(configPath) ? JSON.parse(readFileSync10(configPath, "utf8")) : {};
+  const configPath = join16(dirname9(storePath2), "config.json");
+  const raw = existsSync8(configPath) ? JSON.parse(readFileSync11(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
@@ -41451,7 +42017,7 @@ function createSterlingServer(target, opts = {}) {
   const server = new McpServer({ name: "sterling", version: "0.1.0" });
   const toolWrappers = [];
   if (opts.workerPolicy) {
-    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store, tools));
     toolWrappers.push("worker_policy");
   }
   const SINGLE_WRITE_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_update", "board_edit", "board_claim", "board_reaffirm", "board_release", "board_takeover"]);
@@ -41819,13 +42385,13 @@ function createSterlingServer(target, opts = {}) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync11, mkdirSync as mkdirSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { readFileSync as readFileSync12, mkdirSync as mkdirSync8, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname10 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync11(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync12(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
@@ -41843,10 +42409,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync12, realpathSync as realpathSync6 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync13, realpathSync as realpathSync7 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync12(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync13(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -41877,7 +42443,7 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
   if (dir === void 0)
     return null;
   const instanceId = randomBytes(16).toString("hex");
-  const root = realpathSync6(route.root);
+  const root = realpathSync7(route.root);
   const identity = {
     instance_id: instanceId,
     protocol: BROKER_PROTOCOL,
@@ -42038,9 +42604,9 @@ if (pathArg.includes("${")) {
   console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
   process.exit(2);
 }
-var projectRoot = projectArg !== void 0 ? resolve6(projectArg) : void 0;
-var checkoutRoot = checkoutArg !== void 0 ? resolve6(checkoutArg) : projectRoot;
-var storePath = projectRoot !== void 0 ? join16(projectRoot, ".sterling", "sterling.db") : resolve6(pathArg);
+var projectRoot = projectArg !== void 0 ? resolve7(projectArg) : void 0;
+var checkoutRoot = checkoutArg !== void 0 ? resolve7(checkoutArg) : projectRoot;
+var storePath = projectRoot !== void 0 ? join17(projectRoot, ".sterling", "sterling.db") : resolve7(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot, checkoutRoot } : storePath, { workerPolicy });

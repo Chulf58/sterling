@@ -47,6 +47,7 @@ import {
   type MoveRecoveryOutcome,
   type QueryOptions,
   type ToolStore,
+  resolveDebtOwner,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
@@ -59,6 +60,7 @@ import { EntryReachability, type EntryVerdict } from './entry-reachability.js';
 // session-events-and-register-locks-are-kernel-held-never-reclaimed-by-age):
 // esbuild inlines it into mcp/sterling-mcp.mjs, as packages/tui does for scripts/lib.
 import { appendSessionEventsAt } from '../../../scripts/hooks/lib/session-events.mjs';
+import { headCommit, itemProvenance, observePaths, prefixOf, type Observation } from '../../../scripts/hooks/lib/reconcile-origins.mjs';
 
 export interface SkippedCheck {
   check: string;
@@ -1521,6 +1523,26 @@ export interface KnowledgeSplitInput {
   resolves?: string[];
 }
 
+/** The immutable snapshot a worker proof used: the live owner, its authoritative tree, that tree's HEAD and the committed-bytes baselines of the owner's paths. */
+export type WorkerSnapshot = { ownerId: string; root: string; head: string; baselines: Record<string, string> };
+/** What workerProvenanceGate hands the worker policy: the write fence and, when evidence was proven, the snapshot. */
+export type WorkerProof = { owner: string; items: string[]; check: () => void; snapshot?: WorkerSnapshot };
+
+/** A worker mutation refused because checkout evidence is not payable from the captured target (workerProvenanceGate). */
+export class ProvenanceHold extends Error {
+  constructor(
+    readonly hold: 'conductor' | 'integration',
+    readonly reasons: string[]
+  ) {
+    super(
+      hold === 'conductor'
+        ? `checkout evidence needs the conductor: ${reasons.join('; ')}`
+        : `checkout evidence is not integrated yet (held, not failed): ${reasons.join('; ')}`
+    );
+    this.name = 'ProvenanceHold';
+  }
+}
+
 /**
  * The unforgeable envelope: every write REFUSES these by name (board 617e97d4
  * hoisted this out of refuseServerOwnedFields so knowledge_schema's
@@ -1530,6 +1552,11 @@ export interface KnowledgeSplitInput {
  * from every per-type variant instead of re-deriving or copying it.
  */
 export const WRITE_REFUSED_FIELDS: readonly string[] = [
+  // Checkout evidence on reconcile debt (decision
+  // maintenance-reconciliation-retains-checkout-evidence-and-use): only the
+  // minters write it (an internal parameter, never a payload field), so no
+  // caller can forge or erase what a checkout observed.
+  'observations',
   'id',
   'created_at',
   'updated_at',
@@ -2012,6 +2039,8 @@ export class SterlingTools {
   private newId: () => string;
   private repoRoot?: string;
   private checkoutRoot?: string;
+  /** Bound only by the worker policy around one proven call (withWorkerSnapshot). */
+  private workerSnapshot?: WorkerSnapshot;
   private domains?: DomainSurface;
   private registryPath?: string;
   private foreignBoardRead?: ReadForeignBoardOptions;
@@ -2178,8 +2207,24 @@ export class SterlingTools {
     // declaring working_tree hashes against ITS tree, never the project root —
     // the root's same-named files previously leaked into copy-article baselines.
     // Unmapped tree name → NO baselines (abstain; the read path flags loud).
-    const { root, unresolved } = this.treeRootFor(record);
+    // A record with no working_tree baselines against the PROJECT STORE's
+    // checkout, never the caller's worktree (authoritativeTreeFor).
+    // A proven worker write consumes its bound snapshot FIRST: the snapshot
+    // carries the routing the proof read fresh from disk, so a stale cached
+    // routing can never drop or redirect the proven baselines.
+    const bound = this.workerSnapshot && this.workerSnapshot.ownerId === record.id ? this.workerSnapshot : undefined;
+    const { root, unresolved } = bound ? { root: bound.root, unresolved: false } : this.authoritativeTreeFor(record);
     if (unresolved || !root) return undefined;
+    if (bound) {
+      // A proven worker write: the baselines are the snapshot's committed bytes,
+      // never the working files, which may have changed since the proof.
+      const fromSnapshot: Record<string, string> = {};
+      for (const rel of SterlingTools.baselineablePaths(record)) {
+        if (only && !only.has(rel)) continue;
+        if (bound.baselines[rel] !== undefined) fromSnapshot[rel] = bound.baselines[rel];
+      }
+      return Object.keys(fromSnapshot).length ? fromSnapshot : undefined;
+    }
     const baselines: Record<string, string> = {};
     // ONE definition of "which paths can be baselined", shared with the
     // read-time drift check (baselineablePaths) so the writer of these hashes
@@ -2315,10 +2360,41 @@ export class SterlingTools {
    * abstains LOUD rather than resolving against the wrong tree (the
    * comsoft-juiced false-deletion class).
    */
-  private treeRootFor(record: Record<string, unknown>): { root?: string; unresolved: boolean } {
+  /**
+   * The AUTHORITATIVE tree of a record (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use): a mapped
+   * working_tree resolves as treeRootFor does, and a record of the project
+   * itself resolves to the project store's checkout (repoRoot), never to the
+   * checkout this server happens to run in. Baselines and attested closes use
+   * it, so a session in another worktree cannot re-baseline shared records to
+   * its unmerged bytes. The read-time drift check keeps treeRootFor: it
+   * OBSERVES the checkout it runs in, and records that checkout as evidence.
+   */
+  private authoritativeTreeFor(record: Record<string, unknown>, workingTrees: SterlingConfig['working_trees'] = this.config.working_trees): { root?: string; unresolved: boolean } {
+    const tree = this.treeRootFor(record, workingTrees);
+    if (tree.unresolved) return tree;
+    const name = (record as { working_tree?: string }).working_tree;
+    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name))) return { root: this.repoRoot, unresolved: false };
+    return tree;
+  }
+
+  /** The tree a write on `record` resolves: the bound worker snapshot's root when this call is a proven worker write on that record (the fence re-checks it against the routing on disk), otherwise authoritativeTreeFor. */
+  private workerTreeFor(record: Record<string, unknown>): { root?: string; unresolved: boolean } {
+    const bound = this.workerSnapshot;
+    return bound && bound.ownerId === record.id ? { root: bound.root, unresolved: false } : this.authoritativeTreeFor(record);
+  }
+
+  /** config.working_trees as it stands ON DISK now, read the way the server reads its config at start (server.ts openStoreArg); the cached config can be stale after config_set. */
+  private freshWorkingTrees(): SterlingConfig['working_trees'] {
+    if (!this.repoRoot) return this.config.working_trees;
+    const path = join(this.repoRoot, '.sterling', 'config.json');
+    return parseConfig(existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}).working_trees;
+  }
+
+  private treeRootFor(record: Record<string, unknown>, workingTrees: SterlingConfig['working_trees'] = this.config.working_trees): { root?: string; unresolved: boolean } {
     const name = (record as { working_tree?: string }).working_tree;
     if (!name) return { root: this.checkoutRoot, unresolved: false };
-    const mapped = this.config.working_trees?.[name];
+    const mapped = workingTrees?.[name];
     if (!mapped) {
       if (!this.declaresForeignTree(name)) return { root: this.checkoutRoot, unresolved: false };
       return { root: undefined, unresolved: true };
@@ -3129,6 +3205,12 @@ export class SterlingTools {
    * against. Every abnormal shape now returns undefined, and the caller's
    * `unavailable:article_unresolved` disclosure is what the reader sees.
    */
+  /** The live owner of a reconcile item's debt: resolveDebtOwner (alias, then supersede chain), then the live attestable record. Internal links only. */
+  private debtOwnerOf(link: string | undefined): DurableRecord | undefined {
+    const id = resolveDebtOwner(link, (x) => this.store.get(x) as never, this.store.recordAliases());
+    return id ? this.liveArticleFor(id, ATTESTABLE_OWNER_TYPES) : undefined;
+  }
+
   private liveArticleFor(link: string, types: readonly string[] = ['feature_article']): DurableRecord | undefined {
     let record = this.store.get(link);
     // Bounded AND cycle-guarded: a torn store degrades to an abstention rather
@@ -4188,6 +4270,8 @@ export class SterlingTools {
        * quoted there.
        */
       internalMint?: boolean;
+      /** Checkout evidence from an internal mint (maintenanceEnqueue only); never from a payload. */
+      observations?: Observation[];
     }
   ): CreateResult {
     // deferCheckSkipped (default false): when true, the check_skipped audit rows
@@ -4197,6 +4281,7 @@ export class SterlingTools {
     // other caller omits it, so their behaviour is byte-identical.
     const persistSkips = opts?.deferCheckSkipped !== true;
     this.refuseServerOwnedFields(fields, 'knowledge_create');
+    if (opts?.internalMint === true && opts.observations) fields = { ...fields, observations: opts.observations };
     const ts = this.now();
     // The envelope is SERVER-OWNED: strip these keys from caller fields before
     // assembling the candidate, so a caller cannot override id/timestamps/status/
@@ -4580,10 +4665,17 @@ export class SterlingTools {
    * overdue records costs N scans, not N write transactions. The dedupe rule
    * itself stays in the store (enqueueWouldBeNoop shares enqueueSystemTodo's key).
    */
-  private mintAtRead(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }): MintFailure | undefined {
+  private mintAtRead(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }, observeIn?: string): MintFailure | undefined {
     try {
       if (this.store.enqueueWouldBeNoop({ system_reason: args.reason, text: args.text, file_keys: args.file_keys, feature_link: args.feature_link })) return undefined;
-      this.maintenanceEnqueue(args);
+      // reconcile_needed records what the checkout this server reads observed
+      // (decision maintenance-reconciliation-retains-checkout-evidence-and-use);
+      // a git failure leaves the evidence out, which reads as unknown later.
+      const observations =
+        observeIn && args.reason === 'reconcile_needed' && args.file_keys?.length
+          ? (observePaths(observeIn, args.file_keys, this.repoRoot)?.observations as Observation[] | undefined)
+          : undefined;
+      this.maintenanceEnqueue(args, observations);
       return undefined;
     } catch (err) {
       return { reason: args.reason, error: err instanceof Error ? err.message : String(err) };
@@ -4719,10 +4811,11 @@ export class SterlingTools {
       // several items; each is still attempted, and the FIRST refusal is the one
       // disclosed on the record (and so on the envelope).
       let featureMintFailed: MintFailure | undefined;
+      let mintRoot: string | undefined;
       const featureMint = (args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }) => {
         // Call first, then keep: `featureMintFailed ??= this.mintAtRead(args)`
         // would skip every mint after the first refusal.
-        const failed = this.mintAtRead(args);
+        const failed = this.mintAtRead(args, mintRoot);
         featureMintFailed ??= failed;
       };
       if (record.type === 'feature_article' && this.repoRoot) {
@@ -4749,6 +4842,7 @@ export class SterlingTools {
         const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
         if (tree.unresolved) return { ...record, verify_before_use: true };
         const treeRoot = tree.root ?? this.checkoutRoot ?? this.repoRoot;
+        mintRoot = treeRoot;
         // EVERY drifting file, not just the first (board 2ded3b4b). This loop used
         // to `break` on the first drift, and the enqueue dedup keyed on the
         // ARTICLE — so a second drifting file never got an item, and because
@@ -8302,7 +8396,10 @@ export class SterlingTools {
           `write naming it is refused here. Nothing was written.`
       );
     }
-    const inChain = it.feature_link !== undefined && chain.has(it.feature_link);
+    // An exact chain member, or a link that positively resolves (alias, then
+    // supersede chain) to a record of this chain: the same known lineage the
+    // worker gate and reconcile pruning read (debtOwnerOf).
+    const inChain = it.feature_link !== undefined && (chain.has(it.feature_link) || chain.has(this.debtOwnerOf(it.feature_link)?.id ?? ''));
     const marksThisArticle = isSplit && (it.text ?? '').startsWith(options!.splitMarker!);
     // joinsThisArticle IS the key for its lane: an article_missing item is raised
     // on territory NO article owns, so it carries no feature_link to match — the
@@ -10927,7 +11024,7 @@ export class SterlingTools {
      * mint cannot be impersonated by anything a caller sends. Only
      * maintenanceEnqueue sets it.
      */
-    opts?: { internalMint?: boolean }
+    opts?: { internalMint?: boolean; observations?: Observation[] }
   ): CreateResult & { notice?: string; handoff_delivery?: HandoffDelivery } {
     if (args.target_project !== undefined) return this.boardAddHandoff(args);
     const { text, source, objective, measured_at_head, blocked_by, needs, ...rest } = args;
@@ -11000,7 +11097,7 @@ export class SterlingTools {
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
       // keeps the claim check for every source, system items included.
-      opts?.internalMint === true ? { internalMint: true } : undefined
+      opts?.internalMint === true ? { internalMint: true, ...(opts.observations ? { observations: opts.observations } : {}) } : undefined
     );
     const notices: string[] = [];
     if (source === 'user' && objective === undefined) {
@@ -12609,6 +12706,184 @@ export class SterlingTools {
    * attestation candidate and the caller should perform its ordinary removal.
    * Every other outcome THROWS, with nothing written.
    */
+  /**
+   * THE WORKER'S CHECKOUT-EVIDENCE GATE (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use), run by the
+   * worker policy before EVERY worker mutation on a record that owns files,
+   * with or without resolves, and before a worker removal of a reconcile_needed
+   * item. Everything that runs git or reads files happens here, OUTSIDE the
+   * write lock:
+   * - T is the captured HEAD of the owner's authoritative tree;
+   * - every open reconcile_needed item linked to the owner must be PAYABLE from
+   *   T (itemProvenance: each observation integrated into T, no unknown or
+   *   unreadable evidence), because any write to the owner re-baselines its
+   *   files and may prune those items;
+   * - every claimed article_missing item's paths must be committed regular files
+   *   in T whose bytes in the tree are T's (collectAttestationEvidence), so a
+   *   join never lands a path that exists only in another checkout.
+   * A failure throws a ProvenanceHold naming each path and why. Success returns
+   * the fence the policy arms around the tool: `check` runs INSIDE the first
+   * owner write's (or direct item removal's) transaction and refuses with
+   * nothing written when the owner, a covered item, or the SET of linked
+   * reconcile items moved since this proof (a late fold, a new prune
+   * candidate). Returns undefined when the record owns no files and claims no
+   * article_missing item: nothing here applies, and other lanes keep their
+   * grants unchanged. The proofs cover the captured commit and the bytes read,
+   * not edits nobody has observed yet.
+   */
+  workerProvenanceGate(ownerRef: string, claimed: string[], joinPaths: string[] = []): WorkerProof | undefined {
+    // ONE LIVE OWNER for the whole call: a stored link may name a retired
+    // article, and the attestation and every write land on its live successor,
+    // so the proof, the linked debt and the fence all use that same record
+    // (liveArticleFor, the resolver the attested close uses).
+    const owner = (this.debtOwnerOf(ownerRef) ?? this.store.get(ownerRef)) as (DurableRecord & { version?: number }) | undefined;
+    if (!owner) return undefined;
+    const ownerId = owner.id;
+    type Item = DurableRecord & { source?: string; system_reason?: string; feature_link?: string; file_keys?: string[]; version?: number; observations?: Observation[] };
+    const claimedItems = claimed
+      .map((id) => this.store.get(id) as Item | undefined)
+      .filter((t): t is Item => !!t && t.type === 'todo' && t.source === 'system');
+    const joins = claimedItems.filter((t) => t.system_reason === 'article_missing');
+    const owns = ATTESTABLE_OWNER_TYPES.includes(owner.type);
+    if (!owns && !joins.length) return undefined;
+    // THE OWNER'S COMPLETE DEBT: every open reconcile_needed item whose link
+    // resolves to this live owner through a historical alias (recordAliases)
+    // and the supersede chain (liveArticleFor), and every item whose link
+    // resolves NOWHERE but names a path this owner owns: a broken resolution
+    // never drops a candidate. Internal only; no caller address is redirected.
+    const owned = new Set(SterlingTools.baselineablePaths(owner as unknown as Record<string, unknown>));
+    // The gate's population is the KNOWN lineage (debtOwnerOf, shared with
+    // pruning, the attested close and resolves) PLUS, conservatively, any item
+    // whose link resolves nowhere but names an owned path; pruning removes only
+    // the known lineage, never by overlap.
+    const linkedNow = (): Item[] =>
+      (this.store.query({ types: ['todo'], cap: 100_000 }) as Item[]).filter((t) => {
+        if (t.source !== 'system' || t.system_reason !== 'reconcile_needed' || !t.feature_link) return false;
+        if (t.feature_link === ownerId) return true;
+        const live = this.debtOwnerOf(t.feature_link);
+        return live ? live.id === ownerId : (t.file_keys ?? []).some((k) => owned.has(k));
+      });
+    const holder = this.store.projectStoreHolds(ownerId);
+    const linked = owns ? linkedNow() : [];
+    const version = (r: { version?: number } | undefined) => r?.version;
+    const ownerVersion = version(owner);
+    const expected = new Map<string, number | undefined>([...linked, ...claimedItems].map((t) => [t.id, version(t)]));
+    const linkedIds = linked.map((t) => t.id).sort();
+    let snapshot: WorkerSnapshot | undefined;
+    const fence = {
+      owner: ownerId,
+      items: [...expected.keys()],
+      // Runs INSIDE the first owner write's (or direct item removal's)
+      // transaction: the live owner, its version, its complete linked debt and
+      // every covered item are as proven, and when a snapshot was taken, the
+      // owner's authoritative tree and that tree's HEAD are still the ones the
+      // proof read. The HEAD read is one git query; nothing here claims git and
+      // SQLite move atomically, and the baselines the write stores come from
+      // the captured snapshot, not from the working files.
+      check: () => {
+        const moved: string[] = [];
+        const live = this.liveArticleFor(ownerId, ATTESTABLE_OWNER_TYPES) ?? this.store.get(ownerId);
+        if (!live || live.id !== ownerId || version(live as { version?: number }) !== ownerVersion || this.store.projectStoreHolds(ownerId) !== holder) moved.push(`record '${ownerId}'`);
+        const nowLinked = owns ? linkedNow() : [];
+        if (JSON.stringify(nowLinked.map((t) => t.id).sort()) !== JSON.stringify(linkedIds)) moved.push(`the set of reconcile_needed items linked to '${ownerId}'`);
+        for (const [id, v] of expected) {
+          const cur = this.store.get(id) as Item | undefined;
+          if (!cur || version(cur) !== v) moved.push(`item ${id}`);
+          else if (cur.system_reason === 'reconcile_needed' && !linkedNow().some((t) => t.id === id)) moved.push(`item ${id}'s owner`);
+        }
+        if (snapshot && live) {
+          // The routing as configured ON DISK now, not the server's cached copy.
+          const tree = this.authoritativeTreeFor(live as unknown as Record<string, unknown>, this.freshWorkingTrees());
+          if (tree.unresolved || tree.root !== snapshot.root) moved.push(`the authoritative tree of '${ownerId}' (was ${snapshot.root})`);
+          else if (headCommit(snapshot.root) !== snapshot.head) moved.push(`HEAD of ${snapshot.root} (was ${snapshot.head.slice(0, 8)})`);
+        }
+        if (moved.length) {
+          throw new Error(
+            `version conflict: ${moved.join(', ')} changed after its checkout evidence was ${snapshot ? `proven against ${snapshot.head.slice(0, 8)}` : 'read'}; nothing was written. Re-read and retry.`
+          );
+        }
+      },
+    };
+    // A record that carries no repo path stamps no baseline: no git, but the
+    // fence still refuses a write that debt reached in the meantime. Every
+    // BASELINE-BEARING owner is prepared below even without debt, so no worker
+    // write ever baselines live bytes the proof did not capture.
+    if (!owned.size && !joins.length) return { ...fence };
+    const tree = this.authoritativeTreeFor(owner as unknown as Record<string, unknown>, this.freshWorkingTrees());
+    if (tree.unresolved || !tree.root) {
+      throw new ProvenanceHold('conductor', [`record '${ownerId}': its authoritative tree cannot be resolved (unmapped working_tree or no repo root)`]);
+    }
+    const root = tree.root;
+    const head = headCommit(root);
+    const prefix = prefixOf(root);
+    if (!head || prefix === null) throw new ProvenanceHold('conductor', [`git could not report HEAD of ${root}`]);
+    const holds: { hold: 'conductor' | 'integration'; why: string }[] = [];
+    for (const item of linked) holds.push(...itemProvenance(item, root, head, { prefix }).holds.map((h) => ({ hold: h.hold, why: `item ${item.id}: ${h.why}` })));
+    for (const join of joins) {
+      // The paths this join appends must be committed, unmodified files of T;
+      // keys it does not append stay owed and are not judged here.
+      const keys = (join.file_keys ?? []).filter((k) => joinPaths.includes(k));
+      if (!keys.length) continue;
+      try {
+        const evidence = collectAttestationEvidence({ root, keys, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
+        if (evidence.head_commit !== head) holds.push({ hold: 'integration', why: `item ${join.id}: HEAD moved while it was checked` });
+        for (const [key, ev] of Object.entries(evidence.perPath)) {
+          if (ev.kind !== 'present') holds.push({ hold: 'integration', why: `item ${join.id}: ${key} is not a committed file in ${head.slice(0, 8)} yet` });
+        }
+      } catch (err) {
+        holds.push({ hold: 'integration', why: `item ${join.id}: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+    if (holds.length) throw new ProvenanceHold(holds.some((h) => h.hold === 'conductor') ? 'conductor' : 'integration', holds.map((h) => h.why));
+    // The SNAPSHOT the proof used, carried to the write. Every path the write
+    // may stamp (each owned path and each appended path) is proven the way an
+    // attested close proves it (collectAttestationEvidence, outside the lock):
+    // the working buffer's clean-filtered hash equals its blob in T, and the
+    // baseline is that buffer's sha256 (decision
+    // attested-close-proves-buffer-equality-through-git-not-path-resolution). A
+    // modified or unreadable path refuses here; a path absent from T gets no
+    // baseline; nothing is ever hashed live later.
+    const baselines: Record<string, string> = {};
+    const stamped = [...new Set([...owned, ...joinPaths])].sort();
+    if (stamped.length) {
+      let evidence: AttestationEvidence;
+      try {
+        evidence = collectAttestationEvidence({ root, keys: stamped, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
+      } catch (err) {
+        throw new ProvenanceHold('integration', [`record '${ownerId}': ${err instanceof AttestationRefusal ? err.message : err instanceof Error ? err.message : String(err)}`]);
+      }
+      if (evidence.head_commit !== head) throw new ProvenanceHold('integration', [`HEAD of ${root} moved while it was checked`]);
+      for (const [rel, ev] of Object.entries(evidence.perPath)) if (ev.kind === 'present') baselines[rel] = ev.sha256;
+    }
+    snapshot = { ownerId, root, head, baselines };
+    return { ...fence, snapshot };
+  }
+
+  /**
+   * Run `fn` with a worker proof's snapshot bound (worker policy only; never
+   * reachable from a tool payload). While bound, computeBaselines takes the
+   * owner's baselines from the snapshot, and an attested close refuses unless
+   * it attests the same live owner at the same tree and HEAD.
+   */
+  withWorkerSnapshot<T>(snapshot: WorkerSnapshot | undefined, fn: () => T): T {
+    if (!snapshot) return fn();
+    if (this.workerSnapshot) throw new Error('withWorkerSnapshot: a worker snapshot is already bound; nothing was written.');
+    this.workerSnapshot = snapshot;
+    const release = () => {
+      if (this.workerSnapshot === snapshot) this.workerSnapshot = undefined;
+    };
+    let result: T;
+    try {
+      result = fn();
+    } catch (e) {
+      release();
+      throw e;
+    }
+    if (result && typeof (result as { then?: unknown }).then === 'function') return (result as unknown as Promise<unknown>).finally(release) as unknown as T;
+    release();
+    return result;
+  }
+
   private attestAlreadyPaidClose(op: string, item: DurableRecord): BaselineAttestationReceipt | DomainHeldClose | undefined {
     const it = item as unknown as { id: string; source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] };
     // FALL-THROUGH, NOT REFUSAL — every other lane and every user item removes
@@ -12664,7 +12939,7 @@ export class SterlingTools {
     // would put the transaction on a different database than the article write
     // whenever the two disagree, which is exactly the affinity defect
     // withTransactionForRecord exists to close.)
-    const routing = this.liveArticleFor(it.feature_link, ATTESTABLE_OWNER_TYPES);
+    const routing = this.debtOwnerOf(it.feature_link);
     if (!routing) {
       throw new Error(
         `${op}: reconcile_needed item '${it.id}' has feature_link '${it.feature_link}', which does not resolve to a LIVE ` +
@@ -12702,6 +12977,19 @@ export class SterlingTools {
     // The evidence is bound to the exact keys and tree it was taken for, and the
     // transaction refuses if either has moved (see attestInTransaction).
     const prepared = this.collectAttestationProof(op, it.id, routing, keys);
+    const bound = this.workerSnapshot;
+    if (bound) {
+      // A proven worker close attests the SAME live owner at the SAME tree and
+      // HEAD its checkout-evidence proof used, or nothing.
+      const head = (prepared as unknown as { evidence?: { head_commit?: string } }).evidence?.head_commit ?? (prepared as unknown as { head_commit?: string }).head_commit;
+      const root = (prepared as unknown as { root?: string }).root;
+      if (routing.id !== bound.ownerId || head !== bound.head || (root !== undefined && root !== bound.root)) {
+        throw new Error(
+          `${op}: item '${it.id}' cannot be closed: its checkout evidence was proven for '${bound.ownerId}' at ${bound.head.slice(0, 8)} in ${bound.root}, ` +
+            `and this close would attest '${routing.id}' at ${String(head).slice(0, 8)}${root ? ` in ${root}` : ''}. Nothing was written.`
+        );
+      }
+    }
     return this.store.withTransactionForRecord(routing.id, () => this.attestInTransaction(op, it.id, routing.id, prepared));
   }
 
@@ -12763,7 +13051,7 @@ export class SterlingTools {
           `before, so it refuses rather than remove a different debt. Retry. Nothing was written.`
       );
     }
-    const relinked = fresh.feature_link ? this.liveArticleFor(fresh.feature_link, ATTESTABLE_OWNER_TYPES) : undefined;
+    const relinked = fresh.feature_link ? this.debtOwnerOf(fresh.feature_link) : undefined;
     if (!relinked || relinked.id !== ownerId) {
       throw new Error(
         `${op}: item '${fresh.id}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' — its feature_link now resolves to ` +
@@ -12804,7 +13092,7 @@ export class SterlingTools {
     // refuses on the same footing (decision
     // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]):
     // evidence this process cannot obtain is never an exemption.
-    const tree = this.treeRootFor(rec);
+    const tree = this.workerTreeFor(rec);
     if (tree.unresolved || !tree.root) {
       throw new Error(
         `${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` +
@@ -12956,7 +13244,7 @@ export class SterlingTools {
     // re-resolved from the fresh item, so a feature_link edited between the
     // routing read and the lock cannot attest against the record we happened to
     // open the transaction on.
-    const relinked = freshItem.feature_link ? this.liveArticleFor(freshItem.feature_link, ATTESTABLE_OWNER_TYPES) : undefined;
+    const relinked = freshItem.feature_link ? this.debtOwnerOf(freshItem.feature_link) : undefined;
     if (!relinked || relinked.id !== article.id) {
       throw new Error(
         `${op}: item '${itemId}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${article.id}' — its feature_link now resolves to ` +
@@ -12980,7 +13268,7 @@ export class SterlingTools {
     // The OWNER's OWN tree, re-resolved — a mapped working_tree has its own
     // bytes AND its own HEAD, and an unmapped name abstains loud everywhere else,
     // so it refuses here rather than attesting the project root's same-named files.
-    const tree = this.treeRootFor(article as unknown as Record<string, unknown>);
+    const tree = this.workerTreeFor(article as unknown as Record<string, unknown>);
     if (tree.unresolved || !tree.root) {
       throw new Error(
         `${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` +
@@ -14329,7 +14617,12 @@ export class SterlingTools {
     return result;
   }
 
-  maintenanceEnqueue(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }): {
+  maintenanceEnqueue(
+    args: { reason: string; text: string; file_keys?: string[]; feature_link?: string },
+    // A SECOND parameter, never part of `args`: the read-time drift check's
+    // checkout evidence. No tool surface passes it.
+    observations?: Observation[]
+  ): {
     record: DurableRecord;
     check_skipped: SkippedCheck[];
   } {
@@ -14350,7 +14643,7 @@ export class SterlingTools {
         file_keys: args.file_keys,
         feature_link: args.feature_link,
       },
-      { internalMint: true }
+      { internalMint: true, ...(observations ? { observations } : {}) }
     );
   }
 

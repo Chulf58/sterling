@@ -924,6 +924,40 @@ export function todoBlocksItself(rec: { slug?: string; blocked_by?: string[] }):
   return rec.slug !== undefined && rec.blocked_by?.includes(rec.slug) === true;
 }
 
+// Checkout evidence on reconcile debt (decision
+// maintenance-reconciliation-retains-checkout-evidence-and-use): one path as
+// one checkout observed it, bound to that checkout's HEAD at the time. The
+// checkout is a locator tag only (names and branches are reusable, so it never
+// proves lifetime or payment); `unknown` marks legacy debt that kept no
+// evidence, which no later observation can stand in for. Server-owned: the
+// minters write it, the store folds it, no public write may set or clear it.
+const OBSERVATION_COMMIT = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, '40- or 64-hex commit required');
+export const reconcileObservationSchema = z
+  .object({
+    path: repoPath,
+    checkout: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('store') }).strict(),
+      z.object({ kind: z.literal('checkout'), worktree: z.string().min(1), branch: z.string().min(1).optional() }).strict(),
+      z.object({ kind: z.literal('unknown') }).strict(),
+    ]),
+    commit: OBSERVATION_COMMIT.optional(),
+    state: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('file'), mode: z.enum(['100644', '100755', '120000']), blob: OBSERVATION_COMMIT }).strict(),
+      z.object({ kind: z.literal('absent') }).strict(),
+      z.object({ kind: z.literal('unreadable') }).strict(),
+      z.object({ kind: z.literal('unknown') }).strict(),
+    ]),
+  })
+  .strict()
+  .superRefine((o, ctx) => {
+    const unknown = o.state.kind === 'unknown' || o.checkout.kind === 'unknown';
+    if (unknown && (o.state.kind !== 'unknown' || o.checkout.kind !== 'unknown' || o.commit !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'an unknown observation has an unknown checkout, an unknown state and no commit' });
+    }
+    if (!unknown && o.commit === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['commit'], message: 'an observation is bound to the commit its checkout was at' });
+  });
+export type ReconcileObservation = z.infer<typeof reconcileObservationSchema>;
+
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
 // done = removed by the artifact-writing event (P4).
 export const todoSchema = base
@@ -995,6 +1029,8 @@ export const todoSchema = base
     handoff: todoHandoffSchema.optional(),
     // Which session works on this task now (see todoClaimSchema). User items only.
     claim: todoClaimSchema.optional(),
+    // Checkout evidence (reconcileObservationSchema). reconcile_needed items only.
+    observations: z.array(reconcileObservationSchema).optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
@@ -1006,6 +1042,9 @@ export const todoSchema = base
     }
     if (rec.needs_set_at !== undefined && rec.needs === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_set_at'], message: `needs_set_at goes only with needs` });
+    }
+    if (rec.observations !== undefined && (rec.source !== TODO_SYSTEM_SOURCE || rec.system_reason !== 'reconcile_needed')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['observations'], message: `observations is checkout evidence on reconcile_needed maintenance items only` });
     }
     if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['handoff'], message: `handoff marks source:'user' board tasks only — maintenance-queue items are never handed to another project` });

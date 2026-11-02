@@ -244,7 +244,9 @@ test('repo path fields: "an existing directory" is printed on exactly the fields
   try {
     let checked = 0;
     for (const type of TYPES) {
-      for (const { path, shape } of pathFields(tools.knowledgeSchema(type).fields)) {
+      // A server_owned field (todo.observations[].path) is refused by name before
+      // its paths are judged, as createBody already drops it (server_owned).
+      for (const { path, shape } of pathFields((tools.knowledgeSchema(type).fields as Described[]).filter((f) => !f.server_owned))) {
         const body = createBody(tools, type, { dedup_override: true });
         setPath(body, path, 'a-directory', shape.type.endsWith('[]'));
         const message = thrown(() => tools.knowledgeCreate(type, body));

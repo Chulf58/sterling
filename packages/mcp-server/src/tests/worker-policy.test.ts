@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,11 +39,31 @@ function mkArticle(tools: SterlingTools, slug: string, files: string[], state = 
   return (tools.knowledgeCreate('feature_article', fields as never) as unknown as { record: { id: string } }).record.id;
 }
 
-async function harness(opts: { worker?: boolean } = { worker: true }) {
+async function harness(opts: { worker?: boolean; git?: boolean } = { worker: true }) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-worker-policy-'));
   const policyPath = join(dir, 'maintenance-worker.eligible.json');
+  // The project is a real git repository whose owned files are committed and
+  // unmodified: a worker write on a record that owns files is proven against
+  // the checkout's HEAD, and a join appends only a committed, clean file
+  // (decision maintenance-reconciliation-retains-checkout-evidence-and-use).
+  let dbPath = join(dir, 'sterling.db');
+  if (opts.git !== false) {
+    const project = join(dir, 'project');
+    for (const d of ['a', 'b', 'c']) mkdirSync(join(project, 'src', d), { recursive: true });
+    mkdirSync(join(project, '.sterling'), { recursive: true });
+    writeFileSync(join(project, '.gitignore'), '.sterling/\n');
+    writeFileSync(join(project, 'src', 'a', 'one.ts'), 'export const a = 1;\n');
+    writeFileSync(join(project, 'src', 'b', 'one.ts'), 'export const b = 1;\n');
+    writeFileSync(join(project, 'src', 'c', 'one.ts'), 'export const one = 1;\n');
+    writeFileSync(join(project, 'src', 'c', 'two.ts'), 'export const two = 2;\n');
+    for (const args of [['init', '-q'], ['config', 'user.email', 't@t.t'], ['config', 'user.name', 't'], ['add', '-A'], ['commit', '-q', '-m', 'c']]) {
+      const r = spawnSync('git', args, { cwd: project, encoding: 'utf8' });
+      assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+    }
+    dbPath = join(project, '.sterling', 'sterling.db');
+  }
   const { server, store, tools } = createSterlingServer(
-    join(dir, 'sterling.db'),
+    dbPath,
     opts.worker === false ? {} : { workerPolicy: { path: policyPath, token: TOKEN } }
   );
   // Seeded through SterlingTools directly: the guard sits on the MCP surface only.
@@ -285,7 +305,7 @@ test('refresh_reference: summary is allowed and stamped; location is refused', a
 });
 
 test('article_missing: with target_id null (as H10 mints it), a join that names its item in resolves is allowed in a directory the article already owns; another directory, a foreign path, another write or no resolves is refused', async () => {
-  const h = await harness();
+  const h = await harness({ worker: true, git: true });
   try {
     const join = (path: string, extra: Loose = {}) => ({ id: h.ids.join, field: 'files', entries: [{ path, role: 'a file' }], resolves: [h.ids.missItem], ...extra });
     const before = h.version(h.ids.join);
