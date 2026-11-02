@@ -112,7 +112,9 @@ test('every type: only an optional field ever loses its example to the whole-rec
   }
   // feature_article.retired_reason (GitHub #217) is refused on a live record,
   // which is what the printed examples describe, so it prints no example.
-  assert.deepEqual(omitted.sort(), ['feature_article.retired_reason', `open_question.${OPEN_QUESTION_TERMINUS_FIELD}`]);
+  // todo.observations is checkout evidence a system reconcile_needed item
+  // carries, and the printed todo example is not one, so it prints none.
+  assert.deepEqual(omitted.sort(), ['feature_article.retired_reason', `open_question.${OPEN_QUESTION_TERMINUS_FIELD}`, 'todo.observations']);
 });
 
 test('example choice: a candidate the record schema throws on is never chosen', () => {
@@ -247,6 +249,7 @@ const PATH_FIELDS: [type: string, path: string][] = [
   ['open_question', 'file_keys'],
   ['attestation', 'file_keys'],
   ['todo', 'file_keys'],
+  ['todo', 'observations[].path'],
   ['feature_article', 'files[].path'],
   ['feature_article', 'live_test_refs[].test_paths'],
   ['brief', 'incidental_scope'],

@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,12 +28,31 @@ const HOUR_AGO = new Date(NOW - 60 * 60_000).toISOString();
 
 const cleanGit = (cmd, args) => (args.includes('rev-parse') ? { status: 0, stdout: `${'a'.repeat(40)}\n\n` } : { status: 0, stdout: '' });
 const inertSpawn = () => Object.assign(new EventEmitter(), { pid: 4242, unref() {} });
+// Checkout evidence (decision
+// maintenance-reconciliation-retains-checkout-evidence-and-use): the launcher
+// offers a reconcile_needed item only when its evidence is integrated into the
+// HEAD it read. This file's launcher answers git with the cleanGit fake (a
+// made-up HEAD), so no real evidence can exist for it; its subject is the
+// policy shape and the server argv, so the items count as integrated here. The
+// evidence rule at the launcher is proven against real git and a real store in
+// scripts/tests/maintenance-worker-provenance.test.mjs.
+const INTEGRATED = () => ({ payable: true, conductor: false, holds: [] });
 
 /** A project whose store holds one feature_article, and the launcher run over one queue item per worker lane, the first targeting it. */
 function launchedProject() {
   const base = mkdtempSync(join(tmpdir(), 'sterling-worker-cross-'));
   const project = join(base, 'project');
   mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
+  // A real git project with the article's file committed and unmodified: the
+  // worker server proves a write on a record that owns files against HEAD
+  // (decision maintenance-reconciliation-retains-checkout-evidence-and-use).
+  mkdirSync(join(project, 'src', 'a'), { recursive: true });
+  writeFileSync(join(project, '.gitignore'), '.sterling/\n');
+  writeFileSync(join(project, 'src', 'a', 'one.ts'), 'export const a = 1;\n');
+  for (const args of [['init', '-q'], ['config', 'user.email', 't@t.t'], ['config', 'user.name', 't'], ['add', '-A'], ['commit', '-q', '-m', 'project']]) {
+    const r = spawnSync('git', args, { cwd: project, encoding: 'utf8' });
+    assert.equal(r.status, 0, `fixture setup: git ${args.join(' ')}: ${r.stderr}`);
+  }
   const store = new SterlingStore(join(project, '.sterling', 'sterling.db'));
   let article;
   try {
@@ -71,6 +91,7 @@ function launchedProject() {
     isAlive: () => false,
     spawnSync: cleanGit,
     spawn: inertSpawn,
+    itemProvenance: INTEGRATED,
   });
   assert.equal(result.launched, true, JSON.stringify(result));
   const eligiblePath = workerPaths(project).eligible;
@@ -147,6 +168,18 @@ function articleMissingProject(fileKeys) {
   const project = join(base, 'project');
   const db = join(project, '.sterling', 'sterling.db');
   mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
+  // A real git project whose files are committed and unmodified: a worker join
+  // appends only a path that is a committed, clean file of the project
+  // checkout (decision maintenance-reconciliation-retains-checkout-evidence-and-use).
+  writeFileSync(join(project, '.gitignore'), '.sterling/\n');
+  for (const rel of ['src/c/one.ts', 'src/c/two.ts', 'src/d/other.ts']) {
+    mkdirSync(dirname(join(project, rel)), { recursive: true });
+    writeFileSync(join(project, rel), `export const x = '${rel}';\n`);
+  }
+  for (const args of [['init', '-q'], ['config', 'user.email', 't@t.t'], ['config', 'user.name', 't'], ['add', '-A'], ['commit', '-q', '-m', 'project']]) {
+    const r = spawnSync('git', args, { cwd: project, encoding: 'utf8' });
+    assert.equal(r.status, 0, `fixture setup: git ${args.join(' ')}: ${r.stderr}`);
+  }
   const store = new SterlingStore(db);
   let article;
   let item;

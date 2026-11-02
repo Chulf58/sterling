@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +39,16 @@ function release(holder: DatabaseSync): void {
 test('worker mode under a held lock: a refused write is the policy refusal, an allowed write is the busy text with database is locked', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-worker-busy-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
+  // A real git project with the article's file committed and unmodified: a
+  // worker write on a record that owns files is proven against HEAD (decision
+  // maintenance-reconciliation-retains-checkout-evidence-and-use).
+  mkdirSync(join(dir, 'src', 'a'), { recursive: true });
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\nmaintenance-worker.eligible.json\n');
+  writeFileSync(join(dir, 'src', 'a', 'one.ts'), 'export const a = 1;\n');
+  for (const args of [['init', '-q'], ['config', 'user.email', 't@t.t'], ['config', 'user.name', 't'], ['add', '-A'], ['commit', '-q', '-m', 'a']]) {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  }
   const path = join(dir, '.sterling', 'sterling.db');
   const policyPath = join(dir, 'maintenance-worker.eligible.json');
   const { server, store, tools, toolWrappers } = createSterlingServer(path, { workerPolicy: { path: policyPath, token: TOKEN } });

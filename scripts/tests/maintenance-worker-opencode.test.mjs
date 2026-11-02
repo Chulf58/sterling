@@ -19,6 +19,12 @@ const NOW = Date.parse('2026-10-02T12:00:00.000Z');
 const HEAD = 'b'.repeat(40);
 const FIXTURE_FEATURE_ID = '11111111-2222-4333-8444-555555555555';
 
+// These launcher fixtures answer git with a fake (CLEAN_GIT, fakeGit) and pin
+// lock, argv, batching and verdict behaviour. Checkout evidence needs real git,
+// so the items count as integrated here; the evidence rule itself is proven
+// against real repositories in scripts/tests/reconcile-origins.test.mjs.
+const INTEGRATED = () => ({ payable: true, conductor: false, holds: [] });
+
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), 'sterling-mworker-oc-'));
   const plugin = join(base, 'plugin');
@@ -33,7 +39,8 @@ function fixture() {
   );
   // The shipped tools line is in the stub: the OpenCode runner rewrites it and refuses a prompt without it.
   writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), `PROMPT BODY\n${CLAUDE_TOOLS_LINE}\n`);
-  writeFileSync(join(plugin, 'scripts', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
+  mkdirSync(join(plugin, 'bin'), { recursive: true });
+  writeFileSync(join(plugin, 'bin', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
   // The claude host defines its worker agent from this template (GitHub #70).
   mkdirSync(join(plugin, 'agent-templates'), { recursive: true });
   writeFileSync(join(plugin, 'agent-templates', 'librarian.md'), '---\nname: librarian\n---\n\nLIBRARIAN BODY\n');
@@ -115,7 +122,7 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
   const fx = fixture();
   try {
     const child = fakeOpencode([sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }), read('src/a.mjs'), stepFinish(0.12), text(owes()), stepFinish(0.03)]);
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
     const [call] = child.calls;
     assert.equal(call.cmd, '/opt/oc/opencode.exe');
     assert.deepEqual(call.args.slice(0, 9), ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, '--model', 'anthropic/claude-sonnet-5-5']);
@@ -179,7 +186,7 @@ test('[gate] an OpenCode verdict without a successful tool result is refused: an
     const fx = fixture();
     try {
       const child = fakeOpencode([...events, text(owes())]);
-      assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0, name);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0, name);
       const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
       assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.reason, v.evidence ?? null]), [['item-a', 'unjudged', 'no evidence', null]], name);
       assert.equal(judgedVerdicts(fx.project).size, 0, `${name}: nothing suppresses a relaunch`);
@@ -199,7 +206,7 @@ test('[gate] a child-written refused verdict does not stand on OpenCode either; 
       sterling('maintenance_remove', { id: 'item-b' }, 'completed', removedText('item-b')),
       text(JSON.stringify({ item_id: 'item-b', verdict: 'refused', evidence: true, head: 'forged' })),
     ]);
-    assert.equal(await runWorker({ ...opencodeRun(fx, items), spawn: child.fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, items), spawn: child.fn }), 0);
     const j = readJournal(fx);
     assert.deepEqual(j.filter((l) => l.kind === 'tool_call').map((l) => [l.item_id, l.is_error]), [['item-a', true], ['item-b', false]]);
     const verdicts = j.filter((l) => l.kind === 'verdict');
@@ -215,14 +222,14 @@ test('an OpenCode provider error or a non-zero exit is a FAILED run with a named
   const fx = fixture();
   try {
     const err = { type: 'error', sessionID: 'ses_x', error: { type: 'provider.auth', message: "OpenCode's free tier can only be used from within OpenCode", status: 403 } };
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([err], { code: 1 }).fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([err], { code: 1 }).fn }), 1);
     const run = lastRun(fx);
     assert.equal(run.ok, false);
     assert.match(run.error, /exit 1/);
     assert.match(run.error, /error result \(error \(provider\.auth: OpenCode's free tier/);
     assert.equal(run.cost_usd, null);
 
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([], { code: 0 }).fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([], { code: 0 }).fn }), 1);
     assert.match(lastRun(fx).error, /no final text or error event from opencode run/);
   } finally {
     fx.cleanup();
@@ -233,14 +240,14 @@ test('[decision opencode-maintenance-worker-refuses-without-a-configured-model] 
   const fx = fixture();
   try {
     const child = fakeOpencode([text('{"verdict":"none","reason":"x"}')]);
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM], { model: null }), spawn: child.fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM], { model: null }), spawn: child.fn }), 1);
     assert.equal(child.calls.length, 0, 'no opencode run starts without a model');
     assert.equal(lastRun(fx).ok, false);
     assert.match(lastRun(fx).error, /maintenance_worker\.opencode_model is not set/);
 
     const printed = [];
     opencodeRun(fx, [ITEM]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, token: 'tok', dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, token: 'tok', dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 0);
     const dry = JSON.parse(printed[0]);
     assert.equal(dry.host, 'opencode');
     assert.equal(dry.command, '/opt/oc/opencode.exe');
@@ -268,6 +275,7 @@ function fakeSpawn() {
 const launch = (fx, over = {}) =>
   maybeLaunchMaintenanceWorker({
     root: fx.project,
+    itemProvenance: INTEGRATED,
     config: null,
     items: Array.from({ length: 5 }, (_, i) => ({ id: `i${i}`, system_reason: 'reconcile_needed', text: `reconcile article 'a${i}'`, file_keys: [`src/${i}.mjs`] })),
     trigger: 'stop',
@@ -449,7 +457,7 @@ test('[overpass] the role\'s effort travels in the worker child\'s environment, 
     assert.equal(e.opencode_model, 'overpass/agentic-premium');
     // the run itself: no --variant on the argv, the effort and its model in the child's environment
     const child = fakeOpencode([text('{"verdict":"none","reason":"x"}')]);
-    await runWorker({ ...opencodeRun(fx, [ITEM], { model: 'overpass/agentic-premium' }), opencodeVariant: 'high', spawn: child.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM], { model: 'overpass/agentic-premium' }), opencodeVariant: 'high', spawn: child.fn });
     const [call] = child.calls;
     assert.ok(!call.args.includes('--variant'), call.args.join(' '));
     assert.equal(call.opts.env[WORKER_EFFORT_ENV], 'high');
@@ -551,7 +559,7 @@ test('[overpass] the launcher records a caller-pinned model in eligible.json ove
     const child = fakeOpencode([sterling('maintenance_remove', { id: 'item-a' }, 'completed', removedText('item-a')), text('{"verdict":"none","reason":"x"}')]);
     const chained = fakeSpawn();
     const spawn = (cmd, args, opts) => (cmd === '/opt/oc/opencode.exe' ? child.fn(cmd, args, opts) : chained.fn(cmd, args, opts));
-    assert.equal(await runWorker({ ...run, spawn, spawnSync: fakeGit }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...run, spawn, spawnSync: fakeGit }), 0);
     const chain = readJournal(fx).filter((l) => l.kind === 'chain');
     assert.deepEqual(chain.map((l) => [l.launched, l.items_left]), [[true, 1]], JSON.stringify(chain));
     const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
@@ -589,7 +597,7 @@ test('[gate] runWorker: an owes_prose verdict resting on a knowledge_get inside 
   const fx = fixture();
   try {
     const child = fakeOpencode([failedExecute('knowledge_get', { id: FIXTURE_FEATURE_ID }), read('src/a.mjs'), text(owes())]);
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.reason]), [['item-a', 'unjudged', 'no evidence']]);
   } finally {
@@ -606,7 +614,7 @@ test('--dry-run with an unknown host or no recorded opencode binary prints a ref
     ]) {
       writeFileSync(fx.paths.eligible, JSON.stringify({ token: 'tok', head: HEAD, items: [ITEM], ...eligible }));
       const printed = [];
-      assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, token: 'tok', dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 1);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, token: 'tok', dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 1);
       const dry = JSON.parse(printed[0]);
       assert.equal(dry.dry_run, true);
       assert.match(dry.refused, re);
@@ -640,7 +648,7 @@ test('[d1149d0e] a prompt without the shipped tools line is refused on the OpenC
     assert.throws(() => opencodePrompt('PROMPT BODY'), /tools line/);
     writeFileSync(join(fx.plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
     const child = fakeOpencode([text(owes())]);
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 1);
     assert.equal(child.calls.length, 0, 'no opencode run starts with a prompt that would mislead it');
     assert.equal(lastRun(fx).ok, false);
     assert.match(lastRun(fx).error, /tools line/);
@@ -655,7 +663,7 @@ test('[d1149d0e] the claude host prompt is byte-identical to the shipped prompt 
     const shipped = shippedPrompt();
     writeFileSync(join(fx.plugin, 'templates', 'maintenance-worker-prompt.md'), shipped);
     const printed = [];
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 0);
     const dry = JSON.parse(printed[0]);
     assert.equal(dry.host, 'claude');
     assert.equal(dry.argv[0], '-p');
@@ -684,7 +692,7 @@ test('[#56 opencode] a knowledge write inside execute is journalled with its sta
         part('webfetch', { status: 'completed', input: { url: 'https://example.com' }, output: 'page' }),
         text(JSON.stringify({ item_id: ITEM.id, verdict: 'closed', reason: 'role refreshed' })),
       ]);
-      const code = await runWorker({ ...opts, spawn: child.fn });
+      const code = await runWorker({ itemProvenance: INTEGRATED, ...opts, spawn: child.fn });
       const write = readJournal(fx).find((l) => l.tool === 'knowledge_edit');
       assert.equal(write.is_error, false, name);
       assert.equal(write.field, 'files[path=src/a.mjs].role', name);
@@ -718,7 +726,7 @@ test('[#56 opencode remove stamp] a successful remove without this run\'s stamp,
   for (const [name, event] of cases) {
     const fx = fixture();
     try {
-      assert.equal(await runWorker({ ...opencodeRun(fx, items), spawn: fakeOpencode([event, text('{"verdict":"none","reason":"x"}')]).fn }), 1, name);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, items), spawn: fakeOpencode([event, text('{"verdict":"none","reason":"x"}')]).fn }), 1, name);
       const run = lastRun(fx);
       assert.match(run.error, /unpoliced write: 1 successful knowledge write\(s\) without this run's worker_stamp \(maintenance_remove on item-a\)/, name);
       assert.equal(readJournal(fx).find((l) => l.tool === 'maintenance_remove').unpoliced, true, name);
@@ -746,7 +754,7 @@ test('[#56 opencode shared output] an execute holding two Sterling writes gives 
         },
       },
     });
-    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([twoWrites, text('{"verdict":"none","reason":"x"}')]).fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([twoWrites, text('{"verdict":"none","reason":"x"}')]).fn }), 1);
     const writes = readJournal(fx).filter((l) => l.kind === 'tool_call');
     assert.deepEqual(writes.map((w) => [w.tool, w.unpoliced ?? false, w.stamp ?? null]), [['knowledge_edit', true, null], ['knowledge_update', true, null]]);
     assert.match(lastRun(fx).error, /unpoliced write: 2 successful knowledge write\(s\)/);

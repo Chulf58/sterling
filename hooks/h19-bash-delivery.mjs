@@ -4741,6 +4741,29 @@ var todoBoardItemReadSchema = external_exports.object({
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
+var OBSERVATION_COMMIT = external_exports.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, "40- or 64-hex commit required");
+var reconcileObservationSchema = external_exports.object({
+  path: repoPath,
+  checkout: external_exports.discriminatedUnion("kind", [
+    external_exports.object({ kind: external_exports.literal("store") }).strict(),
+    external_exports.object({ kind: external_exports.literal("checkout"), worktree: external_exports.string().min(1), branch: external_exports.string().min(1).optional() }).strict(),
+    external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+  ]),
+  commit: OBSERVATION_COMMIT.optional(),
+  state: external_exports.discriminatedUnion("kind", [
+    external_exports.object({ kind: external_exports.literal("file"), mode: external_exports.enum(["100644", "100755", "120000"]), blob: OBSERVATION_COMMIT }).strict(),
+    external_exports.object({ kind: external_exports.literal("absent") }).strict(),
+    external_exports.object({ kind: external_exports.literal("unreadable") }).strict(),
+    external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+  ])
+}).strict().superRefine((o, ctx) => {
+  const unknown = o.state.kind === "unknown" || o.checkout.kind === "unknown";
+  if (unknown && (o.state.kind !== "unknown" || o.checkout.kind !== "unknown" || o.commit !== void 0)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "an unknown observation has an unknown checkout, an unknown state and no commit" });
+  }
+  if (!unknown && o.commit === void 0)
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["commit"], message: "an observation is bound to the commit its checkout was at" });
+});
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
   // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4805,7 +4828,9 @@ var todoSchema = base.extend({
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional(),
   // Which session works on this task now (see todoClaimSchema). User items only.
-  claim: todoClaimSchema.optional()
+  claim: todoClaimSchema.optional(),
+  // Checkout evidence (reconcileObservationSchema). reconcile_needed items only.
+  observations: external_exports.array(reconcileObservationSchema).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -4816,6 +4841,9 @@ var todoSchema = base.extend({
   }
   if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
+  }
+  if (rec.observations !== void 0 && (rec.source !== TODO_SYSTEM_SOURCE || rec.system_reason !== "reconcile_needed")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["observations"], message: `observations is checkout evidence on reconcile_needed maintenance items only` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -7645,6 +7673,10 @@ var MountedStores = class {
    *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
    *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
    *  is caller-writable — so the field and the mount can disagree in both directions. */
+  /** The project store's write fence (SterlingStore.withWriteFence); worker targets are project-held. */
+  withWriteFence(owner, items, check, fn) {
+    return this.project.withWriteFence(owner, items, check, fn);
+  }
   projectStoreHolds(id) {
     return this.project.projectStoreHolds(id);
   }
@@ -8710,6 +8742,34 @@ var SqliteDriver = class {
   }
 };
 
+// packages/store/dist/observations.js
+function observationKey(o) {
+  const c = o.checkout;
+  const s2 = o.state;
+  return JSON.stringify([o.path, c.kind, c.worktree ?? "", c.branch ?? "", o.commit ?? "", s2.kind, s2.mode ?? "", s2.blob ?? ""]);
+}
+function unknownObservation(path) {
+  return { path, checkout: { kind: "unknown" }, state: { kind: "unknown" } };
+}
+var DEBT_OWNER_HOP_CAP = 32;
+function resolveDebtOwner(link, get, aliases) {
+  if (!link)
+    return void 0;
+  let canonical = link;
+  for (const a of aliases)
+    if (a.historical_id === link)
+      canonical = a.canonical_id;
+  let record = get(canonical);
+  const seen = /* @__PURE__ */ new Set();
+  while (record && record.status === "superseded") {
+    if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record.id) || !record.superseded_by)
+      return void 0;
+    seen.add(record.id);
+    record = get(record.superseded_by);
+  }
+  return record?.id;
+}
+
 // packages/store/dist/index.js
 var storeDriverFactory;
 var StoreRowDecodeError = class extends Error {
@@ -9188,6 +9248,28 @@ function systemTodoTextsEquivalent(reason, a, b) {
     return a === b;
   const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
   return strip(a) === strip(b);
+}
+function evidenceOf(t) {
+  const obs = Array.isArray(t.observations) ? t.observations : [];
+  return [...obs, ...(t.file_keys ?? []).filter((k) => !obs.some((o) => o.path === k)).map((k) => unknownObservation(k))];
+}
+function foldObservations(prior, incoming, supersede = []) {
+  const replacedPaths = new Set(incoming.filter((o) => o.checkout.kind === "store").map((o) => o.path));
+  const drop = new Set(supersede);
+  const out = /* @__PURE__ */ new Map();
+  for (const o of prior) {
+    const k = observationKey(o);
+    if (drop.has(k) && o.checkout.kind === "store" && replacedPaths.has(o.path))
+      continue;
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  for (const o of incoming) {
+    const k = observationKey(o);
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  return [...out.values()].sort((a, b) => observationKey(a) < observationKey(b) ? -1 : observationKey(a) > observationKey(b) ? 1 : 0);
 }
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
@@ -9817,6 +9899,8 @@ var SterlingStore = class _SterlingStore {
     let served;
     this.tx(() => {
       this.assertNoMoveInFlight(op, [id]);
+      if (this.writeFence && id === this.writeFence.owner)
+        this.passWriteFence();
       const current = this.get(id);
       if (!current)
         throw new Error(`${op}: no record '${id}'`);
@@ -9984,9 +10068,12 @@ var SterlingStore = class _SterlingStore {
    */
   pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
     const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    const aliases = this.recordAliases();
     for (const r of rows) {
       const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
-      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed")
+        continue;
+      if (t.feature_link !== ownerId && resolveDebtOwner(t.feature_link, (id) => this.get(id), aliases) !== ownerId)
         continue;
       const currentFiles = t.file_keys ?? [];
       const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
@@ -10008,7 +10095,13 @@ var SterlingStore = class _SterlingStore {
       }
       const owner = this.get(ownerId);
       const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
-      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
+      const keptObservations = (t.observations ?? []).filter((o) => !prunedPaths.includes(o.path));
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({
+        ...cur,
+        file_keys: keptFiles,
+        text,
+        ...t.observations ? { observations: keptObservations } : {}
+      }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -10156,12 +10249,18 @@ var SterlingStore = class _SterlingStore {
           nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
         }
         const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
-        if (textChanged2 || filesChanged2) {
+        const participants = [survivor, ...folded, candidate];
+        const anyEvidence = participants.some((t) => Array.isArray(t.observations));
+        const priorEvidence = [survivor, ...folded].flatMap((t) => evidenceOf(t));
+        const nextObservations = anyEvidence ? foldObservations(priorEvidence, evidenceOf(candidate), options.supersede_observations) : [];
+        const evidenceChanged = anyEvidence && JSON.stringify((survivor.observations ?? []).map(observationKey)) !== JSON.stringify(nextObservations.map(observationKey));
+        if (textChanged2 || filesChanged2 || evidenceChanged) {
           existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
             ...cur,
             updated_at: candidate.updated_at,
             ...textChanged2 ? { text: nextText } : {},
-            ...filesChanged2 ? { file_keys: unionFiles } : {}
+            ...filesChanged2 ? { file_keys: unionFiles } : {},
+            ...evidenceChanged ? { observations: nextObservations } : {}
           }), {});
           textUpdated = textChanged2;
         } else {
@@ -11213,8 +11312,11 @@ var SterlingStore = class _SterlingStore {
       }
       checkedRemoval = parsed.data;
     }
+    const direct = this.txDepth === 0;
     this.tx(() => {
       this.assertNoMoveInFlight("remove", [id]);
+      if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id)))
+        this.passWriteFence();
       const record = this.get(id);
       const isSystemDrain = record && record.type === "todo" && record.source === "system";
       if (checkedRemoval) {
@@ -11878,6 +11980,53 @@ var SterlingStore = class _SterlingStore {
    * whole thing exactly once.
    */
   txDepth = 0;
+  /**
+   * WRITE FENCE (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use): the worker
+   * policy proves checkout evidence OUTSIDE the lock (git), then runs the tool
+   * with a fence armed on the owner record and the items the proof covered.
+   * The first write to the owner (any applyInPlace on it, which is where
+   * resolves drain and reconcile pruning happen) or the first direct removal
+   * of a fenced item runs `check` INSIDE that write's transaction, under the
+   * write lock, before anything changes; the check throws when the owner, an
+   * item or the set of affected items moved since the proof. The proof covers
+   * ONE such write (whose transaction also holds the resolves drain and the
+   * reconcile pruning it causes); a second fenced write in the same call is
+   * refused, since the proof no longer describes the store it would change. A
+   * fold into a fenced item is NOT a trigger, so evidence that arrives mid-call
+   * is seen by the owner write's check and refuses it.
+   */
+  writeFence;
+  withWriteFence(owner, items, check, fn) {
+    if (this.writeFence)
+      throw new Error("withWriteFence: a write fence is already armed on this store; nothing was written.");
+    const fence = { owner, items: new Set(items), check, passed: false };
+    this.writeFence = fence;
+    const release = () => {
+      if (this.writeFence === fence)
+        this.writeFence = void 0;
+    };
+    let result;
+    try {
+      result = fn();
+    } catch (e) {
+      release();
+      throw e;
+    }
+    if (result && typeof result.then === "function") {
+      return result.finally(release);
+    }
+    release();
+    return result;
+  }
+  passWriteFence() {
+    const fence = this.writeFence;
+    if (fence.passed) {
+      throw new Error("write fence: this call already made the one write its checkout-evidence proof covers; a second write to the fenced record or a fenced item is refused, nothing more was written.");
+    }
+    fence.check();
+    fence.passed = true;
+  }
   /** Open read transactions on this handle (readTx). A write may not start inside one. */
   readDepth = 0;
   /**
@@ -12772,7 +12921,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
       return realpathSync4(p);
@@ -12780,7 +12929,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
       return null;
     }
   };
-  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
@@ -12788,7 +12937,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   const commonReal = real(resolve3(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
   const settings = {};
   if (!core.error && core.status === 0) {
     for (const line of core.stdout.split("\n")) {
@@ -13569,6 +13718,76 @@ import { closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirS
 import { dirname as dirname8, isAbsolute as isAbsolute3, join as join14, resolve as resolve6, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// scripts/hooks/lib/reconcile-origins.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+function git(root, args, input2) {
+  const r = spawnSync2("git", ["-C", root, ...args], { input: input2, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  return { ok: !r.error && r.status === 0, status: r.status, out: r.stdout ? r.stdout.toString("utf8") : "", err: r.error?.message ?? (r.stderr ? r.stderr.toString("utf8").trim() : "") };
+}
+function headCommit(root) {
+  const r = git(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+  const head = r.out.trim();
+  return r.ok && HEX.test(head) ? head : null;
+}
+function treeState(root, commit, rel, prefix = "") {
+  const name = prefix + rel;
+  const r = git(root, ["--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", name]);
+  if (!r.ok) return null;
+  for (const entry of r.out.split("\0")) {
+    const tab = entry.indexOf("	");
+    if (tab < 0) continue;
+    const [mode, type, oid] = entry.slice(0, tab).split(" ");
+    if (entry.slice(tab + 1) !== name) continue;
+    return type === "blob" && /^(100644|100755|120000)$/.test(mode) ? { kind: "file", mode, blob: oid } : { kind: "other" };
+  }
+  return { kind: "absent" };
+}
+var sameState = (a, b) => !!a && !!b && a.kind === b.kind && (a.kind !== "file" || a.mode === b.mode && a.blob === b.blob);
+function proveObservation(treeRoot, target, obs, { prefix = "" } = {}) {
+  const at = (c) => String(c).slice(0, 8);
+  const held = (hold, why) => ({ ok: false, hold, why: `${obs.path}: ${why}` });
+  const kind = obs?.state?.kind;
+  if (kind === "unknown" || kind === void 0) return held("conductor", "no checkout evidence was kept for this debt (legacy or incomplete item)");
+  if (kind === "unreadable") return held("conductor", `the observing checkout could not read the file at ${at(obs.commit)}`);
+  const atTarget = treeState(treeRoot, target, obs.path, prefix);
+  if (!atTarget) return held("conductor", `git could not read ${at(target)}`);
+  if (sameState(atTarget, obs.state)) return { ok: true, via: "target_holds_observed_state" };
+  if (!HEX.test(obs.commit ?? "") || !git(treeRoot, ["cat-file", "-e", `${obs.commit}^{commit}`]).ok) {
+    return held("conductor", `the observed commit ${at(obs.commit)} is not in this repository and the target does not hold the observed state`);
+  }
+  const where = obs.checkout?.kind === "checkout" ? `checkout '${obs.checkout.worktree}'${obs.checkout.branch ? ` (${obs.checkout.branch})` : ""}` : "the store checkout";
+  const atCommit = treeState(treeRoot, obs.commit, obs.path, prefix);
+  if (!atCommit) return held("conductor", `git could not read ${at(obs.commit)}`);
+  if (!sameState(atCommit, obs.state)) {
+    return obs.checkout?.kind === "store" ? held("integration", `the store checkout's uncommitted change observed on ${at(obs.commit)} is not committed in the target yet`) : held("conductor", `the uncommitted change ${where} observed on ${at(obs.commit)} is not what the target holds, and no commit can be shown to carry it`);
+  }
+  const anc = git(treeRoot, ["merge-base", "--is-ancestor", obs.commit, target]);
+  if (anc.ok) return { ok: true, via: "committed_ancestor" };
+  if (anc.status === 1) return held("integration", `the commit ${where} observed (${at(obs.commit)}) is not in ${at(target)} yet`);
+  return held("conductor", `git could not compare ${at(obs.commit)} with ${at(target)}`);
+}
+function itemProvenance(item, treeRoot, target, opts = {}) {
+  const obs = Array.isArray(item?.observations) ? item.observations : [];
+  const holds = [];
+  for (const key of item?.file_keys ?? []) {
+    if (!obs.some((o) => o.path === key)) holds.push({ hold: "conductor", why: `${key}: no checkout evidence was kept for this debt (legacy or incomplete item)` });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const o of obs) {
+    const k = JSON.stringify(o);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const r = proveObservation(treeRoot, target, o, opts);
+    if (!r.ok) holds.push({ hold: r.hold, why: r.why });
+  }
+  return { payable: holds.length === 0, conductor: holds.some((h) => h.hold === "conductor"), holds };
+}
+function prefixOf(root) {
+  const r = git(root, ["rev-parse", "--show-prefix"]);
+  return r.ok ? r.out.trim() : null;
+}
+
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
 var OPENCODE_ALLOWED_TOOLS = [
@@ -13695,17 +13914,30 @@ function judgedVerdicts(root) {
         verdict: v.verdict,
         keys: sortedKeys(v.file_keys),
         head: v.head ?? null,
+        // The item and target versions the verdict judged (checkout evidence,
+        // decision maintenance-reconciliation-retains-checkout-evidence-and-use):
+        // a fold of new evidence or a change to the target re-arms the item.
+        version: Number.isInteger(v.item_version) ? v.item_version : null,
+        target_version: Number.isInteger(v.target_version) ? v.target_version : null,
+        source: typeof v.source === "string" ? v.source : null,
         reason: typeof v.reason === "string" ? v.reason : null,
         lane: typeof v.lane === "string" ? v.lane : null,
         capability: v.capability ?? null
       });
-    } else if (v.verdict === "closed") map.delete(v.item_id);
+    } else if (v.verdict === "closed" || v.verdict === "rearmed") map.delete(v.item_id);
   }
   return map;
 }
-function isJudged(item, verdicts, head) {
+var PROVENANCE_REASON_RE = /provenance_(?:not_integrated|needs_conductor|unfenced)|^checkout evidence needs the conductor/;
+function isProvenanceVerdict(v) {
+  return v?.source === "launcher" || PROVENANCE_REASON_RE.test(String(v?.reason ?? ""));
+}
+function isJudged(item, verdicts, head, store = null) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
+  if (item.system_reason === "reconcile_needed" && isProvenanceVerdict(v)) return false;
+  if (v.version !== null && v.version !== void 0 && v.version !== (item.version ?? null)) return false;
+  if (v.target_version !== null && v.target_version !== void 0 && store && item.feature_link && debtOwnerRecord(store, item)?.version !== v.target_version) return false;
   return v.verdict === "needs_conductor" || v.verdict === "refused" && Boolean(head) && v.head === head;
 }
 function articleSlug(item) {
@@ -13728,15 +13960,15 @@ function selectBatch(items, max = RUN_BATCH_MAX) {
   }
   return out;
 }
-function gitState(root, spawnSync2 = nodeSpawnSync) {
-  const r = spawnSync2("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+function gitState(root, spawnSync3 = nodeSpawnSync) {
+  const r = spawnSync3("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
   return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
 }
-function dirtyPaths(root, paths, spawnSync2 = nodeSpawnSync, prefix = "") {
+function dirtyPaths(root, paths, spawnSync3 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync2("git", ["-C", root, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync3("git", ["-C", root, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {
@@ -13752,15 +13984,21 @@ function dirtyPaths(root, paths, spawnSync2 = nodeSpawnSync, prefix = "") {
   return dirty;
 }
 var DIFF_LANES = ["reconcile_needed", "state_review"];
+function debtOwnerRecord(store, t) {
+  if (!t?.feature_link) return void 0;
+  if (!store?.get) return t.target_snapshot;
+  const id = resolveDebtOwner(t.feature_link, (x) => store.get(x), store.recordAliases?.() ?? []);
+  return store.get(id ?? t.feature_link);
+}
 function itemBaselines(store, t) {
   if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
-  const all = store.get(t.feature_link)?.file_baselines;
+  const all = debtOwnerRecord(store, t)?.file_baselines;
   const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === "string");
   return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
 function itemTargetUpdatedAt(store, t) {
   if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
-  const at = store.get(t.feature_link)?.updated_at;
+  const at = debtOwnerRecord(store, t)?.updated_at;
   return typeof at === "string" ? at : void 0;
 }
 var gitOpts = { encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 };
@@ -13863,6 +14101,7 @@ function failDetail(reason) {
   return `launch FAILED (${reason}) \u2014 the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
+  opts = { ...opts, root: storeRootFor(opts.root) };
   const result = launchWorker(opts);
   if (result.detail) {
     let logError = null;
@@ -13887,6 +14126,45 @@ function maybeLaunchMaintenanceWorker(opts) {
   }
   return result;
 }
+function recordProvenanceVerdicts(opts, paths, holds, cleared, nowMs) {
+  if (!holds.length && !cleared.length) return;
+  const token = acquireLock(paths, { pid: process.pid, started_at: new Date(nowMs).toISOString(), trigger: opts.trigger, stage: "judging" }, nowMs, opts.isAlive);
+  if (!token) return;
+  try {
+    const verdicts = judgedVerdicts(opts.root);
+    const at = new Date(nowMs).toISOString();
+    for (const t of cleared) {
+      const v = verdicts.get(t.id);
+      if (v && isProvenanceVerdict(v) && v.verdict === "needs_conductor") appendFileSync(paths.journal, JSON.stringify({ at, kind: "verdict", item_id: t.id, lane: t.system_reason, verdict: "rearmed", source: "launcher" }) + "\n");
+    }
+    for (const { t, target, p } of holds) {
+      const reason = `checkout evidence needs the conductor: ${p.holds.filter((h) => h.hold === "conductor").map((h) => h.why).join("; ")}`.slice(0, 300);
+      const itemVersion = Number.isInteger(t.version) ? t.version : null;
+      const targetVersion = Number.isInteger(target?.version) ? target.version : null;
+      const v = verdicts.get(t.id);
+      if (v && v.source === "launcher" && v.verdict === "needs_conductor" && v.reason === reason && v.keys === sortedKeys(t.file_keys) && v.version === itemVersion && v.target_version === targetVersion) continue;
+      appendFileSync(
+        paths.journal,
+        JSON.stringify({
+          at,
+          kind: "verdict",
+          item_id: t.id,
+          lane: t.system_reason,
+          verdict: "needs_conductor",
+          reason,
+          file_keys: t.file_keys ?? [],
+          evidence: true,
+          capability: WORKER_CAPABILITY,
+          source: "launcher",
+          ...itemVersion !== null ? { item_version: itemVersion } : {},
+          ...targetVersion !== null ? { target_version: targetVersion } : {}
+        }) + "\n"
+      );
+    }
+  } finally {
+    releaseLock(paths, token);
+  }
+}
 function launchWorker(opts) {
   try {
     const env = opts.env ?? process.env;
@@ -13894,7 +14172,7 @@ function launchWorker(opts) {
     if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
     const verdicts = judgedVerdicts(opts.root);
-    const open2 = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null));
+    const open2 = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null, opts.store));
     if (open2.length === 0) return { launched: false, reason: "queue_empty" };
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
@@ -13910,13 +14188,66 @@ function launchWorker(opts) {
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
     if (opts.trigger !== "chain" && Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
-    const git = gitState(opts.root, opts.spawnSync);
-    const dirty = git && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
+    const git2 = gitState(opts.root, opts.spawnSync);
+    const dirty = git2 && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git2.prefix);
     if (!dirty) {
       return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every queue item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
-    const eligible = open2.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
-    if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
+    const clean = open2.filter((t) => !isJudged(t, verdicts, git2.head, opts.store) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    const waiting = [];
+    const conductorHolds = [];
+    const cleared = [];
+    const all = opts.store ? openWorkerItems(opts.store) : opts.items;
+    const linked = /* @__PURE__ */ new Map();
+    for (const t of all) {
+      if (t.system_reason !== "reconcile_needed" || !t.feature_link) continue;
+      const owner = debtOwnerRecord(opts.store, t)?.id ?? t.feature_link;
+      if (!linked.has(owner)) linked.set(owner, []);
+      linked.get(owner).push(t);
+    }
+    const workingTrees = opts.config?.working_trees && typeof opts.config.working_trees === "object" ? opts.config.working_trees : {};
+    const trees = /* @__PURE__ */ new Map();
+    const treeFor = (target) => {
+      if (!target?.working_tree) return { root: opts.root, head: git2.head, prefix: git2.prefix };
+      const mapped = workingTrees[target.working_tree];
+      if (typeof mapped !== "string" || !mapped) {
+        if (resolve6(String(target.working_tree)) === resolve6(opts.root)) return { root: opts.root, head: git2.head, prefix: git2.prefix };
+        return { unresolved: `working_tree '${target.working_tree}' is not mapped in config.working_trees` };
+      }
+      const root = isAbsolute3(mapped) ? mapped : join14(opts.root, mapped);
+      if (!trees.has(root)) {
+        const head = headCommit(root);
+        const prefix = prefixOf(root);
+        trees.set(root, head && prefix !== null ? { root, head, prefix } : { unresolved: `git could not report HEAD of the mapped tree ${root}` });
+      }
+      return trees.get(root);
+    };
+    const prove = opts.itemProvenance ?? itemProvenance;
+    const eligible = clean.filter((t) => {
+      if (t.system_reason !== "reconcile_needed") return true;
+      const target = debtOwnerRecord(opts.store, t);
+      const standing = verdicts.get(t.id);
+      const tree = treeFor(target);
+      let own;
+      let siblingsPayable = true;
+      if (tree.unresolved) own = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
+      else {
+        own = prove(t, tree.root, tree.head, { prefix: tree.prefix });
+        for (const s2 of linked.get(target?.id ?? t.feature_link) ?? []) if (s2.id !== t.id && !prove(s2, tree.root, tree.head, { prefix: tree.prefix }).payable) siblingsPayable = false;
+      }
+      if (own.conductor) {
+        conductorHolds.push({ t, target, p: own });
+        return false;
+      }
+      if (standing && isProvenanceVerdict(standing) && standing.verdict === "needs_conductor") cleared.push(t);
+      if (own.payable && siblingsPayable) return true;
+      waiting.push(t.id);
+      return false;
+    });
+    recordProvenanceVerdicts(opts, paths, conductorHolds, cleared, nowMs);
+    if (eligible.length === 0) {
+      return { launched: false, reason: "none_eligible", ...waiting.length ? { detail: `${waiting.length} reconcile item(s) wait for another checkout's change to reach ${git2.head.slice(0, 8)}: ${waiting.join(", ")}` } : {} };
+    }
     const waited = (t) => {
       const created = Date.parse(t.created_at ?? "");
       return Number.isFinite(created) ? nowMs - created : Infinity;
@@ -13941,7 +14272,7 @@ function launchWorker(opts) {
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
-    const runner = join14(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    const runner = join14(pluginRoot, "bin", "maintenance-worker-run.mjs");
     if (!existsSync7(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync6(dirname8(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
@@ -13961,18 +14292,42 @@ function launchWorker(opts) {
         const updatedAt = updatedAtById.get(t.id);
         return { ...baselines && typeof baselines === "object" ? { baselines } : {}, ...typeof updatedAt === "string" ? { target_updated_at: updatedAt } : {} };
       };
+      const snapshotTarget = (t) => {
+        const target = debtOwnerRecord(opts.store, t);
+        return target ? { target_snapshot: { id: target.id, ...Number.isInteger(target.version) ? { version: target.version } : {}, ...target.working_tree ? { working_tree: target.working_tree } : {} } } : {};
+      };
+      const versionsOf = (t) => {
+        const target = debtOwnerRecord(opts.store, t);
+        return { ...Number.isInteger(t.version) ? { item_version: t.version } : {}, ...Number.isInteger(target?.version) ? { target_version: target.version } : {} };
+      };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync4(
         paths.eligible,
         JSON.stringify({
           token,
-          head: git.head,
+          head: git2.head,
           ...runnerHost,
-          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
+          // The worker reads and writes the LIVE owner (debtOwnerRecord); a retired
+          // or historical address is never handed to it as a target.
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, slug: articleSlug(t), ...versionsOf(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
           run_id: randomUUID4(),
-          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "", ...withBaselines(t) })),
+          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+          queue_snapshot: eligible.map((t) => ({
+            id: t.id,
+            system_reason: t.system_reason,
+            file_keys: t.file_keys ?? [],
+            feature_link: t.feature_link ?? null,
+            created_at: t.created_at ?? null,
+            text: t.text ?? "",
+            ...withBaselines(t),
+            // What a chained launch (no store) needs to prove checkout evidence
+            // again: the item's version and evidence, and the owner's version
+            // and working_tree. The server's gate re-proves from the live store.
+            ...Number.isInteger(t.version) ? { version: t.version } : {},
+            ...Array.isArray(t.observations) ? { observations: t.observations } : {},
+            ...snapshotTarget(t)
+          })),
           chain_attempted: chainAttempted
         })
       );

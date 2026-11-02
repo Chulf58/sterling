@@ -102,6 +102,8 @@ export {
 } from './pg-driver.js';
 import type { StoreDriver } from './driver.js';
 import { SqliteDriver, DEFAULT_BUSY_TIMEOUT_MS } from './sqlite-driver.js';
+import { observationKey, resolveDebtOwner, unknownObservation, type Observation } from './observations.js';
+export { DEBT_OWNER_HOP_CAP, observationKey, resolveDebtOwner, unknownObservation, type Observation } from './observations.js';
 
 /** Opens the driver for a store path when SterlingStore is given none. */
 export type StoreDriverFactory = (path: string, options: { busyTimeoutMs?: number }) => StoreDriver;
@@ -223,6 +225,10 @@ export const MODELS_CATALOG_LOCATION = '.sterling/models-catalog';
  */
 export interface WriteOptions {
   operation_id?: string;
+  /** enqueueSystemTodo, reconcile_needed fold only: keys (observationKey) of
+   *  STORE-checkout observations the minter re-read and found replaced by the
+   *  store checkout's current state of the same path (see foldObservations). */
+  supersede_observations?: string[];
 }
 
 /** One `records` row, every column a move carries (decision move-a-record-between-domains-with-knowledge-move-same-id). */
@@ -1684,6 +1690,47 @@ function systemTodoTextsEquivalent(reason: string | undefined, a: string, b: str
   return strip(a) === strip(b);
 }
 
+/**
+ * The checkout evidence a reconcile_needed item carries, with every file_key
+ * that has no observation made EXPLICIT as unknown (decision
+ * maintenance-reconciliation-retains-checkout-evidence-and-use): once another
+ * observation of the same path folds in, an implicit gap would otherwise read
+ * as covered.
+ */
+function evidenceOf(t: { file_keys?: string[]; observations?: unknown }): Observation[] {
+  const obs = (Array.isArray(t.observations) ? t.observations : []) as Observation[];
+  return [...obs, ...(t.file_keys ?? []).filter((k) => !obs.some((o) => o.path === k)).map((k) => unknownObservation(k))];
+}
+
+/**
+ * FOLD RULE for checkout evidence. Monotonic: every distinct observation of
+ * every merged item survives, deduplicated by observationKey, in a stable
+ * order. The ONE removal is a store-checkout observation the minter named in
+ * `supersede` AND replaced, in the same call, with a store-checkout
+ * observation of the same path. Justification: the store checkout is the
+ * shared reconciliation's own working tree, and settlement there re-observes
+ * every later state of the path, so a state it has overwritten is not debt
+ * that can land later unobserved. Another checkout's observation is never
+ * superseded: its names are reusable and nothing proves its overwritten state
+ * did not land. Out-of-order arrival cannot drop evidence, because a minter
+ * can only name keys it read.
+ */
+function foldObservations(prior: Observation[], incoming: Observation[], supersede: readonly string[] = []): Observation[] {
+  const replacedPaths = new Set(incoming.filter((o) => o.checkout.kind === 'store').map((o) => o.path));
+  const drop = new Set(supersede);
+  const out = new Map<string, Observation>();
+  for (const o of prior) {
+    const k = observationKey(o);
+    if (drop.has(k) && o.checkout.kind === 'store' && replacedPaths.has(o.path)) continue;
+    if (!out.has(k)) out.set(k, o);
+  }
+  for (const o of incoming) {
+    const k = observationKey(o);
+    if (!out.has(k)) out.set(k, o);
+  }
+  return [...out.values()].sort((a, b) => (observationKey(a) < observationKey(b) ? -1 : observationKey(a) > observationKey(b) ? 1 : 0));
+}
+
 export function buildReconcileText(owner: { type: 'feature_article' | 'reference_material'; slug?: string; title?: string }, fileKeys: string[]): string {
   const files = [...fileKeys].sort();
   return owner.type === 'reference_material'
@@ -2545,6 +2592,7 @@ export class SterlingStore {
     let served!: DurableRecord;
     this.tx(() => {
       this.assertNoMoveInFlight(op, [id]);
+      if (this.writeFence && id === this.writeFence.owner) this.passWriteFence();
       const current = this.get(id);
       if (!current) throw new Error(`${op}: no record '${id}'`);
       const identity = this.identityOf(id);
@@ -2829,6 +2877,7 @@ export class SterlingStore {
     const rows = this.db
       .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'")
       .all() as { body: string; scope: string }[];
+    const aliases = this.recordAliases();
     for (const r of rows) {
       const t = SterlingStore.decodeLiveRecord('pruneReconcileNeeded', r) as DurableRecord & {
         source?: string;
@@ -2837,7 +2886,11 @@ export class SterlingStore {
         file_keys?: string[];
         text?: string;
       };
-      if (t.source !== 'system' || t.system_reason !== 'reconcile_needed' || t.feature_link !== ownerId) continue;
+      if (t.source !== 'system' || t.system_reason !== 'reconcile_needed') continue;
+      // The owner's KNOWN debt: an exact link, or one that POSITIVELY resolves to
+      // this owner through an alias or the supersede chain (resolveDebtOwner). A
+      // link that resolves nowhere is never pruned on a path overlap.
+      if (t.feature_link !== ownerId && resolveDebtOwner(t.feature_link, (id) => this.get(id) as never, aliases) !== ownerId) continue;
       const currentFiles = t.file_keys ?? [];
       const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
       if (prunedPaths.length === 0) continue;
@@ -2865,10 +2918,18 @@ export class SterlingStore {
           : { type: 'feature_article', slug: ownerId },
         keptFiles
       );
+      // Evidence for a path the owner no longer claims goes with the path; every
+      // other observation stays.
+      const keptObservations = ((t as { observations?: Observation[] }).observations ?? []).filter((o) => !prunedPaths.includes(o.path));
       this.applyInPlace(
         'pruneReconcileNeeded',
         t.id,
-        (cur) => ({ ...(cur as unknown as Record<string, unknown>), file_keys: keptFiles, text }),
+        (cur) => ({
+          ...(cur as unknown as Record<string, unknown>),
+          file_keys: keptFiles,
+          text,
+          ...((t as { observations?: Observation[] }).observations ? { observations: keptObservations } : {}),
+        }),
         {},
         { suppressReconcilePrune: true }
       );
@@ -3135,7 +3196,19 @@ export class SterlingStore {
           );
         }
         const textChanged = !textsEquivalent(survivor.text ?? '', nextText);
-        if (textChanged || filesChanged) {
+        // Checkout evidence folds monotonically (foldObservations); a change to
+        // it alone is a real change and bumps the version like any other.
+        // Nothing to materialize when no participant carries evidence: legacy
+        // debt stays implicitly unknown, and a re-report changes nothing.
+        const participants = [survivor, ...folded, candidate] as { file_keys?: string[]; observations?: unknown }[];
+        const anyEvidence = participants.some((t) => Array.isArray(t.observations));
+        const priorEvidence = [survivor, ...folded].flatMap((t) => evidenceOf(t as { file_keys?: string[]; observations?: unknown }));
+        const nextObservations = anyEvidence
+          ? foldObservations(priorEvidence, evidenceOf(candidate as { file_keys?: string[]; observations?: unknown }), options.supersede_observations)
+          : [];
+        const evidenceChanged =
+          anyEvidence && JSON.stringify(((survivor as { observations?: Observation[] }).observations ?? []).map(observationKey)) !== JSON.stringify(nextObservations.map(observationKey));
+        if (textChanged || filesChanged || evidenceChanged) {
           // The versioned core, joining THIS transaction (tx is reentrant): version
           // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
           existing = this.applyInPlace(
@@ -3146,6 +3219,7 @@ export class SterlingStore {
               updated_at: candidate.updated_at,
               ...(textChanged ? { text: nextText } : {}),
               ...(filesChanged ? { file_keys: unionFiles } : {}),
+              ...(evidenceChanged ? { observations: nextObservations } : {}),
             }),
             {}
           ) as DurableRecord & { text?: string; file_keys?: string[] };
@@ -4449,8 +4523,12 @@ export class SterlingStore {
       }
       checkedRemoval = parsed.data;
     }
+    // A DIRECT removal (not one nested in a fold, a drain or a composite whose
+    // owner write already passed the fence) of a fenced item checks the fence.
+    const direct = this.txDepth === 0;
     this.tx(() => {
       this.assertNoMoveInFlight('remove', [id]);
+      if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id))) this.passWriteFence();
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[]; slug?: string; objective?: string; priority?: string }) | undefined;
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
       if (checkedRemoval) {
@@ -5345,6 +5423,55 @@ export class SterlingStore {
    * whole thing exactly once.
    */
   private txDepth = 0;
+
+  /**
+   * WRITE FENCE (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use): the worker
+   * policy proves checkout evidence OUTSIDE the lock (git), then runs the tool
+   * with a fence armed on the owner record and the items the proof covered.
+   * The first write to the owner (any applyInPlace on it, which is where
+   * resolves drain and reconcile pruning happen) or the first direct removal
+   * of a fenced item runs `check` INSIDE that write's transaction, under the
+   * write lock, before anything changes; the check throws when the owner, an
+   * item or the set of affected items moved since the proof. The proof covers
+   * ONE such write (whose transaction also holds the resolves drain and the
+   * reconcile pruning it causes); a second fenced write in the same call is
+   * refused, since the proof no longer describes the store it would change. A
+   * fold into a fenced item is NOT a trigger, so evidence that arrives mid-call
+   * is seen by the owner write's check and refuses it.
+   */
+  private writeFence: { owner: string; items: Set<string>; check: () => void; passed: boolean } | undefined;
+
+  withWriteFence<T>(owner: string, items: Iterable<string>, check: () => void, fn: () => T): T {
+    if (this.writeFence) throw new Error('withWriteFence: a write fence is already armed on this store; nothing was written.');
+    const fence = { owner, items: new Set(items), check, passed: false };
+    this.writeFence = fence;
+    const release = () => {
+      if (this.writeFence === fence) this.writeFence = undefined;
+    };
+    let result: T;
+    try {
+      result = fn();
+    } catch (e) {
+      release();
+      throw e;
+    }
+    // An async tool handler keeps the fence until it settles.
+    if (result && typeof (result as { then?: unknown }).then === 'function') {
+      return (result as unknown as Promise<unknown>).finally(release) as unknown as T;
+    }
+    release();
+    return result;
+  }
+
+  private passWriteFence(): void {
+    const fence = this.writeFence as { check: () => void; passed: boolean };
+    if (fence.passed) {
+      throw new Error('write fence: this call already made the one write its checkout-evidence proof covers; a second write to the fenced record or a fenced item is refused, nothing more was written.');
+    }
+    fence.check();
+    fence.passed = true;
+  }
 
   /** Open read transactions on this handle (readTx). A write may not start inside one. */
   private readDepth = 0;

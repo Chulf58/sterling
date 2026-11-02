@@ -92,7 +92,8 @@ function fixture() {
     JSON.stringify({ mcpServers: { sterling: { command: '/usr/bin/node', args: ['/clone/packages/mcp-server/dist/main.js', '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } })
   );
   writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
-  writeFileSync(join(plugin, 'scripts', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
+  mkdirSync(join(plugin, 'bin'), { recursive: true });
+  writeFileSync(join(plugin, 'bin', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
   mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
   return { plugin, project, paths: workerPaths(join(base, 'project')), cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
@@ -114,6 +115,12 @@ function fakeSpawn({ pid = 4242, throws = null } = {}) {
   return { fn, calls };
 }
 
+// These launcher fixtures answer git with a fake (CLEAN_GIT, fakeGit) and pin
+// lock, argv, batching and verdict behaviour. Checkout evidence needs real git,
+// so the items count as integrated here; the evidence rule itself is proven
+// against real repositories in scripts/tests/reconcile-origins.test.mjs.
+const INTEGRATED = () => ({ payable: true, conductor: false, holds: [] });
+
 function launch(fx, over = {}) {
   return maybeLaunchMaintenanceWorker({
     root: fx.project,
@@ -125,6 +132,7 @@ function launch(fx, over = {}) {
     env: {},
     isAlive: () => false,
     spawnSync: CLEAN_GIT,
+    itemProvenance: INTEGRATED,
     ...over,
   });
 }
@@ -173,7 +181,7 @@ test('takes the lock, spawns ONE detached runner with log stdio, token and budge
     const call = sp.calls[0];
     const lock = JSON.parse(readFileSync(fx.paths.lock, 'utf8'));
     assert.equal(call.cmd, process.execPath);
-    assert.deepEqual(call.args, [join(fx.plugin, 'scripts', 'maintenance-worker-run.mjs'), '--project', fx.project, '--trigger', 'stop', '--token', lock.token, '--budget-usd', '5']);
+    assert.deepEqual(call.args, [join(fx.plugin, 'bin', 'maintenance-worker-run.mjs'), '--project', fx.project, '--trigger', 'stop', '--token', lock.token, '--budget-usd', '5']);
     assert.equal(call.opts.detached, true);
     assert.equal(call.opts.stdio[0], 'ignore');
     assert.equal(typeof call.opts.stdio[1], 'number', 'stdout goes to the log fd');
@@ -505,7 +513,7 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
         ],
       })
     );
-    const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, trigger: 'stop', token: 'tok', budgetUsd: 2, now: () => NOW, ...quiet });
+    const code = await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, trigger: 'stop', token: 'tok', budgetUsd: 2, now: () => NOW, ...quiet });
     assert.equal(code, 0);
     assert.equal(sp.calls[0].cmd, 'claude');
     assert.ok(sp.calls[0].args[1].startsWith('PROMPT BODY\n'), 'the shipped prompt file leads the -p argument');
@@ -533,17 +541,17 @@ test('runWorker: a non-zero exit, an error_max_budget result or a permission den
   const fx = fixture();
   try {
     const denied = fakeClaude([resultEvent({ permission_denials: [{ tool_name: 'mcp__sterling__maintenance_remove' }] })]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: denied.fn, trigger: 'commit' }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: denied.fn, trigger: 'commit' }), 1);
     assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /1 permission denial/);
 
     const budget = fakeClaude([resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 2.01 })]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: budget.fn, trigger: 'stop' }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: budget.fn, trigger: 'stop' }), 1);
     const st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.match(st.last_run.error, /error_max_budget_usd/);
     assert.equal(st.last_run.cost_usd, 2.01, 'a failed run still records its reported cost');
 
     const crashed = fakeClaude(['not json'], { code: 3 });
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: crashed.fn, trigger: 'stop' }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: crashed.fn, trigger: 'stop' }), 1);
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.match(last.error, /exit 3/);
     assert.match(last.error, /no stream-json result event/);
@@ -556,7 +564,7 @@ test('[finding 6] a hung child is killed after the timeout and recorded as a fai
   const fx = fixture();
   try {
     const hung = fakeClaude([removeCall('t1', 'aaaa'), removeResult('t1', 'Closed')], { hang: true });
-    const code = await runWorker({ ...eligibleRun(fx, []), spawn: hung.fn, trigger: 'stop', timeoutMs: 30 });
+    const code = await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: hung.fn, trigger: 'stop', timeoutMs: 30 });
     assert.equal(code, 1);
     assert.equal(hung.calls[0].child.killed, 'SIGTERM');
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
@@ -574,7 +582,7 @@ test('[finding 5] the runner refuses to run when the lock token is not its own',
   try {
     writeFileSync(fx.paths.lock, JSON.stringify({ pid: 1, started_at: new Date(NOW).toISOString(), token: 'someone-else' }));
     const sp = fakeClaude([resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, token: 'mine', ...quiet }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, token: 'mine', ...quiet }), 1);
     assert.equal(sp.calls.length, 0);
     assert.equal(JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token, 'someone-else', "another worker's lock is never released");
   } finally {
@@ -627,7 +635,7 @@ test('runWorker --dry-run prints the argv and spawns nothing', async () => {
   const fx = fixture();
   try {
     const printed = [];
-    const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: () => assert.fail('dry run must not spawn'), dryRun: true, out: (s) => printed.push(s) });
+    const code = await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: () => assert.fail('dry run must not spawn'), dryRun: true, out: (s) => printed.push(s) });
     assert.equal(code, 0);
     const out = JSON.parse(printed[0]);
     assert.equal(out.dry_run, true);
@@ -645,20 +653,20 @@ test('[N1] a run with no result event (crashed, killed, hung) records an unknown
   const fx = fixture();
   try {
     const crashed = fakeClaude(['not json'], { code: 1 });
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: crashed.fn, budgetUsd: 1.5 }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: crashed.fn, budgetUsd: 1.5 }), 1);
     let st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.equal(st.last_run.cost_usd, null, 'the reported cost stays unknown');
     assert.equal(st.last_run.charged_usd, undefined, 'nothing is charged against a cap that no longer exists');
     assert.equal(st.spend, undefined);
 
     const hung = fakeClaude([], { hang: true });
-    await runWorker({ ...eligibleRun(fx, []), spawn: hung.fn, timeoutMs: 20 });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: hung.fn, timeoutMs: 20 });
     st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.equal(st.last_run.ok, false);
     assert.equal(st.last_run.cost_usd, null);
 
     const ok = fakeClaude([resultEvent({ total_cost_usd: 0.1 })]);
-    await runWorker({ ...eligibleRun(fx, []), spawn: ok.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: ok.fn });
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.cost_usd, 0.1, 'a reported cost is recorded as reported');
   } finally {
     fx.cleanup();
@@ -681,7 +689,7 @@ test('[N2] a refused close becomes a refused verdict keyed by id, file_keys and 
       removeResult('t3', 'The user denied permission to use this tool', true),
       resultEvent({}),
     ]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
     const refused = readJournal(fx).filter((l) => l.kind === 'verdict' && l.verdict === 'refused');
     assert.deepEqual(refused.map((l) => [l.item_id, l.head, l.file_keys]), [[refusedId, HEAD, ['src/a.mjs']]], 'only the eligible item; a permission denial is not a server refusal');
     assert.equal(judgedVerdicts(fx.project).get(refusedId).verdict, 'refused');
@@ -705,7 +713,7 @@ test('[N3] the runner records a malformed or zero --budget-usd as a failed run w
     for (const bad of ['0', 'abc', '', 0.001]) {
       rmSync(fx.paths.state, { force: true });
       const child = fakeClaude([resultEvent({})]);
-      assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: child.fn, budgetUsd: bad }), 1, `budget ${JSON.stringify(bad)}`);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: child.fn, budgetUsd: bad }), 1, `budget ${JSON.stringify(bad)}`);
       assert.equal(child.calls.length, 0, 'nothing runs');
       const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
       assert.equal(last.ok, false);
@@ -791,7 +799,7 @@ test('[PARTIAL 2] the child gets ONLY the eligible (clean, unjudged) item ids; t
     assert.deepEqual(eligible.items, [{ id: 'clean', lane: 'reconcile_needed', file_keys: ['src/c.mjs'], feature_link: null, slug: 'clean' }], 'ids, lane, keys and the article identity the evidence gate needs');
 
     const child = fakeClaude([resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, ...quiet }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, ...quiet }), 0);
     const prompt = child.calls[0].args[1];
     const section = prompt.slice(prompt.indexOf('ELIGIBLE'), prompt.indexOf('ALREADY JUDGED'));
     assert.match(section, /- clean lane reconcile_needed target none file_keys/);
@@ -799,7 +807,7 @@ test('[PARTIAL 2] the child gets ONLY the eligible (clean, unjudged) item ids; t
 
     writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), token: 'second' }));
     const other = fakeClaude([resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: other.fn, token: 'second', budgetUsd: 2, ...quiet }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: other.fn, token: 'second', budgetUsd: 2, ...quiet }), 1);
     assert.equal(other.calls.length, 0);
     assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /eligible-item list is missing or belongs to another launch/);
   } finally {
@@ -815,7 +823,7 @@ test('[PARTIAL 9] one run writes at most the log cap to maintenance-worker.log, 
     events.push(resultEvent({}));
     const written = [];
     const child = fakeClaude(events);
-    await runWorker({ ...eligibleRun(fx, []), spawn: child.fn, logCapBytes: 500, log: (t) => written.push(t) });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: child.fn, logCapBytes: 500, log: (t) => written.push(t) });
     const text = written.join('');
     const note = text.indexOf('[maintenance-worker-run: log truncated at 500 bytes');
     assert.ok(note > 0, 'the truncation is announced once');
@@ -894,7 +902,7 @@ test('[gate] a needs_conductor verdict stands only when the stream shows a SUCCE
       toolUse('13', 'Grep', { pattern: 'x', path: 'bin' }),
       resultEvent({ result: ['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((id) => owes(id, `art-${id.toLowerCase()}`)).concat(owes('Z', 'not-eligible')).join('\n') }),
     ]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, items), spawn: child.fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn }), 0);
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null, v.reason]), [
       ['A', 'needs_conductor', true, 'the article does not name the new flag'],
@@ -930,7 +938,7 @@ test('[gate] errored knowledge_get and errored Read give no evidence (results ar
       toolErr('1', 'store busy'),
       resultEvent({ result: owes('A', 'art-a') }),
     ]);
-    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn });
     const v = readJournal(fx).find((l) => l.kind === 'verdict');
     assert.deepEqual([v.verdict, v.reason], ['unjudged', 'no evidence']);
     assert.equal(judgedVerdicts(fx.project).size, 0);
@@ -948,7 +956,7 @@ test('[gate] a child-written {verdict:"refused", evidence:true, head} does not s
       JSON.stringify({ item_id: 'A', article: 'art-a', verdict: 'refused', evidence: true, head: HEAD, file_keys: ['src/a.mjs'], reason: 'I say it was refused' }),
       JSON.stringify({ item_id: 'B', article: 'art-b', verdict: 'closed', evidence: true, head: HEAD, file_keys: ['x'], reason: 'closed it' }),
     ].join('\n');
-    await runWorker({ ...eligibleRun(fx, items), spawn: fakeClaude([resultEvent({ result: forged })]).fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: fakeClaude([resultEvent({ result: forged })]).fn });
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     // CHANGED (GitHub #56): every verdict line carries the item's lane (from eligible.json, null here) and the capability marker.
     assert.deepEqual(verdicts[0], { at: verdicts[0].at, run: verdicts[0].run, kind: 'verdict', item_id: 'A', article: 'art-a', lane: null, verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: 'I say it was refused', capability: WORKER_CAPABILITY });
@@ -987,7 +995,7 @@ test('[no progress] a run with 0 evidence-backed verdicts and 0 closes backs off
   try {
     const items = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'art-a' }];
     const guessed = fakeClaude([resultEvent({ result: owes('A', 'art-a') })]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, items), spawn: guessed.fn }), 0, 'the run itself succeeded');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: guessed.fn }), 0, 'the run itself succeeded');
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.equal(last.ok, true);
     assert.equal(last.no_progress, true);
@@ -1003,10 +1011,10 @@ test('[no progress] a run with 0 evidence-backed verdicts and 0 closes backs off
     assert.equal(after.line, undefined, 'the relaunch after the back-off prints nothing');
 
     const closing = fakeClaude([removeCall('t1', 'A'), removeResult('t1', removedText('A')), resultEvent({})]);
-    await runWorker({ ...eligibleRun(fx, items, 'tok2'), spawn: closing.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items, 'tok2'), spawn: closing.fn });
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.no_progress, false, 'a successful close is progress');
     const refusing = fakeClaude([removeCall('t1', 'A'), removeResult('t1', 'refused: worktree differs', true), resultEvent({})]);
-    await runWorker({ ...eligibleRun(fx, items, 'tok3'), spawn: refusing.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items, 'tok3'), spawn: refusing.fn });
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.no_progress, false, 'a recorded refusal is progress (the item is now judged for this HEAD)');
   } finally {
     fx.cleanup();
@@ -1058,7 +1066,7 @@ test('[breakage] the run summary records the MCP server status from the init eve
   const fx = fixture();
   try {
     const down = fakeClaude([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status: 'failed' }] }, resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: down.fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: down.fn }), 1);
     let last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.equal(last.ok, false);
     assert.equal(last.mcp_status, 'failed');
@@ -1066,7 +1074,7 @@ test('[breakage] the run summary records the MCP server status from the init eve
     assert.equal(readJournal(fx).at(-1).mcp_status, 'failed', 'the journal summary carries it too');
 
     const up = fakeClaude([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status: 'connected' }] }, resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: up.fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: up.fn }), 0);
     last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.deepEqual([last.ok, last.mcp_status], [true, 'connected']);
 
@@ -1074,25 +1082,25 @@ test('[breakage] the run summary records the MCP server status from the init eve
     // successful sterling tool call, is breakage. 'pending' is unknown when the stream shows the server worked.
     const initWith = (status) => ({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status }] });
     const pendingWorked = fakeClaude([initWith('pending'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: pendingWorked.fn }), 0, 'pending + a successful sterling call is not broken');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: pendingWorked.fn }), 0, 'pending + a successful sterling call is not broken');
     last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.deepEqual([last.ok, last.error, last.mcp_status], [true, null, 'pending']);
 
     const pendingIdle = fakeClaude([initWith('pending'), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: pendingIdle.fn }), 1, 'pending and no successful sterling call is broken');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: pendingIdle.fn }), 1, 'pending and no successful sterling call is broken');
     assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /MCP server 'sterling' not connected \(pending/);
 
     const pendingErrored = fakeClaude([initWith('pending'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolErr('k1'), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: pendingErrored.fn }), 1, 'an errored sterling call is not a success');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: pendingErrored.fn }), 1, 'an errored sterling call is not a success');
 
     const disconnected = fakeClaude([initWith('disconnected'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: disconnected.fn }), 1, 'an explicit disconnected status is broken');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: disconnected.fn }), 1, 'an explicit disconnected status is broken');
 
     const closedWhilePending = fakeClaude([initWith('pending'), removeCall('t1', 'A'), removeResult('t1', removedText('A')), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: closedWhilePending.fn }), 0, 'a successful maintenance_remove is a successful sterling call');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: closedWhilePending.fn }), 0, 'a successful maintenance_remove is a successful sterling call');
 
     const silent = fakeClaude([{ type: 'system', subtype: 'init' }, resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: silent.fn }), 0, 'no mcp_servers in the init event is unknown, not broken');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: silent.fn }), 0, 'no mcp_servers in the init event is unknown, not broken');
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.mcp_status, null);
   } finally {
     fx.cleanup();
@@ -1114,12 +1122,12 @@ test('[M1] a refusal of an item that already has a refused verdict for the same 
   try {
     const items = [{ id: 'R', file_keys: ['src/a.mjs'], feature_link: null, slug: null }];
     const refuse = () => fakeClaude([removeCall('t1', 'R'), removeResult('t1', 'refused: the owning record does not claim this path', true), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, items, 'tok1', HEAD), spawn: refuse().fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items, 'tok1', HEAD), spawn: refuse().fn }), 0);
     let last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.deepEqual([last.no_progress, last.refused_verdicts], [false, 1], 'the first refusal is new information: progress');
 
     const head2 = 'b'.repeat(40);
-    assert.equal(await runWorker({ ...eligibleRun(fx, items, 'tok2', head2), spawn: refuse().fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items, 'tok2', head2), spawn: refuse().fn }), 0);
     last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.deepEqual([last.no_progress, last.refused_verdicts], [true, 1], 'the same item refused again for the same file_keys is not progress');
     assert.equal(judgedVerdicts(fx.project).get('R').head, head2, 'the verdict still moves to the new HEAD');
@@ -1131,7 +1139,7 @@ test('[M1] a refusal of an item that already has a refused verdict for the same 
 
     // A refusal for DIFFERENT file_keys than the standing verdict is new information again.
     const wider = [{ id: 'R', file_keys: ['src/a.mjs', 'src/z.mjs'], feature_link: null, slug: null }];
-    assert.equal(await runWorker({ ...eligibleRun(fx, wider, 'tok3', head2), spawn: refuse().fn }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, wider, 'tok3', head2), spawn: refuse().fn }), 0);
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.no_progress, false);
   } finally {
     fx.cleanup();
@@ -1184,7 +1192,7 @@ test('[end to end] a crashed run (no result event, non-zero exit) is recorded, a
     assert.equal(launch(fx, { spawn: sp.fn }).launched, true);
     const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
     const crashed = fakeClaude(['not json'], { code: 1 });
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 1);
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.equal(last.ok, false);
     assert.match(last.error, /exit 1.*no stream-json result event/);
@@ -1303,7 +1311,7 @@ test('[batching] back-off, lock and debounce still come first: a young batch und
 });
 
 const BUSY_TEXT = 'Error: SqliteError: database is locked';
-const busyRun = (fx, items, events, token = 'tok') => runWorker({ ...eligibleRun(fx, items, token), spawn: fakeClaude([...events, resultEvent({})]).fn });
+const busyRun = (fx, items, events, token = 'tok') => runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items, token), spawn: fakeClaude([...events, resultEvent({})]).fn });
 
 test('[busy] a maintenance_remove that fails with a locked database is retry-later: no refused verdict, not judged, the item stays eligible, and a repeat remove that succeeds closes it', async () => {
   const fx = fixture();
@@ -1407,7 +1415,7 @@ test('[line-ref] the stream journal records each knowledge_line_ref_fix call wit
       { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'f2', content: 'refused: anchor not on line 25 at HEAD', is_error: true }] } },
       resultEvent({}),
     ]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: sp.fn }), 0, 'a tool refusal leaves the run ok');
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: sp.fn }), 0, 'a tool refusal leaves the run ok');
     const lines = readJournal(fx);
     const fixes = lines.filter((l) => l.tool === 'knowledge_line_ref_fix');
     assert.equal(fixes.length, 2);
@@ -1446,7 +1454,7 @@ test('[line-ref] a fix on its own is never progress: with or without the evidenc
   for (const [name, events] of cases) {
     const fx = fixture();
     try {
-      await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: fakeClaude([...events, resultEvent({})]).fn });
+      await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: fakeClaude([...events, resultEvent({})]).fn });
       assert.equal(lastRun(fx).no_progress, true, name);
       assert.equal(lastRun(fx).line_ref_fixes_ok, 1, `${name}: the fix is still journalled and counted as a call`);
     } finally {
@@ -1458,7 +1466,7 @@ test('[line-ref] a fix on its own is never progress: with or without the evidenc
 test('[line-ref] ping-pong: two runs that each make an evidenced fix (2->4, then 4->2) and never close are both no_progress, and the launch after them backs off; a fix plus a successful close is still progress', async () => {
   const fx = fixture();
   try {
-    const run = (token, events) => runWorker({ ...eligibleRun(fx, ITEM_A, token), spawn: fakeClaude([...events, resultEvent({})]).fn });
+    const run = (token, events) => runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A, token), spawn: fakeClaude([...events, resultEvent({})]).fn });
     await run('t1', [...evidenceForA(), lineFix('f1', { find: 'src/a.mjs:2', replace: 'src/a.mjs:4' }), fixOk('f1')]);
     assert.equal(lastRun(fx).no_progress, true);
     await run('t2', [...evidenceForA(), lineFix('f2', { find: 'src/a.mjs:4', replace: 'src/a.mjs:2' }), fixOk('f2')]);
@@ -1490,7 +1498,7 @@ test('[line-ref] only refused fixes and no other progress is still no_progress; 
       lineFix('f2', {}),
       resultEvent({}),
     ]);
-    await runWorker({ ...eligibleRun(fx, items), spawn: refused.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: refused.fn });
     const lines = readJournal(fx).filter((l) => l.tool === 'knowledge_line_ref_fix');
     assert.deepEqual(lines.map((l) => l.is_error), [true, null]);
     assert.equal(lines[1].result, 'no result before the run ended');
@@ -1598,7 +1606,7 @@ test('[#56 policy] the launcher writes the batch policy into eligible.json (the 
     assert.deepEqual(eligible.queue_snapshot.map((t) => t.id), ['r1', 's1', 'm1'], 'every eligible item, for the chained launch');
 
     const child = fakeClaude([resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token: lockToken, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token: lockToken, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
     const args = child.calls[0].args;
     const server = JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers.sterling;
     assert.deepEqual(server.args.slice(-4), ['--worker-policy', fx.paths.eligible, '--worker-token', lockToken], 'policy path and token reach the server as argv');
@@ -1616,7 +1624,7 @@ test('[#56 fail closed] a run without the launcher token is refused and recorded
   const fx = fixture();
   try {
     const child = fakeClaude([resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: 2, now: () => NOW, ...quiet }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: 2, now: () => NOW, ...quiet }), 1);
     assert.equal(child.calls.length, 0);
     assert.match(lastRun(fx).error, /no launch token/);
   } finally {
@@ -1645,7 +1653,7 @@ test('[#56 stamp] a successful knowledge write without this run\'s stamp fails t
         writeResult('w2', "worker policy refused knowledge_update: rule 'field_not_allowed' — state. Policy item(s): A. Nothing was written.", true),
         resultEvent({}),
       ]);
-      const code = await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) });
+      const code = await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) });
       const last = lastRun(fx);
       const writes = readJournal(fx).filter((l) => l.kind === 'tool_call');
       assert.deepEqual(writes.map((l) => [l.tool, l.is_error]), [['knowledge_edit', false], ['knowledge_update', true]], name);
@@ -1691,7 +1699,7 @@ test('[#56 resolves] a closure comes from the server receipt: a stamp whose reso
         writeResult('w1', JSON.stringify({ ok: true, [STAMP_KEY]: { run_id: RUN_ID, item_id: 'A', resolved } })),
         resultEvent({ result: JSON.stringify({ item_id: 'A', lane: 'reconcile_needed', verdict: 'closed', reason: 'files[] role refreshed' }) }),
       ]);
-      assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0, name);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0, name);
       const last = lastRun(fx);
       assert.deepEqual([last.ok, last.resolves_closed, last.writes_ok, last.no_progress], [true, closes, 1, false], name);
       assert.deepEqual(readJournal(fx).find((l) => l.tool === 'knowledge_append').resolves, ['A'], `${name}: the request is journalled as sent`);
@@ -1712,7 +1720,7 @@ test('[#56 remove stamp] a successful maintenance_remove without this run\'s sta
     const fx = fixture();
     try {
       const child = fakeClaude([removeCall('c1', 'A'), removeResult('c1', text), resultEvent({})]);
-      assert.equal(await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 1, name);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 1, name);
       const last = lastRun(fx);
       assert.equal(last.ok, false, name);
       assert.match(last.error, /unpoliced write: 1 successful knowledge write\(s\) without this run's worker_stamp \(maintenance_remove on A\)/, name);
@@ -1729,13 +1737,13 @@ test('[#56 budget] a budget cap reached after progress is a normal end; without 
   try {
     const capped = (events) => fakeClaude([...events, resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 5.02 })], { code: 1 });
     const progressed = capped([removeCall('c1', 'A'), removeResult('c1', removedText('A'))]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: progressed.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: progressed.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0);
     let last = lastRun(fx);
     assert.deepEqual([last.ok, last.error, last.budget_capped, last.no_progress, last.cost_usd], [true, null, true, false, 5.02]);
     assert.equal(workerBreakage(last), null, 'H1 shows no FAILED note for it');
 
     const idle = capped([]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A, 'tok2'), spawn: idle.fn }), 1);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A, 'tok2'), spawn: idle.fn }), 1);
     last = lastRun(fx);
     assert.equal(last.ok, false);
     assert.match(last.error, /exit 1; error result \(error_max_budget_usd\)/);
@@ -1760,20 +1768,20 @@ test('[#56 chain] a run that closed an item with eligible work left re-enters th
       return { launched: true, reason: 'launched' };
     };
     const closing = fakeClaude([removeCall('c1', 'A'), removeResult('c1', removedText('A')), resultEvent({})]);
-    assert.equal(await runWorker({ ...armWithSnapshot('t1', snapshot), spawn: closing.fn, relaunch }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...armWithSnapshot('t1', snapshot), spawn: closing.fn, relaunch }), 0);
     assert.deepEqual(calls, [{ items: ['B'], lockHeld: false }], 'the closed item is dropped, and the relaunch comes after the lock is released');
     assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.items_left]), [[true, 1]]);
 
     const idle = fakeClaude([resultEvent({ result: owes('A', 'art-a') })]);
-    await runWorker({ ...armWithSnapshot('t2', snapshot), spawn: idle.fn, relaunch });
+    await runWorker({ itemProvenance: INTEGRATED, ...armWithSnapshot('t2', snapshot), spawn: idle.fn, relaunch });
     assert.equal(calls.length, 1, 'no progress: no chain (the back-off applies instead)');
 
     const lastOne = fakeClaude([removeCall('c1', 'A'), removeResult('c1', removedText('A')), resultEvent({})]);
-    await runWorker({ ...armWithSnapshot('t3', [snapshot[0]]), spawn: lastOne.fn, relaunch });
+    await runWorker({ itemProvenance: INTEGRATED, ...armWithSnapshot('t3', [snapshot[0]]), spawn: lastOne.fn, relaunch });
     assert.equal(calls.length, 1, 'nothing left: no chain');
 
     const failed = fakeClaude([removeCall('c1', 'A'), removeResult('c1', removedText('A')), resultEvent({ permission_denials: [{ tool_name: 'Bash' }] })]);
-    await runWorker({ ...armWithSnapshot('t4', snapshot), spawn: failed.fn, relaunch });
+    await runWorker({ itemProvenance: INTEGRATED, ...armWithSnapshot('t4', snapshot), spawn: failed.fn, relaunch });
     assert.equal(calls.length, 1, 'a failed run does not chain');
   } finally {
     fx.cleanup();
@@ -1798,18 +1806,18 @@ test('[#56 chain] multi-run: an edit that does not close its item, an evidence-b
     };
     // Run 1: a stamped edit on A that closes nothing. A stays open, but the chain moves past it.
     const edit = [...evidenceForA(), writeCall('w1', 'knowledge_update', { id: LINK, body: { what_it_does: 'x.' }, expected_version: 2 }), writeResult('w1', stampedText('A'))];
-    await runWorker({ ...arm('t1', ['A'], ['A', 'B', 'C'], []), spawn: fakeClaude([...edit, resultEvent({})]).fn, relaunch });
+    await runWorker({ itemProvenance: INTEGRATED, ...arm('t1', ['A'], ['A', 'B', 'C'], []), spawn: fakeClaude([...edit, resultEvent({})]).fn, relaunch });
     assert.equal(lastRun(fx).resolves_closed, 0);
     assert.deepEqual(calls.at(-1), { items: ['B', 'C'], attempted: ['A'] }, 'the edited, unclosed item (one the run acted on) is not offered again in this chain');
 
     // Run 2: only an evidence-backed handoff. The snapshot still names A; the carried attempts keep it out.
-    await runWorker({ ...arm('t2', ['B'], ['A', 'B', 'C'], ['A']), spawn: fakeClaude([...evidenceForA(), resultEvent({ result: owes('B', 'art-a') })]).fn, relaunch });
+    await runWorker({ itemProvenance: INTEGRATED, ...arm('t2', ['B'], ['A', 'B', 'C'], ['A']), spawn: fakeClaude([...evidenceForA(), resultEvent({ result: owes('B', 'art-a') })]).fn, relaunch });
     assert.equal(lastRun(fx).evidenced_verdicts, 1);
     assert.equal(lastRun(fx).no_progress, false, 'an evidence-backed handoff is progress');
     assert.deepEqual(calls.at(-1), { items: ['C'], attempted: ['A', 'B'] });
 
     // Run 3: a close with nothing left that this chain has not acted on: the chain ends.
-    await runWorker({ ...arm('t3', ['C'], ['A', 'B', 'C'], ['A', 'B']), spawn: fakeClaude([removeCall('c1', 'C'), removeResult('c1', removedText('C')), resultEvent({})]).fn, relaunch });
+    await runWorker({ itemProvenance: INTEGRATED, ...arm('t3', ['C'], ['A', 'B', 'C'], ['A', 'B']), spawn: fakeClaude([removeCall('c1', 'C'), removeResult('c1', removedText('C')), resultEvent({})]).fn, relaunch });
     assert.equal(lastRun(fx).closes_ok, 1);
     assert.equal(calls.length, 2, 'nothing left: no third relaunch');
   } finally {
@@ -1836,7 +1844,7 @@ test('[#56 chain] the default relaunch goes through the real launcher inside the
     // The npm test preload sets the test-run guard; this test injects every spawn, so it lifts it.
     delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
     // The launch above wrote last-launch at NOW, so the chained launch below is inside the debounce window.
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
     assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 12]], 'a chained launch is not debounced');
     assert.equal(runner.calls.length, 1);
     assert.equal(runner.calls[0].args[4], 'chain', 'the chained run carries trigger chain');
@@ -1891,7 +1899,7 @@ test('[#56 chain] a young one-item tail after a full 12-item run is launched by 
     const runner = fakeSpawn({ pid: 5152 });
     const events = offered.flatMap((id, i) => [removeCall(`c${i}`, id), removeResult(`c${i}`, removedText(id, first.run_id))]);
     const spawn = (cmd, args, opts) => (cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude([...events, resultEvent({})]).fn(cmd, args, opts));
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
     assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 1]], 'one young item is below BATCH_MIN_ITEMS and BATCH_MAX_WAIT_MS, and the chain still launches it');
     assert.equal(runner.calls.length, 1);
     const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
@@ -1913,7 +1921,7 @@ test('[#56 chain] a budget-capped run that touched 1 of 5 offered items leaves t
     // The child closes b1, then the budget cap ends the run before it reaches the other four.
     const capped = [removeCall('c1', 'b1'), removeResult('c1', removedText('b1', first.run_id)), resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 2.01 })];
     const spawn = (cmd, args, opts) => (cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude(capped).fn(cmd, args, opts));
-    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet });
+    await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet });
     assert.equal(lastRun(fx).budget_capped, true);
     assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 4]]);
     const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
@@ -1961,7 +1969,7 @@ test('[#56 handoff] a needs_conductor verdict needs a reason; a temporary failur
         ].join('\n'),
       }),
     ]);
-    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn });
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((l) => [l.item_id, l.verdict, l.evidence ?? null]), [
       ['A', 'needs_conductor', true],
@@ -2028,7 +2036,7 @@ test('[#56 re-judge] an owes_prose verdict from the judge-only worker is judged 
     const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
     // the launcher's item carries the slug 'A' (from its text) and no feature_link: the evidence is by slug
     const getBySlug = fakeClaude([toolUse('g', 'mcp__sterling__knowledge_get', { id: 'A' }), toolOk('g'), toolUse('r', 'Read', { file_path: 'src/a.mjs' }), toolOk('r'), resultEvent({ result: JSON.stringify({ item_id: 'A', verdict: 'needs_conductor', reason: 'a new refusal path the article does not describe' }) })]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: getBySlug.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: getBySlug.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
     const v = judgedVerdicts(fx.project).get('A');
     assert.deepEqual([v.verdict, v.capability, v.reason], ['needs_conductor', WORKER_CAPABILITY, 'a new refusal path the article does not describe']);
     rmSync(fx.paths.lastLaunch);
@@ -2045,7 +2053,7 @@ test('[#70 web tools] the launch argv defines the worker agent through --agents 
   const fx = fixture();
   try {
     const child = fakeClaude([resultEvent({ result: '' })]);
-    await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, spawnSync: CLEAN_GIT });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, ITEM_A), spawn: child.fn, spawnSync: CLEAN_GIT });
     assert.equal(child.calls.length, 1);
     const args = child.calls[0].args;
     assert.equal(args[args.indexOf('--agent') + 1], WORKER_AGENT);
@@ -2147,7 +2155,7 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
         ].join('\n'),
       }),
     ]);
-    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT });
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((l) => [l.item_id, l.verdict, l.evidence ?? null]), [
       ['S1', 'needs_conductor', true],
@@ -2173,7 +2181,7 @@ test('[#70 handoff] a tools-missing verdict without a read of the target record 
   try {
     const items = [{ id: 'S1', lane: 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' }];
     const child = fakeClaude([resultEvent({ result: JSON.stringify({ item_id: 'S1', verdict: 'retry', reason: 'WebSearch is not available in this run' }) })]);
-    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT });
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((l) => [l.item_id, l.verdict, l.reason]), [['S1', 'unjudged', 'no evidence']]);
     assert.equal(handoffVerdicts(fx.project).size, 0);
@@ -2282,7 +2290,10 @@ test('[diffs] an item over its cap is cut and says so, items past the run budget
 test('[diffs] the launcher records the target baselines for the item own file_keys only, and the runner puts the DIFFS section after ELIGIBLE', async () => {
   const fx = fixture();
   try {
-    const store = { get: (id) => (id === 'art-1' ? { id, file_baselines: { 'src/a.mjs': 'h-a', 'src/z.mjs': 'h-z' } } : undefined) };
+    // A store the launcher is given is its live queue (checkout evidence reads
+    // every open item linked to an owner), so this fake answers the queue too:
+    // exactly the items the test passes, which are the whole queue here.
+    const store = { count: () => items.length, query: () => items, get: (id) => (id === 'art-1' ? { id, file_baselines: { 'src/a.mjs': 'h-a', 'src/z.mjs': 'h-z' } } : undefined) };
     const items = [
       { ...ITEM('r1'), feature_link: 'art-1' },
       { ...ITEM('r2'), feature_link: 'gone' },
@@ -2321,7 +2332,7 @@ test('[diffs] runWorker computes the DIFFS section from eligible.json and hands 
   try {
     const items = [{ id: 'R', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a', baselines: { 'src/a.mjs': 'h-a' } }];
     const child = fakeClaude([resultEvent({ result: '{"verdict":"none","reason":"no eligible item"}' })]);
-    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT, trigger: 'stop' });
+    await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT, trigger: 'stop' });
     const prompt = child.calls[0].args[1];
     assert.match(prompt, /\nDIFFS \(from the runner[^\n]*\n### R\n--- src\/a\.mjs: no diff available: no commit touches it\n/);
   } finally {
@@ -2334,7 +2345,10 @@ test('[diffs] a chained launch, which gets only queue_snapshot items and no stor
   try {
     const n = RUN_BATCH_MAX + 2;
     const items = Array.from({ length: n }, (_, i) => ({ ...laneItem(`r${i}`, 'reconcile_needed', n - i), feature_link: `art-${i}` }));
-    const store = { get: (id) => ({ id, file_baselines: { [`src/r${id.slice(4)}.mjs`]: `h-${id}` } }) };
+    // A store the launcher is given is its live queue (checkout evidence reads
+    // every open item linked to an owner), so this fake answers the queue too:
+    // exactly the items the test passes, which are the whole queue here.
+    const store = { count: () => items.length, query: () => items, get: (id) => ({ id, file_baselines: { [`src/r${id.slice(4)}.mjs`]: `h-${id}` } }) };
     assert.equal(launch(fx, { spawn: fakeSpawn().fn, items, store }).launched, true);
     const first = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
     const offered = new Set(first.items.map((t) => t.id));
@@ -2547,7 +2561,10 @@ test('[fallback] without a recorded updated_at the guess says the diffstat was s
 test('[fallback] the launcher carries the target updated_at for diff-lane items, chain launches keep it, and the section reads it from the item', () => {
   const fx = fixture();
   try {
-    const store = { get: (id) => (id === 'art-1' ? { id, file_baselines: { 'src/a.mjs': 'h-a' }, updated_at: '2026-01-05T00:00:00.000Z' } : undefined) };
+    // A store the launcher is given is its live queue (checkout evidence reads
+    // every open item linked to an owner), so this fake answers the queue too:
+    // exactly the items the test passes, which are the whole queue here.
+    const store = { count: () => items.length, query: () => items, get: (id) => (id === 'art-1' ? { id, file_baselines: { 'src/a.mjs': 'h-a' }, updated_at: '2026-01-05T00:00:00.000Z' } : undefined) };
     const items = [{ ...ITEM('r1'), feature_link: 'art-1' }, { ...laneItem('s1', 'stale_research', 1), feature_link: 'art-1' }];
     assert.equal(launch(fx, { spawn: fakeSpawn().fn, items, store }).launched, true);
     const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));

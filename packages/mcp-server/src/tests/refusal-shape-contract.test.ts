@@ -1079,6 +1079,10 @@ test('DERIVATION-B: for EVERY registered record type and EVERY array-of-objects 
       const report = t.knowledgeSchema(type);
       assert.ok(Array.isArray(report.fields), `knowledge_schema('${type}') must report a fields array`);
       for (const f of report.fields) {
+        // A server_owned field (todo.observations) is refused by name before any
+        // element is validated, so no caller can reach its element shape; the
+        // same skip as the required-field sweep below (server_owned).
+        if ((f as { server_owned?: boolean }).server_owned) continue;
         if (Array.isArray(f.element_fields) && f.element_fields.length > 0) {
           pairs.push({ type, field: f.name, efs: f.element_fields });
         }

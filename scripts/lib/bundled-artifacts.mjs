@@ -382,6 +382,9 @@ export const BIN_ENTRIES = {
   'list-projects': 'scripts/list-projects.mjs',
   'migrate-stores': 'scripts/migrate-stores.mjs',
   // the store move skills/move-store/SKILL.md runs; an installed copy has no packages/*/dist (board 013190cf)
+  // the maintenance worker's detached runner the launcher spawns; bundled so its
+  // live store opener (common.mjs openStore) ships without workspace packages
+  'maintenance-worker-run': 'scripts/maintenance-worker-run.mjs',
   'move-store': 'scripts/move-store.mjs',
   // the no_capture no-server fallback the MCP server's session-event refusal names
   'no-capture': 'scripts/no-capture.mjs',

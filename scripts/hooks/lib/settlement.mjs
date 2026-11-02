@@ -50,8 +50,9 @@ import { storeRootFor } from '../../lib/worktree-root.mjs';
 // safe to pull in here despite the "no mcp-server at runtime" constraint
 // above (that constraint is about mcp-server specifically; @sterling/store
 // is already a workspace dependency hooks bundle at build time).
-import { buildReconcileText } from '@sterling/store';
+import { buildReconcileText, observationKey } from '@sterling/store';
 import { ownsHere } from './working-tree.mjs';
+import { observePaths } from './reconcile-origins.mjs';
 import { SESSION_EVENTS_LOCK_HELD, withSessionEventsLock } from './session-events.mjs';
 
 // MUTUAL EXCLUSION around touches.json's read-modify-write (board c198866d
@@ -190,7 +191,7 @@ export function loadGeneratedProjections(root) {
 }
 
 /** Builds the enqueueSystemTodo payload for one article's reconcile_needed item. */
-function buildReconcileItem(article, fileKeys, now) {
+function buildReconcileItem(article, fileKeys, now, observations) {
   return {
     id: randomUUID(),
     type: 'todo',
@@ -207,6 +208,7 @@ function buildReconcileItem(article, fileKeys, now) {
     system_reason: 'reconcile_needed',
     file_keys: fileKeys,
     feature_link: article.id,
+    ...(observations ? { observations } : {}),
   };
 }
 
@@ -261,10 +263,30 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
     // point's union is idempotent on a key it already holds, so this never
     // churns a version bump for nothing new.
     const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
-    if (!drifted.length) continue;
-    const fileKeys = drifted.sort();
-    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID() });
-    minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
+    // CHECKOUT EVIDENCE (decision
+    // maintenance-reconciliation-retains-checkout-evidence-and-use): every mint
+    // records what THIS checkout observed, bound to its HEAD. A path whose open
+    // item still carries a store-checkout observation is re-observed even when
+    // it no longer drifts, so the store checkout's current state replaces the
+    // state it overwrote (the one supersession the store's fold allows, and
+    // only for keys read here). A git failure mints without evidence, which
+    // every later proof reads as unknown and holds for the conductor.
+    const openItem = store
+      .query({ types: ['todo'], file_keys: [...freshPaths], cap: 1000 })
+      .find((t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link === article.id);
+    const storeEvidence = (openItem?.observations ?? []).filter((o) => o.checkout?.kind === 'store');
+    const reobserved = [...freshPaths].filter((rel) => !drifted.includes(rel) && storeEvidence.some((o) => o.path === rel));
+    const observed = [...drifted, ...reobserved].sort();
+    if (!observed.length) continue;
+    const seen = observePaths(root, observed, storeRootFor(root));
+    const fresh = new Set((seen?.observations ?? []).map(observationKey));
+    const supersede =
+      seen?.checkout.kind === 'store' ? storeEvidence.filter((o) => observed.includes(o.path) && !fresh.has(observationKey(o))).map(observationKey) : [];
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, observed, now, seen?.observations), {
+      operation_id: randomUUID(),
+      ...(supersede.length ? { supersede_observations: supersede } : {}),
+    });
+    minted.push({ article_id: article.id, paths: record.file_keys ?? observed });
   }
   return minted;
 }

@@ -14,6 +14,7 @@
 // --dry-run prints the exact argv and exits without spawning anything.
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import { openStore } from './hooks/lib/common.mjs';
 import { pluginRootFrom, runWorker } from './hooks/lib/maintenance-worker.mjs';
 
 const args = process.argv.slice(2);
@@ -46,8 +47,11 @@ if (!pluginRoot) {
   process.exit(1);
 }
 console.error(`maintenance-worker-run: ${new Date().toISOString()} start (trigger ${trigger}, project ${project})`);
+// openStore is the project's own store opener (store root and routing
+// included). runWorker uses it only to re-prove the queue before a chained
+// launch. A static import, so the bin bundle (BIN_ENTRIES) inlines it.
 try {
-  const code = await runWorker({ root: project, pluginRoot, spawn, trigger, dryRun, token, budgetUsd });
+  const code = await runWorker({ root: project, pluginRoot, spawn, trigger, dryRun, token, budgetUsd, openStore });
   console.error(`maintenance-worker-run: ${new Date().toISOString()} end (exit ${code})`);
   process.exit(code);
 } catch (e) {
