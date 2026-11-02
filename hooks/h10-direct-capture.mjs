@@ -7,9 +7,9 @@ var __export = (target, all) => {
 
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID7, createHash as createHash6 } from "node:crypto";
-import { spawn, spawnSync as spawnSync7 } from "node:child_process";
-import { readFileSync as readFileSync15, writeFileSync as writeFileSync8, writeSync as writeSync2, rmSync as rmSync7, existsSync as existsSync13, mkdirSync as mkdirSync11, renameSync as renameSync7 } from "node:fs";
-import { join as join21, basename as basename3 } from "node:path";
+import { spawn, spawnSync as spawnSync8 } from "node:child_process";
+import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, writeSync as writeSync2, rmSync as rmSync7, existsSync as existsSync13, mkdirSync as mkdirSync11, renameSync as renameSync7 } from "node:fs";
+import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
@@ -4761,6 +4761,29 @@ var todoBoardItemReadSchema = external_exports.object({
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
+var OBSERVATION_COMMIT = external_exports.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, "40- or 64-hex commit required");
+var reconcileObservationSchema = external_exports.object({
+  path: repoPath,
+  checkout: external_exports.discriminatedUnion("kind", [
+    external_exports.object({ kind: external_exports.literal("store") }).strict(),
+    external_exports.object({ kind: external_exports.literal("checkout"), worktree: external_exports.string().min(1), branch: external_exports.string().min(1).optional() }).strict(),
+    external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+  ]),
+  commit: OBSERVATION_COMMIT.optional(),
+  state: external_exports.discriminatedUnion("kind", [
+    external_exports.object({ kind: external_exports.literal("file"), mode: external_exports.enum(["100644", "100755", "120000"]), blob: OBSERVATION_COMMIT }).strict(),
+    external_exports.object({ kind: external_exports.literal("absent") }).strict(),
+    external_exports.object({ kind: external_exports.literal("unreadable") }).strict(),
+    external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+  ])
+}).strict().superRefine((o, ctx) => {
+  const unknown = o.state.kind === "unknown" || o.checkout.kind === "unknown";
+  if (unknown && (o.state.kind !== "unknown" || o.checkout.kind !== "unknown" || o.commit !== void 0)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "an unknown observation has an unknown checkout, an unknown state and no commit" });
+  }
+  if (!unknown && o.commit === void 0)
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["commit"], message: "an observation is bound to the commit its checkout was at" });
+});
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
   // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4825,7 +4848,9 @@ var todoSchema = base.extend({
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional(),
   // Which session works on this task now (see todoClaimSchema). User items only.
-  claim: todoClaimSchema.optional()
+  claim: todoClaimSchema.optional(),
+  // Checkout evidence (reconcileObservationSchema). reconcile_needed items only.
+  observations: external_exports.array(reconcileObservationSchema).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -4836,6 +4861,9 @@ var todoSchema = base.extend({
   }
   if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
+  }
+  if (rec.observations !== void 0 && (rec.source !== TODO_SYSTEM_SOURCE || rec.system_reason !== "reconcile_needed")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["observations"], message: `observations is checkout evidence on reconcile_needed maintenance items only` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -7688,6 +7716,10 @@ var MountedStores = class {
    *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
    *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
    *  is caller-writable — so the field and the mount can disagree in both directions. */
+  /** The project store's write fence (SterlingStore.withWriteFence); worker targets are project-held. */
+  withWriteFence(owner, items, check, fn) {
+    return this.project.withWriteFence(owner, items, check, fn);
+  }
   projectStoreHolds(id) {
     return this.project.projectStoreHolds(id);
   }
@@ -8753,6 +8785,34 @@ var SqliteDriver = class {
   }
 };
 
+// packages/store/dist/observations.js
+function observationKey(o) {
+  const c = o.checkout;
+  const s2 = o.state;
+  return JSON.stringify([o.path, c.kind, c.worktree ?? "", c.branch ?? "", o.commit ?? "", s2.kind, s2.mode ?? "", s2.blob ?? ""]);
+}
+function unknownObservation(path) {
+  return { path, checkout: { kind: "unknown" }, state: { kind: "unknown" } };
+}
+var DEBT_OWNER_HOP_CAP = 32;
+function resolveDebtOwner(link, get, aliases) {
+  if (!link)
+    return void 0;
+  let canonical = link;
+  for (const a of aliases)
+    if (a.historical_id === link)
+      canonical = a.canonical_id;
+  let record = get(canonical);
+  const seen = /* @__PURE__ */ new Set();
+  while (record && record.status === "superseded") {
+    if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record.id) || !record.superseded_by)
+      return void 0;
+    seen.add(record.id);
+    record = get(record.superseded_by);
+  }
+  return record?.id;
+}
+
 // packages/store/dist/index.js
 var storeDriverFactory;
 var StoreRowDecodeError = class extends Error {
@@ -9231,6 +9291,28 @@ function systemTodoTextsEquivalent(reason, a, b) {
     return a === b;
   const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
   return strip(a) === strip(b);
+}
+function evidenceOf(t) {
+  const obs = Array.isArray(t.observations) ? t.observations : [];
+  return [...obs, ...(t.file_keys ?? []).filter((k) => !obs.some((o) => o.path === k)).map((k) => unknownObservation(k))];
+}
+function foldObservations(prior, incoming, supersede = []) {
+  const replacedPaths = new Set(incoming.filter((o) => o.checkout.kind === "store").map((o) => o.path));
+  const drop = new Set(supersede);
+  const out = /* @__PURE__ */ new Map();
+  for (const o of prior) {
+    const k = observationKey(o);
+    if (drop.has(k) && o.checkout.kind === "store" && replacedPaths.has(o.path))
+      continue;
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  for (const o of incoming) {
+    const k = observationKey(o);
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  return [...out.values()].sort((a, b) => observationKey(a) < observationKey(b) ? -1 : observationKey(a) > observationKey(b) ? 1 : 0);
 }
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
@@ -9860,6 +9942,8 @@ var SterlingStore = class _SterlingStore {
     let served;
     this.tx(() => {
       this.assertNoMoveInFlight(op, [id]);
+      if (this.writeFence && id === this.writeFence.owner)
+        this.passWriteFence();
       const current = this.get(id);
       if (!current)
         throw new Error(`${op}: no record '${id}'`);
@@ -10027,9 +10111,12 @@ var SterlingStore = class _SterlingStore {
    */
   pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
     const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    const aliases = this.recordAliases();
     for (const r of rows) {
       const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
-      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed")
+        continue;
+      if (t.feature_link !== ownerId && resolveDebtOwner(t.feature_link, (id) => this.get(id), aliases) !== ownerId)
         continue;
       const currentFiles = t.file_keys ?? [];
       const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
@@ -10051,7 +10138,13 @@ var SterlingStore = class _SterlingStore {
       }
       const owner = this.get(ownerId);
       const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
-      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
+      const keptObservations = (t.observations ?? []).filter((o) => !prunedPaths.includes(o.path));
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({
+        ...cur,
+        file_keys: keptFiles,
+        text,
+        ...t.observations ? { observations: keptObservations } : {}
+      }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -10199,12 +10292,18 @@ var SterlingStore = class _SterlingStore {
           nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
         }
         const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
-        if (textChanged2 || filesChanged2) {
+        const participants = [survivor, ...folded, candidate];
+        const anyEvidence = participants.some((t) => Array.isArray(t.observations));
+        const priorEvidence = [survivor, ...folded].flatMap((t) => evidenceOf(t));
+        const nextObservations = anyEvidence ? foldObservations(priorEvidence, evidenceOf(candidate), options.supersede_observations) : [];
+        const evidenceChanged = anyEvidence && JSON.stringify((survivor.observations ?? []).map(observationKey)) !== JSON.stringify(nextObservations.map(observationKey));
+        if (textChanged2 || filesChanged2 || evidenceChanged) {
           existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
             ...cur,
             updated_at: candidate.updated_at,
             ...textChanged2 ? { text: nextText } : {},
-            ...filesChanged2 ? { file_keys: unionFiles } : {}
+            ...filesChanged2 ? { file_keys: unionFiles } : {},
+            ...evidenceChanged ? { observations: nextObservations } : {}
           }), {});
           textUpdated = textChanged2;
         } else {
@@ -11256,8 +11355,11 @@ var SterlingStore = class _SterlingStore {
       }
       checkedRemoval = parsed.data;
     }
+    const direct = this.txDepth === 0;
     this.tx(() => {
       this.assertNoMoveInFlight("remove", [id]);
+      if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id)))
+        this.passWriteFence();
       const record = this.get(id);
       const isSystemDrain = record && record.type === "todo" && record.source === "system";
       if (checkedRemoval) {
@@ -11921,6 +12023,53 @@ var SterlingStore = class _SterlingStore {
    * whole thing exactly once.
    */
   txDepth = 0;
+  /**
+   * WRITE FENCE (decision
+   * maintenance-reconciliation-retains-checkout-evidence-and-use): the worker
+   * policy proves checkout evidence OUTSIDE the lock (git), then runs the tool
+   * with a fence armed on the owner record and the items the proof covered.
+   * The first write to the owner (any applyInPlace on it, which is where
+   * resolves drain and reconcile pruning happen) or the first direct removal
+   * of a fenced item runs `check` INSIDE that write's transaction, under the
+   * write lock, before anything changes; the check throws when the owner, an
+   * item or the set of affected items moved since the proof. The proof covers
+   * ONE such write (whose transaction also holds the resolves drain and the
+   * reconcile pruning it causes); a second fenced write in the same call is
+   * refused, since the proof no longer describes the store it would change. A
+   * fold into a fenced item is NOT a trigger, so evidence that arrives mid-call
+   * is seen by the owner write's check and refuses it.
+   */
+  writeFence;
+  withWriteFence(owner, items, check, fn) {
+    if (this.writeFence)
+      throw new Error("withWriteFence: a write fence is already armed on this store; nothing was written.");
+    const fence = { owner, items: new Set(items), check, passed: false };
+    this.writeFence = fence;
+    const release = () => {
+      if (this.writeFence === fence)
+        this.writeFence = void 0;
+    };
+    let result;
+    try {
+      result = fn();
+    } catch (e) {
+      release();
+      throw e;
+    }
+    if (result && typeof result.then === "function") {
+      return result.finally(release);
+    }
+    release();
+    return result;
+  }
+  passWriteFence() {
+    const fence = this.writeFence;
+    if (fence.passed) {
+      throw new Error("write fence: this call already made the one write its checkout-evidence proof covers; a second write to the fenced record or a fenced item is refused, nothing more was written.");
+    }
+    fence.check();
+    fence.passed = true;
+  }
   /** Open read transactions on this handle (readTx). A write may not start inside one. */
   readDepth = 0;
   /**
@@ -12818,7 +12967,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync as existsSync4, realpathSync as realpathSync4, statSync as statSync4 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
       return realpathSync4(p);
@@ -12826,7 +12975,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
       return null;
     }
   };
-  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
@@ -12834,7 +12983,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   const commonReal = real(resolve3(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
   const settings = {};
   if (!core.error && core.status === 0) {
     for (const line of core.stdout.split("\n")) {
@@ -13300,7 +13449,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve7) => setTimeout(resolve7, ms));
+  return new Promise((resolve8) => setTimeout(resolve8, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -13457,9 +13606,9 @@ var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync5, statSync as statSync5, renameSync as renameSync3 } from "node:fs";
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { join as join14, dirname as dirname9 } from "node:path";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync5, statSync as statSync5, renameSync as renameSync3 } from "node:fs";
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { join as join15, dirname as dirname9 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 import { join as join12 } from "node:path";
@@ -13480,10 +13629,136 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
   return (record) => !isForeignTree(record, root, workingTrees);
 }
 
+// scripts/hooks/lib/reconcile-origins.mjs
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { lstatSync as lstatSync5, readFileSync as readFileSync8, readlinkSync, realpathSync as realpathSync6 } from "node:fs";
+import { basename as basename3, join as join13, resolve as resolve6 } from "node:path";
+var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+function git(root, args, input2) {
+  const r = spawnSync3("git", ["-C", root, ...args], { input: input2, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  return { ok: !r.error && r.status === 0, status: r.status, out: r.stdout ? r.stdout.toString("utf8") : "", err: r.error?.message ?? (r.stderr ? r.stderr.toString("utf8").trim() : "") };
+}
+var realOr = (p) => {
+  try {
+    return realpathSync6(p);
+  } catch {
+    return p;
+  }
+};
+function headCommit(root) {
+  const r = git(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+  const head = r.out.trim();
+  return r.ok && HEX.test(head) ? head : null;
+}
+function checkoutIdentity(root, storeRoot) {
+  const head = headCommit(root);
+  const r = git(root, ["rev-parse", "--absolute-git-dir", "--git-common-dir", "--show-toplevel", "--show-prefix"]);
+  if (!head || !r.ok) return null;
+  const [gitDir, commonDir, top, prefix = ""] = r.out.split("\n");
+  const common = realOr(resolve6(root, commonDir));
+  const sameTop = storeRoot && realOr(top) === realOr(storeRoot);
+  let checkout;
+  if (sameTop) checkout = { kind: "store" };
+  else {
+    const branch = git(root, ["symbolic-ref", "-q", "HEAD"]).out.trim();
+    checkout = { kind: "checkout", worktree: realOr(gitDir) === common ? "main" : basename3(gitDir), ...branch ? { branch } : {} };
+  }
+  return { head, prefix: prefix.trim(), checkout };
+}
+function workingState(root, rel) {
+  let st;
+  try {
+    st = lstatSync5(join13(root, rel));
+  } catch (e) {
+    return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
+  }
+  let mode;
+  let bytes;
+  let filters = true;
+  try {
+    if (st.isSymbolicLink()) {
+      mode = "120000";
+      bytes = Buffer.from(readlinkSync(join13(root, rel)));
+      filters = false;
+    } else if (st.isFile()) {
+      mode = st.mode & 73 ? "100755" : "100644";
+      bytes = readFileSync8(join13(root, rel));
+    } else return { kind: "unreadable" };
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const r = git(root, ["hash-object", "--stdin", ...filters ? [`--path=${rel}`] : ["--no-filters"]], bytes);
+  const blob = r.out.trim();
+  return r.ok && HEX.test(blob) ? { kind: "file", mode, blob } : { kind: "unreadable" };
+}
+function observePaths(root, paths, storeRoot) {
+  const id = checkoutIdentity(root, storeRoot);
+  if (!id) return null;
+  const observations = [...new Set(paths)].sort().map((path) => ({ path, checkout: id.checkout, commit: id.head, state: workingState(root, path) }));
+  return { head: id.head, checkout: id.checkout, observations };
+}
+function treeState(root, commit, rel, prefix = "") {
+  const name = prefix + rel;
+  const r = git(root, ["--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", name]);
+  if (!r.ok) return null;
+  for (const entry of r.out.split("\0")) {
+    const tab = entry.indexOf("	");
+    if (tab < 0) continue;
+    const [mode, type, oid] = entry.slice(0, tab).split(" ");
+    if (entry.slice(tab + 1) !== name) continue;
+    return type === "blob" && /^(100644|100755|120000)$/.test(mode) ? { kind: "file", mode, blob: oid } : { kind: "other" };
+  }
+  return { kind: "absent" };
+}
+var sameState = (a, b) => !!a && !!b && a.kind === b.kind && (a.kind !== "file" || a.mode === b.mode && a.blob === b.blob);
+function proveObservation(treeRoot, target, obs, { prefix = "" } = {}) {
+  const at = (c) => String(c).slice(0, 8);
+  const held = (hold, why) => ({ ok: false, hold, why: `${obs.path}: ${why}` });
+  const kind = obs?.state?.kind;
+  if (kind === "unknown" || kind === void 0) return held("conductor", "no checkout evidence was kept for this debt (legacy or incomplete item)");
+  if (kind === "unreadable") return held("conductor", `the observing checkout could not read the file at ${at(obs.commit)}`);
+  const atTarget = treeState(treeRoot, target, obs.path, prefix);
+  if (!atTarget) return held("conductor", `git could not read ${at(target)}`);
+  if (sameState(atTarget, obs.state)) return { ok: true, via: "target_holds_observed_state" };
+  if (!HEX.test(obs.commit ?? "") || !git(treeRoot, ["cat-file", "-e", `${obs.commit}^{commit}`]).ok) {
+    return held("conductor", `the observed commit ${at(obs.commit)} is not in this repository and the target does not hold the observed state`);
+  }
+  const where = obs.checkout?.kind === "checkout" ? `checkout '${obs.checkout.worktree}'${obs.checkout.branch ? ` (${obs.checkout.branch})` : ""}` : "the store checkout";
+  const atCommit = treeState(treeRoot, obs.commit, obs.path, prefix);
+  if (!atCommit) return held("conductor", `git could not read ${at(obs.commit)}`);
+  if (!sameState(atCommit, obs.state)) {
+    return obs.checkout?.kind === "store" ? held("integration", `the store checkout's uncommitted change observed on ${at(obs.commit)} is not committed in the target yet`) : held("conductor", `the uncommitted change ${where} observed on ${at(obs.commit)} is not what the target holds, and no commit can be shown to carry it`);
+  }
+  const anc = git(treeRoot, ["merge-base", "--is-ancestor", obs.commit, target]);
+  if (anc.ok) return { ok: true, via: "committed_ancestor" };
+  if (anc.status === 1) return held("integration", `the commit ${where} observed (${at(obs.commit)}) is not in ${at(target)} yet`);
+  return held("conductor", `git could not compare ${at(obs.commit)} with ${at(target)}`);
+}
+function itemProvenance(item, treeRoot, target, opts = {}) {
+  const obs = Array.isArray(item?.observations) ? item.observations : [];
+  const holds = [];
+  for (const key of item?.file_keys ?? []) {
+    if (!obs.some((o) => o.path === key)) holds.push({ hold: "conductor", why: `${key}: no checkout evidence was kept for this debt (legacy or incomplete item)` });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const o of obs) {
+    const k = JSON.stringify(o);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const r = proveObservation(treeRoot, target, o, opts);
+    if (!r.ok) holds.push({ hold: r.hold, why: r.why });
+  }
+  return { payable: holds.length === 0, conductor: holds.some((h) => h.hold === "conductor"), holds };
+}
+function prefixOf(root) {
+  const r = git(root, ["rev-parse", "--show-prefix"]);
+  return r.ok ? r.out.trim() : null;
+}
+
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname8, join as join13 } from "node:path";
-var SESSION_EVENTS_REL = join13(".sterling", "transient", "session-events.json");
+import { dirname as dirname8, join as join14 } from "node:path";
+var SESSION_EVENTS_REL = join14(".sterling", "transient", "session-events.json");
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
 var SQLITE_BUSY2 = 5;
 function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
@@ -13560,7 +13835,7 @@ function parseTouchesContent(raw) {
 }
 function hashFile(root, rel) {
   try {
-    return createHash4("sha256").update(readFileSync8(join14(root, rel))).digest("hex");
+    return createHash4("sha256").update(readFileSync9(join15(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -13574,7 +13849,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync8(join14(storeRootFor(root), ".sterling", "config.json"), "utf8");
+    const raw = readFileSync9(join15(storeRootFor(root), ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -13582,7 +13857,7 @@ function loadGeneratedProjections(root) {
     return /* @__PURE__ */ new Set();
   }
 }
-function buildReconcileItem(article, fileKeys, now) {
+function buildReconcileItem(article, fileKeys, now, observations) {
   return {
     id: randomUUID4(),
     type: "todo",
@@ -13598,7 +13873,8 @@ function buildReconcileItem(article, fileKeys, now) {
     source: "system",
     system_reason: "reconcile_needed",
     file_keys: fileKeys,
-    feature_link: article.id
+    feature_link: article.id,
+    ...observations ? { observations } : {}
   };
 }
 function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE__ */ new Date()).toISOString()) {
@@ -13617,17 +13893,26 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
     const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
-    if (!drifted.length) continue;
-    const fileKeys = drifted.sort();
-    const { record } = store2.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID4() });
-    minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
+    const openItem = store2.query({ types: ["todo"], file_keys: [...freshPaths], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link === article.id);
+    const storeEvidence = (openItem?.observations ?? []).filter((o) => o.checkout?.kind === "store");
+    const reobserved = [...freshPaths].filter((rel) => !drifted.includes(rel) && storeEvidence.some((o) => o.path === rel));
+    const observed = [...drifted, ...reobserved].sort();
+    if (!observed.length) continue;
+    const seen = observePaths(root, observed, storeRootFor(root));
+    const fresh = new Set((seen?.observations ?? []).map(observationKey));
+    const supersede = seen?.checkout.kind === "store" ? storeEvidence.filter((o) => observed.includes(o.path) && !fresh.has(observationKey(o))).map(observationKey) : [];
+    const { record } = store2.enqueueSystemTodo(buildReconcileItem(article, observed, now, seen?.observations), {
+      operation_id: randomUUID4(),
+      ...supersede.length ? { supersede_observations: supersede } : {}
+    });
+    minted.push({ article_id: article.id, paths: record.file_keys ?? observed });
   }
   return minted;
 }
 var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 function gitZ(root, args) {
-  const r = spawnSync3("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync4("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
   return r.stdout.split("\0").filter(Boolean);
 }
@@ -13642,7 +13927,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync8(join14(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync9(join15(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -13651,17 +13936,17 @@ function readGitSettled(root) {
 function gitTouches(root, now) {
   let head;
   try {
-    const r = spawnSync3("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    const r = spawnSync4("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
     if (r.status === 0) head = r.stdout.trim();
-    else if (spawnSync3("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else if (spawnSync4("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
     let mergeBase = null;
     if (base2 && base2 !== EMPTY_TREE) {
-      if (spawnSync3("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
-      else if (spawnSync3("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
-        const mb = spawnSync3("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+      if (spawnSync4("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync4("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync4("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
         mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
         if (!mergeBase) base2 = null;
       }
@@ -13681,7 +13966,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync5(join14(root, path)).mtime.toISOString();
+        at = statSync5(join15(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -13692,7 +13977,7 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join14(root, GIT_SETTLED_REL);
+  const p = join15(root, GIT_SETTLED_REL);
   mkdirSync6(dirname9(p), { recursive: true });
   if (ifAbsent) {
     try {
@@ -13724,9 +14009,9 @@ function gitTrackedSubset(root, paths) {
 }
 
 // scripts/lib/version-only.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
-import { lstatSync as lstatSync5, readFileSync as readFileSync9 } from "node:fs";
-import { join as join15 } from "node:path";
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { lstatSync as lstatSync6, readFileSync as readFileSync10 } from "node:fs";
+import { join as join16 } from "node:path";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
   [".claude-plugin/plugin.json", [["version"]]],
@@ -13796,7 +14081,7 @@ function isVersionOnlyText(path, baseContent, tipContent) {
   return JSON.stringify(tip) === JSON.stringify(base2);
 }
 function lsTreeEntry(root, sha, path) {
-  const r = spawnSync4("git", ["ls-tree", sha, "--", path], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync5("git", ["ls-tree", sha, "--", path], { cwd: root, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return null;
   const line = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean)[0];
   if (!line) return null;
@@ -13805,7 +14090,7 @@ function lsTreeEntry(root, sha, path) {
 }
 var isRegularBlob = (e) => !!e && e.type === "blob" && (e.mode === "100644" || e.mode === "100755");
 function showBlobText(root, sha, path) {
-  const r = spawnSync4("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "buffer", timeout: 3e4 });
+  const r = spawnSync5("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "buffer", timeout: 3e4 });
   return r.status === 0 ? strictUtf8(r.stdout) : null;
 }
 function isVersionOnlyInWorkingTree(root, baseSha, path) {
@@ -13813,8 +14098,8 @@ function isVersionOnlyInWorkingTree(root, baseSha, path) {
   if (!isRegularBlob(lsTreeEntry(root, baseSha, path))) return false;
   let current;
   try {
-    if (!lstatSync5(join15(root, path)).isFile()) return false;
-    current = strictUtf8(readFileSync9(join15(root, path)));
+    if (!lstatSync6(join16(root, path)).isFile()) return false;
+    current = strictUtf8(readFileSync10(join16(root, path)));
   } catch {
     return false;
   }
@@ -13869,7 +14154,7 @@ function fillPct(usage, windowSize) {
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync as existsSync8 } from "node:fs";
-import { dirname as dirname10, join as join16 } from "node:path";
+import { dirname as dirname10, join as join17 } from "node:path";
 import { fileURLToPath } from "node:url";
 function pluginRoot(moduleUrl) {
   const walked = walkUpPluginRoot(moduleUrl);
@@ -13879,14 +14164,14 @@ function pluginRoot(moduleUrl) {
 function walkUpPluginRoot(moduleUrl) {
   let dir = dirname10(fileURLToPath(moduleUrl));
   for (let i = 0; i < 4; i++) {
-    if (existsSync8(join16(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync8(join17(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname10(dir);
   }
   return null;
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 
 // scripts/hooks/lib/dispatch-advisory.mjs
 var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
@@ -13923,7 +14208,7 @@ function probeDirtyPaths(projectDir, files, fileEntries = []) {
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
   try {
-    r = spawnSync5("git", ["--no-optional-locks", "status", "--porcelain", "-z", "-uall", "--", ...declared], {
+    r = spawnSync6("git", ["--no-optional-locks", "status", "--porcelain", "-z", "-uall", "--", ...declared], {
       cwd: projectDir,
       encoding: "utf8",
       timeout: 1e4
@@ -13968,9 +14253,9 @@ function formatResidueLine(entry, paths, { verified = true, reason = "", stopSee
 }
 
 // scripts/lib/test-integrity.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync6("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync7("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -13994,16 +14279,16 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, existsSync as existsSync9, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
-import { join as join17, dirname as dirname11 } from "node:path";
+import { readFileSync as readFileSync11, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, existsSync as existsSync9, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { join as join18, dirname as dirname11 } from "node:path";
 function noticesDir(cwd) {
-  return join17(cwd, ".sterling", "transient", "notices");
+  return join18(cwd, ".sterling", "transient", "notices");
 }
 function publishNotice(cwd, text, { sessionId } = {}) {
   const dir = noticesDir(cwd);
   mkdirSync7(dir, { recursive: true });
   const name = `h10-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
-  const target = join17(dir, name);
+  const target = join18(dir, name);
   const tmp = `${target}.tmp`;
   const body = typeof sessionId === "string" && sessionId ? { text: String(text), session_id: sessionId } : { text: String(text) };
   writeFileSync5(tmp, JSON.stringify(body), { flag: "wx" });
@@ -14014,7 +14299,7 @@ var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync6, readFileSync as readFileSync11, readdirSync as readdirSync4, mkdirSync as mkdirSync8, openSync as openSync5, writeSync, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, mkdirSync as mkdirSync8, openSync as openSync5, writeSync, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -14027,12 +14312,12 @@ var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_patte
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync10, linkSync as linkSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync5, readFileSync as readFileSync12, renameSync as renameSync5, unlinkSync as unlinkSync2, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname12, join as join18 } from "node:path";
+import { existsSync as existsSync10, linkSync as linkSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync5, readFileSync as readFileSync13, renameSync as renameSync5, unlinkSync as unlinkSync2, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname12, join as join19 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
-var prLoopPath = (root) => join18(root, PR_LOOP_REL);
+var prLoopPath = (root) => join19(root, PR_LOOP_REL);
 var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
 function parsePrLoopFile(file, rel) {
   try {
@@ -14045,7 +14330,7 @@ function parsePrLoopFile(file, rel) {
 function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
-    s2 = JSON.parse(readFileSync12(file, "utf8"));
+    s2 = JSON.parse(readFileSync13(file, "utf8"));
   } catch (e) {
     throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
@@ -14061,15 +14346,15 @@ function parsePrLoopFileOrThrow(file, rel) {
 }
 function readPrLoopEntries(root) {
   const entries = [];
-  const dir = join18(root, PR_LOOPS_DIR_REL);
+  const dir = join19(root, PR_LOOPS_DIR_REL);
   if (existsSync10(dir)) {
     for (const name of readdirSync5(dir).sort()) {
       const m = name.match(/^(\d+)\.json$/);
       if (!m) continue;
       const rel = prLoopFileRel(m[1]);
-      const state = parsePrLoopFile(join18(dir, name), rel);
+      const state = parsePrLoopFile(join19(dir, name), rel);
       if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
-      entries.push({ state, file: join18(dir, name), rel });
+      entries.push({ state, file: join19(dir, name), rel });
     }
   }
   if (existsSync10(prLoopPath(root))) {
@@ -14083,7 +14368,7 @@ function readPrLoops(root) {
 }
 function prLoopStateExists(root) {
   if (existsSync10(prLoopPath(root))) return true;
-  const dir = join18(root, PR_LOOPS_DIR_REL);
+  const dir = join19(root, PR_LOOPS_DIR_REL);
   return existsSync10(dir) && readdirSync5(dir).some((n) => /^\d+\.json$/.test(n));
 }
 
@@ -14126,8 +14411,8 @@ var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number}
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync6, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync6, readFileSync as readFileSync13, renameSync as renameSync6, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync7, appendFileSync } from "node:fs";
-import { dirname as dirname13, isAbsolute as isAbsolute3, join as join19, resolve as resolve6, sep } from "node:path";
+import { closeSync as closeSync6, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync6, readFileSync as readFileSync14, renameSync as renameSync6, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync7, appendFileSync } from "node:fs";
+import { dirname as dirname13, isAbsolute as isAbsolute3, join as join20, resolve as resolve7, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -14190,28 +14475,28 @@ var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
-  const sterling = join19(root, ".sterling");
+  const sterling = join20(root, ".sterling");
   return {
-    lock: join19(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join19(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join19(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join19(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join19(sterling, "transient", "maintenance-worker.state.json"),
-    log: join19(sterling, "maintenance-worker.log"),
-    journal: join19(sterling, "maintenance-worker.jsonl")
+    lock: join20(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join20(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join20(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join20(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join20(sterling, "transient", "maintenance-worker.state.json"),
+    log: join20(sterling, "maintenance-worker.log"),
+    journal: join20(sterling, "maintenance-worker.jsonl")
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
   let dir = dirname13(fileURLToPath2(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync11(join19(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync11(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname13(dir);
   }
   return null;
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync13(path, "utf8"));
+    return JSON.parse(readFileSync14(path, "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     return { unreadable: String(e?.message ?? e) };
@@ -14231,7 +14516,7 @@ function journalLines(root, files = null) {
   for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
-      text = readFileSync13(path, "utf8");
+      text = readFileSync14(path, "utf8");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
       throw e;
@@ -14256,17 +14541,30 @@ function judgedVerdicts(root) {
         verdict: v.verdict,
         keys: sortedKeys(v.file_keys),
         head: v.head ?? null,
+        // The item and target versions the verdict judged (checkout evidence,
+        // decision maintenance-reconciliation-retains-checkout-evidence-and-use):
+        // a fold of new evidence or a change to the target re-arms the item.
+        version: Number.isInteger(v.item_version) ? v.item_version : null,
+        target_version: Number.isInteger(v.target_version) ? v.target_version : null,
+        source: typeof v.source === "string" ? v.source : null,
         reason: typeof v.reason === "string" ? v.reason : null,
         lane: typeof v.lane === "string" ? v.lane : null,
         capability: v.capability ?? null
       });
-    } else if (v.verdict === "closed") map.delete(v.item_id);
+    } else if (v.verdict === "closed" || v.verdict === "rearmed") map.delete(v.item_id);
   }
   return map;
 }
-function isJudged(item, verdicts, head) {
+var PROVENANCE_REASON_RE = /provenance_(?:not_integrated|needs_conductor|unfenced)|^checkout evidence needs the conductor/;
+function isProvenanceVerdict(v) {
+  return v?.source === "launcher" || PROVENANCE_REASON_RE.test(String(v?.reason ?? ""));
+}
+function isJudged(item, verdicts, head, store2 = null) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
+  if (item.system_reason === "reconcile_needed" && isProvenanceVerdict(v)) return false;
+  if (v.version !== null && v.version !== void 0 && v.version !== (item.version ?? null)) return false;
+  if (v.target_version !== null && v.target_version !== void 0 && store2 && item.feature_link && debtOwnerRecord(store2, item)?.version !== v.target_version) return false;
   return v.verdict === "needs_conductor" || v.verdict === "refused" && Boolean(head) && v.head === head;
 }
 function articleSlug(item) {
@@ -14289,15 +14587,15 @@ function selectBatch(items, max = RUN_BATCH_MAX) {
   }
   return out;
 }
-function gitState(root, spawnSync8 = nodeSpawnSync) {
-  const r = spawnSync8("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+function gitState(root, spawnSync9 = nodeSpawnSync) {
+  const r = spawnSync9("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
   return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
 }
-function dirtyPaths(root, paths, spawnSync8 = nodeSpawnSync, prefix = "") {
+function dirtyPaths(root, paths, spawnSync9 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync8("git", ["-C", root, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync9("git", ["-C", root, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {
@@ -14313,15 +14611,21 @@ function dirtyPaths(root, paths, spawnSync8 = nodeSpawnSync, prefix = "") {
   return dirty;
 }
 var DIFF_LANES = ["reconcile_needed", "state_review"];
+function debtOwnerRecord(store2, t) {
+  if (!t?.feature_link) return void 0;
+  if (!store2?.get) return t.target_snapshot;
+  const id = resolveDebtOwner(t.feature_link, (x) => store2.get(x), store2.recordAliases?.() ?? []);
+  return store2.get(id ?? t.feature_link);
+}
 function itemBaselines(store2, t) {
   if (!store2 || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
-  const all = store2.get(t.feature_link)?.file_baselines;
+  const all = debtOwnerRecord(store2, t)?.file_baselines;
   const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === "string");
   return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
 function itemTargetUpdatedAt(store2, t) {
   if (!store2 || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
-  const at = store2.get(t.feature_link)?.updated_at;
+  const at = debtOwnerRecord(store2, t)?.updated_at;
   return typeof at === "string" ? at : void 0;
 }
 var gitOpts = { encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 };
@@ -14381,10 +14685,10 @@ function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
   if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute3(policy.path))) {
     throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
   }
-  const path = join19(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
+  const path = join20(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync13(path, "utf8"));
+    parsed = JSON.parse(readFileSync14(path, "utf8"));
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
@@ -14397,9 +14701,9 @@ function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
   return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: [...entry.args.map(bind), ...policyArgs] } } });
 }
 function readWorkerPrompt(pluginRoot2) {
-  const path = join19(pluginRoot2, "templates", "maintenance-worker-prompt.md");
+  const path = join20(pluginRoot2, "templates", "maintenance-worker-prompt.md");
   try {
-    return readFileSync13(path, "utf8");
+    return readFileSync14(path, "utf8");
   } catch (e) {
     throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
   }
@@ -14424,6 +14728,7 @@ function failDetail(reason) {
   return `launch FAILED (${reason}) \u2014 the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
+  opts = { ...opts, root: storeRootFor(opts.root) };
   const result = launchWorker(opts);
   if (result.detail) {
     let logError = null;
@@ -14448,6 +14753,45 @@ function maybeLaunchMaintenanceWorker(opts) {
   }
   return result;
 }
+function recordProvenanceVerdicts(opts, paths, holds, cleared, nowMs) {
+  if (!holds.length && !cleared.length) return;
+  const token = acquireLock(paths, { pid: process.pid, started_at: new Date(nowMs).toISOString(), trigger: opts.trigger, stage: "judging" }, nowMs, opts.isAlive);
+  if (!token) return;
+  try {
+    const verdicts = judgedVerdicts(opts.root);
+    const at = new Date(nowMs).toISOString();
+    for (const t of cleared) {
+      const v = verdicts.get(t.id);
+      if (v && isProvenanceVerdict(v) && v.verdict === "needs_conductor") appendFileSync(paths.journal, JSON.stringify({ at, kind: "verdict", item_id: t.id, lane: t.system_reason, verdict: "rearmed", source: "launcher" }) + "\n");
+    }
+    for (const { t, target, p } of holds) {
+      const reason = `checkout evidence needs the conductor: ${p.holds.filter((h) => h.hold === "conductor").map((h) => h.why).join("; ")}`.slice(0, 300);
+      const itemVersion = Number.isInteger(t.version) ? t.version : null;
+      const targetVersion = Number.isInteger(target?.version) ? target.version : null;
+      const v = verdicts.get(t.id);
+      if (v && v.source === "launcher" && v.verdict === "needs_conductor" && v.reason === reason && v.keys === sortedKeys(t.file_keys) && v.version === itemVersion && v.target_version === targetVersion) continue;
+      appendFileSync(
+        paths.journal,
+        JSON.stringify({
+          at,
+          kind: "verdict",
+          item_id: t.id,
+          lane: t.system_reason,
+          verdict: "needs_conductor",
+          reason,
+          file_keys: t.file_keys ?? [],
+          evidence: true,
+          capability: WORKER_CAPABILITY,
+          source: "launcher",
+          ...itemVersion !== null ? { item_version: itemVersion } : {},
+          ...targetVersion !== null ? { target_version: targetVersion } : {}
+        }) + "\n"
+      );
+    }
+  } finally {
+    releaseLock(paths, token);
+  }
+}
 function launchWorker(opts) {
   try {
     const env = opts.env ?? process.env;
@@ -14455,7 +14799,7 @@ function launchWorker(opts) {
     if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
     const verdicts = judgedVerdicts(opts.root);
-    const open2 = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null));
+    const open2 = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null, opts.store));
     if (open2.length === 0) return { launched: false, reason: "queue_empty" };
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
@@ -14471,13 +14815,66 @@ function launchWorker(opts) {
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
     if (opts.trigger !== "chain" && Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
-    const git = gitState(opts.root, opts.spawnSync);
-    const dirty = git && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
+    const git2 = gitState(opts.root, opts.spawnSync);
+    const dirty = git2 && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git2.prefix);
     if (!dirty) {
       return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every queue item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
-    const eligible = open2.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
-    if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
+    const clean = open2.filter((t) => !isJudged(t, verdicts, git2.head, opts.store) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    const waiting = [];
+    const conductorHolds = [];
+    const cleared = [];
+    const all = opts.store ? openWorkerItems(opts.store) : opts.items;
+    const linked = /* @__PURE__ */ new Map();
+    for (const t of all) {
+      if (t.system_reason !== "reconcile_needed" || !t.feature_link) continue;
+      const owner = debtOwnerRecord(opts.store, t)?.id ?? t.feature_link;
+      if (!linked.has(owner)) linked.set(owner, []);
+      linked.get(owner).push(t);
+    }
+    const workingTrees = opts.config?.working_trees && typeof opts.config.working_trees === "object" ? opts.config.working_trees : {};
+    const trees = /* @__PURE__ */ new Map();
+    const treeFor = (target) => {
+      if (!target?.working_tree) return { root: opts.root, head: git2.head, prefix: git2.prefix };
+      const mapped = workingTrees[target.working_tree];
+      if (typeof mapped !== "string" || !mapped) {
+        if (resolve7(String(target.working_tree)) === resolve7(opts.root)) return { root: opts.root, head: git2.head, prefix: git2.prefix };
+        return { unresolved: `working_tree '${target.working_tree}' is not mapped in config.working_trees` };
+      }
+      const root = isAbsolute3(mapped) ? mapped : join20(opts.root, mapped);
+      if (!trees.has(root)) {
+        const head = headCommit(root);
+        const prefix = prefixOf(root);
+        trees.set(root, head && prefix !== null ? { root, head, prefix } : { unresolved: `git could not report HEAD of the mapped tree ${root}` });
+      }
+      return trees.get(root);
+    };
+    const prove = opts.itemProvenance ?? itemProvenance;
+    const eligible = clean.filter((t) => {
+      if (t.system_reason !== "reconcile_needed") return true;
+      const target = debtOwnerRecord(opts.store, t);
+      const standing = verdicts.get(t.id);
+      const tree = treeFor(target);
+      let own;
+      let siblingsPayable = true;
+      if (tree.unresolved) own = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
+      else {
+        own = prove(t, tree.root, tree.head, { prefix: tree.prefix });
+        for (const s2 of linked.get(target?.id ?? t.feature_link) ?? []) if (s2.id !== t.id && !prove(s2, tree.root, tree.head, { prefix: tree.prefix }).payable) siblingsPayable = false;
+      }
+      if (own.conductor) {
+        conductorHolds.push({ t, target, p: own });
+        return false;
+      }
+      if (standing && isProvenanceVerdict(standing) && standing.verdict === "needs_conductor") cleared.push(t);
+      if (own.payable && siblingsPayable) return true;
+      waiting.push(t.id);
+      return false;
+    });
+    recordProvenanceVerdicts(opts, paths, conductorHolds, cleared, nowMs);
+    if (eligible.length === 0) {
+      return { launched: false, reason: "none_eligible", ...waiting.length ? { detail: `${waiting.length} reconcile item(s) wait for another checkout's change to reach ${git2.head.slice(0, 8)}: ${waiting.join(", ")}` } : {} };
+    }
     const waited = (t) => {
       const created = Date.parse(t.created_at ?? "");
       return Number.isFinite(created) ? nowMs - created : Infinity;
@@ -14502,7 +14899,7 @@ function launchWorker(opts) {
     if (!pluginRoot2) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot2, opts.root);
     readWorkerPrompt(pluginRoot2);
-    const runner = join19(pluginRoot2, "scripts", "maintenance-worker-run.mjs");
+    const runner = join20(pluginRoot2, "bin", "maintenance-worker-run.mjs");
     if (!existsSync11(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync10(dirname13(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
@@ -14522,18 +14919,42 @@ function launchWorker(opts) {
         const updatedAt = updatedAtById.get(t.id);
         return { ...baselines && typeof baselines === "object" ? { baselines } : {}, ...typeof updatedAt === "string" ? { target_updated_at: updatedAt } : {} };
       };
+      const snapshotTarget = (t) => {
+        const target = debtOwnerRecord(opts.store, t);
+        return target ? { target_snapshot: { id: target.id, ...Number.isInteger(target.version) ? { version: target.version } : {}, ...target.working_tree ? { working_tree: target.working_tree } : {} } } : {};
+      };
+      const versionsOf = (t) => {
+        const target = debtOwnerRecord(opts.store, t);
+        return { ...Number.isInteger(t.version) ? { item_version: t.version } : {}, ...Number.isInteger(target?.version) ? { target_version: target.version } : {} };
+      };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync7(
         paths.eligible,
         JSON.stringify({
           token,
-          head: git.head,
+          head: git2.head,
           ...runnerHost,
-          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
+          // The worker reads and writes the LIVE owner (debtOwnerRecord); a retired
+          // or historical address is never handed to it as a target.
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, slug: articleSlug(t), ...versionsOf(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
           run_id: randomUUID5(),
-          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "", ...withBaselines(t) })),
+          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+          queue_snapshot: eligible.map((t) => ({
+            id: t.id,
+            system_reason: t.system_reason,
+            file_keys: t.file_keys ?? [],
+            feature_link: t.feature_link ?? null,
+            created_at: t.created_at ?? null,
+            text: t.text ?? "",
+            ...withBaselines(t),
+            // What a chained launch (no store) needs to prove checkout evidence
+            // again: the item's version and evidence, and the owner's version
+            // and working_tree. The server's gate re-proves from the live store.
+            ...Number.isInteger(t.version) ? { version: t.version } : {},
+            ...Array.isArray(t.observations) ? { observations: t.observations } : {},
+            ...snapshotTarget(t)
+          })),
           chain_attempted: chainAttempted
         })
       );
@@ -14581,8 +15002,8 @@ var TOOLS_MISSING_RE = new RegExp(
 
 // scripts/hooks/lib/session-duties.mjs
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync12, readFileSync as readFileSync14, readdirSync as readdirSync6 } from "node:fs";
-import { join as join20 } from "node:path";
+import { existsSync as existsSync12, readFileSync as readFileSync15, readdirSync as readdirSync6 } from "node:fs";
+import { join as join21 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
 var IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -14715,7 +15136,7 @@ function readKnowledgeWrites(root) {
   const errorText2 = (e) => e && typeof e.code === "string" && e.code || "unknown error";
   let names;
   try {
-    names = readdirSync6(join20(root, KNOWLEDGE_WRITES_DIR_REL));
+    names = readdirSync6(join21(root, KNOWLEDGE_WRITES_DIR_REL));
   } catch (e) {
     if (e && e.code === "ENOENT") return { latestAt, unreadable };
     unreadable.push({ file: KNOWLEDGE_WRITES_DIR_REL, error: errorText2(e) });
@@ -14726,7 +15147,7 @@ function readKnowledgeWrites(root) {
     const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
     let text;
     try {
-      text = readFileSync14(join20(root, file), "utf8");
+      text = readFileSync15(join21(root, file), "utf8");
     } catch (e) {
       if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText2(e) });
       continue;
@@ -14861,11 +15282,11 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   const nowMs = Date.parse(nowIso);
   const lines = [];
   const stampIds = /* @__PURE__ */ new Set();
-  const touchesFile = join21(cwd, ".sterling", "transient", "touches.json");
+  const touchesFile = join22(cwd, ".sterling", "transient", "touches.json");
   const recentTouches = [];
   for (const f of [touchesFile, `${touchesFile}.claim`]) {
     try {
-      if (existsSync13(f)) recentTouches.push(...parseTouchesContent(readFileSync15(f, "utf8")));
+      if (existsSync13(f)) recentTouches.push(...parseTouchesContent(readFileSync16(f, "utf8")));
     } catch {
     }
   }
@@ -14889,7 +15310,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   }
   if (stampIds.size) {
     try {
-      mkdirSync11(join21(cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync11(join22(cwd, ".sterling", "transient"), { recursive: true });
       await withRegisterLock(
         cwd,
         () => {
@@ -14900,9 +15321,9 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
               entry.residue_reported_at = nowIso;
             }
           }
-          const transient = join21(cwd, ".sterling", "transient");
+          const transient = join22(cwd, ".sterling", "transient");
           mkdirSync11(transient, { recursive: true });
-          const tmpPath = join21(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
+          const tmpPath = join22(transient, `${basename4(registerPath2)}.tmp-${process.pid}`);
           writeFileSync8(tmpPath, JSON.stringify(fresh));
           renameSync7(tmpPath, registerPath2);
         },
@@ -14953,9 +15374,9 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join21(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join21(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join21(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join22(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join22(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join22(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -14973,12 +15394,12 @@ try {
 `);
     }
   };
-  const pressureMarker = join21(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join22(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const loadSharedWindows = () => {
     try {
       const pluginDir = pluginRoot(import.meta.url);
       if (!pluginDir) return { error: "the Sterling plugin root was not found" };
-      const raw = JSON.parse(readFileSync15(join21(pluginDir, "templates", "context-windows.json"), "utf8"));
+      const raw = JSON.parse(readFileSync16(join22(pluginDir, "templates", "context-windows.json"), "utf8"));
       if (!raw || typeof raw.windows !== "object" || raw.windows === null || Array.isArray(raw.windows)) {
         return { error: 'templates/context-windows.json has no "windows" object' };
       }
@@ -15037,8 +15458,8 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...sourceFields, at: now };
         }
       }
-      mkdirSync11(join21(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync8(join21(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync11(join22(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync8(join22(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -15051,7 +15472,7 @@ try {
   const dirtyPaths2 = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync7("git", ["--no-optional-locks", "status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync8("git", ["--no-optional-locks", "status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -15070,27 +15491,27 @@ try {
   const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${defaultWindowNote()}${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync15(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync16(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
   const spendPressureMarker = (level) => writeFileSync8(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join21(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const gaugeMarker = join22(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync15(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync16(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
   const spendGaugeMarker = () => writeFileSync8(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in the shared window table or context_watch.windows \u2014 context fill is UNRELIABLE and is not reported. Add "${pressure.unmapped_model}": <window tokens> to templates/context-windows.json in the Sterling plugin (one edit serves every project). (once per session)`;
-  const sharedWarnMarker = join21(input.cwd, ".sterling", "transient", "shared-windows-warned.json");
+  const sharedWarnMarker = join22(input.cwd, ".sterling", "transient", "shared-windows-warned.json");
   const sharedWarnSpent = () => {
     try {
-      return JSON.parse(readFileSync15(sharedWarnMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync16(sharedWarnMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
@@ -15178,7 +15599,7 @@ try {
       let orphanedTouches = [];
       if (existsSync13(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync15(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync16(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
@@ -15186,7 +15607,7 @@ try {
       let freshTouches = [];
       try {
         renameSync7(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync15(touchesClaimPath, "utf8"));
+        freshTouches = parseTouchesContent(readFileSync16(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
@@ -15196,23 +15617,23 @@ try {
     { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
   );
   const writingAgentIds = recentlyWritingAgentIds(touches, Date.parse(now), config.dispatch_register.stale_minutes);
-  const git = gitTouches(input.cwd, now);
+  const git2 = gitTouches(input.cwd, now);
   let lostSettlementMessage = "";
-  if (!git.ok) {
-    skipRow("h10-git-touches", git.reason);
-  } else if (git.settled) {
-    if (git.base_lost) {
-      skipRow("h10-git-touches", `settled_sha_unreachable:${git.settled.sha}`);
-      lostSettlementMessage = `\u26A0 H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
-    } else if (git.merge_base) {
-      disclose(`H10: settled SHA ${git.settled.sha.slice(0, 12)} is not an ancestor of HEAD ${git.next.sha.slice(0, 12)}; touches diffed from merge-base ${git.merge_base.slice(0, 12)}
+  if (!git2.ok) {
+    skipRow("h10-git-touches", git2.reason);
+  } else if (git2.settled) {
+    if (git2.base_lost) {
+      skipRow("h10-git-touches", `settled_sha_unreachable:${git2.settled.sha}`);
+      lostSettlementMessage = `\u26A0 H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git2.settled.sha} is unreachable from HEAD ${git2.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
+    } else if (git2.merge_base) {
+      disclose(`H10: settled SHA ${git2.settled.sha.slice(0, 12)} is not an ancestor of HEAD ${git2.next.sha.slice(0, 12)}; touches diffed from merge-base ${git2.merge_base.slice(0, 12)}
 `);
     }
-    const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git.changed.has(p));
+    const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git2.changed.has(p));
     const tracked = gitTrackedSubset(input.cwd, unchanged) ?? /* @__PURE__ */ new Set();
     touches = touches.filter((t) => !tracked.has(t?.path));
     const registered = new Set(touches.map((t) => t?.path));
-    touches = [...touches, ...git.candidates.filter((c) => !registered.has(c.path))];
+    touches = [...touches, ...git2.candidates.filter((c) => !registered.has(c.path))];
   }
   const discardTouchesClaim = () => {
     withFileLock(
@@ -15234,14 +15655,14 @@ try {
   let sessionEvents = [];
   try {
     if (existsSync13(eventsPath)) {
-      const raw = JSON.parse(readFileSync15(eventsPath, "utf8"));
+      const raw = JSON.parse(readFileSync16(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync13(join21(input.cwd, p))
+    (p) => existsSync13(join22(input.cwd, p))
   );
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
@@ -15348,12 +15769,12 @@ try {
     return `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}]: ${pathsDisplay} \u2014 duty re-arms when they land`;
   };
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
-  const deferralNotedPath = join21(input.cwd, ".sterling", "transient", "deferral-noted.json");
+  const deferralNotedPath = join22(input.cwd, ".sterling", "transient", "deferral-noted.json");
   const deferralKey = deferredPaths.length ? createHash6("sha256").update(JSON.stringify({ owners: [...deferredAgents].sort(), paths: [...deferredPaths].sort() })).digest("hex") : null;
   const deferralNoted = (() => {
     if (!deferralKey || !hasSession) return false;
     try {
-      const raw = JSON.parse(readFileSync15(deferralNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync16(deferralNotedPath, "utf8"));
       return raw.session_id === input.session_id && raw.key === deferralKey;
     } catch {
       return false;
@@ -15373,11 +15794,11 @@ try {
       (f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k, fileEntries.has(f)))
     );
   });
-  const dispatchUnknownNotedPath = join21(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
+  const dispatchUnknownNotedPath = join22(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
-      const raw = JSON.parse(readFileSync15(dispatchUnknownNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync16(dispatchUnknownNotedPath, "utf8"));
       if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
       if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
       return new Set(raw.keys);
@@ -15422,14 +15843,14 @@ try {
       )
     );
   }
-  const prLoopNaggedPath = join21(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
+  const prLoopNaggedPath = join22(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
   const prLoop = (() => {
     const { state, degraded } = evaluatePrLoop(input.cwd);
     if (degraded) degradationParts.push(degraded);
     if (!state) return null;
     const spent = (() => {
       try {
-        const m = JSON.parse(readFileSync15(prLoopNaggedPath, "utf8"));
+        const m = JSON.parse(readFileSync16(prLoopNaggedPath, "utf8"));
         return hasSession && m.session_id === input.session_id && m.armed_at === state.armed_at;
       } catch {
         return false;
@@ -15472,12 +15893,12 @@ try {
   const runSettlement = () => {
     try {
       mintSettlementReconcile(store, input.cwd, settlementCandidates, now);
-      if (git.ok && git.base_lost) {
-        const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
+      if (git2.ok && git2.base_lost) {
+        const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git2.settled.sha} is unreachable from HEAD ${git2.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
         if (!exists) store.enqueueSystemTodo({ id: randomUUID7(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] }, { operation_id: randomUUID7() });
       }
-      if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
+      if (git2.ok && !deferredPaths.length) writeGitSettled(input.cwd, git2.next);
     } catch (e) {
       settlementFailed = true;
       try {
@@ -15514,7 +15935,7 @@ try {
   const graceSpentIds = (() => {
     if (!existsSync13(nagMarker)) return /* @__PURE__ */ new Set();
     try {
-      const m = JSON.parse(readFileSync15(nagMarker, "utf8"));
+      const m = JSON.parse(readFileSync16(nagMarker, "utf8"));
       return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
     } catch {
       return null;
@@ -15526,10 +15947,10 @@ try {
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const generatedProjections = loadGeneratedProjections(input.cwd);
-  const releaseBase = git.ok && git.settled && !git.base_lost ? git.merge_base ?? git.settled.sha : null;
-  const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
+  const releaseBase = git2.ok && git2.settled && !git2.base_lost ? git2.merge_base ?? git2.settled.sha : null;
+  const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git2.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync13(join21(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync13(join22(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const dispatchEventReturnAt = (e) => {
     const laneRows = taggedWebLaneRows(e);
@@ -15614,7 +16035,7 @@ try {
       ["ls-files", "-z", "--", ...clean],
       ["ls-tree", "-r", "-z", "HEAD", "--name-only", "--", ...clean]
     ]) {
-      const res = spawnSync7("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
+      const res = spawnSync8("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
       if (res.status !== 0) return null;
       for (const p of (res.stdout || "").split("\0").filter(Boolean)) seen.add(p);
     }
@@ -15669,7 +16090,7 @@ try {
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join21(input.cwd, p)))
+      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)))
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
@@ -15718,10 +16139,10 @@ try {
       recomputeDegraded(e);
     }
   }
-  const newnessBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : "HEAD";
+  const newnessBase = git2.ok && git2.settled && !git2.base_lost ? git2.settled.sha : "HEAD";
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync7("git", ["ls-tree", "-r", newnessBase, "--name-only", "--", ...unowned], {
+    const head = spawnSync8("git", ["ls-tree", "-r", newnessBase, "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4
@@ -15825,11 +16246,11 @@ try {
         deferral_owners: [...deferredAgents].sort()
       })
     ).digest("hex");
-    const dutyNaggedMarker = join21(input.cwd, ".sterling", "transient", "duty-nagged.json");
+    const dutyNaggedMarker = join22(input.cwd, ".sterling", "transient", "duty-nagged.json");
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
-        const raw = JSON.parse(readFileSync15(dutyNaggedMarker, "utf8"));
+        const raw = JSON.parse(readFileSync16(dutyNaggedMarker, "utf8"));
         if (raw.session_id !== input.session_id) return null;
         if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
         return raw;
@@ -15928,7 +16349,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync13(join21(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => !existsSync13(join22(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);

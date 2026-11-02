@@ -66,6 +66,9 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, r
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WORKER_AGENT } from '../../lib/conductor-identity.mjs';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
+import { resolveDebtOwner } from '@sterling/store';
+import { headCommit, itemProvenance, prefixOf } from './reconcile-origins.mjs';
 import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, opencodeStreamJournal } from './maintenance-worker-opencode.mjs';
 
 /** Sonnet 5.5, not Haiku: the worker writes factual edits, and an unreviewed
@@ -281,6 +284,9 @@ export function rotateJournal(root, limit = ROTATE_BYTES) {
       ...(v.lane ? { lane: v.lane } : {}),
       ...(v.reason ? { reason: v.reason } : {}),
       ...(v.capability ? { capability: v.capability } : {}),
+      ...(v.source ? { source: v.source } : {}),
+      ...(v.version !== null && v.version !== undefined ? { item_version: v.version } : {}),
+      ...(v.target_version !== null && v.target_version !== undefined ? { target_version: v.target_version } : {}),
     })
   );
   // The sample-audit count survives too: the .1 backup is the one older file
@@ -335,11 +341,17 @@ export function judgedVerdicts(root) {
         verdict: v.verdict,
         keys: sortedKeys(v.file_keys),
         head: v.head ?? null,
+        // The item and target versions the verdict judged (checkout evidence,
+        // decision maintenance-reconciliation-retains-checkout-evidence-and-use):
+        // a fold of new evidence or a change to the target re-arms the item.
+        version: Number.isInteger(v.item_version) ? v.item_version : null,
+        target_version: Number.isInteger(v.target_version) ? v.target_version : null,
+        source: typeof v.source === 'string' ? v.source : null,
         reason: typeof v.reason === 'string' ? v.reason : null,
         lane: typeof v.lane === 'string' ? v.lane : null,
         capability: v.capability ?? null,
       });
-    } else if (v.verdict === 'closed') map.delete(v.item_id);
+    } else if (v.verdict === 'closed' || v.verdict === 'rearmed') map.delete(v.item_id);
   }
   return map;
 }
@@ -381,9 +393,27 @@ function countWrites(lines) {
  *  file_keys. refused (a close the server refused): same file_keys AND the
  *  same HEAD — a new commit may make the close attestable, so it becomes
  *  launchable again. */
-export function isJudged(item, verdicts, head) {
+/** The item and target versions an eligible.json item was launched at, for a verdict line. */
+function judgedVersions(item) {
+  return { ...(Number.isInteger(item?.item_version) ? { item_version: item.item_version } : {}), ...(Number.isInteger(item?.target_version) ? { target_version: item.target_version } : {}) };
+}
+
+/** A standing verdict that is about CHECKOUT EVIDENCE: the launcher's hand-off,
+ *  or a server refusal by the evidence gate. It never stops the launcher from
+ *  proving the item again: whether evidence is payable depends on the current
+ *  target tree, its HEAD, its mapping and the owner's other debt, none of which
+ *  the verdict can capture. It only deduplicates the notification. */
+const PROVENANCE_REASON_RE = /provenance_(?:not_integrated|needs_conductor|unfenced)|^checkout evidence needs the conductor/;
+export function isProvenanceVerdict(v) {
+  return v?.source === 'launcher' || PROVENANCE_REASON_RE.test(String(v?.reason ?? ''));
+}
+
+export function isJudged(item, verdicts, head, store = null) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
+  if (item.system_reason === 'reconcile_needed' && isProvenanceVerdict(v)) return false;
+  if (v.version !== null && v.version !== undefined && v.version !== (item.version ?? null)) return false;
+  if (v.target_version !== null && v.target_version !== undefined && store && item.feature_link && debtOwnerRecord(store, item)?.version !== v.target_version) return false;
   return v.verdict === 'needs_conductor' || (v.verdict === 'refused' && Boolean(head) && v.head === head);
 }
 
@@ -406,7 +436,7 @@ export function openWorkerItems(store) {
  *  compare against). */
 export function unjudgedWorkerItems(store, root, head = null) {
   const verdicts = judgedVerdicts(root);
-  return openWorkerItems(store).filter((t) => !isJudged(t, verdicts, head));
+  return openWorkerItems(store).filter((t) => !isJudged(t, verdicts, head, store));
 }
 
 /** At most `max` items, round-robin across WORKER_LANES in their order and
@@ -513,9 +543,24 @@ export const DIFF_SUMMARY_MAX = 200;
 
 /** The target's baselines for the item's own file_keys, read at launch (the
  *  runner has no store), or undefined when the item gets no diff from it. */
+/**
+ * The record that owns an item's debt NOW: the store's one owner-lineage rule
+ * (resolveDebtOwner: historical alias, then supersede chain to the live end),
+ * the same rule the server's worker gate, attested close, resolves and pruning
+ * use. A link that resolves nowhere keeps the record it names, if any. Without
+ * a store (a storeless chained snapshot), the owner the launch recorded.
+ * Internal only: a caller's write to a retired address stays refused.
+ */
+export function debtOwnerRecord(store, t) {
+  if (!t?.feature_link) return undefined;
+  if (!store?.get) return t.target_snapshot;
+  const id = resolveDebtOwner(t.feature_link, (x) => store.get(x), store.recordAliases?.() ?? []);
+  return store.get(id ?? t.feature_link);
+}
+
 function itemBaselines(store, t) {
   if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return undefined;
-  const all = store.get(t.feature_link)?.file_baselines;
+  const all = debtOwnerRecord(store, t)?.file_baselines;
   const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === 'string');
   return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
@@ -523,7 +568,7 @@ function itemBaselines(store, t) {
 /** The target's updated_at, read at launch, for the by-time fallback; undefined when unknown. */
 function itemTargetUpdatedAt(store, t) {
   if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return undefined;
-  const at = store.get(t.feature_link)?.updated_at;
+  const at = debtOwnerRecord(store, t)?.updated_at;
   return typeof at === 'string' ? at : undefined;
 }
 
@@ -1004,6 +1049,10 @@ function failDetail(reason) {
  *   opts.pluginRoot override; opts.env process.env override
  */
 export function maybeLaunchMaintenanceWorker(opts) {
+  // ONE worker per project STORE: a trigger from any checkout (a linked
+  // worktree's Stop or commit included) launches, locks, journals and reads
+  // the queue at the store's root, never at the triggering checkout.
+  opts = { ...opts, root: storeRootFor(opts.root) };
   const result = launchWorker(opts);
   if (result.detail) {
     let logError = null;
@@ -1033,6 +1082,56 @@ export function maybeLaunchMaintenanceWorker(opts) {
   return result;
 }
 
+/**
+ * The NOTIFICATION side of checkout evidence (eligibility is proven on every
+ * launch, above). Each conductor hold becomes ONE standing needs_conductor
+ * verdict; an identical hold (same reason, file_keys, item and owner versions)
+ * is not written again, so a target that merely moved does not repeat it. A
+ * hand-off whose item is offered or waits again is withdrawn with a 'rearmed'
+ * line, so H1 never shows it as current. Written only under the worker lock
+ * every launcher shares, with the journal re-read under it; when the lock is
+ * held elsewhere nothing is written now and the next launch writes it.
+ */
+function recordProvenanceVerdicts(opts, paths, holds, cleared, nowMs) {
+  if (!holds.length && !cleared.length) return;
+  const token = acquireLock(paths, { pid: process.pid, started_at: new Date(nowMs).toISOString(), trigger: opts.trigger, stage: 'judging' }, nowMs, opts.isAlive);
+  if (!token) return;
+  try {
+    const verdicts = judgedVerdicts(opts.root);
+    const at = new Date(nowMs).toISOString();
+    for (const t of cleared) {
+      const v = verdicts.get(t.id);
+      if (v && isProvenanceVerdict(v) && v.verdict === 'needs_conductor') appendFileSync(paths.journal, JSON.stringify({ at, kind: 'verdict', item_id: t.id, lane: t.system_reason, verdict: 'rearmed', source: 'launcher' }) + '\n');
+    }
+    for (const { t, target, p } of holds) {
+      const reason = `checkout evidence needs the conductor: ${p.holds.filter((h) => h.hold === 'conductor').map((h) => h.why).join('; ')}`.slice(0, 300);
+      const itemVersion = Number.isInteger(t.version) ? t.version : null;
+      const targetVersion = Number.isInteger(target?.version) ? target.version : null;
+      const v = verdicts.get(t.id);
+      if (v && v.source === 'launcher' && v.verdict === 'needs_conductor' && v.reason === reason && v.keys === sortedKeys(t.file_keys) && v.version === itemVersion && v.target_version === targetVersion) continue;
+      appendFileSync(
+        paths.journal,
+        JSON.stringify({
+          at,
+          kind: 'verdict',
+          item_id: t.id,
+          lane: t.system_reason,
+          verdict: 'needs_conductor',
+          reason,
+          file_keys: t.file_keys ?? [],
+          evidence: true,
+          capability: WORKER_CAPABILITY,
+          source: 'launcher',
+          ...(itemVersion !== null ? { item_version: itemVersion } : {}),
+          ...(targetVersion !== null ? { target_version: targetVersion } : {}),
+        }) + '\n'
+      );
+    }
+  } finally {
+    releaseLock(paths, token);
+  }
+}
+
 function launchWorker(opts) {
   try {
     const env = opts.env ?? process.env;
@@ -1043,7 +1142,7 @@ function launchWorker(opts) {
     // to the conductor for their current file_keys. Refused verdicts need
     // HEAD, checked below.
     const verdicts = judgedVerdicts(opts.root);
-    const open = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null));
+    const open = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null, opts.store));
     if (open.length === 0) return { launched: false, reason: 'queue_empty' };
 
     const nowMs = opts.now ?? Date.now();
@@ -1075,8 +1174,76 @@ function launchWorker(opts) {
     if (!dirty) {
       return { launched: false, reason: 'git_failed', detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every queue item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
-    const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
-    if (eligible.length === 0) return { launched: false, reason: 'none_eligible' };
+    const clean = open.filter((t) => !isJudged(t, verdicts, git.head, opts.store) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    // CHECKOUT EVIDENCE (decision
+    // maintenance-reconciliation-retains-checkout-evidence-and-use), proven on
+    // EVERY launch from live inputs, never from a cached verdict: the owner's
+    // authoritative tree (its working_tree mapping, resolved now), that tree's
+    // HEAD, and every open reconcile_needed item linked to the same owner (the
+    // server's gate needs all of them payable). Payable -> offered. Committed
+    // but not integrated, or the store checkout's own uncommitted state ->
+    // waits, no verdict. Unknown, unreadable, unresolvable or another
+    // checkout's unmatched uncommitted state -> the conductor's: notified once
+    // per distinct reason and item/owner version, and the notice is withdrawn
+    // ('rearmed') as soon as the item is offered or merely waits again.
+    const waiting = [];
+    const conductorHolds = [];
+    const cleared = [];
+    const all = opts.store ? openWorkerItems(opts.store) : opts.items;
+    const linked = new Map();
+    for (const t of all) {
+      if (t.system_reason !== 'reconcile_needed' || !t.feature_link) continue;
+      const owner = debtOwnerRecord(opts.store, t)?.id ?? t.feature_link;
+      if (!linked.has(owner)) linked.set(owner, []);
+      linked.get(owner).push(t);
+    }
+    const workingTrees = opts.config?.working_trees && typeof opts.config.working_trees === 'object' ? opts.config.working_trees : {};
+    const trees = new Map();
+    const treeFor = (target) => {
+      // As the server's treeRootFor resolves it, kept dependency-free here: no
+      // working_tree is the store checkout; a mapped name is its mapped path;
+      // an unmapped name is the store checkout only when it names this very
+      // directory, and otherwise unresolved (a conductor hold, never a guess).
+      if (!target?.working_tree) return { root: opts.root, head: git.head, prefix: git.prefix };
+      const mapped = workingTrees[target.working_tree];
+      if (typeof mapped !== 'string' || !mapped) {
+        if (resolve(String(target.working_tree)) === resolve(opts.root)) return { root: opts.root, head: git.head, prefix: git.prefix };
+        return { unresolved: `working_tree '${target.working_tree}' is not mapped in config.working_trees` };
+      }
+      const root = isAbsolute(mapped) ? mapped : join(opts.root, mapped);
+      if (!trees.has(root)) {
+        const head = headCommit(root);
+        const prefix = prefixOf(root);
+        trees.set(root, head && prefix !== null ? { root, head, prefix } : { unresolved: `git could not report HEAD of the mapped tree ${root}` });
+      }
+      return trees.get(root);
+    };
+    const prove = opts.itemProvenance ?? itemProvenance;
+    const eligible = clean.filter((t) => {
+      if (t.system_reason !== 'reconcile_needed') return true;
+      const target = debtOwnerRecord(opts.store, t);
+      const standing = verdicts.get(t.id);
+      const tree = treeFor(target);
+      let own;
+      let siblingsPayable = true;
+      if (tree.unresolved) own = { payable: false, conductor: true, holds: [{ hold: 'conductor', why: tree.unresolved }] };
+      else {
+        own = prove(t, tree.root, tree.head, { prefix: tree.prefix });
+        for (const s of linked.get(target?.id ?? t.feature_link) ?? []) if (s.id !== t.id && !prove(s, tree.root, tree.head, { prefix: tree.prefix }).payable) siblingsPayable = false;
+      }
+      if (own.conductor) {
+        conductorHolds.push({ t, target, p: own });
+        return false;
+      }
+      if (standing && isProvenanceVerdict(standing) && standing.verdict === 'needs_conductor') cleared.push(t);
+      if (own.payable && siblingsPayable) return true;
+      waiting.push(t.id);
+      return false;
+    });
+    recordProvenanceVerdicts(opts, paths, conductorHolds, cleared, nowMs);
+    if (eligible.length === 0) {
+      return { launched: false, reason: 'none_eligible', ...(waiting.length ? { detail: `${waiting.length} reconcile item(s) wait for another checkout's change to reach ${git.head.slice(0, 8)}: ${waiting.join(', ')}` } : {}) };
+    }
     // BATCHING. The wait is measured from the item's created_at: it is the one
     // timestamp the launcher already holds for every item (a "last became
     // eligible" time would need new state), and an item that sat dirty then went
@@ -1118,7 +1285,10 @@ function launchWorker(opts) {
     // in the hook rather than silently in a detached process.
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
-    const runner = join(pluginRoot, 'scripts', 'maintenance-worker-run.mjs');
+    // The BUNDLED runner (BIN_ENTRIES): it carries the store opener a chained
+    // launch re-proves the queue with, which the scripts/ source cannot load in
+    // an installed package (no workspace @sterling/* there).
+    const runner = join(pluginRoot, 'bin', 'maintenance-worker-run.mjs');
     if (!existsSync(runner)) return { launched: false, reason: 'error', detail: failDetail(`runner missing: ${runner}`) };
 
     mkdirSync(dirname(paths.lock), { recursive: true });
@@ -1159,6 +1329,14 @@ function launchWorker(opts) {
         const updatedAt = updatedAtById.get(t.id);
         return { ...(baselines && typeof baselines === 'object' ? { baselines } : {}), ...(typeof updatedAt === 'string' ? { target_updated_at: updatedAt } : {}) };
       };
+      const snapshotTarget = (t) => {
+        const target = debtOwnerRecord(opts.store, t);
+        return target ? { target_snapshot: { id: target.id, ...(Number.isInteger(target.version) ? { version: target.version } : {}), ...(target.working_tree ? { working_tree: target.working_tree } : {}) } } : {};
+      };
+      const versionsOf = (t) => {
+        const target = debtOwnerRecord(opts.store, t);
+        return { ...(Number.isInteger(t.version) ? { item_version: t.version } : {}), ...(Number.isInteger(target?.version) ? { target_version: target.version } : {}) };
+      };
       const chainAttempted = opts.trigger === 'chain' && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync(
         paths.eligible,
@@ -1166,11 +1344,27 @@ function launchWorker(opts) {
           token,
           head: git.head,
           ...runnerHost,
-          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
+          // The worker reads and writes the LIVE owner (debtOwnerRecord); a retired
+          // or historical address is never handed to it as a target.
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, slug: articleSlug(t), ...versionsOf(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
           run_id: randomUUID(),
-          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? '', ...withBaselines(t) })),
+          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+          queue_snapshot: eligible.map((t) => ({
+            id: t.id,
+            system_reason: t.system_reason,
+            file_keys: t.file_keys ?? [],
+            feature_link: t.feature_link ?? null,
+            created_at: t.created_at ?? null,
+            text: t.text ?? '',
+            ...withBaselines(t),
+            // What a chained launch (no store) needs to prove checkout evidence
+            // again: the item's version and evidence, and the owner's version
+            // and working_tree. The server's gate re-proves from the live store.
+            ...(Number.isInteger(t.version) ? { version: t.version } : {}),
+            ...(Array.isArray(t.observations) ? { observations: t.observations } : {}),
+            ...snapshotTarget(t),
+          })),
           chain_attempted: chainAttempted,
         })
       );
@@ -1695,7 +1889,7 @@ export async function runWorker(opts) {
         } else if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
           // The server's refusal IS the evidence for this verdict.
           actedIds.add(entry.item_id);
-          journal({ kind: 'verdict', item_id: entry.item_id, lane: byId.get(entry.item_id).lane ?? null, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
+          journal({ kind: 'verdict', item_id: entry.item_id, lane: byId.get(entry.item_id).lane ?? null, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, ...judgedVersions(byId.get(entry.item_id)), reason: String(entry.result ?? '').slice(0, 200) });
           refusedVerdicts++;
           if (!repeatRefusal(entry.item_id)) newRefusals++;
         }
@@ -1783,7 +1977,7 @@ export async function runWorker(opts) {
         const claimed = typeof v.reason === 'string' ? v.reason.trim() : '';
         if ((v.verdict === 'retry' || v.verdict === 'needs_conductor') && WEB_LANES.has(lane) && isToolsMissing(claimed)) {
           if (item && readTarget(item, seenArticles)) {
-            journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: claimed.slice(0, 300), file_keys: item.file_keys, evidence: true, ...(v.verdict === 'retry' ? { claimed: 'retry' } : {}), ...marker });
+            journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: claimed.slice(0, 300), file_keys: item.file_keys, evidence: true, ...judgedVersions(item), ...(v.verdict === 'retry' ? { claimed: 'retry' } : {}), ...marker });
             evidenced++;
             actedIds.add(v.item_id);
           } else {
@@ -1820,7 +2014,7 @@ export async function runWorker(opts) {
         // A handoff stands only when the stream shows the reads its lane
         // needs. Otherwise it is 'unjudged' and suppresses nothing.
         if (item && hasEvidence(item, seenArticles, seenFiles, opts.root, seenGrepPaths, runReads)) {
-          journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: reason.slice(0, 300), file_keys: item.file_keys, evidence: true, ...marker });
+          journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: reason.slice(0, 300), file_keys: item.file_keys, evidence: true, ...judgedVersions(item), ...marker });
           evidenced++;
           actedIds.add(v.item_id);
         } else {
@@ -1921,22 +2115,45 @@ function relaunchAfterRun(opts, chain) {
     const cfg = readProjectConfig(opts.root);
     if (cfg.problem) return { launched: false, reason: 'error', detail: `not chained: ${cfg.problem}` };
     const { [WORKER_ENV_FLAG]: _inside, ...env } = process.env;
-    return maybeLaunchMaintenanceWorker({
-      root: opts.root,
-      config: cfg.config,
-      items: chain.items,
-      trigger: 'chain',
-      chainAttempted: chain.attempted,
-      spawn: opts.spawn,
-      pluginRoot: opts.pluginRoot,
-      env,
-      // Test seams the runner already carries; unset in a real run.
-      ...(opts.now ? { now: opts.now() } : {}),
-      ...(opts.spawnSync ? { spawnSync: opts.spawnSync } : {}),
-      // A model the first launch pinned (Overpass) rides along: the chain never
-      // falls back to the config model, and it does not re-resolve the toggle.
-      ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin, ...(chain.pinnedModel ? { workerModel: chain.pinnedModel, ...(chain.pinnedEffort ? { workerEffort: chain.pinnedEffort } : {}) } : {}) } : {}),
-    });
+    // LIVE INPUTS for the chain (decision
+    // maintenance-reconciliation-retains-checkout-evidence-and-use): the
+    // runner passes the project's own store opener, and the chained launch
+    // proves eligibility from the current items, owners, mappings and linked
+    // debt, not from the previous launch's snapshot. A store that cannot be
+    // opened refuses the chain loudly; the next trigger launches afresh.
+    let store = null;
+    let items = chain.items;
+    if (opts.openStore) {
+      try {
+        store = opts.openStore(opts.root);
+      } catch (e) {
+        return { launched: false, reason: 'store_unavailable', detail: `not chained: the project store could not be opened to re-prove the queue (${e?.message ?? e})` };
+      }
+      if (!store) return { launched: false, reason: 'store_unavailable', detail: 'not chained: no project store was found to re-prove the queue' };
+      items = chain.items.map((t) => store.get(t.id)).filter((t) => t && t.type === 'todo' && t.source === 'system');
+    }
+    try {
+      return maybeLaunchMaintenanceWorker({
+        root: opts.root,
+        config: cfg.config,
+        items,
+        ...(store ? { store } : {}),
+        trigger: 'chain',
+        chainAttempted: chain.attempted,
+        spawn: opts.spawn,
+        pluginRoot: opts.pluginRoot,
+        env,
+        // Test seams the runner already carries; unset in a real run.
+        ...(opts.now ? { now: opts.now() } : {}),
+        ...(opts.spawnSync ? { spawnSync: opts.spawnSync } : {}),
+        ...(opts.itemProvenance ? { itemProvenance: opts.itemProvenance } : {}),
+        // A model the first launch pinned (Overpass) rides along: the chain never
+        // falls back to the config model, and it does not re-resolve the toggle.
+        ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin, ...(chain.pinnedModel ? { workerModel: chain.pinnedModel, ...(chain.pinnedEffort ? { workerEffort: chain.pinnedEffort } : {}) } : {}) } : {}),
+      });
+    } finally {
+      store?.close?.();
+    }
   } catch (e) {
     return { launched: false, reason: 'error', detail: `not chained: ${e?.message ?? e}` };
   }

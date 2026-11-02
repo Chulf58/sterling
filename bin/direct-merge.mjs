@@ -4349,7 +4349,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoClaimSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, BOARD_REMOVAL_OUTCOMES, boardRemovalOutcomeSchema, boardRemovalSchema, boardRemovalJournalEntrySchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, OBSERVATION_COMMIT, reconcileObservationSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4876,6 +4876,29 @@ var init_records = __esm({
       objective: external_exports.string().optional(),
       file_keys: external_exports.array(external_exports.string()).optional()
     }).passthrough();
+    OBSERVATION_COMMIT = external_exports.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, "40- or 64-hex commit required");
+    reconcileObservationSchema = external_exports.object({
+      path: repoPath,
+      checkout: external_exports.discriminatedUnion("kind", [
+        external_exports.object({ kind: external_exports.literal("store") }).strict(),
+        external_exports.object({ kind: external_exports.literal("checkout"), worktree: external_exports.string().min(1), branch: external_exports.string().min(1).optional() }).strict(),
+        external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+      ]),
+      commit: OBSERVATION_COMMIT.optional(),
+      state: external_exports.discriminatedUnion("kind", [
+        external_exports.object({ kind: external_exports.literal("file"), mode: external_exports.enum(["100644", "100755", "120000"]), blob: OBSERVATION_COMMIT }).strict(),
+        external_exports.object({ kind: external_exports.literal("absent") }).strict(),
+        external_exports.object({ kind: external_exports.literal("unreadable") }).strict(),
+        external_exports.object({ kind: external_exports.literal("unknown") }).strict()
+      ])
+    }).strict().superRefine((o, ctx) => {
+      const unknown = o.state.kind === "unknown" || o.checkout.kind === "unknown";
+      if (unknown && (o.state.kind !== "unknown" || o.checkout.kind !== "unknown" || o.commit !== void 0)) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "an unknown observation has an unknown checkout, an unknown state and no commit" });
+      }
+      if (!unknown && o.commit === void 0)
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["commit"], message: "an observation is bound to the commit its checkout was at" });
+    });
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4940,7 +4963,9 @@ var init_records = __esm({
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional(),
       // Which session works on this task now (see todoClaimSchema). User items only.
-      claim: todoClaimSchema.optional()
+      claim: todoClaimSchema.optional(),
+      // Checkout evidence (reconcileObservationSchema). reconcile_needed items only.
+      observations: external_exports.array(reconcileObservationSchema).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
@@ -4951,6 +4976,9 @@ var init_records = __esm({
       }
       if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
+      }
+      if (rec.observations !== void 0 && (rec.source !== TODO_SYSTEM_SOURCE || rec.system_reason !== "reconcile_needed")) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["observations"], message: `observations is checkout evidence on reconcile_needed maintenance items only` });
       }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -7854,6 +7882,10 @@ var init_mounted = __esm({
        *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
        *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
        *  is caller-writable — so the field and the mount can disagree in both directions. */
+      /** The project store's write fence (SterlingStore.withWriteFence); worker targets are project-held. */
+      withWriteFence(owner, items, check, fn) {
+        return this.project.withWriteFence(owner, items, check, fn);
+      }
       projectStoreHolds(id) {
         return this.project.projectStoreHolds(id);
       }
@@ -8963,6 +8995,40 @@ CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journ
   }
 });
 
+// packages/store/dist/observations.js
+function observationKey(o) {
+  const c = o.checkout;
+  const s2 = o.state;
+  return JSON.stringify([o.path, c.kind, c.worktree ?? "", c.branch ?? "", o.commit ?? "", s2.kind, s2.mode ?? "", s2.blob ?? ""]);
+}
+function unknownObservation(path) {
+  return { path, checkout: { kind: "unknown" }, state: { kind: "unknown" } };
+}
+function resolveDebtOwner(link, get, aliases) {
+  if (!link)
+    return void 0;
+  let canonical = link;
+  for (const a of aliases)
+    if (a.historical_id === link)
+      canonical = a.canonical_id;
+  let record = get(canonical);
+  const seen = /* @__PURE__ */ new Set();
+  while (record && record.status === "superseded") {
+    if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record.id) || !record.superseded_by)
+      return void 0;
+    seen.add(record.id);
+    record = get(record.superseded_by);
+  }
+  return record?.id;
+}
+var DEBT_OWNER_HOP_CAP;
+var init_observations = __esm({
+  "packages/store/dist/observations.js"() {
+    "use strict";
+    DEBT_OWNER_HOP_CAP = 32;
+  }
+});
+
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync as statSync3 } from "node:fs";
 import { dirname as dirname4, join as join5, resolve as resolvePath2 } from "node:path";
@@ -9281,6 +9347,28 @@ function systemTodoTextsEquivalent(reason, a, b) {
   const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
   return strip(a) === strip(b);
 }
+function evidenceOf(t) {
+  const obs = Array.isArray(t.observations) ? t.observations : [];
+  return [...obs, ...(t.file_keys ?? []).filter((k) => !obs.some((o) => o.path === k)).map((k) => unknownObservation(k))];
+}
+function foldObservations(prior, incoming, supersede = []) {
+  const replacedPaths = new Set(incoming.filter((o) => o.checkout.kind === "store").map((o) => o.path));
+  const drop = new Set(supersede);
+  const out = /* @__PURE__ */ new Map();
+  for (const o of prior) {
+    const k = observationKey(o);
+    if (drop.has(k) && o.checkout.kind === "store" && replacedPaths.has(o.path))
+      continue;
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  for (const o of incoming) {
+    const k = observationKey(o);
+    if (!out.has(k))
+      out.set(k, o);
+  }
+  return [...out.values()].sort((a, b) => observationKey(a) < observationKey(b) ? -1 : observationKey(a) > observationKey(b) ? 1 : 0);
+}
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
@@ -9306,6 +9394,8 @@ var init_dist2 = __esm({
     init_pg_bridge();
     init_pg_driver();
     init_sqlite_driver();
+    init_observations();
+    init_observations();
     StoreRowDecodeError = class extends Error {
       op;
       constructor(op, cause) {
@@ -10093,6 +10183,8 @@ var init_dist2 = __esm({
         let served;
         this.tx(() => {
           this.assertNoMoveInFlight(op, [id]);
+          if (this.writeFence && id === this.writeFence.owner)
+            this.passWriteFence();
           const current = this.get(id);
           if (!current)
             throw new Error(`${op}: no record '${id}'`);
@@ -10260,9 +10352,12 @@ var init_dist2 = __esm({
        */
       pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
         const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+        const aliases = this.recordAliases();
         for (const r of rows) {
           const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
-          if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+          if (t.source !== "system" || t.system_reason !== "reconcile_needed")
+            continue;
+          if (t.feature_link !== ownerId && resolveDebtOwner(t.feature_link, (id) => this.get(id), aliases) !== ownerId)
             continue;
           const currentFiles = t.file_keys ?? [];
           const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
@@ -10284,7 +10379,13 @@ var init_dist2 = __esm({
           }
           const owner = this.get(ownerId);
           const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
-          this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
+          const keptObservations = (t.observations ?? []).filter((o) => !prunedPaths.includes(o.path));
+          this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({
+            ...cur,
+            file_keys: keptFiles,
+            text,
+            ...t.observations ? { observations: keptObservations } : {}
+          }), {}, { suppressReconcilePrune: true });
         }
       }
       /**
@@ -10432,12 +10533,18 @@ var init_dist2 = __esm({
               nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
             }
             const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
-            if (textChanged2 || filesChanged2) {
+            const participants = [survivor, ...folded, candidate];
+            const anyEvidence = participants.some((t) => Array.isArray(t.observations));
+            const priorEvidence = [survivor, ...folded].flatMap((t) => evidenceOf(t));
+            const nextObservations = anyEvidence ? foldObservations(priorEvidence, evidenceOf(candidate), options.supersede_observations) : [];
+            const evidenceChanged = anyEvidence && JSON.stringify((survivor.observations ?? []).map(observationKey)) !== JSON.stringify(nextObservations.map(observationKey));
+            if (textChanged2 || filesChanged2 || evidenceChanged) {
               existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
                 ...cur,
                 updated_at: candidate.updated_at,
                 ...textChanged2 ? { text: nextText } : {},
-                ...filesChanged2 ? { file_keys: unionFiles } : {}
+                ...filesChanged2 ? { file_keys: unionFiles } : {},
+                ...evidenceChanged ? { observations: nextObservations } : {}
               }), {});
               textUpdated = textChanged2;
             } else {
@@ -11489,8 +11596,11 @@ var init_dist2 = __esm({
           }
           checkedRemoval = parsed.data;
         }
+        const direct = this.txDepth === 0;
         this.tx(() => {
           this.assertNoMoveInFlight("remove", [id]);
+          if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id)))
+            this.passWriteFence();
           const record = this.get(id);
           const isSystemDrain = record && record.type === "todo" && record.source === "system";
           if (checkedRemoval) {
@@ -12154,6 +12264,53 @@ var init_dist2 = __esm({
        * whole thing exactly once.
        */
       txDepth = 0;
+      /**
+       * WRITE FENCE (decision
+       * maintenance-reconciliation-retains-checkout-evidence-and-use): the worker
+       * policy proves checkout evidence OUTSIDE the lock (git), then runs the tool
+       * with a fence armed on the owner record and the items the proof covered.
+       * The first write to the owner (any applyInPlace on it, which is where
+       * resolves drain and reconcile pruning happen) or the first direct removal
+       * of a fenced item runs `check` INSIDE that write's transaction, under the
+       * write lock, before anything changes; the check throws when the owner, an
+       * item or the set of affected items moved since the proof. The proof covers
+       * ONE such write (whose transaction also holds the resolves drain and the
+       * reconcile pruning it causes); a second fenced write in the same call is
+       * refused, since the proof no longer describes the store it would change. A
+       * fold into a fenced item is NOT a trigger, so evidence that arrives mid-call
+       * is seen by the owner write's check and refuses it.
+       */
+      writeFence;
+      withWriteFence(owner, items, check, fn) {
+        if (this.writeFence)
+          throw new Error("withWriteFence: a write fence is already armed on this store; nothing was written.");
+        const fence = { owner, items: new Set(items), check, passed: false };
+        this.writeFence = fence;
+        const release = () => {
+          if (this.writeFence === fence)
+            this.writeFence = void 0;
+        };
+        let result;
+        try {
+          result = fn();
+        } catch (e) {
+          release();
+          throw e;
+        }
+        if (result && typeof result.then === "function") {
+          return result.finally(release);
+        }
+        release();
+        return result;
+      }
+      passWriteFence() {
+        const fence = this.writeFence;
+        if (fence.passed) {
+          throw new Error("write fence: this call already made the one write its checkout-evidence proof covers; a second write to the fenced record or a fenced item is refused, nothing more was written.");
+        }
+        fence.check();
+        fence.passed = true;
+      }
       /** Open read transactions on this handle (readTx). A write may not start inside one. */
       readDepth = 0;
       /**
@@ -12296,9 +12453,9 @@ var init_dist2 = __esm({
 });
 
 // scripts/direct-merge.mjs
-import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync11, readFileSync as readFileSync13, realpathSync as realpathSync5 } from "node:fs";
-import { join as join20, resolve as resolve8 } from "node:path";
+import { spawnSync as spawnSync9 } from "node:child_process";
+import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync6 } from "node:fs";
+import { join as join21, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -12823,7 +12980,7 @@ function isSterlingRoot(dir) {
 
 // scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git3 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const git4 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
       return realpathSync3(p);
@@ -12831,7 +12988,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
       return null;
     }
   };
-  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  const r = git4(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
@@ -12839,7 +12996,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   const commonReal = real(resolve4(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const core = git4(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
   const settings = {};
   if (!core.error && core.status === 0) {
     for (const line of core.stdout.split("\n")) {
@@ -13449,8 +13606,8 @@ var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
-import { join as join15, dirname as dirname9 } from "node:path";
+import { readFileSync as readFileSync11, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
+import { join as join16, dirname as dirname9 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/working-tree.mjs
@@ -13599,15 +13756,84 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
   return (record) => !isForeignTree(record, root, workingTrees);
 }
 
+// scripts/hooks/lib/reconcile-origins.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { lstatSync as lstatSync5, readFileSync as readFileSync10, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
+import { basename as basename3, join as join14, resolve as resolve7 } from "node:path";
+var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+function git2(root, args, input) {
+  const r = spawnSync4("git", ["-C", root, ...args], { input, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  return { ok: !r.error && r.status === 0, status: r.status, out: r.stdout ? r.stdout.toString("utf8") : "", err: r.error?.message ?? (r.stderr ? r.stderr.toString("utf8").trim() : "") };
+}
+var realOr = (p) => {
+  try {
+    return realpathSync5(p);
+  } catch {
+    return p;
+  }
+};
+function headCommit(root) {
+  const r = git2(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+  const head = r.out.trim();
+  return r.ok && HEX.test(head) ? head : null;
+}
+function checkoutIdentity(root, storeRoot2) {
+  const head = headCommit(root);
+  const r = git2(root, ["rev-parse", "--absolute-git-dir", "--git-common-dir", "--show-toplevel", "--show-prefix"]);
+  if (!head || !r.ok) return null;
+  const [gitDir, commonDir, top, prefix = ""] = r.out.split("\n");
+  const common = realOr(resolve7(root, commonDir));
+  const sameTop = storeRoot2 && realOr(top) === realOr(storeRoot2);
+  let checkout;
+  if (sameTop) checkout = { kind: "store" };
+  else {
+    const branch2 = git2(root, ["symbolic-ref", "-q", "HEAD"]).out.trim();
+    checkout = { kind: "checkout", worktree: realOr(gitDir) === common ? "main" : basename3(gitDir), ...branch2 ? { branch: branch2 } : {} };
+  }
+  return { head, prefix: prefix.trim(), checkout };
+}
+function workingState(root, rel) {
+  let st;
+  try {
+    st = lstatSync5(join14(root, rel));
+  } catch (e) {
+    return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
+  }
+  let mode2;
+  let bytes;
+  let filters = true;
+  try {
+    if (st.isSymbolicLink()) {
+      mode2 = "120000";
+      bytes = Buffer.from(readlinkSync(join14(root, rel)));
+      filters = false;
+    } else if (st.isFile()) {
+      mode2 = st.mode & 73 ? "100755" : "100644";
+      bytes = readFileSync10(join14(root, rel));
+    } else return { kind: "unreadable" };
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const r = git2(root, ["hash-object", "--stdin", ...filters ? [`--path=${rel}`] : ["--no-filters"]], bytes);
+  const blob = r.out.trim();
+  return r.ok && HEX.test(blob) ? { kind: "file", mode: mode2, blob } : { kind: "unreadable" };
+}
+function observePaths(root, paths, storeRoot2) {
+  const id = checkoutIdentity(root, storeRoot2);
+  if (!id) return null;
+  const observations = [...new Set(paths)].sort().map((path) => ({ path, checkout: id.checkout, commit: id.head, state: workingState(root, path) }));
+  return { head: id.head, checkout: id.checkout, observations };
+}
+
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname8, join as join14 } from "node:path";
-var SESSION_EVENTS_REL = join14(".sterling", "transient", "session-events.json");
+import { dirname as dirname8, join as join15 } from "node:path";
+var SESSION_EVENTS_REL = join15(".sterling", "transient", "session-events.json");
 
 // scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
-    return createHash3("sha256").update(readFileSync10(join15(root, rel))).digest("hex");
+    return createHash3("sha256").update(readFileSync11(join16(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -13621,7 +13847,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync10(join15(storeRootFor(root), ".sterling", "config.json"), "utf8");
+    const raw = readFileSync11(join16(storeRootFor(root), ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -13629,7 +13855,7 @@ function loadGeneratedProjections(root) {
     return /* @__PURE__ */ new Set();
   }
 }
-function buildReconcileItem(article, fileKeys, now) {
+function buildReconcileItem(article, fileKeys, now, observations) {
   return {
     id: randomUUID4(),
     type: "todo",
@@ -13645,7 +13871,8 @@ function buildReconcileItem(article, fileKeys, now) {
     source: "system",
     system_reason: "reconcile_needed",
     file_keys: fileKeys,
-    feature_link: article.id
+    feature_link: article.id,
+    ...observations ? { observations } : {}
   };
 }
 function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE__ */ new Date()).toISOString()) {
@@ -13664,10 +13891,19 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
     const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
-    if (!drifted.length) continue;
-    const fileKeys = drifted.sort();
-    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID4() });
-    minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
+    const openItem = store.query({ types: ["todo"], file_keys: [...freshPaths], cap: 1e3 }).find((t) => t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link === article.id);
+    const storeEvidence = (openItem?.observations ?? []).filter((o) => o.checkout?.kind === "store");
+    const reobserved = [...freshPaths].filter((rel) => !drifted.includes(rel) && storeEvidence.some((o) => o.path === rel));
+    const observed = [...drifted, ...reobserved].sort();
+    if (!observed.length) continue;
+    const seen = observePaths(root, observed, storeRootFor(root));
+    const fresh = new Set((seen?.observations ?? []).map(observationKey));
+    const supersede = seen?.checkout.kind === "store" ? storeEvidence.filter((o) => observed.includes(o.path) && !fresh.has(observationKey(o))).map(observationKey) : [];
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, observed, now, seen?.observations), {
+      operation_id: randomUUID4(),
+      ...supersede.length ? { supersede_observations: supersede } : {}
+    });
+    minted.push({ article_id: article.id, paths: record.file_keys ?? observed });
   }
   return minted;
 }
@@ -13690,7 +13926,7 @@ function explainReconcileDebtLiveness(store, root, item) {
 }
 
 // scripts/lib/version-only.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawnSync as spawnSync5 } from "node:child_process";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
   [".claude-plugin/plugin.json", [["version"]]],
@@ -13760,7 +13996,7 @@ function isVersionOnlyText(path, baseContent, tipContent) {
   return JSON.stringify(tip) === JSON.stringify(base2);
 }
 function lsTreeEntry(root, sha, path) {
-  const r = spawnSync4("git", ["ls-tree", sha, "--", path], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync5("git", ["ls-tree", sha, "--", path], { cwd: root, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return null;
   const line = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean)[0];
   if (!line) return null;
@@ -13769,7 +14005,7 @@ function lsTreeEntry(root, sha, path) {
 }
 var isRegularBlob = (e) => !!e && e.type === "blob" && (e.mode === "100644" || e.mode === "100755");
 function showBlobText(root, sha, path) {
-  const r = spawnSync4("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "buffer", timeout: 3e4 });
+  const r = spawnSync5("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "buffer", timeout: 3e4 });
   return r.status === 0 ? strictUtf8(r.stdout) : null;
 }
 function readVersionAtCommit(root, sha, path) {
@@ -13790,10 +14026,10 @@ function isVersionOnlyBetweenCommits(root, baseSha, tipSha, path) {
 }
 
 // scripts/lib/opencode-release.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync5 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join16, resolve as resolve7 } from "node:path";
+import { join as join17, resolve as resolve8 } from "node:path";
 var RELEASE_PACKAGE = "@chulf58/sterling";
 var RELEASE_BRANCH = "opencode-release";
 var BUILD_CLASS_SCRIPTS = ["postinstall", "build", "preinstall", "install", "prepack", "prepare"];
@@ -13812,10 +14048,10 @@ function releasePackageJson(text) {
   return `${JSON.stringify(pkg, null, 2)}
 `;
 }
-function git2(target2, args, { env, input } = {}) {
-  return spawnSync5("git", args, { cwd: target2, encoding: "utf8", timeout: 12e4, input, env: env ? { ...process.env, ...env } : process.env });
+function git3(target2, args, { env, input } = {}) {
+  return spawnSync6("git", args, { cwd: target2, encoding: "utf8", timeout: 12e4, input, env: env ? { ...process.env, ...env } : process.env });
 }
-function defaultRemoteGit(args, { cwd, log = (m) => console.error(m), prefix = "opencode-release", run = spawnSync5, platform = process.platform }) {
+function defaultRemoteGit(args, { cwd, log = (m) => console.error(m), prefix = "opencode-release", run = spawnSync6, platform = process.platform }) {
   const opts = { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
   const first = run("git", args, opts);
   if (first.status === 0 || platform === "win32") return first;
@@ -13828,12 +14064,12 @@ function defaultRemoteGit(args, { cwd, log = (m) => console.error(m), prefix = "
 ${output(win)}` };
 }
 function revParse(target2, rev) {
-  const r = git2(target2, ["rev-parse", "-q", "--verify", rev]);
+  const r = git3(target2, ["rev-parse", "-q", "--verify", rev]);
   return r.status === 0 ? r.stdout.trim() : null;
 }
-var isAncestor = (target2, a, b) => git2(target2, ["merge-base", "--is-ancestor", a, b]).status === 0;
+var isAncestor = (target2, a, b) => git3(target2, ["merge-base", "--is-ancestor", a, b]).status === 0;
 function packageAt(target2, sha) {
-  const r = git2(target2, ["show", `${sha}:package.json`]);
+  const r = git3(target2, ["show", `${sha}:package.json`]);
   if (r.status !== 0) return null;
   try {
     return { text: r.stdout, json: JSON.parse(r.stdout) };
@@ -13854,19 +14090,19 @@ function must(r, what) {
   return r.stdout.trim();
 }
 function buildReleaseTree(target2, headSha, pkgText) {
-  const tmp = mkdtempSync2(join16(tmpdir(), "sterling-release-index-"));
+  const tmp = mkdtempSync2(join17(tmpdir(), "sterling-release-index-"));
   try {
-    const env = { GIT_INDEX_FILE: join16(tmp, "index") };
-    must(git2(target2, ["read-tree", headSha], { env }), `git read-tree ${headSha}`);
-    const blob = must(git2(target2, ["hash-object", "-w", "--stdin"], { input: releasePackageJson(pkgText) }), "git hash-object");
-    must(git2(target2, ["update-index", "--cacheinfo", `100644,${blob},package.json`], { env }), "git update-index");
-    return must(git2(target2, ["write-tree"], { env }), "git write-tree");
+    const env = { GIT_INDEX_FILE: join17(tmp, "index") };
+    must(git3(target2, ["read-tree", headSha], { env }), `git read-tree ${headSha}`);
+    const blob = must(git3(target2, ["hash-object", "-w", "--stdin"], { input: releasePackageJson(pkgText) }), "git hash-object");
+    must(git3(target2, ["update-index", "--cacheinfo", `100644,${blob},package.json`], { env }), "git update-index");
+    return must(git3(target2, ["write-tree"], { env }), "git write-tree");
   } finally {
     rmSync5(tmp, { recursive: true, force: true });
   }
 }
 function rerunCommand(target2, ref) {
-  return `node ${quote(join16(resolve7(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve7(target2))} --ref ${quote(ref)}`;
+  return `node ${quote(join17(resolve8(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve8(target2))} --ref ${quote(ref)}`;
 }
 function releaseVersion({ target: target2, into: into2, headSha, version, pkgText, remoteGit, log, prefix }) {
   const tag = `v${version}`;
@@ -13904,7 +14140,7 @@ function releaseVersion({ target: target2, into: into2, headSha, version, pkgTex
 
 Release of ${headSha} (${into2}): the merged tree with a package.json that installs from Git (no workspaces, no build-class scripts).
 `;
-  const commitOn = (parent) => git2(target2, ["commit-tree", tree, ...parent ? ["-p", parent] : [], "-F", "-"], { input: message });
+  const commitOn = (parent) => git3(target2, ["commit-tree", tree, ...parent ? ["-p", parent] : [], "-F", "-"], { input: message });
   let commit = remoteTag ?? localTag;
   if (commit) {
     const where = remoteTag ? "on origin" : "locally";
@@ -13934,11 +14170,11 @@ ${output(tagPush)}`, commit);
     commit = made.stdout.trim();
   }
   if (!(localBranch && (localBranch === commit || isAncestor(target2, commit, localBranch)))) {
-    const upd = git2(target2, ["update-ref", `refs/heads/${RELEASE_BRANCH}`, commit]);
+    const upd = git3(target2, ["update-ref", `refs/heads/${RELEASE_BRANCH}`, commit]);
     if (upd.status !== 0) return failed(`git update-ref refs/heads/${RELEASE_BRANCH} failed: ${output(upd)}`, commit);
   }
   if (localTag !== commit) {
-    const t = git2(target2, ["tag", ...localTag ? ["-f"] : [], tag, commit]);
+    const t = git3(target2, ["tag", ...localTag ? ["-f"] : [], tag, commit]);
     if (t.status !== 0) return failed(`git tag ${tag} failed: ${output(t)}`, commit);
   }
   const push = remoteGit(["push", "--atomic", "origin", `refs/heads/${RELEASE_BRANCH}:refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}:refs/tags/${tag}`], { cwd: target2, log, prefix });
@@ -13962,9 +14198,9 @@ function releaseAfterMerge({ target: target2, into: into2, baseSha, headSha, pus
 }
 
 // scripts/lib/parked-close.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 function deletedBetween(cwd, fromSha, toSha) {
-  const r = spawnSync6("git", ["diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", fromSha, toSha], {
+  const r = spawnSync7("git", ["diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", fromSha, toSha], {
     cwd,
     encoding: "utf8",
     timeout: 6e4
@@ -13984,19 +14220,19 @@ function parkedItemResolved(paths, deletedSet, existsFn) {
 init_dist2();
 
 // scripts/lib/work-pr.mjs
-import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname10, join as join18 } from "node:path";
+import { spawnSync as spawnSync8 } from "node:child_process";
+import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname10, join as join19 } from "node:path";
 
 // scripts/lib/gh-path.mjs
 import { existsSync as existsSync8 } from "node:fs";
-import { delimiter, join as join17 } from "node:path";
+import { delimiter, join as join18 } from "node:path";
 function resolveGhPath(env = process.env) {
   const names = process.platform === "win32" ? ["gh.exe", "gh.cmd", "gh"] : ["gh", "gh.exe"];
   for (const dir of String(env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
-      const candidate = join17(dir, name);
+      const candidate = join18(dir, name);
       if (existsSync8(candidate)) return candidate;
     }
   }
@@ -14005,7 +14241,7 @@ function resolveGhPath(env = process.env) {
 
 // scripts/lib/work-pr.mjs
 function gh(cwd, args, timeoutMs2 = 12e4) {
-  return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  return spawnSync8("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 var compareUrl = (repo, base2, branch2) => `https://${repo}/compare/${base2.split("/").map(encodeURIComponent).join("/")}...${branch2.split("/").map(encodeURIComponent).join("/")}?expand=1`;
@@ -14025,12 +14261,12 @@ function parseOriginRepo(url) {
   return { host, repo: `${host}/${owner}/${name}` };
 }
 function noOriginRemote(cwd) {
-  const r = spawnSync7("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync8("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
   return r.status === 0 && !r.stdout.split("\n").map((l) => l.trim()).includes("origin");
 }
 var NO_ORIGIN_LOCAL_MERGE_NOTICE = "direct-merge: WORK mode, but this repository has no 'origin' remote \u2014 merging LOCALLY like hobby mode. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
 function workPreflight(cwd) {
-  const url = spawnSync7("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const url = spawnSync8("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (url.status !== 0) {
     return { refusal: "direct-merge: work mode opens a PR against the 'origin' remote, and this repository has none. Add it: git remote add origin <url>" };
   }
@@ -14040,7 +14276,7 @@ function workPreflight(cwd) {
       refusal: `direct-merge: origin's URL '${url.stdout.trim()}' is not a GitHub repository URL (https://host/owner/repo, ssh://host/owner/repo or host:owner/repo) \u2014 work mode derives the PR repo from origin and will not guess one.`
     };
   }
-  const pushUrls = spawnSync7("git", ["remote", "get-url", "--push", "--all", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const pushUrls = spawnSync8("git", ["remote", "get-url", "--push", "--all", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (pushUrls.status !== 0) {
     return { refusal: `direct-merge: could not read origin's push URLs (git remote get-url --push --all origin, exit ${pushUrls.status}): ${streams(pushUrls)}` };
   }
@@ -14072,8 +14308,8 @@ Run: gh auth login --hostname ${origin.host}` };
   return { repo: origin.repo };
 }
 function localBranchRefusal(cwd, branch2) {
-  const fmt = spawnSync7("git", ["check-ref-format", "--branch", branch2], { cwd, encoding: "utf8", timeout: 3e4 });
-  const ref = spawnSync7("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch2}`], { cwd, encoding: "utf8", timeout: 3e4 });
+  const fmt = spawnSync8("git", ["check-ref-format", "--branch", branch2], { cwd, encoding: "utf8", timeout: 3e4 });
+  const ref = spawnSync8("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch2}`], { cwd, encoding: "utf8", timeout: 3e4 });
   if (fmt.status === 0 && ref.status === 0) return null;
   return `direct-merge: '${branch2}' is not a local branch (no refs/heads/${branch2}) \u2014 work mode pushes a local branch to open its PR. Check out the branch, or pass --branch <local branch>.`;
 }
@@ -14090,7 +14326,7 @@ function capPrBody(text, range) {
   return `${text.slice(0, keep)}${note}`;
 }
 function prTextFromCommits(cwd, mergeBase2, branchTip2, branch2) {
-  const log = spawnSync7("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
+  const log = spawnSync8("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
     cwd,
     encoding: "utf8",
     timeout: 3e4
@@ -14139,7 +14375,7 @@ function openPrsForHead(cwd, repo, branch2, base2) {
   return prs.filter((pr) => pr.headRefName === branch2 && (base2 === void 0 || pr.baseRefName === base2)).map(({ url, number, headRefName, baseRefName }) => ({ url, number, headRefName, baseRefName }));
 }
 function pushWithWindowsRetry(cwd, pushArgs, log) {
-  const tryPush = (cmd) => spawnSync7(cmd, ["push", ...pushArgs], {
+  const tryPush = (cmd) => spawnSync8(cmd, ["push", ...pushArgs], {
     cwd,
     encoding: "utf8",
     timeout: 12e4,
@@ -14238,7 +14474,7 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   state.pushed = true;
   log(`direct-merge: pushed ${branch2} (${branchTip2}) to origin.`);
   for (const [key, value] of [[`branch.${branch2}.remote`, "origin"], [`branch.${branch2}.merge`, `refs/heads/${branch2}`]]) {
-    const set = spawnSync7("git", ["config", key, value], { cwd, encoding: "utf8", timeout: 3e4 });
+    const set = spawnSync8("git", ["config", key, value], { cwd, encoding: "utf8", timeout: 3e4 });
     if (set.status !== 0) log(`direct-merge: could not set the upstream (${key}); the push and PR are unaffected. Set it with: git branch --set-upstream-to=origin/${branch2} ${branch2}`);
   }
   if (existing) {
@@ -14318,8 +14554,8 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
-var prLoopPath = (root) => join18(root, PR_LOOP_REL);
-var prLoopFile = (root, prNumber) => join18(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
+var prLoopPath = (root) => join19(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber) => join19(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
   mkdirSync6(dirname10(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
@@ -14374,7 +14610,7 @@ function parsePrLoopFile(file, rel) {
 function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
-    s2 = JSON.parse(readFileSync11(file, "utf8"));
+    s2 = JSON.parse(readFileSync12(file, "utf8"));
   } catch (e) {
     throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
@@ -14391,8 +14627,8 @@ function parsePrLoopFileOrThrow(file, rel) {
 
 // scripts/lib/attestation-inspection.mjs
 init_dist();
-import { existsSync as existsSync10, readFileSync as readFileSync12 } from "node:fs";
-import { join as join19 } from "node:path";
+import { existsSync as existsSync10, readFileSync as readFileSync13 } from "node:fs";
+import { join as join20 } from "node:path";
 import { DatabaseSync as DatabaseSync6 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
@@ -14408,9 +14644,9 @@ function parseNulPathList(stdout) {
 function readAttestationGlobs(projectRoot2) {
   const dropped = { invalid_container: false, non_string: 0, empty: 0, duplicates: [] };
   try {
-    const configPath = join19(projectRoot2, ".sterling", "config.json");
+    const configPath = join20(projectRoot2, ".sterling", "config.json");
     if (!existsSync10(configPath)) return { globs: [], dropped };
-    const raw = JSON.parse(readFileSync12(configPath, "utf8"));
+    const raw = JSON.parse(readFileSync13(configPath, "utf8"));
     const declared = raw && typeof raw === "object" ? raw.attestation_path_globs : void 0;
     if (declared !== void 0 && !Array.isArray(declared)) {
       dropped.invalid_container = true;
@@ -14479,7 +14715,7 @@ function inspectAttestations({ projectRoot: projectRoot2, touchedPaths, declared
       return { available: false, reason: `could not read attestations from ${label}: ${e?.message ?? e}` };
     }
   } else {
-    const dbPath = join19(projectRoot2, ".sterling", "sterling.db");
+    const dbPath = join20(projectRoot2, ".sterling", "sterling.db");
     if (!existsSync10(dbPath)) {
       return { available: false, reason: `no Sterling store at ${dbPath} \u2014 nothing to compare against` };
     }
@@ -14625,26 +14861,26 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
-if (linkedWorktree && !existsSync11(join20(storeRoot, CONFIG_REL4))) {
+if (linkedWorktree && !existsSync11(join21(storeRoot, CONFIG_REL4))) {
   fail2(
-    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join20(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join20(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join21(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join21(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
     2
   );
 }
-if (!linkedWorktree && !existsSync11(join20(target, CONFIG_REL4))) {
-  const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+if (!linkedWorktree && !existsSync11(join21(target, CONFIG_REL4))) {
+  const dirs = spawnSync9("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
-  if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {
+  if (gitDir && commonDir && realpathSync6(resolve9(target, gitDir)) !== realpathSync6(resolve9(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join20(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync6(resolve9(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
   }
 }
 if (linkedWorktree && !modeError && !shipsPr) {
-  const head = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+  const head = spawnSync9("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : "<branch>";
   fail2(
     `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' \u2014 refusing before the battery.
@@ -14673,7 +14909,7 @@ if (shipsPr) {
   workRepo = pre.repo;
 }
 stage("branch");
-var hasRef = (ref) => spawnSync8("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: target, encoding: "utf8", timeout: 3e4 }).status === 0;
+var hasRef = (ref) => spawnSync9("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: target, encoding: "utf8", timeout: 3e4 }).status === 0;
 function workDefaultBranch() {
   try {
     return { base: defaultBranch(target) };
@@ -14704,7 +14940,7 @@ Pass --into <base> to name the base.`);
   console.error(`direct-merge: work mode \u2014 ${head} has an open PR into '${prs[0].baseRefName}' (${prs.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}); using that as the base (--into overrides).`);
   return prs[0].baseRefName;
 }
-var symbolic = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var symbolic = spawnSync9("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (symbolic.error || symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? "").trim())) {
   fail2(
     `direct-merge: could not determine the checked-out branch (git symbolic-ref HEAD ${symbolic.error ? `failed to run: ${symbolic.error.message}` : `exited ${symbolic.status ?? `by signal ${symbolic.signal}`}: ${(symbolic.stderr || symbolic.stdout || "").trim()}`}) \u2014 refusing before the battery.`
@@ -14746,7 +14982,7 @@ if (shipsPr) {
   if (notBranch) fail2(notBranch, 2);
 }
 stage("dirty-tree");
-var dirtyCheck = spawnSync8("git", ["--no-optional-locks", "status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var dirtyCheck = spawnSync9("git", ["--no-optional-locks", "status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (dirtyCheck.status !== 0) {
   fail2(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || "").trim()}`);
 }
@@ -14783,13 +15019,13 @@ ${untracked.length} untracked path(s):`,
 }
 stage("resolve");
 var resolveSha = (ref, label) => {
-  const r = spawnSync8("git", ["rev-parse", ref], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync9("git", ["rev-parse", ref], { cwd: target, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) fail2(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || "").trim()}`);
   return r.stdout.trim();
 };
 var intoRef = into;
 if (shipsPr) {
-  const fetched = spawnSync8("git", ["fetch", "--no-tags", "origin", `+refs/heads/${into}:refs/remotes/origin/${into}`], {
+  const fetched = spawnSync9("git", ["fetch", "--no-tags", "origin", `+refs/heads/${into}:refs/remotes/origin/${into}`], {
     cwd: target,
     encoding: "utf8",
     timeout: 12e4,
@@ -14805,10 +15041,10 @@ if (shipsPr) {
 }
 var intoTip = resolveSha(intoRef, "into");
 var branchTip = resolveSha(branch, "branch");
-var mergeBaseR = spawnSync8("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var mergeBaseR = spawnSync9("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (mergeBaseR.status !== 0) fail2(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || "").trim()}`);
 var mergeBase = mergeBaseR.stdout.trim();
-var diff = spawnSync8("git", ["-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", mergeBase, branchTip], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var diff = spawnSync9("git", ["-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", mergeBase, branchTip], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (diff.status !== 0) fail2(`direct-merge: git diff ${mergeBase} ${branchTip} failed: ${(diff.stderr || "").trim()}`);
 var changed = new Set(diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
 var versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) && isVersionOnlyBetweenCommits(target, mergeBase, branchTip, p));
@@ -14973,7 +15209,7 @@ direct-merge: RECONCILE DEBT DISCLOSED \u2014 ${headline} cover files this branc
 stage("version");
 var GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 var pluginManifestRel = ".claude-plugin/plugin.json";
-if (existsSync11(join20(target, pluginManifestRel))) {
+if (existsSync11(join21(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
   if (substantive.length > 0 && !process.argv.includes("--allow-same-version")) {
     const readVersion = (raw, label) => {
@@ -14983,10 +15219,10 @@ if (existsSync11(join20(target, pluginManifestRel))) {
         fail2(`direct-merge: could not parse ${label} while checking the version bump`);
       }
     };
-    const pkgPath = join20(target, "package.json");
-    const branchPlugin = readVersion(readFileSync13(join20(target, pluginManifestRel), "utf8"), pluginManifestRel);
-    const branchPkg = existsSync11(pkgPath) ? readVersion(readFileSync13(pkgPath, "utf8"), "package.json") : null;
-    const baseShow = spawnSync8("git", ["show", `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
+    const pkgPath = join21(target, "package.json");
+    const branchPlugin = readVersion(readFileSync14(join21(target, pluginManifestRel), "utf8"), pluginManifestRel);
+    const branchPkg = existsSync11(pkgPath) ? readVersion(readFileSync14(pkgPath, "utf8"), "package.json") : null;
+    const baseShow = spawnSync9("git", ["show", `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail2(
@@ -15003,8 +15239,8 @@ The version is the clone-currency signal consumers read: bump BOTH ${pluginManif
   }
 }
 stage("battery");
-var pkgJsonPath = join20(target, "package.json");
-var hasCheck = existsSync11(pkgJsonPath) && !!JSON.parse(readFileSync13(pkgJsonPath, "utf8")).scripts?.check;
+var pkgJsonPath = join21(target, "package.json");
+var hasCheck = existsSync11(pkgJsonPath) && !!JSON.parse(readFileSync14(pkgJsonPath, "utf8")).scripts?.check;
 if (hasCheck) {
   console.error("direct-merge: running the consistency-check battery (npm run check)\u2026");
   const check = defaultExec("npm", ["run", "check"], { cwd: target, timeout: 3e5 });
@@ -15021,7 +15257,7 @@ var attestationDisclosure = (() => {
     const { globs: declaredGlobs, dropped } = readAttestationGlobs(storeRoot);
     const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
     if (declaredGlobs.length === 0 && !hasDrop) return [];
-    const d = spawnSync8("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
+    const d = spawnSync9("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
       cwd: target,
       encoding: "utf8",
       timeout: 6e4
@@ -15058,7 +15294,7 @@ try {
 merged.attestation_disclosure = attestationDisclosure;
 try {
   if (changed.size > 0) {
-    const dbPath = join20(storeRoot, ".sterling", "sterling.db");
+    const dbPath = join21(storeRoot, ".sterling", "sterling.db");
     if (!existsSync11(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;
@@ -15098,7 +15334,7 @@ try {
   );
   emit({ ...merged, branches_swept: null, sweep_failed: true }, 1);
 }
-var bundleChecker = join20(target, "scripts", "check-bundles-fresh.mjs");
+var bundleChecker = join21(target, "scripts", "check-bundles-fresh.mjs");
 if (existsSync11(bundleChecker)) {
   console.error("direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source\u2026");
   const rebuilt = defaultExec("npm", ["run", "build"], { cwd: target, timeout: 6e5 });
@@ -15115,7 +15351,7 @@ if (existsSync11(bundleChecker)) {
     );
     emit({ ...merged, branches_swept: swept, bundles_unverified: true }, 1);
   }
-  const bundles = spawnSync8(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
+  const bundles = spawnSync9(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
   if (bundles.status !== 0) {
     console.error(
       [
@@ -15134,14 +15370,14 @@ if (existsSync11(bundleChecker)) {
 }
 var parkedClosed = 0;
 try {
-  const postMergeHead = spawnSync8("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const postMergeHead = spawnSync9("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const deletedSet = postMergeHead.status === 0 ? deletedBetween(target, intoTip, postMergeHead.stdout.trim()) : null;
   const { store: post } = openProject(target);
   try {
     for (const t of post.query({ types: ["todo"], cap: 1e3 })) {
       if (t.source !== "system" || t.system_reason !== "file_parked") continue;
       const paths = t.file_keys ?? [];
-      if (parkedItemResolved(paths, deletedSet, (k) => existsSync11(join20(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync11(join21(target, k)))) {
         post.remove(t.id, (/* @__PURE__ */ new Date()).toISOString());
         parkedClosed += 1;
       }
@@ -15158,7 +15394,7 @@ if (noOriginFallback) {
 } else if (process.argv.includes("--no-push")) {
   console.error("direct-merge: push to origin SKIPPED (--no-push) \u2014 consumers cannot see this merge until you push.");
 } else {
-  const remotes = spawnSync8("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const remotes = spawnSync9("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const hasOrigin = remotes.status === 0 && remotes.stdout.split("\n").map((r) => r.trim()).includes("origin");
   if (!hasOrigin) {
     console.error("direct-merge: no 'origin' remote \u2014 push skipped (loud).");
@@ -15182,7 +15418,7 @@ if (noOriginFallback) {
     }
   }
 }
-var mergedHead = spawnSync8("git", ["rev-parse", into], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var mergedHead = spawnSync9("git", ["rev-parse", into], { cwd: target, encoding: "utf8", timeout: 3e4 });
 var opencodeRelease;
 if (mergedHead.status === 0) {
   opencodeRelease = releaseAfterMerge({ target, into, baseSha: intoTip, headSha: mergedHead.stdout.trim(), pushed });
