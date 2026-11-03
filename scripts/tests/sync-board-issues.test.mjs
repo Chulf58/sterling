@@ -17,11 +17,18 @@ import { SterlingStore } from '@sterling/store';
 import {
   FOOTER_RE,
   ISSUE_CEILING,
+  CeilingSettingError,
+  ceilingOf,
+  excludedComment,
+  excludePrefixesOf,
+  mirrorSettingsOf,
   PlanError,
   objectiveLabel,
   bodyOf,
   closeCandidates,
+  closeComment,
   closeReceipt,
+  describe,
   keyMarker,
   lockPathFor,
   parseArgs,
@@ -68,9 +75,9 @@ function model(issues = [], labels = []) {
       } else throw new Error(`unknown ${a.kind}`);
     }
   };
-  gh.receipts = (snapshot) =>
-    new Set(closeCandidates(snapshot, gh.issues, P).filter((n) => (gh.comments.get(n) ?? []).some((c) => c.includes('<!-- sterling-close: board:'))));
-  gh.plan = (snapshot, opts = {}) => plan({ project: P, snapshot, issues: gh.issues, labels: gh.labels, receipts: gh.receipts(snapshot), ...opts });
+  gh.receipts = (snapshot, prefixes = []) =>
+    new Set(closeCandidates(snapshot, gh.issues, P, prefixes).filter((n) => (gh.comments.get(n) ?? []).some((c) => c.includes('<!-- sterling-close: board:'))));
+  gh.plan = (snapshot, opts = {}) => plan({ project: P, snapshot, issues: gh.issues, labels: gh.labels, receipts: gh.receipts(snapshot, opts.excludePrefixes), ...opts });
   return gh;
 }
 
@@ -492,6 +499,7 @@ if (method === 'POST' && route === base + '/issues') { const n = s.issues.length
 if (method === 'POST' && (m = route.match(/\\/issues\\/(\\d+)\\/comments$/))) { (s.comments[m[1]] ??= []).push({ body: body.body }); save(); out({ id: 1 }); }
 if (method === 'POST' && (m = route.match(/\\/issues\\/(\\d+)\\/labels$/))) { issue(m[1]).labels.push(...body.labels.map((name) => ({ name }))); save(); out(issue(m[1]).labels); }
 if (method === 'DELETE' && (m = route.match(/\\/issues\\/(\\d+)\\/labels\\/(.+)$/))) { const name = decodeURIComponent(m[2]); issue(m[1]).labels = issue(m[1]).labels.filter((l) => l.name !== name); save(); out(issue(m[1]).labels); }
+if (method === 'PATCH' && s.patch_fail) { console.error('gh: Server Error (HTTP 500)'); process.exit(1); }
 if (method === 'PATCH' && (m = route.match(/\\/issues\\/(\\d+)$/))) { Object.assign(issue(m[1]), body); save(); out(issue(m[1])); }
 console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3);
 `;
@@ -739,7 +747,8 @@ test('end to end: at the ceiling a run creates nothing, says so loudly and exits
     const r = h.run();
     assert.equal(r.status, 3, r.stderr);
     assert.match(r.stdout, /skipped \(ceiling\): "One too many" for board:/);
-    assert.match(r.stderr, /CEILING github\.com\/acme\/widgets holds 200 issues \(pull requests excluded\) and the limit is 200 \(Clear View's cap\): 1 board task\(s\) got NO issue\. Closing and labelling still ran\./);
+    // Changed on purpose: the old text said "(Clear View's cap)", claiming the default is a limit of an outside consumer the mirror does not read. The exit 3, the count 200, the limit 200 and the skipped count are asserted exactly as before.
+    assert.match(r.stderr, /CEILING github\.com\/acme\/widgets holds 200 issues \(pull requests excluded\) and the limit is 200 \(default mirror ceiling\): 1 board task\(s\) got NO issue\. Closing and labelling still ran\./);
     assert.deepEqual(h.writes(), []);
   } finally {
     h.cleanup();
@@ -775,4 +784,417 @@ test('--help exits 0 with the usage; an unknown flag exits 2', () => {
   const bad = spawnSync(process.execPath, [SCRIPT, '--force'], { encoding: 'utf8' });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /unknown argument '--force'/);
+});
+
+test('ceilingOf: absent is the 200 default, a positive safe integer is that limit, 0 and null are unlimited', () => {
+  assert.deepEqual(ceilingOf(undefined), { limit: 200, source: 'default' });
+  assert.deepEqual(ceilingOf({}), { limit: 200, source: 'default' });
+  assert.deepEqual(ceilingOf({ issue_mirror: {} }), { limit: 200, source: 'default' });
+  assert.deepEqual(ceilingOf({ issue_mirror: { ceiling: 1500 } }), { limit: 1500, source: 'config' });
+  assert.deepEqual(ceilingOf({ issue_mirror: { ceiling: 200 } }), { limit: 200, source: 'config' });
+  assert.deepEqual(ceilingOf({ issue_mirror: { ceiling: 0 } }), { limit: null, source: 'config' });
+  assert.deepEqual(ceilingOf({ issue_mirror: { ceiling: null } }), { limit: null, source: 'config' });
+});
+
+test('ceilingOf refuses every invalid value and never coerces or falls back', () => {
+  for (const bad of ['1500', '', true, false, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 2, [], {}, [5]]) {
+    assert.throws(() => ceilingOf({ issue_mirror: { ceiling: bad } }), CeilingSettingError, `ceiling ${JSON.stringify(bad)}`);
+  }
+  for (const bad of [null, 5, 'x', [], true]) {
+    assert.throws(() => ceilingOf({ issue_mirror: bad }), CeilingSettingError, `issue_mirror ${JSON.stringify(bad)}`);
+  }
+  assert.throws(() => ceilingOf(null), CeilingSettingError);
+});
+
+test('plan: a raised ceiling admits creates past 200, and null (unlimited) never skips', () => {
+  const others = Array.from({ length: 300 }, (_, i) => ({ number: i + 1, state: i % 2 ? 'closed' : 'open', body: 'not ours', labels: [] }));
+  const prs = Array.from({ length: 50 }, (_, i) => ({ number: 900 + i, state: 'open', body: 'pr', pull_request: {}, labels: [] }));
+  const snapshot = snap({ items: [item(3), item(4), item(5)], journal: [jrow(1, 'done')] });
+  const issues = [...others, ...prs, mirrored(700, 1)];
+  const at200 = plan({ project: P, snapshot, issues });
+  assert.equal(at200.ceiling.skipped, 3, 'the default 200 is already exceeded by 301 genuine issues');
+  const raised = plan({ project: P, snapshot, issues, ceiling: 1500 });
+  assert.deepEqual(raised.ceiling, { limit: 1500, count: 301, skipped: 0, skipped_items: [] });
+  assert.equal(raised.actions.filter((a) => a.kind === 'create').length, 3);
+  const tight = plan({ project: P, snapshot, issues, ceiling: 302 });
+  assert.deepEqual(tight.ceiling.skipped_items.length, 2, 'a finite limit still caps and counts open and closed, not pull requests');
+  assert.deepEqual(kinds(tight.actions), ['comment', 'close', 'create']);
+  const unlimited = plan({ project: P, snapshot, issues, ceiling: null });
+  assert.deepEqual(unlimited.ceiling, { limit: null, count: 301, skipped: 0, skipped_items: [] });
+  assert.equal(unlimited.actions.filter((a) => a.kind === 'create').length, 3);
+  assert.doesNotThrow(() => JSON.stringify(unlimited.ceiling));
+});
+
+function setMirrorConfig(h, issueMirror) {
+  const path = join(h.root, '.sterling', 'config.json');
+  const cfg = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(path, JSON.stringify({ ...cfg, issue_mirror: issueMirror }));
+}
+
+test('end to end: issue_mirror.ceiling raises the limit; the dry run names the limit and its source whether over or under it', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness({ preexisting: 200 });
+  try {
+    h.mk({ text: 'Past the default' });
+    const dry = h.run('--dry-run');
+    assert.equal(dry.status, 3, dry.stderr);
+    assert.match(dry.stdout, /CEILING limit 200 \(default\); 200 genuine issue\(s\)/);
+    setMirrorConfig(h, { ceiling: 1500 });
+    const raisedDry = h.run('--dry-run');
+    assert.equal(raisedDry.status, 0, raisedDry.stderr);
+    assert.match(raisedDry.stdout, /CEILING limit 1500 \(config issue_mirror\.ceiling\); 200 genuine issue\(s\)/);
+    assert.match(raisedDry.stdout, /would create issue "Past the default"/);
+    const real = h.run();
+    assert.equal(real.status, 0, real.stderr);
+    assert.equal(h.gh().issues.filter((i) => !i.pull_request).length, 201);
+    setMirrorConfig(h, { ceiling: 201 });
+    h.mk({ text: 'Second past the limit' });
+    const capped = h.run();
+    assert.equal(capped.status, 3, capped.stderr);
+    assert.match(capped.stderr, /holds 201 issues \(pull requests excluded\) and the limit is 201 \(config issue_mirror\.ceiling\): 1 board task/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+for (const unlimited of [0, null]) {
+  test(`end to end: issue_mirror.ceiling ${unlimited} is unlimited and never exits 3`, { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+    const h = harness({ preexisting: 250 });
+    try {
+      h.mk({ text: 'One' });
+      h.mk({ text: 'Two' });
+      setMirrorConfig(h, { ceiling: unlimited });
+      const dry = h.run('--dry-run');
+      assert.equal(dry.status, 0, dry.stderr);
+      assert.match(dry.stdout, /CEILING limit unlimited \(config issue_mirror\.ceiling\)/);
+      const real = h.run();
+      assert.equal(real.status, 0, real.stderr);
+      assert.equal(h.gh().issues.filter((i) => i.body?.includes('<!-- sterling-key: board:')).length, 2);
+    } finally {
+      h.cleanup();
+    }
+  });
+}
+
+test('end to end: an invalid issue_mirror.ceiling exits 2 before any gh call, dry run or not', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness();
+  try {
+    h.mk({ text: 'Never mirrored' });
+    for (const bad of [{ ceiling: '1500' }, { ceiling: true }, { ceiling: -5 }, { ceiling: 2.5 }, { ceiling: 1e300 }, 'many', null, []]) {
+      setMirrorConfig(h, bad);
+      for (const args of [['--dry-run'], []]) {
+        const r = h.run(...args);
+        assert.equal(r.status, 2, `${JSON.stringify(bad)} ${args}: ${r.stderr}`);
+        assert.match(r.stderr, /issue_mirror.*Nothing was written/s);
+        assert.equal(h.callsText(), '', 'gh was never called');
+      }
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('end to end: --project reads the target project\'s ceiling, not the caller\'s', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness({ preexisting: 200 });
+  try {
+    h.mk({ text: 'Target task' });
+    setMirrorConfig(h, { ceiling: 0 });
+    const elsewhere = mkdtempSync(join(tmpdir(), 'sterling-sync-issues-cwd-'));
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT, '--dry-run', '--project', h.root], { cwd: elsewhere, env: h.env, encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /CEILING limit unlimited/);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------- exclude_prefixes ----------
+
+const EX = ['[CH] '];
+const exItem = (n, prefix, record = {}, readiness = {}) => item(n, { text: `${prefix}Task ${n}\nmore detail`, ...record }, readiness);
+
+test('excludePrefixesOf: absent is [], valid strings are kept as written, and every bad shape is refused', () => {
+  assert.deepEqual(excludePrefixesOf(undefined), []);
+  assert.deepEqual(excludePrefixesOf({}), []);
+  assert.deepEqual(excludePrefixesOf({ issue_mirror: { ceiling: 5 } }), []);
+  assert.deepEqual(excludePrefixesOf({ issue_mirror: { exclude_prefixes: [] } }), []);
+  assert.deepEqual(excludePrefixesOf({ issue_mirror: { exclude_prefixes: [' [CH] ', 'x'] } }), [' [CH] ', 'x'], 'prefixes are neither trimmed nor case-folded');
+  assert.deepEqual(mirrorSettingsOf({ issue_mirror: { ceiling: 0, exclude_prefixes: ['a'] } }), { ceiling: { limit: null, source: 'config' }, excludePrefixes: ['a'] });
+  for (const bad of ['[CH]', null, 5, {}, true, [''], [1], [null], ['ok', ''], [['a']]]) {
+    assert.throws(() => excludePrefixesOf({ issue_mirror: { exclude_prefixes: bad } }), CeilingSettingError, JSON.stringify(bad));
+  }
+  assert.throws(() => mirrorSettingsOf({ issue_mirror: [] }), CeilingSettingError);
+  assert.throws(() => mirrorSettingsOf({ issue_mirror: { ceiling: 3, exclude_prefixes: 'x' } }), CeilingSettingError, 'a good ceiling does not excuse a bad prefix list');
+});
+
+test('exclude_prefixes: a matching task gets no issue, live or journal-only; a non-matching or differently cased one does', () => {
+  const r = plan({
+    project: P,
+    snapshot: snap({ items: [exItem(1, '[CH] '), exItem(2, '[ch] '), exItem(3, 'x[CH] '), exItem(4, '')], journal: [jrow(5, 'done', { text: '[CH] done one' }), jrow(6, 'done', { text: 'plain done' })] }),
+    issues: [],
+    excludePrefixes: EX,
+  });
+  assert.deepEqual(r.actions.filter((a) => a.kind === 'create').map((a) => a.key).sort(), [uuid(2), uuid(3), uuid(4), uuid(6)].sort());
+  assert.equal(r.ceiling.skipped, 0);
+  const none = plan({ project: P, snapshot: snap({ items: [exItem(1, '[CH] ')] }), issues: [], excludePrefixes: [] });
+  assert.equal(none.actions.length, 1, 'the default [] filters nothing');
+});
+
+test('exclude_prefixes: the prefix is matched after leading whitespace of the task text only', () => {
+  const r = plan({ project: P, snapshot: snap({ items: [item(1, { text: '  \n\t[CH] indented' }), item(2, { text: 'note: [CH] inside' }), item(3, { text: '[CH] ' + 'x'.repeat(5) })] }), issues: [], excludePrefixes: ['[CH]'] });
+  assert.deepEqual(r.actions.map((a) => a.key), [uuid(2)]);
+  const spaced = plan({ project: P, snapshot: snap({ items: [item(1, { text: ' [CH] a' })] }), issues: [], excludePrefixes: [' [CH]'] });
+  assert.equal(spaced.actions.length, 1, 'a prefix with its own leading space is not trimmed, so it never matches trimmed text');
+});
+
+test('exclude_prefixes: an open issue of a now excluded task closes once as not planned, then a rerun does nothing and never reopens', () => {
+  const gh = model([mirrored(10, 1, { labels: [{ name: 'blocked' }, { name: 'from:CH.Hub' }, { name: 'objective:x' }] }), mirrored(11, 2)], ['blocked', 'from:CH.Hub', 'objective:x']);
+  const snapshot = snap({ items: [item(1, { text: '[CH] Task 1\nmore detail' }, { state: 'blocked' }), item(2)] });
+  const first = gh.plan(snapshot, { excludePrefixes: EX });
+  assert.deepEqual(kinds(first.actions), ['comment', 'remove_label', 'close']);
+  assert.equal(first.actions[0].number, 10);
+  assert.match(first.actions[0].body, /excluded from the mirror by config issue_mirror\.exclude_prefixes/);
+  assert.ok(first.actions[0].body.includes(closeReceipt(uuid(1))));
+  assert.equal(first.actions[1].label, 'blocked');
+  assert.deepEqual(first.actions[2], { kind: 'close', number: 10, key: uuid(1), state_reason: 'not_planned', outcome: 'excluded' });
+  assert.equal(describe(first.actions[2]), 'close #10 as not_planned (excluded)');
+  assert.deepEqual(first.drift, []);
+  gh.apply(first.actions);
+  assert.ok(gh.issues.find((i) => i.number === 10).labels.some((l) => (l.name ?? l) === 'from:CH.Hub'), 'from: is kept');
+  const second = gh.plan(snapshot, { excludePrefixes: EX });
+  assert.deepEqual(second.actions, []);
+  assert.deepEqual(second.warnings, [], 'a closed issue of an excluded task is neither reopened nor warned about');
+});
+
+test('exclude_prefixes: an interrupted close (receipt posted, issue open) closes without a second comment', () => {
+  const gh = model([mirrored(10, 1)]);
+  gh.comments.set(10, [excludedComment(uuid(1))]);
+  const snapshot = snap({ items: [item(1, { text: '[CH] Task 1' })] });
+  const r = gh.plan(snapshot, { excludePrefixes: EX });
+  assert.deepEqual(kinds(r.actions), ['close']);
+  assert.deepEqual(closeCandidates(snapshot, gh.issues, P, EX), [10]);
+  assert.deepEqual(closeCandidates(snapshot, gh.issues, P), [], 'without the prefix the task is simply present');
+});
+
+test('exclude_prefixes: an earlier receipt with a different reason (a done comment) is reused: no second comment, the issue just closes as not planned', () => {
+  const gh = model([mirrored(10, 1)]);
+  gh.comments.set(10, [closeComment(uuid(1), { outcome: 'done', evidence: { commit: 'abc' } })]);
+  const snapshot = snap({ items: [item(1, { text: '[CH] Task 1' })] });
+  const r = gh.plan(snapshot, { excludePrefixes: EX });
+  assert.deepEqual(r.actions, [{ kind: 'close', number: 10, key: uuid(1), state_reason: 'not_planned', outcome: 'excluded' }]);
+  gh.apply(r.actions);
+  assert.equal(gh.comments.get(10).length, 1, 'the earlier explanation stays the only comment (accepted exception)');
+});
+
+test('exclude_prefixes: an open issue of a JOURNAL-only (removed) excluded task closes as not planned excluded, never as done, with or without an earlier receipt', () => {
+  const entry = jrow(1, 'done', { text: 'STATUS shipped', evidence: { commit: 'abc' } });
+  const snapshot = snap({ journal: [entry] });
+  const bare = model([mirrored(10, 1)]);
+  const fresh = bare.plan(snapshot, { excludePrefixes: ['STATUS'] });
+  assert.deepEqual(kinds(fresh.actions), ['comment', 'close']);
+  assert.match(fresh.actions[0].body, /excluded from the mirror by config issue_mirror\.exclude_prefixes/);
+  assert.doesNotMatch(fresh.actions[0].body, /Done on the Sterling board/);
+  assert.deepEqual(fresh.actions[1], { kind: 'close', number: 10, key: uuid(1), state_reason: 'not_planned', outcome: 'excluded' });
+  assert.deepEqual(fresh.actions.filter((a) => a.kind === 'create'), [], 'a journal-only excluded task never gets a new issue');
+  const withReceipt = model([mirrored(10, 1, { labels: [{ name: 'blocked' }] })], ['blocked']);
+  withReceipt.comments.set(10, [excludedComment(uuid(1))]);
+  const reused = withReceipt.plan(snapshot, { excludePrefixes: ['STATUS'] });
+  assert.deepEqual(kinds(reused.actions), ['remove_label', 'close']);
+  assert.equal(reused.actions[1].state_reason, 'not_planned');
+  assert.equal(reused.actions[1].outcome, 'excluded');
+  const unexcluded = bare.plan(snapshot);
+  assert.equal(unexcluded.actions[1].state_reason, 'completed', 'without the prefix the same row still closes as done');
+  assert.deepEqual(model([mirrored(10, 1, { state: 'closed' })]).plan(snapshot, { excludePrefixes: ['STATUS'] }).actions, [], 'a closed issue is left alone');
+});
+
+test('exclude_prefixes: a whitespace-only prefix does not exclude every task, because the text is trimmed first and the prefix is literal', () => {
+  const r = plan({ project: P, snapshot: snap({ items: [item(1, { text: 'Plain task' }), item(2, { text: '  Padded task' })] }), issues: [], excludePrefixes: [' '] });
+  assert.equal(r.actions.length, 2);
+  assert.deepEqual(excludePrefixesOf({ issue_mirror: { exclude_prefixes: [' '] } }), [' ']);
+});
+
+test('exclude_prefixes: a tracker keeps precedence, a foreign marker never closes, an unreadable item is left alone', () => {
+  const foreign = { number: 20, state: 'open', title: 'f', body: bodyOf(uuid(2), '[CH] Task 2', 'other-project'), labels: [] };
+  const r = plan({
+    project: P,
+    snapshot: snap({ items: [exItem(1, '[CH] ', { handoff: sent }, { state: 'delegated' }), exItem(2, '[CH] '), exItem(4, '[CH] ')], unreadable: [{ id: uuid(5), reason: 'bad' }] }),
+    issues: [mirrored(10, 1), foreign, { number: 21, state: 'open', title: 'u', body: bodyOf(uuid(5), '[CH] u', 'alpha'), labels: [] }],
+    excludePrefixes: EX,
+  });
+  assert.deepEqual(r.actions, []);
+  assert.ok(r.warnings.some((w) => w.includes('#10') && w.includes('hand-off tracker')));
+  assert.ok(r.warnings.some((w) => w.includes('#21') && w.includes('cannot read')));
+});
+
+test('a REMOVED hand-off tracker\'s open issue is left alone by every journal closure, excluded or ordinary, with or without a receipt', () => {
+  const legacyText = "Handed to project 'Other': STATUS shipped";
+  const rows = [
+    ['typed', jrow(1, 'done', { handoff_role: 'sent', text: 'STATUS shipped', evidence: { commit: 'abc' } }), ['STATUS']],
+    ['legacy text', jrow(1, 'done', { text: legacyText, evidence: { commit: 'abc' } }), ['Handed']],
+  ];
+  for (const [label, entry, prefixes] of rows) {
+    const snapshot = snap({ journal: [entry] });
+    for (const receipt of [false, true]) {
+      for (const excludePrefixes of [prefixes, []]) {
+        const gh = model([mirrored(10, 1, { labels: [{ name: 'in-progress' }, { name: 'blocked' }] })], ['in-progress', 'blocked']);
+        if (receipt) gh.comments.set(10, [closeComment(uuid(1), entry)]);
+        const before = structuredClone({ issue: gh.issues[0], comments: gh.comments.get(10) ?? [] });
+        const r = gh.plan(snapshot, { excludePrefixes });
+        const why = `${label}, receipt ${receipt}, prefixes [${excludePrefixes}]`;
+        assert.deepEqual(r.actions, [], why);
+        assert.ok(r.warnings.some((w) => w.includes('#10') && w.includes('hand-off tracker')), why);
+        gh.apply(r.actions);
+        assert.deepEqual({ issue: gh.issues[0], comments: gh.comments.get(10) ?? [] }, before, why);
+      }
+    }
+  }
+  const none = snap({ journal: [jrow(1, 'done', { handoff_role: 'none', text: legacyText, evidence: { commit: 'abc' } })] });
+  const plain = model([mirrored(10, 1)]);
+  assert.deepEqual(plain.plan(none).actions.filter((a) => a.kind === 'close').map((a) => a.state_reason), ['completed'], 'handoff_role none defeats the text fallback: an ordinary done close');
+  assert.deepEqual(plain.plan(none, { excludePrefixes: ['Handed'] }).actions.filter((a) => a.kind === 'close').map((a) => a.outcome), ['excluded'], 'and an ordinary exclusion close');
+});
+
+test('exclude_prefixes: existing issues of excluded tasks still count toward a finite ceiling, closing them frees nothing, and a never-created excluded task costs 0', () => {
+  const others = Array.from({ length: 197 }, (_, i) => ({ number: i + 1, state: 'closed', body: 'not ours', labels: [] }));
+  const issues = [...others, mirrored(300, 1), mirrored(301, 2), mirrored(302, 3)];
+  const snapshot = snap({ items: [item(1, { text: '[CH] Task 1' }), item(2, { text: '[CH] Task 2' }), item(3), exItem(4, '[CH] '), exItem(5, ''), exItem(6, '')] });
+  const r = plan({ project: P, snapshot, issues, ceiling: 200, excludePrefixes: EX });
+  assert.equal(r.ceiling.count, 200, 'the two issues about to be closed still count');
+  assert.deepEqual(r.ceiling.skipped_items.map((s) => s.key), [uuid(5), uuid(6)], 'the excluded never-created task 4 is neither created nor skipped');
+  assert.equal(r.ceiling.skipped, 2);
+  assert.equal(r.actions.filter((a) => a.kind === 'create').length, 0);
+  assert.equal(r.actions.filter((a) => a.kind === 'close').length, 2, 'closes still run at the ceiling');
+  const room = plan({ project: P, snapshot, issues, ceiling: 201, excludePrefixes: EX });
+  assert.deepEqual(room.actions.filter((a) => a.kind === 'create').map((a) => a.key), [uuid(5)], 'one slot of room: the excluded tasks never take it');
+  assert.deepEqual(room.ceiling.skipped_items.map((s) => s.key), [uuid(6)]);
+});
+
+test('exclude_prefixes: excluded tasks cannot starve high or low priority work', () => {
+  const items = [exItem(1, '[CH] ', { priority: 'high', created_at: '2026-01-01T00:00:00.000Z' }), exItem(2, '', { priority: 'low', created_at: '2026-01-02T00:00:00.000Z' }), exItem(3, '', { priority: 'high', created_at: '2026-01-03T00:00:00.000Z' })];
+  const r = plan({ project: P, snapshot: snap({ items }), issues: [{ number: 1, state: 'closed', body: 'x', labels: [] }], ceiling: 3, excludePrefixes: EX });
+  assert.deepEqual(r.actions.map((a) => a.key), [uuid(3), uuid(2)]);
+  assert.equal(r.ceiling.skipped, 0);
+});
+
+test('end to end: exclude_prefixes keeps open and journal-only excluded tasks off GitHub; a later config closes the existing issue once', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness({ preexisting: 3 });
+  try {
+    const keep = h.mk({ text: 'Keep me' });
+    const early = h.mk({ text: 'Mirror me first' });
+    assert.equal(h.run().status, 0);
+    const ours = (id) => h.gh().issues.find((i) => i.body?.includes(keyMarker(id)));
+    assert.equal(ours(early.id).state, 'open');
+    h.mk({ text: '[CH] Excluded open' });
+    const gone = h.mk({ text: '[CH] Excluded journal' });
+    h.store.remove(gone.id, NOW, { outcome: 'done' });
+    setMirrorConfig(h, { exclude_prefixes: ['[CH] '] });
+    h.store.remove(early.id, NOW, { outcome: 'dropped' });
+    const before = h.gh().issues.length;
+    h.resetCalls();
+    const dry = h.run('--dry-run');
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.doesNotMatch(dry.stdout, /Excluded/);
+    assert.deepEqual(h.writes(), []);
+    const real = h.run();
+    assert.equal(real.status, 0, real.stderr);
+    assert.equal(h.gh().issues.length, before, 'no issue was created for either excluded task (and the removed one closed normally)');
+    assert.ok(ours(keep.id));
+    // Now exclude an already-mirrored live task.
+    setMirrorConfig(h, { exclude_prefixes: ['Keep'] });
+    h.resetCalls();
+    const dry2 = h.run('--dry-run');
+    assert.match(dry2.stdout, /would close #\d+ as not_planned \(excluded\)/);
+    assert.match(dry2.stdout, /would comment on #\d+ with the close receipt/);
+    assert.deepEqual(h.writes(), [], 'the dry run wrote nothing');
+    const r1 = h.run();
+    assert.equal(r1.status, 0, r1.stderr);
+    const issue = ours(keep.id);
+    assert.equal(issue.state, 'closed');
+    assert.equal(issue.state_reason, 'not_planned');
+    const comments = h.gh().comments[issue.number];
+    assert.equal(comments.length, 1);
+    assert.match(comments[0].body, /excluded from the mirror by config issue_mirror\.exclude_prefixes/);
+    assert.match(r1.stdout, /\(excluded\)/);
+    h.resetCalls();
+    const r2 = h.run();
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.deepEqual(h.writes(), [], 'a second real run writes nothing');
+    assert.match(r2.stdout, /nothing to do/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('end to end: invalid exclude_prefixes exit 2 before any gh call in both modes, even beside a valid ceiling', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness();
+  try {
+    h.mk({ text: 'Never mirrored' });
+    for (const bad of [{ exclude_prefixes: '[CH]' }, { exclude_prefixes: [''] }, { exclude_prefixes: [1] }, { exclude_prefixes: null }, { ceiling: 5, exclude_prefixes: {} }]) {
+      setMirrorConfig(h, bad);
+      for (const args of [['--dry-run'], []]) {
+        const r = h.run(...args);
+        assert.equal(r.status, 2, `${JSON.stringify(bad)} ${args}: ${r.stderr}`);
+        assert.match(r.stderr, /exclude_prefixes.*Nothing was written/s);
+        assert.equal(h.callsText(), '', 'gh was never called');
+      }
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('end to end: a close that fails after the exclusion comment leaves one comment; the rerun closes, the third run changes nothing', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness();
+  try {
+    const t = h.mk({ text: 'Mirrored then excluded' });
+    assert.equal(h.run().status, 0);
+    const issue = () => h.gh().issues.find((i) => i.body?.includes(keyMarker(t.id)));
+    setMirrorConfig(h, { exclude_prefixes: ['Mirrored'] });
+    h.setGh({ patch_fail: true });
+    const failed = h.run();
+    assert.equal(failed.status, 1, failed.stderr);
+    assert.equal(issue().state, 'open');
+    assert.equal(h.gh().comments[issue().number].length, 1, 'the comment was posted before the close failed');
+    h.setGh({ patch_fail: false });
+    const rerun = h.run();
+    assert.equal(rerun.status, 0, rerun.stderr);
+    assert.equal(issue().state, 'closed');
+    assert.equal(issue().state_reason, 'not_planned');
+    assert.equal(h.gh().comments[issue().number].length, 1, 'one comment in total');
+    h.resetCalls();
+    const third = h.run();
+    assert.equal(third.status, 0, third.stderr);
+    assert.deepEqual(h.writes(), [], 'the third run writes nothing');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('end to end: an exclusion comment posted, the close fails, the task is then removed from the board: the rerun still closes as not planned with one comment', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {
+  const h = harness();
+  try {
+    const t = h.mk({ text: 'STATUS shipped' });
+    assert.equal(h.run().status, 0);
+    const issue = () => h.gh().issues.find((i) => i.body?.includes(keyMarker(t.id)));
+    setMirrorConfig(h, { exclude_prefixes: ['STATUS'] });
+    h.setGh({ patch_fail: true });
+    assert.equal(h.run().status, 1);
+    assert.equal(h.gh().comments[issue().number].length, 1);
+    h.store.remove(t.id, NOW, { outcome: 'done', evidence: { commit: 'abc123' } });
+    h.setGh({ patch_fail: false });
+    const rerun = h.run();
+    assert.equal(rerun.status, 0, rerun.stderr);
+    assert.equal(issue().state, 'closed');
+    assert.equal(issue().state_reason, 'not_planned');
+    assert.equal(h.gh().comments[issue().number].length, 1, 'one comment in total, the exclusion one');
+    assert.match(h.gh().comments[issue().number][0].body, /excluded from the mirror/);
+    h.resetCalls();
+    assert.equal(h.run().status, 0);
+    assert.deepEqual(h.writes(), []);
+  } finally {
+    h.cleanup();
+  }
 });

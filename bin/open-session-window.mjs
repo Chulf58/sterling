@@ -5985,6 +5985,17 @@ var configSchema = external_exports.object({
   // lives twice: here and in templates/default-config.json (config.test.ts pins
   // that they agree).
   pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+  // Issue mirror (scripts/sync-board-issues.mjs): `ceiling` is the cap on
+  // genuine GitHub issues (open and closed, pull requests excluded) the
+  // mirror stops creating at. Absent means 200; 0 or null means unlimited.
+  // `exclude_prefixes` is an array of non-empty strings (default none): a task
+  // whose text, after leading whitespace, starts with one is not mirrored.
+  // PERMISSIVE and WITHOUT a default on purpose: the value is preserved raw and
+  // an absent key stays absent, so the strict judge, mirrorSettingsOf() in
+  // scripts/sync-board-issues.mjs, can tell "default" from "set" and refuse an
+  // invalid value (exit 2) instead of coercing it. Read it through mirrorSettingsOf,
+  // never from the parsed config. Not in templates/default-config.json for the same reason.
+  issue_mirror: external_exports.unknown().optional(),
   // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
   // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
   // routes the conductor and every lane through the provider's tiered models.
