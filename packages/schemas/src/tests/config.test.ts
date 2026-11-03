@@ -810,3 +810,13 @@ test('multi_session: absent key is off with max_sessions 1; enabled with 3 parse
   assert.throws(() => parseConfig({ multi_session: { max_sessions: 1.5 } }), /max_sessions/);
   assert.throws(() => parseConfig({ multi_session: { max_sessions: '3' } }), /max_sessions/);
 });
+
+test('issue_mirror (mirror ceiling): permissive and WITHOUT a default, so an absent key stays absent and any value is preserved raw', () => {
+  assert.equal('issue_mirror' in (parseConfig({}) as object), false, 'no default is filled in: the strict judge ceilingOf must tell default from set');
+  const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.equal('issue_mirror' in rawTemplate, false, 'the shipped template does not fill the ceiling either');
+  for (const raw of [{ ceiling: 1500 }, { ceiling: 0 }, { ceiling: null }, { ceiling: '1500' }, 'x', null]) {
+    assert.deepEqual((parseConfig({ issue_mirror: raw }) as unknown as { issue_mirror?: unknown }).issue_mirror, raw);
+  }
+  assert.deepEqual(unreadConfigKeys({ issue_mirror: { ceiling: 1500 } }), [], 'issue_mirror is a key the schema reads');
+});

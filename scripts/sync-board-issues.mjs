@@ -37,8 +37,91 @@ import { parseOriginRepo } from './lib/work-pr.mjs';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
 import { SESSION_EVENTS_LOCK_HELD, withSessionEventsLock } from './hooks/lib/session-events.mjs';
 
-/** Clear View's lifetime cap on genuine issues per repo (pull requests excluded): no new issue is created past it. */
+/** Default cap on genuine issues per repo (pull requests excluded): no new issue is created past it. config.issue_mirror.ceiling overrides it. */
 export const ISSUE_CEILING = 200;
+/** A config.issue_mirror value (ceiling or exclude_prefixes) its judge refuses. The CLI exits 2 on it before anything is written. */
+export class CeilingSettingError extends Error {
+  name = 'CeilingSettingError';
+}
+
+/**
+ * The per-project ceiling, config.issue_mirror.ceiling. `cfg` is the parsed
+ * .sterling/config.json object (undefined when there is no file). Returns
+ * { limit, source }: limit is a positive safe integer or null for unlimited;
+ * source is 'default' (the key is absent, ISSUE_CEILING) or 'config'. 0 and
+ * null both mean unlimited. Anything else that is present (a string, a
+ * boolean, a negative or fractional number, an unsafe integer, an issue_mirror
+ * that is not an object) throws: it is never coerced and never replaced by the
+ * default. config.ts keeps the key permissive and without a default so this
+ * judge can tell absent from set.
+ */
+export function ceilingOf(cfg) {
+  const block = mirrorBlockOf(cfg);
+  if (block === undefined || !Object.hasOwn(block, 'ceiling')) return { limit: ISSUE_CEILING, source: 'default' };
+  const v = block.ceiling;
+  if (v === null || v === 0) return { limit: null, source: 'config' };
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+    throw new CeilingSettingError(`config issue_mirror.ceiling must be a positive integer, or 0 or null for unlimited, got ${JSON.stringify(v)}`);
+  }
+  return { limit: v, source: 'config' };
+}
+
+/** config.issue_mirror as an object, undefined when absent; anything else that is present throws. */
+function mirrorBlockOf(cfg) {
+  if (cfg === undefined) return undefined;
+  if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) throw new CeilingSettingError(`config root must be an object, got ${JSON.stringify(cfg)}`);
+  const block = cfg.issue_mirror;
+  if (block === undefined) return undefined;
+  if (block === null || typeof block !== 'object' || Array.isArray(block)) throw new CeilingSettingError(`config issue_mirror must be an object, got ${JSON.stringify(block)}`);
+  return block;
+}
+
+/**
+ * config.issue_mirror.exclude_prefixes: an array of non-empty strings, default
+ * []. A task whose text, after leading whitespace, starts with one of them is
+ * not mirrored (see plan). The prefixes are used exactly as written, never
+ * trimmed or case-folded. A non-array, a non-string or an empty string throws:
+ * an empty prefix would exclude every task.
+ */
+export function excludePrefixesOf(cfg) {
+  const block = mirrorBlockOf(cfg);
+  if (block === undefined || !Object.hasOwn(block, 'exclude_prefixes')) return [];
+  const v = block.exclude_prefixes;
+  if (!Array.isArray(v)) throw new CeilingSettingError(`config issue_mirror.exclude_prefixes must be an array of non-empty strings, got ${JSON.stringify(v)}`);
+  for (const p of v) {
+    if (typeof p !== 'string' || p === '') throw new CeilingSettingError(`config issue_mirror.exclude_prefixes must hold only non-empty strings, got ${JSON.stringify(p)}`);
+  }
+  return [...v];
+}
+
+/** Every issue_mirror setting of one parsed config: { ceiling: { limit, source }, excludePrefixes }. */
+export function mirrorSettingsOf(cfg) {
+  return { ceiling: ceilingOf(cfg), excludePrefixes: excludePrefixesOf(cfg) };
+}
+
+/** The issue_mirror settings of the project at storeRoot: its .sterling/config.json, or the defaults when there is no file. */
+export function mirrorSettingsAt(storeRoot) {
+  const path = join(storeRoot, '.sterling', 'config.json');
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (e) {
+    if (e?.code === 'ENOENT') return mirrorSettingsOf(undefined);
+    throw new Error(`${path} could not be read (${e.message})`);
+  }
+  try {
+    return mirrorSettingsOf(JSON.parse(text));
+  } catch (e) {
+    if (e instanceof CeilingSettingError) throw e;
+    throw new Error(`${path} is not valid JSON (${e.message})`);
+  }
+}
+
+/** True when the task text, after leading whitespace, starts with one of the prefixes (case-sensitive, as written). */
+export const isExcluded = (text, prefixes) => {
+  const t = String(text ?? '').trimStart();
+  return prefixes.some((p) => t.startsWith(p));
+};
 export const LABEL_IN_PROGRESS = 'in-progress';
 export const LABEL_BLOCKED = 'blocked';
 export const FROM_LABEL_PREFIX = 'from:';
@@ -214,10 +297,10 @@ export function indexByKey(issues, project) {
   return { ours: new Map([...holders].map(([key, l]) => [key, l[0]])), foreign, warnings };
 }
 
-/** This project's open mirrored issues whose task left the board: the issues whose comments the executor reads for a close receipt before planning. */
-export function closeCandidates(snapshot, issues, project) {
+/** This project's open mirrored issues whose task left the board or is excluded by prefix: the issues whose comments the executor reads for a close receipt before planning. */
+export function closeCandidates(snapshot, issues, project, excludePrefixes = []) {
   const { ours } = indexByKey(issues, project);
-  const present = new Set([...snapshot.items.map((i) => String(i.record.id)), ...snapshot.unreadable.map((u) => u.id)]);
+  const present = new Set([...snapshot.items.filter((i) => !isExcluded(i.record.text, excludePrefixes) || isTrackerItem(i)).map((i) => String(i.record.id)), ...snapshot.unreadable.map((u) => u.id)]);
   return [...ours].filter(([key, issue]) => issue.state === 'open' && !present.has(key)).map(([, issue]) => issue.number);
 }
 
@@ -239,6 +322,9 @@ export function closeComment(id, entry) {
   return lines.join('\n');
 }
 
+/** The closing comment for an open issue whose task is now excluded by config issue_mirror.exclude_prefixes. */
+export const excludedComment = (id) => ['Closed as not planned: the task is excluded from the mirror by config issue_mirror.exclude_prefixes.', '', closeReceipt(id)].join('\n');
+
 const stateReasonOf = (entry) => (entry?.outcome === 'done' ? 'completed' : 'not_planned');
 
 /**
@@ -251,11 +337,16 @@ const stateReasonOf = (entry) => (entry?.outcome === 'done' ? 'completed' : 'not
  * (projectIdentityOf: the marker new issues carry and the markers this project
  * owns; any other keyed issue is left alone), labels (the repo's label names),
  * receipts (numbers of the issues whose comments already carry their close
- * receipt), ceiling (default ISSUE_CEILING).
+ * receipt), ceiling (default ISSUE_CEILING; null is unlimited), excludePrefixes
+ * (default []: a live or journal-only task whose text, after leading whitespace,
+ * starts with one is never a create candidate, and an open issue of an excluded
+ * live task is closed as not planned with outcome 'excluded'. Trackers keep
+ * their precedence. Issues of excluded tasks still count toward the ceiling,
+ * and a task that was never created costs nothing).
  * Returns { actions, warnings, drift, ceiling: { limit, count, skipped, skipped_items } },
  * where skipped_items lists { key, title } of each task that got no issue.
  */
-export function plan({ snapshot, issues, project, labels = [], receipts = new Set(), ceiling = ISSUE_CEILING }) {
+export function plan({ snapshot, issues, project, labels = [], receipts = new Set(), ceiling = ISSUE_CEILING, excludePrefixes = [] }) {
   const genuine = issues.filter((i) => !i.pull_request);
   const { ours: byKey, foreign, warnings: foreignWarnings } = indexByKey(genuine, project);
   const live = new Map(snapshot.items.map((item) => [String(item.record.id), item]));
@@ -282,11 +373,25 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
     return true;
   };
 
+  /** An open issue of an excluded task, live or removed: the one exclusion comment (unless its receipt is there), labels off, close as not planned. */
+  const closeExcluded = (issue, key) => {
+    if (!receipts.has(issue.number)) closes.push({ kind: 'comment', number: issue.number, key, body: excludedComment(key) });
+    for (const label of [LABEL_IN_PROGRESS, LABEL_BLOCKED]) {
+      const held = labelNames(issue).find((n) => n.toLowerCase() === label.toLowerCase());
+      if (held) closes.push({ kind: 'remove_label', number: issue.number, label: held });
+    }
+    closes.push({ kind: 'close', number: issue.number, key, state_reason: 'not_planned', outcome: 'excluded' });
+  };
+
   for (const [key, issue] of byKey) {
     const item = live.get(key);
     if (item) {
       if (isTrackerItem(item)) {
         warnings.push(`#${issue.number} carries the key of board item ${key}, a hand-off tracker; trackers are not mirrored, so it is left as it is.`);
+        continue;
+      }
+      if (isExcluded(item.record.text, excludePrefixes)) {
+        if (issue.state === 'open') closeExcluded(issue, key);
         continue;
       }
       if (issue.state !== 'open') {
@@ -329,6 +434,14 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
     }
     if (issue.state !== 'open') continue;
     const entry = journal.get(key);
+    if (entry && journalHandoff(entry).tracker) {
+      warnings.push(`#${issue.number} carries the key of removed board item ${key}, a hand-off tracker; trackers are not mirrored, so it is left as it is.`);
+      continue;
+    }
+    if (entry && isExcluded(entry.text, excludePrefixes)) {
+      closeExcluded(issue, key);
+      continue;
+    }
     if (!receipts.has(issue.number)) closes.push({ kind: 'comment', number: issue.number, key, body: closeComment(key, entry) });
     const names = labelNames(issue);
     for (const label of [LABEL_IN_PROGRESS, LABEL_BLOCKED]) {
@@ -338,7 +451,7 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
     closes.push({ kind: 'close', number: issue.number, key, state_reason: stateReasonOf(entry), outcome: entry?.outcome ?? 'vanished' });
   }
 
-  let room = ceiling - genuine.length;
+  let room = ceiling === null ? Infinity : ceiling - genuine.length;
   const skipped = [];
   const take = (key, text) => {
     if (room <= 0) {
@@ -356,7 +469,7 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
   const candidates = [];
   for (const item of snapshot.items) {
     const id = String(item.record.id);
-    if (isTrackerItem(item) || byKey.has(id) || heldElsewhere(id)) continue;
+    if (isTrackerItem(item) || byKey.has(id) || isExcluded(item.record.text, excludePrefixes) || heldElsewhere(id)) continue;
     const text = String(item.record.text ?? '');
     // Labels are built, and so validated, only for an admitted create: a task the ceiling leaves out never blocks the plan.
     const labelsOf = () => {
@@ -374,7 +487,7 @@ export function plan({ snapshot, issues, project, labels = [], receipts = new Se
   for (const entry of snapshot.journal) {
     if (entry.source !== 'user' || byKey.has(entry.item_id) || live.has(entry.item_id)) continue;
     const handoff = journalHandoff(entry);
-    if (handoff.tracker || heldElsewhere(entry.item_id)) continue;
+    if (handoff.tracker || isExcluded(entry.text, excludePrefixes) || heldElsewhere(entry.item_id)) continue;
     const labelsOf = () => {
       const labelsFor = handoff.from !== undefined ? [fromLabel(handoff.from)] : [];
       const objective = objectiveLabel(entry.objective);
@@ -498,12 +611,12 @@ export function makeGh(host, ghPath = resolveGhPath()) {
 }
 
 /** Everything the planner needs from GitHub: every issue (state all), the label names and the close receipts. */
-export function readInventory(gh, ownerRepo, snapshot, project) {
+export function readInventory(gh, ownerRepo, snapshot, project, excludePrefixes = []) {
   const issues = gh.list(`repos/${ownerRepo}/issues?state=all`);
   const labels = gh.list(`repos/${ownerRepo}/labels`).map((l) => l.name);
   const receipts = new Set();
   const byNumber = new Map(issues.map((i) => [i.number, i]));
-  for (const number of closeCandidates(snapshot, issues, project)) {
+  for (const number of closeCandidates(snapshot, issues, project, excludePrefixes)) {
     const key = footerOf(byNumber.get(number).body).key;
     const comments = gh.list(`repos/${ownerRepo}/issues/${number}/comments`);
     if (comments.some((c) => String(c.body ?? '').includes(closeReceipt(key)))) receipts.add(number);
@@ -557,8 +670,8 @@ export function execute(actions, gh, ownerRepo, log) {
 /**
  * The lock file for one repo (host/owner/repo, lowercased as GitHub compares
  * them), under a private per-user directory in the OS temp dir. It is per repo,
- * not per project: every project mirroring into one repo shares the 200-issue
- * ceiling, so their runs take turns. Not guaranteed across machines or WSL distros.
+ * not per project: every project mirroring into one repo shares its issue
+ * count, so their runs take turns. Not guaranteed across machines or WSL distros.
  */
 export function lockPathFor(repo) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
@@ -600,8 +713,9 @@ Mirrors the project's user board tasks one way to GitHub issues in the repo of
 its 'origin' remote. --dry-run prints what it would do and writes nothing.
 --project names the project directory (default: the current directory); a
 linked git worktree reads its main checkout's board.
-Exit codes: 0 done, 1 refused or failed, 2 usage error, 3 done but new issues
-were not created because the repo reached ${ISSUE_CEILING} issues.`;
+Exit codes: 0 done, 1 refused or failed, 2 usage error or an invalid
+config issue_mirror setting, 3 done but new issues
+were not created because the repo reached the issue ceiling (default ${ISSUE_CEILING}; config issue_mirror.ceiling sets it, 0 or null for unlimited).`;
 
 export function parseArgs(argv) {
   const out = { dryRun: false, project: undefined, help: false };
@@ -642,6 +756,18 @@ function main() {
   } catch (e) {
     refuse(`the project's identity for the issue marker could not be read: ${e.message}`);
   }
+  let ceiling;
+  let excludePrefixes;
+  try {
+    ({ ceiling, excludePrefixes } = mirrorSettingsAt(storeRoot));
+  } catch (e) {
+    if (e instanceof CeilingSettingError) {
+      process.stderr.write(`sync-board-issues: ${e.message}. Nothing was written.\n`);
+      process.exit(2);
+    }
+    refuse(`the issue_mirror settings could not be read: ${e.message}`);
+  }
+  const ceilingText = `${ceiling.limit === null ? 'unlimited' : ceiling.limit} (${ceiling.source === 'default' ? 'default' : 'config issue_mirror.ceiling'})`;
   const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
   if (url.error || url.status !== 0) refuse(`${dir} has no 'origin' remote (git remote get-url origin: ${oneLine(url)}); the mirror writes to origin's GitHub repo and will not guess one. Nothing was written.`);
   const origin = parseOriginRepo(url.stdout);
@@ -660,8 +786,9 @@ function main() {
       throw e;
     }
     for (const u of snapshot.unreadable) process.stderr.write(`sync-board-issues: WARNING board item ${u.id} cannot be read (${u.reason}); it is not mirrored and its issue, if any, is left as it is.\n`);
-    const inventory = readInventory(gh, ownerRepo, snapshot, project);
-    const result = plan({ snapshot, project, ...inventory });
+    const inventory = readInventory(gh, ownerRepo, snapshot, project, excludePrefixes);
+    const result = plan({ snapshot, project, ceiling: ceiling.limit, excludePrefixes, ...inventory });
+    if (args.dryRun) process.stdout.write(`sync-board-issues: CEILING limit ${ceilingText}; ${result.ceiling.count} genuine issue(s) (open and closed, pull requests excluded) in the repo.\n`);
     for (const w of result.warnings) process.stderr.write(`sync-board-issues: WARNING ${w}\n`);
     for (const d of result.drift) process.stdout.write(`text drift: #${d.number} ("${d.title}") — the board text changed after the issue was written; the mirror never edits an issue.\n`);
     const log = (line) => process.stdout.write(`${args.dryRun ? 'would ' : ''}${line}\n`);
@@ -674,7 +801,7 @@ function main() {
     if (result.ceiling.skipped > 0) {
       for (const s of result.ceiling.skipped_items) process.stdout.write(`${args.dryRun ? 'would skip' : 'skipped'} (ceiling): "${s.title}" for board:${s.key}\n`);
       process.stderr.write(
-        `sync-board-issues: CEILING ${origin.repo} holds ${result.ceiling.count} issues (pull requests excluded) and the limit is ${result.ceiling.limit} (Clear View's cap): ${result.ceiling.skipped} board task(s) got NO issue. Closing and labelling ${args.dryRun ? 'are still planned' : 'still ran'}.\n`
+        `sync-board-issues: CEILING ${origin.repo} holds ${result.ceiling.count} issues (pull requests excluded) and the limit is ${result.ceiling.limit} (${ceiling.source === 'default' ? 'default mirror ceiling' : 'config issue_mirror.ceiling'}): ${result.ceiling.skipped} board task(s) got NO issue. Closing and labelling ${args.dryRun ? 'are still planned' : 'still ran'}.\n`
       );
       return 3;
     }
