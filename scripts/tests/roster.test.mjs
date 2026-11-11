@@ -257,6 +257,38 @@ test('web tools: the researcher allowlist carries WebSearch and WebFetch; scout 
   for (const write of ['Edit', 'Write', 'NotebookEdit']) assert.ok(!researcher.includes(write), `researcher.md stays read-only — no ${write}`);
 });
 
+// Decision domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired:
+// a cross-store refusal names a two-step remedy (write without resolves, verify the lane paid, maintenance_remove). The
+// librarian's blanket "never retry without the claim / never maintenance_remove around a refusal" must carve it out, and
+// only it, so the rendered agent and skills/drain/SKILL.md do not contradict each other.
+test('the rendered librarian carves out the conductor-authorized cross-store two-step and keeps every other refusal a stop', () => {
+  const content = readFileSync(join(TPL, 'librarian.md'), 'utf8');
+  const { installedContent } = renderInstalledAgent(content, 'librarian.md', { ...OPTS, ...CFG });
+  const body = installedContent.replace(/^---\n[\s\S]*?\n---\n/, '');
+  assert.match(body, /ONE exception to the refusal stop/, 'the carve-out is named in rubric item 1');
+  assert.match(body, /work order authorizes it/, 'only a conductor-authorized work order may use it');
+  assert.match(body, /refusal itself names/, 'the refusal must name the remedy');
+  for (const lane of ['refresh_reference', 'stale_research', 'wire_in_dormant', 'state_review', 'reconcile_needed']) {
+    assert.ok(body.includes(lane), `the carve-out names the ${lane} lane`);
+  }
+  assert.match(body, /WITHOUT `resolves`[\s\S]*PAID[\s\S]*then `maintenance_remove`[\s\S]*write first, close second/, 'the two steps run in order: write, verify paid, remove');
+  assert.match(body, /`article_missing`[^.]*always refused/, 'an article_missing domain target stays refused');
+  assert.match(body, /every other refusal stays STOP-and-report/, 'every other refusal still stops');
+  assert.match(body, /other than the conductor-authorized cross-store two-step/, 'the wrong-move warning exempts only that two-step');
+  assert.match(body, /never `maintenance_remove` the item around the refusal to force it closed\. ONE exception/, 'the general prohibition is kept in force');
+  // maintenance_query only re-checks reconcile_needed; on the other lanes it shows the same debt
+  // before and after the paying write, so it can confirm the item but never that the lane paid.
+  assert.doesNotMatch(body, /verify with `maintenance_query` that the item's lane is PAID/, 'maintenance_query is never named as the payment check');
+  assert.match(body, /`maintenance_query` is NOT a payment oracle/, 'the query is disclaimed as a payment oracle');
+  assert.match(body, /identity, lane and target match the work order and that it is still open/, 'the query confirms only the item identity, lane, target and open state');
+  assert.match(body, /neither the query, the write merely succeeding nor the item's artifact citations prove the lane paid/, 'no lookup or citation stands in for payment');
+  assert.match(body, /lane-specific verification recipe the conductor supplies WITH the work order/, 'payment is proved by a conductor-supplied recipe');
+  assert.match(body, /narrow read-back of the target record/, 'the recipe may read back the exact target record');
+  assert.match(body, /never your own research or a new judgment/, 'running the recipe is not authorship or research');
+  assert.match(body, /A missing recipe or evidence[^.]*STOP and report; never infer payment yourself/, 'a missing recipe or a mismatch stops');
+  assert.match(body, /do not re-fetch articles you just wrote, except the one narrow read-back[^.]*never a wider context fetch/, 'the lean-context rule admits only that read-back');
+});
+
 // GitHub #128: the conductor hands the librarian drafted board and queue
 // mutations, and a partial text change is board_edit. Without that grant the
 // librarian returned blocked on ten drafted edits and the conductor applied them.
