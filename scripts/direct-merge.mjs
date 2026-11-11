@@ -30,6 +30,58 @@ import { workPreflight, shipAsPr, openPrsForHead, pushWithWindowsRetry, localBra
 // (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
+
+// COMMAND LINE FIRST: --help and every invalid flag are decided here, before any
+// config read, git call or gh call, so a mistyped or help invocation never runs
+// part of a merge. Value flags take `--flag value` or `--flag=value`; the two
+// switches take no value. The parser is arg() (exact tokens, duplicates and
+// flag-shaped values refused), the same one every other sanctioned CLI uses.
+const USAGE =
+  'Usage: node direct-merge.mjs [--target <dir>] [--into <branch>] [--branch <branch>] [--no-push] [--allow-same-version]\n' +
+  '  --target <dir>        project directory (default: the current directory)\n' +
+  '  --into <branch>       base branch to merge into, or the PR base in work mode (default: the default branch)\n' +
+  '  --branch <branch>     must be the checked-out branch (default: the checked-out branch)\n' +
+  '  --no-push             hobby only: merge locally without pushing the base (refused in work mode)\n' +
+  '  --allow-same-version  accept changed files without a version bump\n' +
+  '  -h, --help            print this usage and exit 0';
+const VALUE_FLAGS = ['--target', '--into', '--branch'];
+const SWITCH_FLAGS = ['--no-push', '--allow-same-version'];
+function usageRefusal(problem) {
+  console.error(`direct-merge: ${problem}\nRun with --help for usage. Nothing was run.`);
+  process.exit(2);
+}
+(function validateCommandLine(argv) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  for (const flag of VALUE_FLAGS) {
+    let value;
+    try {
+      value = arg(flag, argv);
+    } catch (e) {
+      usageRefusal(e.message);
+    }
+    if (argv.includes(flag) && value === undefined) usageRefusal(`${flag} needs a value`);
+    if (value === '') usageRefusal(`${flag} needs a non-empty value`);
+  }
+  const valueOf = new Set();
+  argv.forEach((tok, i) => {
+    if (VALUE_FLAGS.includes(tok)) valueOf.add(i + 1);
+  });
+  argv.forEach((tok, i) => {
+    if (valueOf.has(i)) return;
+    const name = tok.split('=')[0];
+    if (VALUE_FLAGS.includes(name)) return;
+    if (SWITCH_FLAGS.includes(tok)) return;
+    if (SWITCH_FLAGS.includes(name)) usageRefusal(`${name} takes no value`);
+    usageRefusal(`unknown argument '${tok}'`);
+  });
+  for (const flag of SWITCH_FLAGS) {
+    if (argv.filter((t) => t === flag).length > 1) usageRefusal(`${flag}: given more than once`);
+  }
+})(process.argv.slice(2));
+
 const target = arg('--target') ?? process.cwd();
 // LINKED WORKTREE (board ks-dashboards-gap-1): .sterling/ is gitignored, so a
 // linked worktree never has the store or the config. The project's store, config
@@ -179,7 +231,23 @@ function workDefaultBranch() {
 }
 // Work mode without --into picks its base once the branch is known (below), so
 // an open PR for the branch can name it; hobby resolves it here, as before.
-let into = arg('--into') ?? (shipsPr ? null : defaultBranch(target));
+// A repo with no origin/HEAD, main or master (a first branch before any base
+// exists) makes defaultBranch throw its one "cannot determine" error; that is a
+// refusal with the way out, not a stack trace. Any other error still propagates,
+// and the base is never created or reset here.
+function hobbyDefaultBranch() {
+  try {
+    return defaultBranch(target);
+  } catch (e) {
+    if (!String(e?.message).startsWith('branch-manager: cannot determine the default branch')) throw e;
+    fail(
+      `direct-merge: there is no base branch to merge into — no origin/HEAD, no main and no master exist in '${target}'.\n` +
+        `Pass --into <branch> naming an existing base, or create the initial base branch yourself first (nothing was merged, created or reset).`,
+      2
+    );
+  }
+}
+let into = arg('--into') ?? (shipsPr ? null : hobbyDefaultBranch());
 // A STACKED PR (GitHub issue #103, user-ruled 2026-10-15 "Reuse the open PR's
 // base"): when the branch already has an open PR, whatever its base, that base is
 // the merge base for the whole run (battery, version check, push, PR reuse), so
