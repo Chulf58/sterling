@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, WORKER_EFFORT, WORKER_MODEL, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
+import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, WORKER_CAPABILITY, WORKER_EFFORT, WORKER_MODEL, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
 import { buildOpencodeArgs, opencodeEnv, WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV, CLAUDE_TOOLS_LINE, OPENCODE_ALLOWED_TOOLS, OPENCODE_PROMPT_NOTE, OPENCODE_WORKER_AGENT, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -90,6 +90,24 @@ const OC_RUN_ID = 'run-oc-1';
 const removedText = (item, runId = OC_RUN_ID) => JSON.stringify({ removed: item, worker_stamp: { run_id: runId, item_id: item, resolved: [item] } });
 const ITEM = { id: 'item-a', file_keys: ['src/a.mjs'], feature_link: FIXTURE_FEATURE_ID, slug: 'probe-article' };
 const owes = (id = ITEM.id) => JSON.stringify({ item_id: id, article: 'probe-article', verdict: 'owes_prose', file_keys: ['forged'], reason: 'the article misses the new flag' });
+
+test('[E2BIG] a large historical journal of items gone from the queue never grows the opencode argv past the 131072-byte single-argument limit', async () => {
+  const fx = fixture();
+  try {
+    for (let i = 0; i < 1500; i++) writeFileSync(fx.paths.journal, JSON.stringify({ kind: 'verdict', item_id: `gone-${i}-${'x'.repeat(40)}`, verdict: 'needs_conductor', file_keys: Array.from({ length: 6 }, (_, k) => `src/some/long/path/${i}/file-${k}.mjs`), evidence: true, capability: WORKER_CAPABILITY }) + '\n', { flag: 'a' });
+    const run = opencodeRun(fx, [ITEM]);
+    const child = fakeOpencode([text('{"verdict":"none","reason":"x"}')]);
+    const spawn = (cmd, args, opts) => {
+      if (args.some((a) => Buffer.byteLength(a) >= 131072)) throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' });
+      return child.fn(cmd, args, opts);
+    };
+    await runWorker({ itemProvenance: INTEGRATED, ...run, spawn, spawnSync: fakeGit });
+    assert.equal(child.calls.length, 1, 'the child launched, no E2BIG');
+    assert.ok(child.calls[0].args.every((a) => Buffer.byteLength(a) < 131072));
+  } finally {
+    fx.cleanup();
+  }
+});
 
 test('the measured OpenCode 2.0.21 events parse: an inner sterling call counts by its OWN status, errored reads are no evidence, a remove is journalled with its text, the last message is the result', () => {
   const lines = readFileSync(join(here, 'fixtures', 'opencode-run-events.jsonl'), 'utf8');

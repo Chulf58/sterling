@@ -13900,7 +13900,8 @@ function workerPrompt(pluginRoot2, root, eligible = null, diffs = "") {
 ELIGIBLE (work ONLY these items; every other open item is dirty against HEAD, already judged or left for a later run, so leave it alone):
 ` + eligible.items.map((t) => `- ${t.id} lane ${t.lane ?? "reconcile_needed"} target ${t.feature_link ?? "none"} file_keys ${sortedKeys(t.file_keys)}`).join("\n") + "\n" + diffs;
   }
-  const judged = [...judgedVerdicts(root)].map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === "refused" ? ` at HEAD ${v.head}` : ""}`);
+  const batchIds = eligible ? new Set(eligible.items.map((t) => t.id)) : null;
+  const judged = [...judgedVerdicts(root)].filter(([id]) => !batchIds || batchIds.has(id)).map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === "refused" ? ` at HEAD ${v.head}` : ""}`);
   if (judged.length) prompt += `
 ALREADY JUDGED (skip each unless its current file_keys differ from the ones listed):
 ${judged.join("\n")}

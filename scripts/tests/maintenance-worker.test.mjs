@@ -786,6 +786,30 @@ test('[N4] a project root in a subdirectory of the git top-level: porcelain path
   }
 });
 
+test('[E2BIG] a large historical journal of items gone from the queue never grows the claude argv past the 131072-byte single-argument limit; the batch\'s own judged verdict still lists', async () => {
+  const fx = fixture();
+  try {
+    for (let i = 0; i < 1500; i++) journalLine(fx, { kind: 'verdict', item_id: `gone-${i}-${'x'.repeat(40)}`, verdict: 'needs_conductor', file_keys: Array.from({ length: 6 }, (_, k) => `src/some/long/path/${i}/file-${k}.mjs`), evidence: true, capability: WORKER_CAPABILITY });
+    journalLine(fx, { kind: 'verdict', item_id: 'live', verdict: 'needs_conductor', file_keys: ['src/old.mjs'], evidence: true, capability: WORKER_CAPABILITY });
+    const token = 'tok';
+    writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), token }));
+    writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, items: [{ id: 'live', lane: 'reconcile_needed', file_keys: ['src/new.mjs'], feature_link: null, slug: 'live' }, { id: 'fresh', lane: 'reconcile_needed', file_keys: ['src/c.mjs'], feature_link: null, slug: 'fresh' }] }));
+    const child = fakeClaude([resultEvent({})]);
+    const spawn = (cmd, args, opts) => {
+      const big = args.find((a) => Buffer.byteLength(a) >= 131072);
+      if (big !== undefined) throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' });
+      return child.fn(cmd, args, opts);
+    };
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, ...quiet }), 0);
+    const prompt = child.calls[0].args[1];
+    assert.ok(Buffer.byteLength(prompt) < 131072);
+    assert.doesNotMatch(prompt, /gone-/, 'history of items outside the batch is not listed');
+    assert.match(prompt, /- live needs_conductor file_keys \["src\/old\.mjs"\]/, 'a batch item whose verdict stands still lists, with the keys it was judged on');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('[PARTIAL 2] the child gets ONLY the eligible (clean, unjudged) item ids; the runner refuses an eligible list from another launch', async () => {
   const fx = fixture();
   try {
