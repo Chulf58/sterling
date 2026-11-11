@@ -551,9 +551,101 @@ export function describe(action) {
 /** A gh call failed; the message names the gh binary, the call and what GitHub said. */
 export class GhError extends Error {
   name = 'GhError';
+  /** `details.kind` is 'rate_limit', 'auth' or 'http'; `details.status` is the HTTP status when gh printed one. */
+  constructor(message, details = {}) {
+    super(message);
+    Object.assign(this, details);
+  }
 }
 
-const oneLine = (r) => (r.stderr || r.stdout || String(r.error?.message ?? '') || `exit ${r.status}`).trim().replace(/\s*\n\s*/g, ' | ');
+const DETAIL_LIMIT = 600;
+const ERRORS_SHOWN = 5;
+
+const scrub = (s) => s.replace(/\b(?:gh[pousr]_|github_pat_)\w+/g, '[redacted]').replace(/\b(Bearer|token)\s+\S+/gi, '$1 [redacted]');
+const flat = (s) => s.trim().replace(/\s*\n\s*/g, ' | ');
+
+/** Both output streams of a failed gh call, with GitHub's JSON error body when stdout is one (an object with a string message). */
+function streams(r) {
+  const stderr = (r.stderr ?? '').trim();
+  const stdout = (r.stdout ?? '').trim();
+  let body = null;
+  try {
+    body = stdout ? JSON.parse(stdout) : null;
+  } catch {
+    body = null;
+  }
+  return { stderr, stdout, body: body && typeof body === 'object' && typeof body.message === 'string' ? body : null };
+}
+
+/** The complete raw text a failure is classified from: stderr, GitHub's message (or the raw stdout) and the spawn error. Never truncated. */
+function failureCause(r) {
+  const { stderr, stdout, body } = streams(r);
+  return [stderr, body ? body.message : stdout, r.error?.message ?? ''].join('\n');
+}
+
+/** One validation entry in GitHub's words: "Label name invalid (name is too long)". */
+function errorEntry(e) {
+  if (typeof e === 'string') return e;
+  const where = [e?.resource, e?.field, e?.code].filter((x) => typeof x === 'string').join(' ');
+  return typeof e?.message === 'string' ? `${where} (${e.message})`.trim() : where;
+}
+
+/** Split `room` characters across fields: a short field keeps all of its text, the long ones share what is left evenly. */
+function fairShares(lengths, room) {
+  const shares = [];
+  let left = Math.max(0, room);
+  const order = lengths.map((_, i) => i).sort((a, b) => lengths[a] - lengths[b]);
+  order.forEach((i, k) => {
+    shares[i] = Math.min(lengths[i], Math.floor(left / (order.length - k)));
+    left -= shares[i];
+  });
+  return shares;
+}
+
+/** `s` cut to `n` characters by removing its middle, so both its start and its last line survive; the cut is marked. */
+function clip(s, n) {
+  if (s.length <= n) return s;
+  const note = ` [... cut from ${s.length} chars ...] `;
+  const keep = n - note.length;
+  if (keep <= 0) return s.slice(0, n);
+  const head = Math.ceil(keep / 2);
+  return `${s.slice(0, head)}${note}${s.slice(s.length - (keep - head))}`;
+}
+
+/**
+ * What a failed gh call said, from both streams: stderr, then GitHub's message and up to 5 validation errors
+ * (or the raw stdout when it is not a JSON error body), then the spawn error. Each piece is scrubbed of tokens,
+ * then the pieces share DETAIL_LIMIT characters so no single piece can push the others out.
+ */
+const oneLine = (r) => {
+  const { stderr, stdout, body } = streams(r);
+  const parts = [];
+  const field = (text) => parts.push({ text: flat(scrub(text)) });
+  const next = () => parts.length && parts.push(' | ');
+  if (stderr) field(stderr);
+  if (body) {
+    next();
+    field(body.message);
+    const errors = Array.isArray(body.errors) ? body.errors : [];
+    errors.slice(0, ERRORS_SHOWN).forEach((e, i) => {
+      parts.push(i === 0 ? ': ' : '; ');
+      field(errorEntry(e));
+    });
+    if (errors.length > ERRORS_SHOWN) parts.push(` (and ${errors.length - ERRORS_SHOWN} more errors not shown)`);
+  } else if (stdout) {
+    next();
+    field(stdout);
+  }
+  if (r.error?.message) {
+    next();
+    field(String(r.error.message));
+  }
+  if (!parts.length) return `exit ${r.status}`;
+  const fields = parts.filter((p) => typeof p !== 'string');
+  const fixed = parts.reduce((n, p) => n + (typeof p === 'string' ? p.length : 0), 0);
+  const shares = fairShares(fields.map((f) => f.text.length), DETAIL_LIMIT - fixed);
+  return parts.map((p) => (typeof p === 'string' ? p : clip(p.text, shares[fields.indexOf(p)]))).join('');
+};
 
 function httpStatus(r) {
   const m = `${r.stderr ?? ''}\n${r.stdout ?? ''}`.match(/\(HTTP (\d{3})\)/);
@@ -581,13 +673,14 @@ export function makeGh(host, ghPath = resolveGhPath()) {
       if (r.error || r.status !== 0) {
         const status = r.error ? null : httpStatus(r);
         const said = oneLine(r);
-        if (status === 429 || (status === 403 && /rate limit|abuse|secondary/i.test(said))) {
-          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was rate limited by ${host} (${said}). Nothing is retried; run again later. Work done before this call stays done, and a rerun picks up from it.`);
+        const cause = failureCause(r);
+        if (status === 429 || (status === 403 && /rate limit|abuse|secondary/i.test(cause))) {
+          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was rate limited by ${host} (${said}). Nothing is retried; run again later. Work done before this call stays done, and a rerun picks up from it.`, { kind: 'rate_limit', status });
         }
-        if (status === 401 || /bad credentials|authentication|not logged in/i.test(said)) {
-          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was refused as unauthenticated by ${host} (${said}); run gh auth login --hostname ${host}. On WSL with a Windows gh.exe, a GH_TOKEN set in WSL reaches it only through WSLENV.`);
+        if (status === 401 || /bad credentials|authentication|not logged in/i.test(cause)) {
+          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was refused as unauthenticated by ${host} (${said}); run gh auth login --hostname ${host}. On WSL with a Windows gh.exe, a GH_TOKEN set in WSL reaches it only through WSLENV.`, { kind: 'auth', status });
         }
-        throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} failed (${said})`);
+        throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} failed (${said})`, { kind: 'http', status });
       }
       if (!r.stdout.trim()) return null;
       try {
@@ -633,7 +726,13 @@ export function execute(actions, gh, ownerRepo, log) {
         try {
           gh.api('POST', `repos/${ownerRepo}/labels`, { name: a.name, color: a.color, description: a.description });
         } catch (e) {
-          throw new GhError(`${e.message}. The label '${a.name}' is missing and could not be created; the account needs triage or write access to ${ownerRepo}, or a maintainer creates the label by hand.`);
+          const advice =
+            e.kind === 'http' && (e.status === 403 || e.status === 404)
+              ? `The label '${a.name}' is missing and could not be created; the account needs triage or write access to ${ownerRepo}, or a maintainer creates the label by hand.`
+              : e.kind === 'http' && e.status === 422
+                ? `The label '${a.name}' could not be created: GitHub refused the request with HTTP 422, which is not an access refusal; the reason is only what GitHub said above.`
+                : `The label '${a.name}' is missing and could not be created.`;
+          throw new GhError(`${e.message}. ${advice}`, { kind: e.kind, status: e.status });
         }
         break;
       case 'comment':
