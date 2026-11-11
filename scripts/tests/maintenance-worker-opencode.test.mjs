@@ -54,8 +54,10 @@ function fakeOpencode(events, { code = 0 } = {}) {
   const fn = (cmd, args, opts) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
+    const call = { cmd, args, opts, stdin: '', stdinEnded: false };
+    child.stdin = Object.assign(new EventEmitter(), { end: (d) => ((call.stdin += d ?? ''), (call.stdinEnded = true)) });
     child.kill = () => setImmediate(() => child.emit('close', null));
-    calls.push({ cmd, args, opts });
+    calls.push(call);
     setImmediate(() => {
       const text = events.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).join('\n') + '\n';
       child.stdout.emit('data', text.slice(0, 50)); // a line split across chunks
@@ -109,6 +111,75 @@ test('[E2BIG] a large historical journal of items gone from the queue never grow
   }
 });
 
+test('[E2BIG] the prompt is not in argv and is written to the child stdin, which is ended; a prompt over 200 KB still launches', async () => {
+  const fx = fixture();
+  try {
+    const big = { ...ITEM, slug: 'probe-article', file_keys: Array.from({ length: 6000 }, (_, k) => `src/some/long/path/with/many/segments/file-${k}.mjs`) };
+    const run = opencodeRun(fx, [big]);
+    const child = fakeOpencode([text('{"verdict":"none","reason":"x"}')]);
+    const spawn = (cmd, args, opts) => {
+      if (args.some((a) => Buffer.byteLength(a) >= 131072)) throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' });
+      return child.fn(cmd, args, opts);
+    };
+    await runWorker({ itemProvenance: INTEGRATED, ...run, spawn, spawnSync: fakeGit });
+    assert.equal(child.calls.length, 1);
+    const call = child.calls[0];
+    assert.equal(call.opts.stdio[0], 'pipe');
+    assert.ok(call.stdinEnded, 'stdin is ended');
+    assert.ok(Buffer.byteLength(call.stdin) > 200 * 1024, `prompt on stdin is ${Buffer.byteLength(call.stdin)} bytes`);
+    assert.ok(call.stdin.includes('item-a'), 'the prompt names the item');
+    assert.ok(!call.args.some((a) => a.includes('item-a')), 'the prompt is not in argv');
+    assert.equal(call.args[0], 'run');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('a stdin write error on a child that ignores SIGTERM: the run does not settle until the child closes after SIGKILL, and records the stdin error', async () => {
+  const fx = fixture();
+  try {
+    const run = opencodeRun(fx, [ITEM]);
+    const signals = [];
+    let closed = false;
+    const spawn = () => {
+      const c = new EventEmitter();
+      c.stdout = new EventEmitter();
+      c.stdin = Object.assign(new EventEmitter(), { end() {} });
+      c.kill = (sig) => {
+        signals.push(sig);
+        if (sig === 'SIGKILL') setImmediate(() => ((closed = true), c.emit('close', null)));
+      };
+      setImmediate(() => c.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })));
+      return c;
+    };
+    const code = await runWorker({ itemProvenance: INTEGRATED, ...run, spawn, spawnSync: fakeGit, killGraceMs: 20 });
+    assert.equal(closed, true, 'the run settled only after the child closed');
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+    assert.equal(code, 1);
+    assert.match(lastRun(fx).error, /could not write the prompt to stdin: write EPIPE/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('a stdin write error (EPIPE) is a recorded failed run, not a crash', async () => {
+  const fx = fixture();
+  try {
+    const run = opencodeRun(fx, [ITEM]);
+    const child = fakeOpencode([]);
+    const spawn = (cmd, args, opts) => {
+      let c;
+      setImmediate(() => c.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))); // queued before the fake child's own close
+      c = child.fn(cmd, args, opts);
+      return c;
+    };
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...run, spawn, spawnSync: fakeGit }), 1);
+    assert.match(lastRun(fx).error, /could not write the prompt to stdin: write EPIPE .*argv \d+ bytes, prompt \d+ bytes/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('the measured OpenCode 2.0.21 events parse: an inner sterling call counts by its OWN status, errored reads are no evidence, a remove is journalled with its text, the last message is the result', () => {
   const lines = readFileSync(join(here, 'fixtures', 'opencode-run-events.jsonl'), 'utf8');
   const observed = [];
@@ -144,11 +215,11 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     const [call] = child.calls;
     assert.equal(call.cmd, '/opt/oc/opencode.exe');
     assert.deepEqual(call.args.slice(0, 9), ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, '--model', 'anthropic/claude-sonnet-5-5']);
-    assert.match(call.args[9], /^PROMPT BODY/);
-    assert.match(call.args[9], /HOST NOTE \(OpenCode\)/);
-    assert.ok(call.args[9].includes(OPENCODE_TOOLS_LINE), 'the OpenCode tools line replaces the shipped one');
-    assert.ok(!call.args[9].includes(CLAUDE_TOOLS_LINE), 'the claude tools line does not reach the OpenCode run');
-    assert.match(call.args[9], /item-a/, 'the eligible list reaches the prompt');
+    assert.match(call.stdin, /^PROMPT BODY/);
+    assert.match(call.stdin, /HOST NOTE \(OpenCode\)/);
+    assert.ok(call.stdin.includes(OPENCODE_TOOLS_LINE), 'the OpenCode tools line replaces the shipped one');
+    assert.ok(!call.stdin.includes(CLAUDE_TOOLS_LINE), 'the claude tools line does not reach the OpenCode run');
+    assert.match(call.stdin, /item-a/, 'the eligible list reaches the prompt');
     assert.equal(call.opts.env.PWD, fx.project, 'the session directory follows PWD (measured)');
     assert.equal(call.opts.env.STERLING_MAINTENANCE_WORKER, '1');
     assert.equal(call.opts.env.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
@@ -461,7 +532,7 @@ test('[overpass] the worker takes the maintenance-worker role\'s tier and effort
 // 2.1.2's `run` refuses --variant (it prints its usage and exits 1), so the effort now rides in the child's
 // environment with the model it applies to, and the plugin in the child sets it on each request.
 test('[overpass] the role\'s effort travels in the worker child\'s environment, through eligible.json, never as --variant, and is absent without one', async () => {
-  assert.ok(!buildOpencodeArgs({ prompt: 'p', model: 'overpass/agentic-premium', variant: 'high' }).includes('--variant'), 'a stale variant argument is ignored');
+  assert.ok(!buildOpencodeArgs({ model: 'overpass/agentic-premium', variant: 'high' }).includes('--variant'), 'a stale variant argument is ignored');
   assert.deepEqual(opencodeEnv({ root: '/r', config: { model: 'overpass/agentic-premium' }, effort: 'high' })[WORKER_EFFORT_ENV], 'high');
   assert.deepEqual(opencodeEnv({ root: '/r', config: { model: 'overpass/agentic-premium' }, effort: 'high' })[WORKER_EFFORT_MODEL_ENV], 'overpass/agentic-premium');
   assert.ok(!Object.hasOwn(opencodeEnv({ root: '/r', config: { model: 'm' } }), WORKER_EFFORT_ENV), 'no effort, no variable');
@@ -685,7 +756,7 @@ test('[d1149d0e] the claude host prompt is byte-identical to the shipped prompt 
     const dry = JSON.parse(printed[0]);
     assert.equal(dry.host, 'claude');
     assert.equal(dry.argv[0], '-p');
-    assert.equal(dry.argv[1], shipped);
+    assert.equal(dry.stdin, shipped);
   } finally {
     fx.cleanup();
   }

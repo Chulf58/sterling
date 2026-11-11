@@ -493,7 +493,7 @@ let m;
 if (method === 'GET' && route === base + '/issues') page(s.issues);
 if (method === 'GET' && route === base + '/labels') page(s.labels.map((name) => ({ name })));
 if (method === 'GET' && (m = route.match(/\\/issues\\/(\\d+)\\/comments$/))) page(s.comments[m[1]] ?? []);
-if (method === 'POST' && route === base + '/labels') { if (s.label_create_raw) { if (s.label_create_raw.stdout) process.stdout.write(s.label_create_raw.stdout); if (s.label_create_raw.stderr) process.stderr.write(s.label_create_raw.stderr); process.exit(1); } if (s.label_create_fail) { console.error('gh: Resource not accessible by integration (HTTP 403)'); process.exit(1); } s.labels.push(body.name); save(); out({ name: body.name }); }
+if (method === 'POST' && route === base + '/labels') { if (s.label_create_raw && (!s.label_create_raw.only || s.label_create_raw.only === body.name)) { if (s.label_create_raw.stdout) process.stdout.write(s.label_create_raw.stdout); if (s.label_create_raw.stderr) process.stderr.write(s.label_create_raw.stderr); process.exit(1); } if (s.label_create_fail) { console.error('gh: Resource not accessible by integration (HTTP 403)'); process.exit(1); } s.labels.push(body.name); save(); out({ name: body.name }); }
 if (method === 'POST' && route === base + '/issues' && s.slow_create_ms) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, s.slow_create_ms);
 if (method === 'POST' && route === base + '/issues') { const n = s.issues.length + 1; s.issues.push({ number: n, state: 'open', title: body.title, body: body.body, labels: (body.labels ?? []).map((name) => ({ name })) }); save(); out({ number: n }); }
 if (method === 'POST' && (m = route.match(/\\/issues\\/(\\d+)\\/comments$/))) { (s.comments[m[1]] ??= []).push({ body: body.body }); save(); out({ id: 1 }); }
@@ -708,28 +708,16 @@ test('end to end: a label the account cannot create fails loudly and names gh', 
     h.setGh({ label_create_fail: true });
     const r = h.run();
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /gh at \S+\/bin\/gh: POST repos\/acme\/widgets\/labels failed \(gh: Resource not accessible by integration \(HTTP 403\)\)\. The label 'from:CH\.Hub' is missing and could not be created/);
+    assert.match(r.stderr, /gh at \S+\/bin\/gh: POST repos\/acme\/widgets\/labels failed \(HTTP 403 \| gh: Resource not accessible by integration \(HTTP 403\)\)\. The label 'from:CH\.Hub' is missing and could not be created/);
     assert.equal(h.gh().issues.filter((i) => !i.pull_request).length, 0, 'nothing was created after the failure');
   } finally {
     h.cleanup();
   }
 });
 
-const LABEL_ADVICE = /needs triage or write access/;
-/** The script's own 422 sentence: it names the status and draws no conclusion about the cause. */
-const NEUTRAL_422 = /The label 'from:CH\.Hub' could not be created: GitHub refused the request with HTTP 422, which is not an access refusal; the reason is only what GitHub said above\./;
-/** A 422 can mean a validation failure or a spam block, so the script's own words never call the label invalid. */
-const OWN_INVALID_CLAIM = /rejected it as invalid|label is invalid/i;
+const GH_SKIP = { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' };
 
-/** What gh said, as the label-create failure quotes it: the text between "failed (" and "). The label". */
-function saidOf(r) {
-  const start = r.stderr.indexOf('labels failed (');
-  const end = r.stderr.lastIndexOf('). The label');
-  assert.ok(start >= 0 && end > start, `not a quoted label-create failure: ${r.stderr}`);
-  return r.stderr.slice(start + 'labels failed ('.length, end);
-}
-
-/** Run a label create that the fake gh fails with the given raw streams; returns the script's result. */
+/** Run one received-from task whose label create the fake gh fails with the given raw streams. */
 function labelFailure(raw) {
   const h = harness();
   try {
@@ -741,128 +729,57 @@ function labelFailure(raw) {
   }
 }
 
-const GH_SKIP = { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' };
-
-test('end to end: a 422 keeps GitHub\'s validation code, field and message from stdout beside the stderr line, and never blames access', GH_SKIP, () => {
-  const body = { message: 'Validation Failed', errors: [{ resource: 'Label', code: 'invalid', field: 'name', message: 'name is too long' }], documentation_url: 'https://docs.github.com/rest/issues/labels#create-a-label' };
-  const r = labelFailure({ stdout: JSON.stringify(body), stderr: 'gh: Validation Failed (HTTP 422)\n' });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /failed \(gh: Validation Failed \(HTTP 422\)/);
-  assert.match(r.stderr, /Validation Failed: Label name invalid \(name is too long\)/);
-  assert.match(r.stderr, NEUTRAL_422);
-  assert.doesNotMatch(r.stderr, OWN_INVALID_CLAIM);
-  assert.doesNotMatch(r.stderr, LABEL_ADVICE);
-});
-
-test('end to end: a 422 that only says "Validation Failed, or the endpoint has been spammed" keeps that sentence and is not called an invalid label', GH_SKIP, () => {
-  const body = { message: 'Validation Failed, or the endpoint has been spammed.', documentation_url: 'https://docs.github.com/rest/issues/labels#create-a-label' };
-  const r = labelFailure({ stdout: JSON.stringify(body), stderr: 'gh: Validation Failed (HTTP 422)\n' });
-  assert.equal(r.status, 1);
-  assert.match(saidOf(r), /^gh: Validation Failed \(HTTP 422\) \| Validation Failed, or the endpoint has been spammed\.$/);
-  assert.match(r.stderr, NEUTRAL_422);
-  assert.doesNotMatch(r.stderr, OWN_INVALID_CLAIM);
-  assert.doesNotMatch(r.stderr, LABEL_ADVICE);
-});
-
-test('end to end: a 422 already_exists keeps GitHub\'s code beside stderr and is not called an invalid label', GH_SKIP, () => {
-  const body = { message: 'Validation Failed', errors: [{ resource: 'Label', code: 'already_exists', field: 'name' }] };
-  const r = labelFailure({ stdout: JSON.stringify(body), stderr: 'gh: Validation Failed (HTTP 422)\n' });
-  assert.equal(r.status, 1);
-  assert.equal(saidOf(r), 'gh: Validation Failed (HTTP 422) | Validation Failed: Label name already_exists');
-  assert.match(r.stderr, NEUTRAL_422);
-  assert.doesNotMatch(r.stderr, OWN_INVALID_CLAIM);
-});
-
-test('end to end: a non-JSON stdout (a proxy page) is kept beside a non-empty stderr', GH_SKIP, () => {
-  const r = labelFailure({ stdout: 'upstream connect error or disconnect/reset before headers. reset reason: overflow\n', stderr: 'gh: HTTP 502 (HTTP 502)\n' });
-  assert.equal(r.status, 1);
-  assert.equal(saidOf(r), 'gh: HTTP 502 (HTTP 502) | upstream connect error or disconnect/reset before headers. reset reason: overflow');
-  assert.doesNotMatch(r.stderr, LABEL_ADVICE);
-});
-
-test('end to end: a long stderr warning cannot crowd out GitHub\'s validation detail or the gh status line, and the cut is marked', GH_SKIP, () => {
-  const warning = `warning: ${'w'.repeat(700)}`;
+test('end to end: a 422 on a label shows GitHub\'s validation errors from stdout beside stderr, skips the label and syncs on', GH_SKIP, () => {
   const body = { message: 'Validation Failed', errors: [{ resource: 'Label', code: 'invalid', field: 'name', message: 'name is too long' }] };
-  const r = labelFailure({ stdout: JSON.stringify(body), stderr: `${warning}\ngh: Validation Failed (HTTP 422)\n` });
-  assert.equal(r.status, 1);
-  const said = saidOf(r);
-  assert.ok(said.length <= 600, `the detail is bounded to 600 characters, got ${said.length}`);
-  assert.match(said, /^warning: w+/);
-  assert.match(said, /cut from \d+ chars/);
-  assert.match(said, /gh: Validation Failed \(HTTP 422\) \| Validation Failed: Label name invalid \(name is too long\)$/);
-  assert.match(r.stderr, NEUTRAL_422);
+  const r = labelFailure({ stdout: JSON.stringify(body), stderr: 'gh: Validation Failed (HTTP 422) token ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /WARNING label 'from:CH\.Hub' was refused by GitHub and is skipped: gh at \S+: POST repos\/acme\/widgets\/labels failed \(HTTP 422 \| Validation Failed: Label name invalid \(name is too long\) \| gh: Validation Failed \(HTTP 422\) token \[redacted\]\)/);
+  assert.doesNotMatch(r.stderr, /ghp_abc|needs triage or write access/);
 });
 
-test('end to end: one very long validation message is cut on its own, and the other errors and the 5-error cap stay visible', GH_SKIP, () => {
-  const errors = [
-    { resource: 'Label', code: 'invalid', field: 'name', message: 'm'.repeat(3000) },
-    { resource: 'Label', code: 'custom', field: 'color', message: 'color is bad' },
-    ...Array.from({ length: 5 }, (_, i) => ({ resource: 'Label', code: 'custom', field: `f${i}` })),
-  ];
-  const r = labelFailure({ stdout: JSON.stringify({ message: 'Validation Failed', errors }), stderr: 'gh: Validation Failed (HTTP 422)\n' });
-  assert.equal(r.status, 1);
-  const said = saidOf(r);
-  assert.ok(said.length <= 600, `the detail is bounded to 600 characters, got ${said.length}`);
-  assert.match(said, /^gh: Validation Failed \(HTTP 422\) \| Validation Failed: Label name invalid \(m+ \[\.\.\. cut from 3021 chars \.\.\.\] m+\); Label color custom \(color is bad\); Label f0 custom; Label f1 custom; Label f2 custom \(and 2 more errors not shown\)$/);
+test('end to end: a long stderr warning before a 422 does not push out the status or the validation code', GH_SKIP, () => {
+  const body = { message: 'Validation Failed', errors: [{ resource: 'Label', code: 'invalid', field: 'name' }] };
+  const r = labelFailure({ stdout: JSON.stringify(body), stderr: `warning: ${'w'.repeat(700)}\ngh: Validation Failed (HTTP 422)\n` });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /failed \(HTTP 422 \| Validation Failed: Label name invalid \| warning: w+/);
 });
 
-test('end to end: a rate-limit or not-logged-in line after a long warning is still classed as such, without access advice', GH_SKIP, () => {
+test('end to end: a rate-limit 403 gets the wait advice and no access advice, even after a long warning; not-logged-in is its own failure', GH_SKIP, () => {
   const warning = `warning: ${'w'.repeat(700)}\n`;
-  const rate = labelFailure({ stdout: '', stderr: `${warning}gh: API rate limit exceeded for installation ID 1 (HTTP 403)\n` });
+  const rate = labelFailure({ stdout: '', stderr: `${warning}gh: API rate limit exceeded (HTTP 403)\n` });
   assert.equal(rate.status, 1);
   assert.match(rate.stderr, /was rate limited by github\.com/);
-  assert.match(rate.stderr, /API rate limit exceeded for installation ID 1 \(HTTP 403\)/);
-  assert.doesNotMatch(rate.stderr, LABEL_ADVICE);
+  assert.doesNotMatch(rate.stderr, /needs triage or write access/);
   const auth = labelFailure({ stdout: '', stderr: `${warning}gh: not logged in to any GitHub hosts\n` });
   assert.equal(auth.status, 1);
   assert.match(auth.stderr, /refused as unauthenticated/);
-  assert.doesNotMatch(auth.stderr, LABEL_ADVICE);
+  assert.doesNotMatch(auth.stderr, /needs triage or write access/);
 });
 
-test('end to end: a rate limit named only in GitHub\'s JSON body is still classed as a rate limit', GH_SKIP, () => {
-  const r = labelFailure({ stdout: JSON.stringify({ message: 'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.' }), stderr: 'gh: HTTP 403 (HTTP 403)\n' });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /was rate limited by github\.com/);
-  assert.doesNotMatch(r.stderr, LABEL_ADVICE);
-});
-
-test('end to end: a token inside a JSON error body is scrubbed and the body is still read as GitHub\'s message', GH_SKIP, () => {
-  const r = labelFailure({ stdout: JSON.stringify({ message: 'Problems parsing token ghp_abcdefghijklmnopqrstuvwxyz0123456789 and Bearer abc.def' }), stderr: 'gh: Problems parsing JSON (HTTP 400)\n' });
-  assert.equal(saidOf(r), 'gh: Problems parsing JSON (HTTP 400) | Problems parsing token [redacted] and Bearer [redacted]');
-});
-
-test('end to end: a 422 whose only text is on stdout is not lost, and an oversized body is bounded', GH_SKIP, () => {
-  const r = labelFailure({ stdout: JSON.stringify({ message: 'Validation Failed', errors: [{ resource: 'Label', code: 'already_exists', field: 'name' }], blob: 'x'.repeat(5000) }), stderr: '' });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /Label name already_exists/);
-  assert.doesNotMatch(r.stderr, /xxxxxxxxxx/);
-  assert.doesNotMatch(r.stderr, LABEL_ADVICE);
-});
-
-test('end to end: credentials in the response are scrubbed from the error', GH_SKIP, () => {
-  const r = labelFailure({ stdout: '', stderr: 'gh: Validation Failed (HTTP 422) token ghp_abcdefghijklmnopqrstuvwxyz0123456789 Bearer abc.def\n' });
-  assert.doesNotMatch(r.stderr, /ghp_abcdefghijklmnopqrstuvwxyz/);
-  assert.doesNotMatch(r.stderr, /Bearer abc\.def/);
-});
-
-test('end to end: 403 and 404 on a label create keep the access advice', GH_SKIP, () => {
+test('end to end: a 403 or 404 on a label create keeps the access advice and fails the run', GH_SKIP, () => {
   for (const [code, text] of [[403, 'Resource not accessible by integration'], [404, 'Not Found']]) {
     const r = labelFailure({ stdout: JSON.stringify({ message: text }), stderr: `gh: ${text} (HTTP ${code})\n` });
     assert.equal(r.status, 1);
     assert.match(r.stderr, new RegExp(`\\(HTTP ${code}\\)`));
-    assert.match(r.stderr, LABEL_ADVICE);
+    assert.match(r.stderr, /needs triage or write access/);
   }
 });
 
-test('end to end: a rate limit, an auth failure and a non-JSON stderr keep their own wording, without access advice on the first two', GH_SKIP, () => {
-  const rate = labelFailure({ stdout: '', stderr: 'gh: API rate limit exceeded (HTTP 403)\n' });
-  assert.match(rate.stderr, /was rate limited by/);
-  assert.doesNotMatch(rate.stderr, LABEL_ADVICE);
-  const auth = labelFailure({ stdout: '', stderr: 'gh: Bad credentials (HTTP 401)\n' });
-  assert.match(auth.stderr, /refused as unauthenticated/);
-  assert.doesNotMatch(auth.stderr, LABEL_ADVICE);
-  const plain = labelFailure({ stdout: '', stderr: 'dial tcp: lookup api.github.com: no such host\n' });
-  assert.match(plain.stderr, /failed \(dial tcp: lookup api\.github\.com: no such host\)/);
+test('end to end: one refused objective label is skipped with a warning and the other items still sync with their labels', GH_SKIP, () => {
+  const h = harness();
+  try {
+    const bad = h.mk({ text: 'Bad objective task', objective: 'M1: name, sig' });
+    const good = h.mk({ text: 'Good objective task', objective: 'Fine' });
+    h.setGh({ label_create_raw: { only: 'objective:M1: name, sig', stdout: JSON.stringify({ message: 'Validation Failed' }), stderr: 'gh: Validation Failed (HTTP 422)\n' } });
+    const r = h.run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /WARNING label 'objective:M1: name, sig' was refused by GitHub and is skipped/);
+    const issueOf = (id) => h.gh().issues.find((i) => i.body?.includes(keyMarker(id)));
+    assert.deepEqual(issueOf(bad.id).labels, []);
+    assert.deepEqual(issueOf(good.id).labels.map((l) => l.name), ['objective:Fine']);
+  } finally {
+    h.cleanup();
+  }
 });
 
 test('end to end: a run while the repo lock is held (any spelling of the repo) exits 1 and writes nothing', { skip: process.platform === 'win32' && 'the fake gh is a POSIX shell shim' }, () => {

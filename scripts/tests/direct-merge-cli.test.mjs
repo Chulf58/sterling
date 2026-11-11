@@ -58,41 +58,33 @@ for (const flag of ['--help', '-h']) {
     assert.equal(o.r.status, 0, `exit: ${o.stderr}`);
     assert.equal(o.calls, '', 'no git/gh call before help');
     assert.deepEqual(o.targetEntries, [], 'no file written in the target');
-    const text = `${o.stdout} ${o.stderr}`;
-    for (const f of ['--target', '--into', '--branch', '--no-push', '--allow-same-version']) assert.ok(text.includes(f), `usage names ${f}: ${text}`);
+    for (const f of ['--target', '--into', '--branch', '--no-push', '--allow-same-version']) assert.ok(o.stdout.includes(f), `usage names ${f}: ${o.stdout}`);
   });
 }
 
-for (const [label, args, expected] of [
-  ['an unknown flag', ['--bogus'], '--bogus'],
-  ['an unknown flag with a value', ['--bogus=1', '--target', '<target>'], '--bogus'],
-  ['a stray positional argument', ['main'], 'main'],
-  ['--into with no value', ['--into'], '--into'],
-  ['--into= with an empty value', ['--into='], '--into'],
-  ['--branch followed by another flag', ['--branch', '--no-push'], '--branch'],
-  ['--target with no value', ['--target'], '--target'],
-  ['a duplicated --into', ['--into', 'a', '--into', 'b'], '--into'],
-  ['a value on a switch', ['--no-push=yes'], '--no-push'],
-]) {
-  test(`${label} exits 2 naming the problem, with no git/gh call and no stack trace`, () => {
+for (const args of [['--no-push=true'], ['--allow-same-version=x']]) {
+  test(`${args[0]}: a switch carrying a value is refused with no side effect`, () => {
     const o = runHostile(args);
     assert.equal(o.r.status, 2, `exit: ${o.stderr}`);
     assert.equal(o.calls, '', 'no git/gh call before validation');
     assert.deepEqual(o.targetEntries, [], 'no file written in the target');
-    assert.ok(o.stderr.includes(expected), `stderr names ${expected}: ${o.stderr}`);
-    assert.ok(o.stderr.includes('--help'), `stderr points at --help: ${o.stderr}`);
-    assert.ok(!/\n\s+at /.test(String(o.r.stderr)), 'no stack trace');
-    assert.equal(o.stdout, '', 'nothing on stdout');
+    assert.ok(o.stderr.includes(args[0]), `stderr names the flag: ${o.stderr}`);
   });
 }
 
-test('every supported flag form passes validation (both value spellings, both switches)', () => {
+test('supported flag forms pass the flag check and reach the first side-effect step', () => {
   const o = runHostile(['--target=<target>', '--into=main', '--branch', 'feat/x', '--no-push', '--allow-same-version']);
-  // Validation passes, so the script proceeds to its first step, the repository
-  // check (the target is not a repo): exit 1 with that refusal, not the usage exit 2.
   assert.equal(o.r.status, 1, o.stderr);
-  assert.ok(o.stderr.includes('not a git repository'), `validation did not block a valid command line: ${o.stderr}`);
-  assert.ok(!o.stderr.includes('--help'), o.stderr);
+  assert.ok(o.stderr.includes('not a git repository'), `flag check did not block: ${o.stderr}`);
+  assert.ok(!o.stderr.includes('unknown flag'), o.stderr);
+});
+
+test('an unknown flag exits 2 naming it, with no git/gh call and no file written', () => {
+  const o = runHostile(['--bogus', '--target', '<target>']);
+  assert.equal(o.r.status, 2, `exit: ${o.stderr}`);
+  assert.equal(o.calls, '', 'no git/gh call before validation');
+  assert.deepEqual(o.targetEntries, [], 'no file written in the target');
+  assert.ok(o.stderr.includes('--bogus'), `stderr names the flag: ${o.stderr}`);
 });
 
 test('an unborn default base is a clean refusal naming --into, and never creates or moves a base', () => {

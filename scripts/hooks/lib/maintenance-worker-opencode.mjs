@@ -118,12 +118,13 @@ export function buildOpencodeConfig({ mcpConfig, model = null }) {
 /** `opencode run` argv. --standalone runs a private server (no background
  *  service, no port); --auto approves what is not explicitly denied, so the
  *  run never waits on a prompt nobody will answer; --agent picks the worker
- *  agent, so the user's default agent's rules never apply. No --variant: OpenCode
+ *  agent, so the user's default agent's rules never apply. The prompt is not in
+ *  argv (one argument is capped near 128 KiB, spawn E2BIG): runWorker writes it to stdin. No --variant: OpenCode
  *  2.1.2's `run` refuses that flag (it prints its usage and exits 1, measured
  *  2026-10-24), so the Overpass role's effort travels in the child's environment
  *  instead (opencodeEnv, WORKER_EFFORT_ENV). */
-export function buildOpencodeArgs({ prompt, model = null }) {
-  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : []), prompt];
+export function buildOpencodeArgs({ model = null }) {
+  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : [])];
 }
 
 /** The child's environment variables carrying the Overpass maintenance-worker effort and

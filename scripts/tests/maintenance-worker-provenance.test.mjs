@@ -271,6 +271,7 @@ function fakeClaude(events) {
   return (cmd, args, opts) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
+    child.stdin = Object.assign(new EventEmitter(), { end() {} });
     child.kill = () => setImmediate(() => child.emit('close', null));
     setImmediate(() => {
       child.stdout.emit('data', events.map((e) => JSON.stringify(e)).join('\n') + '\n');

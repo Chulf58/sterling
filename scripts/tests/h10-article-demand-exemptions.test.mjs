@@ -11,7 +11,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -113,6 +113,28 @@ test('carried item: a carried path that an ignore glob or a generated_projection
     // Neither covered path is touched again: they can leave only as carried keys.
     encounter(dir, store, SRC, '2026-10-01T10:00:00.000Z');
     assert.deepEqual(demandedPaths(store), SRC, 'a path the policy now exempts is undischargeable demand and must leave the carried item');
+  } finally {
+    cleanup();
+  }
+});
+
+test('carried item: a carried path that became a link to a directory is dropped from the open item (leaf validation refuses to claim it)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    encounter(dir, store, [...SRC, 'src/link'], '2026-10-01T09:00:00.000Z');
+    assert.deepEqual(demandedPaths(store), [...SRC, 'src/link'], 'baseline: the plain file at src/link is demanded');
+
+    rmSync(join(dir, 'src', 'link'));
+    mkdirSync(join(dir, 'realdir'));
+    symlinkSync('../realdir', join(dir, 'src', 'link'));
+    // Reach the open item through the link itself; touch() cannot write through it.
+    const at = '2026-10-01T10:00:00.000Z';
+    writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'src/link', at }]));
+    capture(store, at);
+    const first = stop(dir);
+    const last = first.code === 2 ? stop(dir) : first;
+    assert.equal(last.code, 0, `the session releases: ${last.stderr}`);
+    assert.deepEqual(demandedPaths(store), SRC, 'a directory link can never be claimed, so it must leave the carried item');
   } finally {
     cleanup();
   }
