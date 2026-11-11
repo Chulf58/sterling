@@ -8826,6 +8826,16 @@ function resolveDebtOwner(link, get, aliases) {
 
 // packages/store/dist/index.js
 var storeDriverFactory;
+function classifyClaimPath(repoRoot, path) {
+  try {
+    return statSync3(join5(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+  } catch (err) {
+    const code = err?.code;
+    if (code === "ENOENT")
+      return "absent";
+    return { kind: "unverifiable", errno: code ?? String(err) };
+  }
+}
 var StoreRowDecodeError = class extends Error {
   op;
   constructor(op, cause) {
@@ -16053,7 +16063,8 @@ try {
     return seen;
   };
   const exemptFromDemand = demandExemption(config, generatedProjections);
-  let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned);
+  const unclaimableDirectory = (p) => classifyClaimPath(input.cwd, p) === "real_directory";
+  let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned).filter((p) => !unclaimableDirectory(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
     if (ignored === null) skipRow("article-demand-gitignore", "no_git");
@@ -16101,7 +16112,7 @@ try {
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)))
+      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)) || unclaimableDirectory(p))
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
