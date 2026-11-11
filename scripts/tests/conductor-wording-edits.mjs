@@ -536,6 +536,27 @@ export const LIBRARIAN_WORDING_EDITS = [
     before: '(`board_add`/`board_update`/`board_remove`, `maintenance_remove`)',
     after: '(`board_add`/`board_update`/`board_edit`/`board_remove`, `maintenance_remove`)',
   },
+  {
+    commit: 'board 15cfc7fd',
+    date: '2026-11-11',
+    reason: 'rubric item 1 forbade every retry without the claim and every maintenance_remove around a refusal, which contradicted skills/drain/SKILL.md; decision domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired rules that a conductor-authorized, refusal-named cross-store refusal closes in two steps (write without resolves, verify the lane paid, maintenance_remove), and article_missing on a domain target stays refused; maintenance_query re-checks only reconcile_needed, so payment is proved by a conductor-supplied, lane-specific recipe with a narrow read-back of the target, never by the query',
+    before: "never `maintenance_remove` the item around the refusal to force it closed. **Article ids",
+    after: "never `maintenance_remove` the item around the refusal to force it closed. ONE exception to the refusal stop, only when the conductor's work order authorizes it AND the refusal itself names it: a cross-store refusal, where the target record is held by a domain store so no write can carry `resolves` (maintenance items are project-local), on a `refresh_reference`, `stale_research`, `wire_in_dormant` or `state_review` item, or on a `reconcile_needed` item whose refusal names the guarded two-step. Then perform the exact conductor-drafted write WITHOUT `resolves`, verify the lane is PAID with the lane-specific verification recipe the conductor supplies WITH the work order, and only then `maintenance_remove` the item by its full id: write first, close second. The recipe names positive evidence fixed in advance: a narrow read-back of the target record you just wrote (one `knowledge_get` by its id), compared mechanically against the draft (each drafted value is what landed, and any version, timestamp or state the recipe names matches), plus any source evidence the conductor already established. Running the recipe is never your own research or a new judgment. `maintenance_query` is NOT a payment oracle: use it only to confirm that the item's identity, lane and target match the work order and that it is still open. On these lanes it shows the same debt before and after the write, so neither the query, the write merely succeeding nor the item's artifact citations prove the lane paid. A missing recipe or evidence, a read-back that does not match the draft, an unexpected target, or an item that changed since the work order means STOP and report; never infer payment yourself. An `article_missing` item whose target is a domain store is always refused, and every other refusal stays STOP-and-report. **Article ids",
+  },
+  {
+    commit: 'board 15cfc7fd',
+    date: '2026-11-11',
+    reason: 'the Wrong move warning exempts only that conductor-authorized two-step, so the general warning against closing around a refusal stays clear',
+    before: "or calling `maintenance_remove(\"m-441\")` to force it closed after a refusal — both leave",
+    after: "or calling `maintenance_remove(\"m-441\")` to force it closed after a refusal other than the conductor-authorized cross-store two-step above — both leave",
+  },
+  {
+    commit: 'board 15cfc7fd',
+    date: '2026-11-11',
+    reason: 'the lean-context rule forbade re-fetching a just-written article, which would block the narrow read-back the cross-store two-step\'s verification recipe needs; only that read-back is admitted',
+    before: 'and do not re-fetch articles you just wrote.',
+    after: "and do not re-fetch articles you just wrote, except the one narrow read-back a cross-store two-step's verification recipe calls for (item 1): that target record only, checked against the recipe, never a wider context fetch.",
+  },
 ];
 
 const occurrences = (text, needle) => text.split(needle).length - 1;
