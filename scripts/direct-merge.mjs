@@ -31,11 +31,8 @@ import { workPreflight, shipAsPr, openPrsForHead, pushWithWindowsRetry, localBra
 // block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 
-// COMMAND LINE FIRST: --help and every invalid flag are decided here, before any
-// config read, git call or gh call, so a mistyped or help invocation never runs
-// part of a merge. Value flags take `--flag value` or `--flag=value`; the two
-// switches take no value. The parser is arg() (exact tokens, duplicates and
-// flag-shaped values refused), the same one every other sanctioned CLI uses.
+// --help and unknown flags are decided before any config read, git call or gh
+// call, so a mistyped invocation never runs part of a merge (as report-issue.mjs does).
 const USAGE =
   'Usage: node direct-merge.mjs [--target <dir>] [--into <branch>] [--branch <branch>] [--no-push] [--allow-same-version]\n' +
   '  --target <dir>        project directory (default: the current directory)\n' +
@@ -44,41 +41,18 @@ const USAGE =
   '  --no-push             hobby only: merge locally without pushing the base (refused in work mode)\n' +
   '  --allow-same-version  accept changed files without a version bump\n' +
   '  -h, --help            print this usage and exit 0';
-const VALUE_FLAGS = ['--target', '--into', '--branch'];
-const SWITCH_FLAGS = ['--no-push', '--allow-same-version'];
-function usageRefusal(problem) {
-  console.error(`direct-merge: ${problem}\nRun with --help for usage. Nothing was run.`);
-  process.exit(2);
-}
-(function validateCommandLine(argv) {
+(function checkFlags(argv) {
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(USAGE);
     process.exit(0);
   }
-  for (const flag of VALUE_FLAGS) {
-    let value;
-    try {
-      value = arg(flag, argv);
-    } catch (e) {
-      usageRefusal(e.message);
-    }
-    if (argv.includes(flag) && value === undefined) usageRefusal(`${flag} needs a value`);
-    if (value === '') usageRefusal(`${flag} needs a non-empty value`);
-  }
-  const valueOf = new Set();
-  argv.forEach((tok, i) => {
-    if (VALUE_FLAGS.includes(tok)) valueOf.add(i + 1);
-  });
-  argv.forEach((tok, i) => {
-    if (valueOf.has(i)) return;
-    const name = tok.split('=')[0];
-    if (VALUE_FLAGS.includes(name)) return;
-    if (SWITCH_FLAGS.includes(tok)) return;
-    if (SWITCH_FLAGS.includes(name)) usageRefusal(`${name} takes no value`);
-    usageRefusal(`unknown argument '${tok}'`);
-  });
-  for (const flag of SWITCH_FLAGS) {
-    if (argv.filter((t) => t === flag).length > 1) usageRefusal(`${flag}: given more than once`);
+  const values = ['--target', '--into', '--branch'];
+  const switches = ['--no-push', '--allow-same-version'];
+  // Switches are honoured only as exact tokens, so `--no-push=true` must not pass as known.
+  const bad = argv.find((tok) => tok.startsWith('-') && !switches.includes(tok) && !values.includes(tok.split('=')[0]));
+  if (bad) {
+    console.error(`direct-merge: unknown flag ${bad}\n${USAGE}`);
+    process.exit(2);
   }
 })(process.argv.slice(2));
 

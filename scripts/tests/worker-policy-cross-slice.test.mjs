@@ -266,6 +266,7 @@ test('a partial article_missing join through a real worker server leaves the ite
     const child = () => {
       const c = new EventEmitter();
       c.stdout = new EventEmitter();
+      c.stdin = Object.assign(new EventEmitter(), { end() {} });
       setImmediate(() => {
         c.stdout.emit('data', events.map((e) => JSON.stringify(e)).join('\n') + '\n');
         c.emit('close', 0);

@@ -6600,82 +6600,38 @@ function describe(action) {
 }
 var GhError = class extends Error {
   name = "GhError";
-  /** `details.kind` is 'rate_limit', 'auth' or 'http'; `details.status` is the HTTP status when gh printed one. */
-  constructor(message, details = {}) {
+  constructor(message, status = null) {
     super(message);
-    Object.assign(this, details);
+    this.status = status;
   }
 };
 var DETAIL_LIMIT = 600;
-var ERRORS_SHOWN = 5;
 var scrub = (s2) => s2.replace(/\b(?:gh[pousr]_|github_pat_)\w+/g, "[redacted]").replace(/\b(Bearer|token)\s+\S+/gi, "$1 [redacted]");
-var flat = (s2) => s2.trim().replace(/\s*\n\s*/g, " | ");
-function streams(r) {
-  const stderr = (r.stderr ?? "").trim();
-  const stdout = (r.stdout ?? "").trim();
-  let body = null;
-  try {
-    body = stdout ? JSON.parse(stdout) : null;
-  } catch {
-    body = null;
-  }
-  return { stderr, stdout, body: body && typeof body === "object" && typeof body.message === "string" ? body : null };
-}
-function failureCause(r) {
-  const { stderr, stdout, body } = streams(r);
-  return [stderr, body ? body.message : stdout, r.error?.message ?? ""].join("\n");
-}
 function errorEntry(e) {
   if (typeof e === "string") return e;
   const where = [e?.resource, e?.field, e?.code].filter((x) => typeof x === "string").join(" ");
   return typeof e?.message === "string" ? `${where} (${e.message})`.trim() : where;
 }
-function fairShares(lengths, room) {
-  const shares = [];
-  let left = Math.max(0, room);
-  const order = lengths.map((_, i) => i).sort((a, b) => lengths[a] - lengths[b]);
-  order.forEach((i, k) => {
-    shares[i] = Math.min(lengths[i], Math.floor(left / (order.length - k)));
-    left -= shares[i];
-  });
-  return shares;
+function errorBody(stdout) {
+  try {
+    const body = JSON.parse(stdout);
+    return body && typeof body === "object" && typeof body.message === "string" ? body : null;
+  } catch {
+    return null;
+  }
 }
-function clip(s2, n) {
-  if (s2.length <= n) return s2;
-  const note = ` [... cut from ${s2.length} chars ...] `;
-  const keep = n - note.length;
-  if (keep <= 0) return s2.slice(0, n);
-  const head = Math.ceil(keep / 2);
-  return `${s2.slice(0, head)}${note}${s2.slice(s2.length - (keep - head))}`;
-}
+var detailOf = (r) => {
+  const stderr = (r.stderr ?? "").trim();
+  const stdout = (r.stdout ?? "").trim();
+  const body = stdout ? errorBody(stdout) : null;
+  const status = httpStatus(r);
+  const out = body ? `${body.message}${Array.isArray(body.errors) && body.errors.length ? `: ${body.errors.map(errorEntry).join("; ")}` : ""}` : stdout;
+  const text = scrub([status ? `HTTP ${status}` : "", out, stderr, r.error?.message ?? ""].filter(Boolean).join(" | ").replace(/\s*\n\s*/g, " | "));
+  return text || `exit ${r.status}`;
+};
 var oneLine = (r) => {
-  const { stderr, stdout, body } = streams(r);
-  const parts = [];
-  const field = (text) => parts.push({ text: flat(scrub(text)) });
-  const next = () => parts.length && parts.push(" | ");
-  if (stderr) field(stderr);
-  if (body) {
-    next();
-    field(body.message);
-    const errors = Array.isArray(body.errors) ? body.errors : [];
-    errors.slice(0, ERRORS_SHOWN).forEach((e, i) => {
-      parts.push(i === 0 ? ": " : "; ");
-      field(errorEntry(e));
-    });
-    if (errors.length > ERRORS_SHOWN) parts.push(` (and ${errors.length - ERRORS_SHOWN} more errors not shown)`);
-  } else if (stdout) {
-    next();
-    field(stdout);
-  }
-  if (r.error?.message) {
-    next();
-    field(String(r.error.message));
-  }
-  if (!parts.length) return `exit ${r.status}`;
-  const fields = parts.filter((p) => typeof p !== "string");
-  const fixed = parts.reduce((n, p) => n + (typeof p === "string" ? p.length : 0), 0);
-  const shares = fairShares(fields.map((f) => f.text.length), DETAIL_LIMIT - fixed);
-  return parts.map((p) => typeof p === "string" ? p : clip(p.text, shares[fields.indexOf(p)])).join("");
+  const text = detailOf(r);
+  return text.length > DETAIL_LIMIT ? `${text.slice(0, DETAIL_LIMIT)}\u2026` : text;
 };
 function httpStatus(r) {
   const m = `${r.stderr ?? ""}
@@ -6701,14 +6657,14 @@ function makeGh(host, ghPath = resolveGhPath()) {
       if (r.error || r.status !== 0) {
         const status = r.error ? null : httpStatus(r);
         const said = oneLine(r);
-        const cause = failureCause(r);
+        const cause = detailOf(r);
         if (status === 429 || status === 403 && /rate limit|abuse|secondary/i.test(cause)) {
-          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was rate limited by ${host} (${said}). Nothing is retried; run again later. Work done before this call stays done, and a rerun picks up from it.`, { kind: "rate_limit", status });
+          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was rate limited by ${host} (${said}). Nothing is retried; run again later. Work done before this call stays done, and a rerun picks up from it.`);
         }
         if (status === 401 || /bad credentials|authentication|not logged in/i.test(cause)) {
-          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was refused as unauthenticated by ${host} (${said}); run gh auth login --hostname ${host}. On WSL with a Windows gh.exe, a GH_TOKEN set in WSL reaches it only through WSLENV.`, { kind: "auth", status });
+          throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} was refused as unauthenticated by ${host} (${said}); run gh auth login --hostname ${host}. On WSL with a Windows gh.exe, a GH_TOKEN set in WSL reaches it only through WSLENV.`);
         }
-        throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} failed (${said})`, { kind: "http", status });
+        throw new GhError(`gh at ${ghPath}: ${method} ${apiPath} failed (${said})`, status);
       }
       if (!r.stdout.trim()) return null;
       try {
@@ -6742,7 +6698,10 @@ function readInventory(gh, ownerRepo, snapshot, project, excludePrefixes = []) {
   }
   return { issues, labels, receipts };
 }
-function execute(actions, gh, ownerRepo, log) {
+function execute(actions, gh, ownerRepo, log, warn = () => {
+}) {
+  const refused = /* @__PURE__ */ new Set();
+  const usable = (labels) => labels.filter((l) => !refused.has(l));
   for (const a of actions) {
     log(describe(a));
     switch (a.kind) {
@@ -6750,8 +6709,13 @@ function execute(actions, gh, ownerRepo, log) {
         try {
           gh.api("POST", `repos/${ownerRepo}/labels`, { name: a.name, color: a.color, description: a.description });
         } catch (e) {
-          const advice = e.kind === "http" && (e.status === 403 || e.status === 404) ? `The label '${a.name}' is missing and could not be created; the account needs triage or write access to ${ownerRepo}, or a maintainer creates the label by hand.` : e.kind === "http" && e.status === 422 ? `The label '${a.name}' could not be created: GitHub refused the request with HTTP 422, which is not an access refusal; the reason is only what GitHub said above.` : `The label '${a.name}' is missing and could not be created.`;
-          throw new GhError(`${e.message}. ${advice}`, { kind: e.kind, status: e.status });
+          if (e.status === 422) {
+            refused.add(a.name);
+            warn(`label '${a.name}' was refused by GitHub and is skipped: ${e.message}`);
+            break;
+          }
+          const advice = e.status === 403 || e.status === 404 ? ` The label '${a.name}' is missing and could not be created; the account needs triage or write access to ${ownerRepo}, or a maintainer creates the label by hand.` : "";
+          throw new GhError(`${e.message}.${advice}`, e.status);
         }
         break;
       case "comment":
@@ -6760,14 +6724,17 @@ function execute(actions, gh, ownerRepo, log) {
       case "remove_label":
         gh.api("DELETE", `repos/${ownerRepo}/issues/${a.number}/labels/${encodeURIComponent(a.label)}`);
         break;
-      case "add_labels":
-        gh.api("POST", `repos/${ownerRepo}/issues/${a.number}/labels`, { labels: a.labels });
+      case "add_labels": {
+        const labels = usable(a.labels);
+        if (labels.length) gh.api("POST", `repos/${ownerRepo}/issues/${a.number}/labels`, { labels });
         break;
+      }
       case "close":
         gh.api("PATCH", `repos/${ownerRepo}/issues/${a.number}`, { state: "closed", state_reason: a.state_reason });
         break;
       case "create": {
-        const made = gh.api("POST", `repos/${ownerRepo}/issues`, { title: a.title, body: a.body, ...a.labels.length ? { labels: a.labels } : {} });
+        const labels = usable(a.labels);
+        const made = gh.api("POST", `repos/${ownerRepo}/issues`, { title: a.title, body: a.body, ...labels.length ? { labels } : {} });
         const number = made?.number;
         if (!Number.isInteger(number)) throw new GhError(`gh at ${gh.path}: creating the issue for board:${a.key} returned no issue number`);
         log(`  created #${number}`);
@@ -6904,7 +6871,8 @@ ${USAGE}
     const log = (line) => process.stdout.write(`${args.dryRun ? "would " : ""}${line}
 `);
     if (args.dryRun) result.actions.forEach((a) => log(describe(a)));
-    else execute(result.actions, gh, ownerRepo, log);
+    else execute(result.actions, gh, ownerRepo, log, (w) => process.stderr.write(`sync-board-issues: WARNING ${w}
+`));
     const counts = {};
     for (const a of result.actions) counts[a.kind] = (counts[a.kind] ?? 0) + 1;
     const summary = Object.keys(counts).length ? Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(", ") : "nothing to do";

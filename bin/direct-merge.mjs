@@ -14844,42 +14844,18 @@ function attestationDisclosureLines({ tool, result, declaredGlobs, subject, drop
 
 // scripts/direct-merge.mjs
 var USAGE = "Usage: node direct-merge.mjs [--target <dir>] [--into <branch>] [--branch <branch>] [--no-push] [--allow-same-version]\n  --target <dir>        project directory (default: the current directory)\n  --into <branch>       base branch to merge into, or the PR base in work mode (default: the default branch)\n  --branch <branch>     must be the checked-out branch (default: the checked-out branch)\n  --no-push             hobby only: merge locally without pushing the base (refused in work mode)\n  --allow-same-version  accept changed files without a version bump\n  -h, --help            print this usage and exit 0";
-var VALUE_FLAGS = ["--target", "--into", "--branch"];
-var SWITCH_FLAGS = ["--no-push", "--allow-same-version"];
-function usageRefusal(problem) {
-  console.error(`direct-merge: ${problem}
-Run with --help for usage. Nothing was run.`);
-  process.exit(2);
-}
-(function validateCommandLine(argv) {
+(function checkFlags(argv) {
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(USAGE);
     process.exit(0);
   }
-  for (const flag of VALUE_FLAGS) {
-    let value;
-    try {
-      value = arg(flag, argv);
-    } catch (e) {
-      usageRefusal(e.message);
-    }
-    if (argv.includes(flag) && value === void 0) usageRefusal(`${flag} needs a value`);
-    if (value === "") usageRefusal(`${flag} needs a non-empty value`);
-  }
-  const valueOf = /* @__PURE__ */ new Set();
-  argv.forEach((tok, i) => {
-    if (VALUE_FLAGS.includes(tok)) valueOf.add(i + 1);
-  });
-  argv.forEach((tok, i) => {
-    if (valueOf.has(i)) return;
-    const name = tok.split("=")[0];
-    if (VALUE_FLAGS.includes(name)) return;
-    if (SWITCH_FLAGS.includes(tok)) return;
-    if (SWITCH_FLAGS.includes(name)) usageRefusal(`${name} takes no value`);
-    usageRefusal(`unknown argument '${tok}'`);
-  });
-  for (const flag of SWITCH_FLAGS) {
-    if (argv.filter((t) => t === flag).length > 1) usageRefusal(`${flag}: given more than once`);
+  const values = ["--target", "--into", "--branch"];
+  const switches = ["--no-push", "--allow-same-version"];
+  const bad = argv.find((tok) => tok.startsWith("-") && !switches.includes(tok) && !values.includes(tok.split("=")[0]));
+  if (bad) {
+    console.error(`direct-merge: unknown flag ${bad}
+${USAGE}`);
+    process.exit(2);
   }
 })(process.argv.slice(2));
 var target = arg("--target") ?? process.cwd();
