@@ -288,9 +288,9 @@ test('builds the probed claude argv: Sonnet 5.5, medium effort, the worker agent
       mcpServers: { sterling: { command: '/usr/bin/node', args: ['/clone/packages/mcp-server/dist/main.js', '--store', `${fx.project}/.sterling/sterling.db`] } },
     }, "the plugin's own wiring, with ${CLAUDE_PROJECT_DIR} bound to THIS project's store");
     const agentDefinition = workerAgentDefinition(fx.plugin);
-    const args = buildWorkerArgs({ prompt: 'P', mcpConfig, agentDefinition });
+    const args = buildWorkerArgs({ mcpConfig, agentDefinition });
     assert.deepEqual(args, [
-      '-p', 'P',
+      '-p',
       '--model', 'claude-sonnet-5-5',
       '--effort', 'medium',
       '--agents', agentDefinition,
@@ -455,11 +455,13 @@ function fakeClaude(events, { code = 0, hang = false } = {}) {
   const fn = (cmd, args, opts) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
+    const call = { cmd, args, opts, child, stdin: '', stdinEnded: false };
+    child.stdin = Object.assign(new EventEmitter(), { end: (d) => ((call.stdin += d ?? ''), (call.stdinEnded = true)) });
     child.kill = (sig) => {
       child.killed = sig;
       setImmediate(() => child.emit('close', null));
     };
-    calls.push({ cmd, args, opts, child });
+    calls.push(call);
     setImmediate(() => {
       const text = events.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).join('\n') + '\n';
       child.stdout.emit('data', text.slice(0, 40)); // a line split across chunks
@@ -516,7 +518,11 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
     const code = await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, trigger: 'stop', token: 'tok', budgetUsd: 2, now: () => NOW, ...quiet });
     assert.equal(code, 0);
     assert.equal(sp.calls[0].cmd, 'claude');
-    assert.ok(sp.calls[0].args[1].startsWith('PROMPT BODY\n'), 'the shipped prompt file leads the -p argument');
+    assert.ok(sp.calls[0].stdin.startsWith('PROMPT BODY\n'), 'the shipped prompt file leads the prompt written to stdin');
+    assert.ok(sp.calls[0].stdinEnded, 'stdin is ended');
+    assert.ok(!sp.calls[0].args.some((a) => a.includes('PROMPT BODY')), 'the prompt is not in argv');
+    assert.equal(sp.calls[0].args[0], '-p');
+    assert.equal(sp.calls[0].opts.stdio[0], 'pipe');
     const lines = readJournal(fx);
     assert.deepEqual(lines.map((l) => l.kind), ['tool_call', 'tool_call', 'verdict', 'verdict', 'run_summary']);
     assert.deepEqual([lines[0].item_id, lines[0].is_error, lines[0].result], ['11111111-1111-1111-1111-111111111111', false, removedText('11111111-1111-1111-1111-111111111111')]);
@@ -640,7 +646,7 @@ test('runWorker --dry-run prints the argv and spawns nothing', async () => {
     const out = JSON.parse(printed[0]);
     assert.equal(out.dry_run, true);
     assert.equal(out.command, 'claude');
-    assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-sonnet-5-5', '--effort', 'medium']);
+    assert.deepEqual(out.argv.slice(1, 5), ['--model', 'claude-sonnet-5-5', '--effort', 'medium']);
     assert.equal(existsSync(fx.paths.lock), false);
   } finally {
     fx.cleanup();
@@ -801,7 +807,7 @@ test('[E2BIG] a large historical journal of items gone from the queue never grow
       return child.fn(cmd, args, opts);
     };
     assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, ...quiet }), 0);
-    const prompt = child.calls[0].args[1];
+    const prompt = child.calls[0].stdin;
     assert.ok(Buffer.byteLength(prompt) < 131072);
     assert.doesNotMatch(prompt, /gone-/, 'history of items outside the batch is not listed');
     assert.match(prompt, /- live needs_conductor file_keys \["src\/old\.mjs"\]/, 'a batch item whose verdict stands still lists, with the keys it was judged on');
@@ -824,7 +830,7 @@ test('[PARTIAL 2] the child gets ONLY the eligible (clean, unjudged) item ids; t
 
     const child = fakeClaude([resultEvent({})]);
     assert.equal(await runWorker({ itemProvenance: INTEGRATED, root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, ...quiet }), 0);
-    const prompt = child.calls[0].args[1];
+    const prompt = child.calls[0].stdin;
     const section = prompt.slice(prompt.indexOf('ELIGIBLE'), prompt.indexOf('ALREADY JUDGED'));
     assert.match(section, /- clean lane reconcile_needed target none file_keys/);
     assert.doesNotMatch(section, /- dirty |- judged /, 'dirty and judged items are not offered');
@@ -1417,7 +1423,7 @@ const ITEM_A = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: LINK, slug: '
 const lastRun = (fx) => JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
 
 test('[line-ref] the argv allows knowledge_line_ref_fix under both mounted names and neither is denied', () => {
-  const args = buildWorkerArgs({ prompt: 'P', mcpConfig: '{}', agentDefinition: '{}' });
+  const args = buildWorkerArgs({ mcpConfig: '{}', agentDefinition: '{}' });
   const allowed = args[args.indexOf('--allowedTools') + 1].split(',');
   const denied = args[args.indexOf('--disallowedTools') + 1].split(',');
   for (const name of ['mcp__sterling__knowledge_line_ref_fix', 'mcp__plugin_sterling_sterling__knowledge_line_ref_fix']) {
@@ -1636,7 +1642,7 @@ test('[#56 policy] the launcher writes the batch policy into eligible.json (the 
     assert.deepEqual(server.args.slice(-4), ['--worker-policy', fx.paths.eligible, '--worker-token', lockToken], 'policy path and token reach the server as argv');
     assert.ok(server.args[server.args.length - 3].startsWith('/'), 'the policy path is absolute');
     assert.ok(!Object.keys(child.calls[0].opts.env).some((k) => /POLICY/.test(k)), 'never as ambient env');
-    assert.match(args[1], /- s1 lane stale_research target f-s1 file_keys \[\]/);
+    assert.match(child.calls[0].stdin, /- s1 lane stale_research target f-s1 file_keys \[\]/);
     assert.throws(() => resolveMcpConfig(fx.plugin, fx.project, { path: 'relative/eligible.json', token: 't' }), /absolute/);
     assert.throws(() => resolveMcpConfig(fx.plugin, fx.project, { path: fx.paths.eligible, token: '' }), /token/);
   } finally {
@@ -2110,7 +2116,7 @@ test('[#70 web tools] the shipped librarian template yields a worker agent body 
   } finally {
     fx.cleanup();
   }
-  assert.throws(() => buildWorkerArgs({ prompt: 'P', mcpConfig: '{}' }), /needs the worker agent definition/);
+  assert.throws(() => buildWorkerArgs({ mcpConfig: '{}' }), /needs the worker agent definition/);
 });
 
 const ISSUE_70_REASON = 'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written';
@@ -2357,7 +2363,7 @@ test('[diffs] runWorker computes the DIFFS section from eligible.json and hands 
     const items = [{ id: 'R', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a', baselines: { 'src/a.mjs': 'h-a' } }];
     const child = fakeClaude([resultEvent({ result: '{"verdict":"none","reason":"no eligible item"}' })]);
     await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT, trigger: 'stop' });
-    const prompt = child.calls[0].args[1];
+    const prompt = child.calls[0].stdin;
     assert.match(prompt, /\nDIFFS \(from the runner[^\n]*\n### R\n--- src\/a\.mjs: no diff available: no commit touches it\n/);
   } finally {
     fx.cleanup();

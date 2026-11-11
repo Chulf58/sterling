@@ -13196,8 +13196,8 @@ function buildOpencodeConfig({ mcpConfig, model = null }) {
     ...model ? { model } : {}
   };
 }
-function buildOpencodeArgs({ prompt, model = null }) {
-  return ["run", "--standalone", "--format", "json", "--auto", "--agent", OPENCODE_WORKER_AGENT, ...model ? ["--model", model] : [], prompt];
+function buildOpencodeArgs({ model = null }) {
+  return ["run", "--standalone", "--format", "json", "--auto", "--agent", OPENCODE_WORKER_AGENT, ...model ? ["--model", model] : []];
 }
 var WORKER_EFFORT_ENV = "STERLING_MAINTENANCE_WORKER_EFFORT";
 var WORKER_EFFORT_MODEL_ENV = "STERLING_MAINTENANCE_WORKER_EFFORT_MODEL";
@@ -13908,11 +13908,10 @@ ${judged.join("\n")}
 `;
   return prompt;
 }
-function buildWorkerArgs({ prompt, mcpConfig, agentDefinition, budgetUsd: budgetUsd2 = WORKER_RUN_BUDGET_USD }) {
+function buildWorkerArgs({ mcpConfig, agentDefinition, budgetUsd: budgetUsd2 = WORKER_RUN_BUDGET_USD }) {
   if (typeof agentDefinition !== "string" || !agentDefinition) throw new Error("buildWorkerArgs needs the worker agent definition (workerAgentDefinition)");
   return [
     "-p",
-    prompt,
     "--model",
     WORKER_MODEL,
     "--effort",
@@ -14428,10 +14427,10 @@ async function runWorker(opts) {
       if (typeof model !== "string" || !model.trim()) throw new Error(OPENCODE_MODEL_UNSET);
       const config = buildOpencodeConfig({ mcpConfig, model });
       const effort = opts.opencodeVariant ?? eligible?.opencode_variant ?? null;
-      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model }), env: opencodeEnv({ root: opts.root, config, effort }) };
+      return { host, bin: ocBin, args: buildOpencodeArgs({ model }), input: opencodePrompt(prompt), env: opencodeEnv({ root: opts.root, config, effort }) };
     }
     if (host !== "claude") throw new Error(`unknown runner host '${host}'`);
-    return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd2 : rawBudget }), env: {} };
+    return { host, bin, input: prompt, args: buildWorkerArgs({ mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd2 : rawBudget }), env: {} };
   };
   if (opts.dryRun) {
     let run;
@@ -14441,7 +14440,7 @@ async function runWorker(opts) {
       (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, refused: e?.message ?? String(e) }, null, 2));
       return 1;
     }
-    (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, host: run.host, command: run.bin, argv: run.args, ...run.host === "opencode" ? { env: run.env } : {} }, null, 2));
+    (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, host: run.host, command: run.bin, argv: run.args, stdin: run.input, ...run.host === "opencode" ? { env: run.env } : {} }, null, 2));
     return 0;
   }
   const token2 = opts.token ?? randomUUID4();
@@ -14561,17 +14560,27 @@ async function runWorker(opts) {
       const { code, spawnError, timedOut } = await new Promise((resolve7) => {
         let child;
         try {
-          child = opts.spawn(run.bin, run.args, { cwd: opts.root, stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, [WORKER_ENV_FLAG]: "1", CLAUDE_PROJECT_DIR: opts.root, ...run.env } });
+          child = opts.spawn(run.bin, run.args, { cwd: opts.root, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [WORKER_ENV_FLAG]: "1", CLAUDE_PROJECT_DIR: opts.root, ...run.env } });
         } catch (e) {
           resolve7({ code: null, spawnError: e, timedOut: false });
           return;
         }
+        const killGraceMs = opts.killGraceMs ?? 1e4;
         let timedOut2 = false;
+        let stdinError = null;
         let killTimer;
+        child.stdin.on("error", (e) => {
+          if (stdinError) return;
+          stdinError = new Error(`could not write the prompt to stdin: ${e.message ?? e}`);
+          child.kill?.("SIGTERM");
+          killTimer = setTimeout(() => child.kill?.("SIGKILL"), killGraceMs);
+          killTimer.unref?.();
+        });
+        child.stdin.end(run.input);
         const timer = setTimeout(() => {
           timedOut2 = true;
           child.kill?.("SIGTERM");
-          killTimer = setTimeout(() => child.kill?.("SIGKILL"), 1e4);
+          killTimer = setTimeout(() => child.kill?.("SIGKILL"), killGraceMs);
           killTimer.unref?.();
         }, timeoutMs2);
         child.stdout.on("data", (d) => {
@@ -14593,12 +14602,12 @@ async function runWorker(opts) {
         child.on("close", (c) => {
           clearTimeout(timer);
           clearTimeout(killTimer);
-          resolve7({ code: c, spawnError: null, timedOut: timedOut2 });
+          resolve7({ code: c, spawnError: stdinError, timedOut: timedOut2 });
         });
       });
       const { result, removes, closedOk, lineRefFixes, lineRefFixesOk, writes, mcpStatus, sterlingOk } = stream.end();
       if (spawnError) {
-        record({ ok: false, at: iso(), error: `could not start ${run.bin}: ${spawnError.message ?? spawnError}` });
+        record({ ok: false, at: iso(), error: `could not start ${run.bin}: ${spawnError.message ?? spawnError} (argv ${run.args.reduce((n, a) => n + Buffer.byteLength(a), 0)} bytes, prompt ${Buffer.byteLength(run.input)} bytes on stdin)` });
         return 1;
       }
       const verdicts = parseVerdicts(result?.result);
