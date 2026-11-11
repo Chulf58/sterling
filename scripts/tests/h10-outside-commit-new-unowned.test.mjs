@@ -20,7 +20,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -205,6 +205,47 @@ test('FALLBACK: a first-ever session (no settled snapshot yet) falls back to HEA
     // requires a SECOND Stop to observe the file as a git candidate.
     assert.equal(r.code, 0, 'FALLBACK-BROKEN SHAPE if this is not 0: a first-ever session (no settled snapshot) must behave exactly as it did before this fix — no crash, no false demand');
     assert.doesNotMatch(out(r), /article/i, 'no article demand on the very first Stop of a project — matches pre-fix first-run behavior');
+  } finally {
+    cleanup();
+  }
+});
+
+test('SYMLINK TO DIRECTORY: a tracked mode-120000 link to a directory is never demanded (the tool layer refuses a directory claim), while a symlink to a file and a plain file still are', () => {
+  const { dir, store, g, cleanup } = makeGitProject();
+  try {
+    const originalOwned = 'export const owned = 1;\n';
+    writeFile(dir, 'src/owned.mjs', originalOwned);
+    writeFile(dir, 'realdir/inner.mjs', 'export const inner = 1;\n');
+    commitAll(g, 'initial');
+    articleWithBaseline(store, 'feat-owned', [
+      { path: 'src/owned.mjs', content: originalOwned },
+      { path: 'realdir/inner.mjs', content: 'export const inner = 1;\n' },
+    ]);
+    assert.equal(runSessionStart(dir, 'startup').code, 0, 'S1 H1 SessionStart must not fail');
+    assert.equal(runStop(dir).code, 0, 'S1 H10 Stop seeds the settled snapshot');
+
+    // Outside commit: a link to a directory, a link to a file, a plain file.
+    symlinkSync('../realdir', join(dir, 'src', 'dirlink'));
+    symlinkSync('owned.mjs', join(dir, 'src', 'filelink.mjs'));
+    writeFile(dir, 'src/plain-new.mjs', 'export const plain = 1;\n');
+    g(['add', '-A']);
+    assert.match(g(['ls-files', '-s', 'src/dirlink']), /^120000 /, 'CONTROL: the fixture link is tracked as mode 120000');
+    g(['-c', 'user.email=outside@t', '-c', 'user.name=outside-git', 'commit', '-qm', 'outside commit: links']);
+
+    assert.equal(runSessionStart(dir, 'startup').code, 0, 'S2 H1 SessionStart must not fail');
+    captureNow(store);
+
+    const nag = runStop(dir);
+    assert.equal(nag.code, 2, 'the plain file and the file link still raise the article demand');
+    assert.doesNotMatch(out(nag), /dirlink/, 'the directory link is not named in the demand');
+    assert.match(out(nag), /plain-new/, 'CONTROL: a plain new file is still demanded');
+
+    const settle = runStop(dir);
+    assert.equal(settle.code, 0, 'second Stop releases and queues the demand');
+    const keys = articleMissingItems(store).flatMap((t) => t.file_keys ?? []);
+    assert.ok(!keys.includes('src/dirlink'), `no article_missing key for the directory link; got ${JSON.stringify(keys)}`);
+    assert.ok(keys.includes('src/plain-new.mjs'), `CONTROL: plain file still queued; got ${JSON.stringify(keys)}`);
+    assert.ok(keys.includes('src/filelink.mjs'), `CONTROL: symlink to a file still queued; got ${JSON.stringify(keys)}`);
   } finally {
     cleanup();
   }

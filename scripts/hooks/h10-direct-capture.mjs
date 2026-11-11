@@ -44,6 +44,7 @@ import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
+import { classifyClaimPath } from '@sterling/store';
 import { publishNotice } from './lib/delivery.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
@@ -2011,7 +2012,13 @@ try {
   // own an article, so it is exempt the same way (board 3d3c9d81). The carried
   // keys of an open item are pruned by the same predicate (prunable, below).
   const exemptFromDemand = demandExemption(config, generatedProjections);
-  let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned);
+  // A path the tool layer refuses as a claim (a directory, a symlink to one
+  // included — decision path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary)
+  // can never gain an owning article, so demanding one is an impossible
+  // claim. Only the shared classifier's 'real_directory' verdict is dropped:
+  // leaf, absent and unverifiable paths stay demanded and visible.
+  const unclaimableDirectory = (p) => classifyClaimPath(input.cwd, p) === 'real_directory';
+  let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned).filter((p) => !unclaimableDirectory(p));
   // A gitignored path is never governed territory (board 1de3653b) — it cannot
   // be owned, so demanding an article for it is a false demand. A failed ignore
   // check degrades to the unfiltered list (toward signaling), recorded loudly.
@@ -2196,7 +2203,7 @@ try {
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow('article-demand-carried-gitignore', 'no_git');
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p)))
+      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p)) || unclaimableDirectory(p))
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
