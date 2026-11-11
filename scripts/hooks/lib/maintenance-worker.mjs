@@ -963,7 +963,12 @@ export function workerPrompt(pluginRoot, root, eligible = null, diffs = '') {
       '\n' +
       diffs;
   }
-  const judged = [...judgedVerdicts(root)].map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === 'refused' ? ` at HEAD ${v.head}` : ''}`);
+  // With a batch, only the batch's own ids can be re-judged, so only their
+  // standing verdicts are listed: the journal keeps verdicts for items long
+  // gone from the queue, and listing them all grows the prompt (the last argv
+  // element) past the 131072-byte single-argument limit (E2BIG on Linux).
+  const batchIds = eligible ? new Set(eligible.items.map((t) => t.id)) : null;
+  const judged = [...judgedVerdicts(root)].filter(([id]) => !batchIds || batchIds.has(id)).map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === 'refused' ? ` at HEAD ${v.head}` : ''}`);
   if (judged.length) prompt += `\nALREADY JUDGED (skip each unless its current file_keys differ from the ones listed):\n${judged.join('\n')}\n`;
   return prompt;
 }
