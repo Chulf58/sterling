@@ -8,11 +8,11 @@ var __export = (target, all) => {
 
 // scripts/maintenance-worker-run.mjs
 import { spawn } from "node:child_process";
-import { resolve as resolve6 } from "node:path";
+import { resolve as resolve5 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
+import { join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -13087,7 +13087,7 @@ function openStore(dir) {
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync7, renameSync as renameSync2, rmSync as rmSync4, rmdirSync, statSync as statSync5, writeFileSync as writeFileSync3, appendFileSync } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute2, join as join11, resolve as resolve5, sep } from "node:path";
+import { dirname as dirname6, isAbsolute, join as join11, resolve as resolve4, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/conductor-identity.mjs
@@ -13399,10 +13399,10 @@ function workerPaths(root) {
   };
 }
 function pluginRootFrom(moduleUrl = new URL("../scripts/hooks/lib/maintenance-worker.mjs", import.meta.url).href) {
-  let dir = dirname7(fileURLToPath(moduleUrl));
+  let dir = dirname6(fileURLToPath(moduleUrl));
   for (let i = 0; i < 5; i++) {
     if (existsSync6(join11(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname7(dir);
+    dir = dirname6(dir);
   }
   return null;
 }
@@ -13852,7 +13852,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   return readJson(paths.lock)?.token === token2 ? token2 : null;
 }
 function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
-  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute2(policy.path))) {
+  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute(policy.path))) {
     throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
   }
   const path = join11(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
@@ -13942,12 +13942,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync5(dirname7(state), { recursive: true });
+  mkdirSync5(dirname6(state), { recursive: true });
   writeFileSync3(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync5(dirname7(log), { recursive: true });
+  mkdirSync5(dirname6(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -14066,10 +14066,10 @@ function launchWorker(opts) {
       if (!target?.working_tree) return { root: opts.root, head: git2.head, prefix: git2.prefix };
       const mapped = workingTrees[target.working_tree];
       if (typeof mapped !== "string" || !mapped) {
-        if (resolve5(String(target.working_tree)) === resolve5(opts.root)) return { root: opts.root, head: git2.head, prefix: git2.prefix };
+        if (resolve4(String(target.working_tree)) === resolve4(opts.root)) return { root: opts.root, head: git2.head, prefix: git2.prefix };
         return { unresolved: `working_tree '${target.working_tree}' is not mapped in config.working_trees` };
       }
-      const root = isAbsolute2(mapped) ? mapped : join11(opts.root, mapped);
+      const root = isAbsolute(mapped) ? mapped : join11(opts.root, mapped);
       if (!trees.has(root)) {
         const head = headCommit(root);
         const prefix = prefixOf(root);
@@ -14129,7 +14129,7 @@ function launchWorker(opts) {
     readWorkerPrompt(pluginRoot2);
     const runner = join11(pluginRoot2, "bin", "maintenance-worker-run.mjs");
     if (!existsSync6(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync5(dirname7(paths.lock), { recursive: true });
+    mkdirSync5(dirname6(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token2 = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token2) return { launched: false, reason: "already_running" };
@@ -14365,7 +14365,7 @@ function hasEvidence2(item, seenArticles, seenFiles, root, seenGrepPaths = /* @_
   const target = readTarget(item, seenArticles);
   const keys = item.file_keys ?? [];
   const file = keys.some((k) => {
-    const t = resolve5(root, k);
+    const t = resolve4(root, k);
     if (seenFiles.has(t)) return true;
     for (const g of seenGrepPaths) if (t === g || t.startsWith(g.endsWith(sep) ? g : g + sep)) return true;
     return false;
@@ -14414,11 +14414,11 @@ async function runWorker(opts) {
     const e = readJson(paths.eligible);
     return e && !e.unreadable && e.token === opts.token && Array.isArray(e.items) ? e : null;
   };
-  const abs = (p) => isAbsolute2(String(p)) ? resolve5(String(p)) : resolve5(opts.root, String(p));
+  const abs = (p) => isAbsolute(String(p)) ? resolve4(String(p)) : resolve4(opts.root, String(p));
   const hostOf = (eligible) => opts.host ?? eligible?.host ?? "claude";
   const buildRun = (eligible) => {
     const prompt = workerPrompt(opts.pluginRoot, opts.root, eligible, eligible ? itemDiffSection(opts.root, eligible.items, { spawnSync: opts.spawnSync ?? nodeSpawnSync }) : "");
-    const mcpConfig = resolveMcpConfig(opts.pluginRoot, opts.root, eligible ? { path: resolve5(paths.eligible), token: eligible.token } : null);
+    const mcpConfig = resolveMcpConfig(opts.pluginRoot, opts.root, eligible ? { path: resolve4(paths.eligible), token: eligible.token } : null);
     const host = hostOf(eligible);
     if (host === "opencode") {
       const ocBin = opts.opencodeBin ?? eligible?.opencode_bin;
@@ -14452,7 +14452,7 @@ async function runWorker(opts) {
   }
   const runStartMs = nowMs();
   const runId = new Date(runStartMs).toISOString();
-  mkdirSync5(dirname7(paths.lock), { recursive: true });
+  mkdirSync5(dirname6(paths.lock), { recursive: true });
   writeFileSync3(paths.lock, JSON.stringify({ pid: process.pid, started_at: lock?.started_at ?? runId, trigger: opts.trigger, stage: "running", token: token2 }));
   rotateJournal(opts.root);
   const journal = (entry) => appendFileSync(paths.journal, JSON.stringify({ at: iso(), run: runId, ...entry }) + "\n");
@@ -14549,7 +14549,7 @@ async function runWorker(opts) {
         if (name.endsWith("__knowledge_get") && input.id) seenArticles.add(String(input.id));
         else if (name.endsWith("__knowledge_query")) runReads.queried = true;
         else if (name === "Read" && input.file_path) seenFiles.add(abs(input.file_path));
-        else if (name === "Grep") seenGrepPaths.add(input.path ? abs(input.path) : resolve5(opts.root));
+        else if (name === "Grep") seenGrepPaths.add(input.path ? abs(input.path) : resolve4(opts.root));
         else if (name === "WebSearch" || name === "WebFetch") runReads.web = true;
       };
       const launchKeys = new Map([...byId].map(([id, t]) => [id, t.file_keys ?? []]));
@@ -14557,12 +14557,12 @@ async function runWorker(opts) {
       const timeoutMs2 = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
       const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
       let logged = 0;
-      const { code, spawnError, timedOut } = await new Promise((resolve7) => {
+      const { code, spawnError, timedOut } = await new Promise((resolve6) => {
         let child;
         try {
           child = opts.spawn(run.bin, run.args, { cwd: opts.root, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [WORKER_ENV_FLAG]: "1", CLAUDE_PROJECT_DIR: opts.root, ...run.env } });
         } catch (e) {
-          resolve7({ code: null, spawnError: e, timedOut: false });
+          resolve6({ code: null, spawnError: e, timedOut: false });
           return;
         }
         const killGraceMs = opts.killGraceMs ?? 1e4;
@@ -14597,12 +14597,12 @@ async function runWorker(opts) {
         });
         child.on("error", (e) => {
           clearTimeout(timer);
-          resolve7({ code: null, spawnError: e, timedOut: timedOut2 });
+          resolve6({ code: null, spawnError: e, timedOut: timedOut2 });
         });
         child.on("close", (c) => {
           clearTimeout(timer);
           clearTimeout(killTimer);
-          resolve7({ code: c, spawnError: stdinError, timedOut: timedOut2 });
+          resolve6({ code: c, spawnError: stdinError, timedOut: timedOut2 });
         });
       });
       const { result, removes, closedOk, lineRefFixes, lineRefFixesOk, writes, mcpStatus, sterlingOk } = stream.end();
@@ -14779,7 +14779,7 @@ var budgetUsd;
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--dry-run") dryRun = true;
-  else if (a === "--project" && args[i + 1]) project = resolve6(args[++i]);
+  else if (a === "--project" && args[i + 1]) project = resolve5(args[++i]);
   else if (a === "--trigger" && args[i + 1]) trigger = args[++i];
   else if (a === "--token" && args[i + 1]) token = args[++i];
   else if (a === "--budget-usd" && i + 1 < args.length) budgetUsd = args[++i];

@@ -2981,7 +2981,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve8.call(this, root, ref);
+      let _sch = resolve10.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3008,7 +3008,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve8(root, ref) {
+    function resolve10(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3639,55 +3639,55 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve8(baseURI, relativeURI, options) {
+    function resolve10(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base2, relative2, options, skipNormalization) {
+    function resolveComponent(base2, relative3, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base2 = parse3(serialize(base2, options), options);
-        relative2 = parse3(serialize(relative2, options), options);
+        relative3 = parse3(serialize(relative3, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative2.scheme) {
-        target.scheme = relative2.scheme;
-        target.userinfo = relative2.userinfo;
-        target.host = relative2.host;
-        target.port = relative2.port;
-        target.path = removeDotSegments(relative2.path || "");
-        target.query = relative2.query;
+      if (!options.tolerant && relative3.scheme) {
+        target.scheme = relative3.scheme;
+        target.userinfo = relative3.userinfo;
+        target.host = relative3.host;
+        target.port = relative3.port;
+        target.path = removeDotSegments(relative3.path || "");
+        target.query = relative3.query;
       } else {
-        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
-          target.userinfo = relative2.userinfo;
-          target.host = relative2.host;
-          target.port = relative2.port;
-          target.path = removeDotSegments(relative2.path || "");
-          target.query = relative2.query;
+        if (relative3.userinfo !== void 0 || relative3.host !== void 0 || relative3.port !== void 0) {
+          target.userinfo = relative3.userinfo;
+          target.host = relative3.host;
+          target.port = relative3.port;
+          target.path = removeDotSegments(relative3.path || "");
+          target.query = relative3.query;
         } else {
-          if (!relative2.path) {
+          if (!relative3.path) {
             target.path = base2.path;
-            if (relative2.query !== void 0) {
-              target.query = relative2.query;
+            if (relative3.query !== void 0) {
+              target.query = relative3.query;
             } else {
               target.query = base2.query;
             }
           } else {
-            if (relative2.path[0] === "/") {
-              target.path = removeDotSegments(relative2.path);
+            if (relative3.path[0] === "/") {
+              target.path = removeDotSegments(relative3.path);
             } else {
               if ((base2.userinfo !== void 0 || base2.host !== void 0 || base2.port !== void 0) && !base2.path) {
-                target.path = "/" + relative2.path;
+                target.path = "/" + relative3.path;
               } else if (!base2.path) {
-                target.path = relative2.path;
+                target.path = relative3.path;
               } else {
-                target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative2.path;
+                target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative3.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative2.query;
+            target.query = relative3.query;
           }
           target.userinfo = base2.userinfo;
           target.host = base2.host;
@@ -3695,7 +3695,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base2.scheme;
       }
-      target.fragment = relative2.fragment;
+      target.fragment = relative3.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -3897,7 +3897,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve8,
+      resolve: resolve10,
       resolveComponent,
       equal,
       serialize,
@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname11, isAbsolute as isAbsolute2, join as join17, resolve as resolve7 } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute3, join as join19, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13000,12 +13000,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve8) => {
+    return new Promise((resolve10) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve8();
+        resolve10();
       } else {
-        this._stdout.once("drain", resolve8);
+        this._stdout.once("drain", resolve10);
       }
     });
   }
@@ -29564,7 +29564,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve8) => setTimeout(resolve8, pollInterval));
+        await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -29581,7 +29581,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve10, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -29659,7 +29659,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve8(parseResult.data);
+            resolve10(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -29920,12 +29920,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve10, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve8, interval);
+      const timeoutId = setTimeout(resolve10, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -31025,7 +31025,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve8) => setTimeout(resolve8, pollInterval));
+      await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -40564,20 +40564,20 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const holds = [];
     for (const item of linked)
       holds.push(...itemProvenance(item, root, head, { prefix }).holds.map((h) => ({ hold: h.hold, why: `item ${item.id}: ${h.why}` })));
-    for (const join18 of joins) {
-      const keys = (join18.file_keys ?? []).filter((k) => joinPaths.includes(k));
+    for (const join20 of joins) {
+      const keys = (join20.file_keys ?? []).filter((k) => joinPaths.includes(k));
       if (!keys.length)
         continue;
       try {
         const evidence = collectAttestationEvidence({ root, keys, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
         if (evidence.head_commit !== head)
-          holds.push({ hold: "integration", why: `item ${join18.id}: HEAD moved while it was checked` });
+          holds.push({ hold: "integration", why: `item ${join20.id}: HEAD moved while it was checked` });
         for (const [key, ev] of Object.entries(evidence.perPath)) {
           if (ev.kind !== "present")
-            holds.push({ hold: "integration", why: `item ${join18.id}: ${key} is not a committed file in ${head.slice(0, 8)} yet` });
+            holds.push({ hold: "integration", why: `item ${join20.id}: ${key} is not a committed file in ${head.slice(0, 8)} yet` });
         }
       } catch (err) {
-        holds.push({ hold: "integration", why: `item ${join18.id}: ${err instanceof Error ? err.message : String(err)}` });
+        holds.push({ hold: "integration", why: `item ${join20.id}: ${err instanceof Error ? err.message : String(err)}` });
       }
     }
     if (holds.length)
@@ -42581,6 +42581,112 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
   };
 }
 
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname12, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve8 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync9, readFileSync as readFileSync14 } from "node:fs";
+import { join as join17 } from "node:path";
+var CONFIG_REL2 = join17(".sterling", "config.json");
+var STORE_DB_REL = join17(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync9(join17(dir, CONFIG_REL2)) || existsSync9(join17(dir, STORE_DB_REL)));
+}
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { existsSync as existsSync10, realpathSync as realpathSync8, statSync as statSync5 } from "node:fs";
+import { basename as basename5, dirname as dirname11, join as join18, resolve as resolve7 } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git3 = (args2, at) => spawnSync4("git", args2, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync8(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve7(cwd, gitDir));
+  const commonReal = real(resolve7(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve7(commonReal, settings.worktree));
+  else if (basename5(commonReal) === ".git") mainRoot = dirname11(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join18(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync10(join18(linkedWorktree.mainRoot, configRel)) && existsSync10(join18(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync5(join18(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveProjectRoots(from, isRoot = isSterlingRoot) {
+  if (!from) return null;
+  let dir = resolve7(String(from));
+  for (; ; ) {
+    if (gitFileAt(dir)) {
+      const linked = linkedWorktreeOnce(dir);
+      if (linked) {
+        const storeRoot = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+      }
+    }
+    if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
+    const parent = dirname11(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// scripts/hooks/lib/hook-roots.mjs
+function hookProjectRoot(from) {
+  if (!from) return null;
+  let dir = resolve8(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname12(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function isWithin(child, parent) {
+  const rel = relative2(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute2(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
 // packages/mcp-server/dist/main.js
 var args = process.argv.slice(2);
 var valueOf = (flag) => {
@@ -42605,7 +42711,7 @@ if (workerPolicyArg === void 0 !== (workerTokenArg === void 0) || workerPolicyAr
   console.error("sterling-mcp: worker mode needs both --worker-policy <absolute path to eligible.json> and --worker-token <run lock token>, each with a value");
   process.exit(2);
 }
-if (workerPolicyArg !== void 0 && !isAbsolute2(workerPolicyArg)) {
+if (workerPolicyArg !== void 0 && !isAbsolute3(workerPolicyArg)) {
   console.error(`sterling-mcp: --worker-policy must be an absolute path, got '${workerPolicyArg}'`);
   process.exit(2);
 }
@@ -42615,9 +42721,11 @@ if (pathArg.includes("${")) {
   console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
   process.exit(2);
 }
-var projectRoot = projectArg !== void 0 ? resolve7(projectArg) : void 0;
-var checkoutRoot = checkoutArg !== void 0 ? resolve7(checkoutArg) : projectRoot;
-var storePath = projectRoot !== void 0 ? join17(projectRoot, ".sterling", "sterling.db") : resolve7(pathArg);
+var claudeRoots = projectArg !== void 0 && checkoutArg === void 0 ? hookRoots(resolve9(projectArg)) : null;
+var splitRoots = claudeRoots && claudeRoots.storeRoot !== claudeRoots.checkoutRoot ? claudeRoots : null;
+var projectRoot = projectArg !== void 0 ? splitRoots?.storeRoot ?? resolve9(projectArg) : void 0;
+var checkoutRoot = checkoutArg !== void 0 ? resolve9(checkoutArg) : splitRoots?.checkoutRoot ?? projectRoot;
+var storePath = projectRoot !== void 0 ? join19(projectRoot, ".sterling", "sterling.db") : resolve9(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot, checkoutRoot } : storePath, { workerPolicy });
@@ -42626,13 +42734,13 @@ try {
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
   process.exit(1);
 }
-recordRuntimeMarker(storePath, dirname11(fileURLToPath(import.meta.url)));
+recordRuntimeMarker(storePath, dirname13(fileURLToPath(import.meta.url)));
 await created.server.connect(new StdioServerTransport());
 if (projectRoot !== void 0) {
   const route = resolveStoreRoute(projectRoot);
   if (route?.storage === "postgres") {
     try {
-      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname11(fileURLToPath(import.meta.url)) });
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname13(fileURLToPath(import.meta.url)) });
       if (broker === null) {
         console.error("sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.");
       } else {

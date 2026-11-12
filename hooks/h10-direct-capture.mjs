@@ -13,7 +13,7 @@ import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
+import { join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -13071,7 +13071,8 @@ function realOf(p) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname6, isAbsolute, relative, resolve as resolve4 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve4(String(from));
@@ -13082,21 +13083,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync6(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -15370,11 +15374,11 @@ var residueLines = await (async () => {
   }
 })();
 var store;
-if (storeBackend(input.cwd) === "sqlite") {
-  store = openStore(input.cwd);
+if (storeBackend(input.storeRoot) === "sqlite") {
+  store = openStore(input.storeRoot);
 } else {
   try {
-    store = openStore(input.cwd);
+    store = openStore(input.storeRoot);
   } catch (e) {
     const why = `H10: the project store could not be opened (${namedError(e)}), so the session-end duties cannot be checked.`;
     if (residueLines.length) process.stderr.write(residueLines.join("\n\n") + "\n\n");
@@ -15866,7 +15870,7 @@ try {
   }
   const prLoopNaggedPath = join22(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
   const prLoop = (() => {
-    const { state, degraded } = evaluatePrLoop(input.cwd);
+    const { state, degraded } = evaluatePrLoop(input.storeRoot);
     if (degraded) degradationParts.push(degraded);
     if (!state) return null;
     const spent = (() => {
@@ -15995,7 +15999,7 @@ try {
   });
   const dutyRecords = openDutyRecords(store, config, {
     onUnreadable: (name, error) => degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties \u2014 ${error}; a record written there this session is not counted`),
-    root: input.cwd,
+    root: input.storeRoot,
     onLedgerUnreadable: (error, file) => degradationParts.push(`H10: the domain-write ledger (${file}) could not be read \u2014 ${error}; a domain-scoped record logged only in that file is not counted toward the session-end duties, and entries in this project's other ledger files still count. Fix or remove the file`)
   });
   const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
@@ -16408,7 +16412,7 @@ ${parts.join("\n\n")}`;
       store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
     } catch {
     }
-    if (storeBackend(input.cwd) === "routed") {
+    if (storeBackend(input.storeRoot) === "routed") {
       const why = `H10: session-end duties could not be checked (${namedError(e)}).`;
       if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.
 `);

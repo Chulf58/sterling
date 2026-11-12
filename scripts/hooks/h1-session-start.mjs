@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync,
 import { spawnSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
-import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError, inertWorktreeLine } from './lib/common.mjs';
+import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError } from './lib/common.mjs';
 import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
 import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 import { planLockSection } from './lib/plan-lock-section.mjs';
@@ -201,7 +201,13 @@ function computeH1DeadDispatchResidue(cwd, source) {
   return lines;
 }
 
-const input = readStdin({ reportInertWorktree: true });
+const input = readStdin();
+// The project's shared store root: the main checkout for a session in a linked
+// worktree outside it, else input.cwd (common.mjs readStdin). Transient state, git
+// and files stay on input.cwd, the checkout; the store, config, domain lines,
+// maintenance queue, registry row and server marker are the store root's, as in
+// the OpenCode plugin (operating-state.mjs, context.mjs).
+const storeRoot = input.storeRoot;
 
 // DAEMON SPARE GUARD (decision `h1-skips-a-claude-code-daemon-spare-session`).
 // Claude Code's background supervisor keeps an idle spare session beside the
@@ -215,13 +221,6 @@ const input = readStdin({ reportInertWorktree: true });
 if (isSpareSession(input.session_id)) {
   exitAfterWrite(`${SPARE_SKIP_LINE}\n`, 0);
   // exitAfterWrite exits from the write callback; nothing below may run meanwhile.
-  await new Promise(() => {});
-}
-
-// A linked worktree outside the main checkout: every hook is inert there
-// (common.mjs hookProjectRoot), and this is the one line that says so.
-if (input.inertWorktree) {
-  exitAfterWrite(`${inertWorktreeLine(input.inertWorktree)}\n`, 0);
   await new Promise(() => {});
 }
 
@@ -260,7 +259,7 @@ if (input.source === 'startup' || input.source === 'clear') {
 const sessionMarkerPath = join(input.cwd, '.sterling', 'transient', 'session.json');
 const sessionMarkerTmp = join(input.cwd, '.sterling', 'transient', `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync(join(input.cwd, '.sterling', 'config.json'))) {
+  if (existsSync(join(storeRoot, '.sterling', 'config.json'))) {
     mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
     writeFileSync(
       sessionMarkerTmp,
@@ -342,10 +341,10 @@ let storeVersionWarning = '';
 let storeVersionContext = '';
 let projectStoreBlocked = false;
 try {
-  const projectDb = join(input.cwd, '.sterling', 'sterling.db');
+  const projectDb = join(storeRoot, '.sterling', 'sterling.db');
   const behind = [];
   const other = [];
-  for (const db of machineStores(input.cwd)) {
+  for (const db of machineStores(storeRoot)) {
     let found;
     try {
       found = probeSchemaVersion(db);
@@ -440,11 +439,11 @@ if (domainMapResult) {
 let storeOpenWarning = '';
 let store = null;
 if (!projectStoreBlocked) {
-  if (storeBackend(input.cwd) === 'sqlite') {
-    store = openStore(input.cwd);
+  if (storeBackend(storeRoot) === 'sqlite') {
+    store = openStore(storeRoot);
   } else {
     try {
-      store = openStore(input.cwd);
+      store = openStore(storeRoot);
     } catch (e) {
       storeOpenWarning = `⚠ Sterling store: DEGRADED — the project store could not be opened (${namedError(e)}). Knowledge tools, delivery and the session-end duties cannot reach it until this is fixed.\n`;
     }
@@ -464,12 +463,12 @@ if (!store) {
   // A project with a Sterling config or a blocked store is a Sterling project: its instructions
   // name <Sterling root>, so this exit prints the STERLING ROOT line too. A directory with no
   // Sterling state prints nothing.
-  const sterlingProject = projectStoreBlocked || storeOpenWarning !== '' || existsSync(join(input.cwd, '.sterling', 'config.json'));
+  const sterlingProject = projectStoreBlocked || storeOpenWarning !== '' || existsSync(join(storeRoot, '.sterling', 'config.json'));
   // The STORAGE line rides this exit too: a Postgres project whose store cannot be opened
   // (the DEGRADED case above) is exactly where the reader needs to see which backend the
   // config names. readProjectConfig never throws.
   let earlyStorageContext = '';
-  if (sterlingProject) earlyStorageContext = `\n\n${storageLine({ ...readProjectConfig(input.cwd), root: input.cwd })}`;
+  if (sterlingProject) earlyStorageContext = `\n\n${storageLine({ ...readProjectConfig(storeRoot), root: storeRoot })}`;
   if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
@@ -504,7 +503,7 @@ if (!store) {
 // The three-state read (absent / unreadable / non-object) and the MACHINE ROLE,
 // TDD posture and Project mode lines below live in lib/operating-state.mjs, shared
 // with the OpenCode context hook; the rationale for each travels with its function.
-const { config, configUnreadable } = readProjectConfig(input.cwd);
+const { config, configUnreadable } = readProjectConfig(storeRoot);
 // `config` stays null-or-as-parsed, so the queue threshold and the concurrency
 // ceiling keep degrading to their own defaults. Each line below is guarded like
 // every other H1 read: a malformed config or unresolved plugin root costs only
@@ -536,7 +535,7 @@ try {
 
 let handoffContext = '';
 try {
-  handoffContext = `\n\n${handoffFilesLine({ config, configUnreadable, root: input.cwd })}`;
+  handoffContext = `\n\n${handoffFilesLine({ config, configUnreadable, root: storeRoot })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
@@ -545,7 +544,7 @@ try {
 // the Handoff files line so the Project mode and Handoff files lines stay adjacent.
 let storageContext = '';
 try {
-  storageContext = `\n\n${storageLine({ config, configUnreadable, root: input.cwd })}`;
+  storageContext = `\n\n${storageLine({ config, configUnreadable, root: storeRoot })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
@@ -553,7 +552,7 @@ try {
 // MOUNTED DOMAINS (lib/operating-state.mjs): one line per configured domain with
 // its description, and a loud line for a missing store or a missing description.
 // It never throws: every failure is its own UNKNOWN line.
-const domainLines = mountedDomainLines({ config, configUnreadable, root: input.cwd });
+const domainLines = mountedDomainLines({ config, configUnreadable, root: storeRoot });
 const domainsContext = domainLines.length ? `\n\n${domainLines.join('\n')}` : '';
 
 // PENDING ISSUE REPORTS: the count of Sterling issue reports report-issue.mjs
@@ -901,7 +900,7 @@ try {
   counts.groupedTodos = grouped.length;
   counts.objectives = new Set(grouped.map((t) => t.objective)).size;
 
-  const m = readMaintenanceState(store, input.cwd);
+  const m = readMaintenanceState(store, storeRoot);
   counts.maintenance = m.total;
   reconcile = m.reconcile;
   drainable = m.drainable;
@@ -948,7 +947,7 @@ const queueContext = queueLine ? `\n\n${queueLine}` : '';
 
 // RECONCILE BACKLOG: the banner segment and the conductor line come from the shared
 // lib (lib/maintenance-state.mjs reconcileBacklog), which carries the rationale.
-const backlog = reconcileBacklog({ reconcile, cwd: input.cwd });
+const backlog = reconcileBacklog({ reconcile, cwd: storeRoot });
 const reconcileBanner = backlog.banner;
 const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 
@@ -971,7 +970,7 @@ let registryContext = '';
   // startup context (P5: the degraded state is said, not swallowed).
   let refreshed = null;
   try {
-    refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+    refreshed = refreshRegistryRow(storeRoot, { config, configUnreadable });
   } catch (e) {
     registryContext = `\n\nSTERLING PROJECT REGISTRY REFRESH FAILED (${e?.message ?? e}): this project's last-seen time, stack tags and name in the shared registry were not updated, and its sibling projects could not be listed this session.`;
   }
@@ -1032,7 +1031,7 @@ try {
     process.env.STERLING_SERVER_DIST ?? (root ? (existsSync(join(root, 'mcp')) ? join(root, 'mcp') : join(root, 'packages', 'mcp-server', 'dist')) : null);
   const currentBuildId = serverDist && existsSync(buildIdPath(serverDist)) ? readFileSync(buildIdPath(serverDist), 'utf8').trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join(input.cwd, '.sterling', 'sterling.db'));
+  const markerPath = runtimeMarkerPath(join(storeRoot, '.sterling', 'sterling.db'));
   if (existsSync(markerPath)) {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync(markerPath, 'utf8')));
     if (parsed.success) marker = parsed.data;

@@ -10,7 +10,9 @@ import { takeSelectionFile } from './lib/selection-file.mjs';
 
 const input = readStdin();
 let selection;
-if (storeBackend(input.cwd) === 'routed') {
+// A linked worktree outside the main checkout takes only its own checkout's slot
+// file, never the shared store row, as the OpenCode plugin does (selection.mjs).
+if (input.storeRoot !== input.cwd || storeBackend(input.storeRoot) === 'routed') {
   try {
     selection = takeSelectionFile(input.cwd);
   } catch (e) {

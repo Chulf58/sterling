@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
+import { join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -13406,7 +13406,8 @@ function realOf(p) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname6, isAbsolute, relative, resolve as resolve4 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve4(String(from));
@@ -13417,21 +13418,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync6(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;

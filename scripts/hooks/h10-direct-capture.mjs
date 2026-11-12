@@ -240,11 +240,14 @@ const residueLines = await (async () => {
 // releases loudly instead, the same block-once posture as every other H10
 // duty, so an unreachable database can never trap the conductor.
 let store;
-if (storeBackend(input.cwd) === 'sqlite') {
-  store = openStore(input.cwd);
+// The store, config, PR-loop state and domain-write ledgers are the store root's
+// (the main checkout for a linked worktree outside it); transient state, git and
+// files are input.cwd's, the checkout (common.mjs readStdin).
+if (storeBackend(input.storeRoot) === 'sqlite') {
+  store = openStore(input.storeRoot);
 } else {
   try {
-    store = openStore(input.cwd);
+    store = openStore(input.storeRoot);
   } catch (e) {
     const why = `H10: the project store could not be opened (${namedError(e)}), so the session-end duties cannot be checked.`;
     if (residueLines.length) process.stderr.write(residueLines.join('\n\n') + '\n\n');
@@ -1256,7 +1259,7 @@ try {
   // mode with a pr-loop.json present is disclosed as not evaluated.
   const prLoopNaggedPath = join(input.cwd, '.sterling', 'transient', 'pr-loop-nagged.json');
   const prLoop = (() => {
-    const { state, degraded } = evaluatePrLoop(input.cwd);
+    const { state, degraded } = evaluatePrLoop(input.storeRoot);
     if (degraded) degradationParts.push(degraded);
     if (!state) return null;
     const spent = (() => {
@@ -1783,7 +1786,7 @@ try {
   const dutyRecords = openDutyRecords(store, config, {
     onUnreadable: (name, error) =>
       degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties — ${error}; a record written there this session is not counted`),
-    root: input.cwd,
+    root: input.storeRoot,
     onLedgerUnreadable: (error, file) =>
       degradationParts.push(`H10: the domain-write ledger (${file}) could not be read — ${error}; a domain-scoped record logged only in that file is not counted toward the session-end duties, and entries in this project's other ledger files still count. Fix or remove the file`),
   });
@@ -2963,7 +2966,7 @@ try {
   // could not be evaluated, so the gate FAILS CLOSED naming the error, and on
   // the re-entered Stop it releases loudly so it can never trap the session.
   // SQLite storage keeps the baselined warn below unchanged.
-  if (storeBackend(input.cwd) === 'routed') {
+  if (storeBackend(input.storeRoot) === 'routed') {
     const why = `H10: session-end duties could not be checked (${namedError(e)}).`;
     if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
     deny(`${why} Failing closed: fix the store connection or the hook store broker, then stop again.\n`);

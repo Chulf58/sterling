@@ -9,11 +9,11 @@ var __export = (target, all) => {
 // scripts/rotation-note.mjs
 import { existsSync as existsSync7, mkdirSync as mkdirSync7, writeFileSync as writeFileSync5, readFileSync as readFileSync8 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { dirname as dirname8 } from "node:path";
+import { dirname as dirname7 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync, lstatSync as lstatSync2, readdirSync, realpathSync, chmodSync } from "node:fs";
-import { join as join2, resolve as resolve2, dirname, isAbsolute } from "node:path";
+import { mkdirSync, readFileSync as readFileSync3, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync as lstatSync2, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join4, resolve as resolve3, dirname as dirname2, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -5910,9 +5910,108 @@ function parseStoreFence(value) {
   throw new Error(`store_meta '${STORE_FENCE_KEY}' has an unknown fence kind ${JSON.stringify(kind)}`);
 }
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join as join3, resolve as resolve2 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
+}
+function storeBackend(root) {
+  const dbExists = () => existsSync(join2(root, STORE_DB_REL));
+  let text;
+  try {
+    text = readFileSync2(join2(root, CONFIG_REL), "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return "sqlite";
+    return dbExists() ? "sqlite" : "routed";
+  }
+  let storage;
+  try {
+    storage = JSON.parse(text)?.storage;
+  } catch {
+    return dbExists() ? "sqlite" : "routed";
+  }
+  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
+}
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd2 = process.cwd()) {
+  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd2);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve2(cwd2, gitDir));
+  const commonReal = real(resolve2(cwd2, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd2);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve2(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join3(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join3(linkedWorktree.mainRoot, configRel)) && existsSync2(join3(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join3(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve2(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join2(root, ".sterling", "transient", "dispatch-register.json");
+  return join4(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -5934,10 +6033,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync(p)) return { availability: "absent", arr: [] };
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync2(p, "utf8");
+    raw = readFileSync3(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -5994,35 +6093,7 @@ var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/plan-lock.mjs
 import { closeSync, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
-
-// scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync2, readFileSync as readFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
-var CONFIG_REL = join3(".sterling", "config.json");
-var STORE_DB_REL = join3(".sterling", "sterling.db");
-function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync2(join3(dir, CONFIG_REL)) || existsSync2(join3(dir, STORE_DB_REL)));
-}
-function storeBackend(root) {
-  const dbExists = () => existsSync2(join3(root, STORE_DB_REL));
-  let text;
-  try {
-    text = readFileSync3(join3(root, CONFIG_REL), "utf8");
-  } catch (e) {
-    if (e?.code === "ENOENT") return "sqlite";
-    return dbExists() ? "sqlite" : "routed";
-  }
-  let storage;
-  try {
-    storage = JSON.parse(text)?.storage;
-  } catch {
-    return dbExists() ? "sqlite" : "routed";
-  }
-  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
-}
-
-// scripts/hooks/lib/plan-lock.mjs
+import { join as join5 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
@@ -6099,7 +6170,7 @@ function invalidReason(l) {
   return null;
 }
 function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join4(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
   if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
   const raw = read.text;
   let parsed;
@@ -6122,14 +6193,14 @@ var OPENCODE_DEAD_LANE_CHECK = "tell whether a lane is dead: send the old sessio
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync5, existsSync as existsSync4, statSync as statSync3 } from "node:fs";
-import { dirname as dirname5, join as join8, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync5, existsSync as existsSync5, statSync as statSync4 } from "node:fs";
+import { dirname as dirname6, join as join9, resolve as resolvePath2 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 
 // packages/store/dist/mounted.js
-import { mkdirSync as mkdirSync4, existsSync as existsSync3, rmSync as rmSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { mkdirSync as mkdirSync4, existsSync as existsSync4, rmSync as rmSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { dirname as dirname3, join as join6 } from "node:path";
+import { dirname as dirname4, join as join7 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 
 // packages/store/dist/shares.js
@@ -6174,8 +6245,8 @@ function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHA
 // packages/store/dist/move-lock.js
 import { hostname } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
-import { linkSync, mkdirSync as mkdirSync3, readFileSync as readFileSync4, rmSync as rmSync2, statSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { linkSync, mkdirSync as mkdirSync3, readFileSync as readFileSync4, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
 var MoveLockBusyError = class extends Error {
   path;
   owner;
@@ -6212,7 +6283,7 @@ function readOwner(path) {
   let mtimeMs;
   try {
     raw = readFileSync4(path, "utf8");
-    mtimeMs = statSync(path).mtimeMs;
+    mtimeMs = statSync2(path).mtimeMs;
   } catch (e) {
     if (e.code === "ENOENT")
       return void 0;
@@ -6294,7 +6365,7 @@ function acquireMoveLock(path, opts = {}) {
   const me = { pid, proc_start: procStart, hostname: host2, started_at: (/* @__PURE__ */ new Date()).toISOString(), token: randomUUID() };
   const warning = procStart === null ? `knowledge_move lock: this platform gives no process start time (/proc/${pid}/stat unreadable), so a lock left by a dead process whose pid was reused is honoured until that process exits.` : void 0;
   const probe = { isAlive, startTimeOf, host: host2, now: () => Date.now() };
-  mkdirSync3(dirname2(path), { recursive: true });
+  mkdirSync3(dirname3(path), { recursive: true });
   const started = Date.now();
   for (; ; ) {
     if (createWithContent(path, JSON.stringify(me)))
@@ -6325,13 +6396,13 @@ function releaseMoveLock(handle) {
 
 // packages/store/dist/pg-bridge.js
 import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
-import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync5, statSync as statSync3 } from "node:fs";
 import { homedir } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 var STATE_WAITING = 0;
 var STATE_REPLY = 1;
 var STATE_DEAD = 2;
-var DEFAULT_PG_CREDENTIALS_PATH = join5(homedir(), ".sterling", "credentials", "served.json");
+var DEFAULT_PG_CREDENTIALS_PATH = join6(homedir(), ".sterling", "credentials", "served.json");
 var DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
 var HANDSHAKE_MARGIN_MS = 5e3;
 var PgConfigError = class extends Error {
@@ -6449,7 +6520,7 @@ function buildPgConnectionConfig(creds) {
 function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
   let mode;
   try {
-    mode = statSync2(path).mode;
+    mode = statSync3(path).mode;
   } catch (e) {
     throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
   }
@@ -7354,17 +7425,17 @@ COMMIT`);
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join6(domainsHome(), name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join7(domainsHome(), name, "sterling.db")
   }));
 }
 function domainsHome() {
-  return join6(homedir2(), ".sterling", "domains");
+  return join7(homedir2(), ".sterling", "domains");
 }
 function defaultMoveLockPath() {
-  return join6(domainsHome(), ".move.lock");
+  return join7(domainsHome(), ".move.lock");
 }
 function open(dbPath) {
-  mkdirSync4(dirname3(dbPath), { recursive: true });
+  mkdirSync4(dirname4(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
 }
 var PROBE_ID = "00000000-0000-0000-0000-000000000000";
@@ -7538,7 +7609,7 @@ var MountedStores = class {
     this.project = open(projectDbPath);
     try {
       for (const m of mounts) {
-        if (!existsSync3(m.dbPath)) {
+        if (!existsSync4(m.dbPath)) {
           if (options?.skipMissing) {
             this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
             continue;
@@ -8512,8 +8583,8 @@ var JOURNAL_SELECT = journalSelect();
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { realpathSync as realpathSync2 } from "node:fs";
-import { dirname as dirname4, basename, join as join7, resolve as resolvePath } from "node:path";
+import { realpathSync as realpathSync3 } from "node:fs";
+import { dirname as dirname5, basename as basename2, join as join8, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -8713,7 +8784,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync4(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join7(realpathSync2(dirname4(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join8(realpathSync3(dirname5(this.dbPath)), basename2(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -11814,10 +11885,10 @@ var SterlingStore = class _SterlingStore {
   /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
   snapshot(targetPath) {
     const target = targetPath.replace(/\\/g, "/");
-    if (existsSync4(target)) {
+    if (existsSync5(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync5(dirname5(target), { recursive: true });
+    mkdirSync5(dirname6(target), { recursive: true });
     this.db.snapshot(target);
   }
   close() {
@@ -12361,12 +12432,12 @@ var SterlingStore = class _SterlingStore {
 // packages/store/dist/routing.js
 import { lstatSync as lstatSync4, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join10, resolve as resolve3 } from "node:path";
+import { join as join11, resolve as resolve4 } from "node:path";
 
 // packages/store/dist/broker-runtime.js
 import { createHash as createHash2 } from "node:crypto";
-import { closeSync as closeSync3, constants as FS2, fstatSync as fstatSync2, lstatSync as lstatSync3, mkdirSync as mkdirSync6, openSync as openSync3, readdirSync as readdirSync2, readSync as readSync2, realpathSync as realpathSync3, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { join as join9 } from "node:path";
+import { closeSync as closeSync3, constants as FS2, fstatSync as fstatSync2, lstatSync as lstatSync3, mkdirSync as mkdirSync6, openSync as openSync3, readdirSync as readdirSync2, readSync as readSync2, realpathSync as realpathSync4, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join10 } from "node:path";
 var BrokerRuntimeDirError = class extends Error {
   constructor(message) {
     super(message);
@@ -12383,7 +12454,7 @@ function brokerDirPath(env = process.env) {
     return void 0;
   const xdg = env.XDG_RUNTIME_DIR;
   if (xdg && xdg.startsWith("/") && !onWindowsDrive(xdg))
-    return join9(xdg, "sterling");
+    return join10(xdg, "sterling");
   return `/tmp/sterling-${id}`;
 }
 function assertPrivate(path, kind) {
@@ -12420,10 +12491,10 @@ function brokerDir({ create, env = process.env }) {
   return dir;
 }
 function brokerProjectKey(root) {
-  return createHash2("sha256").update(realpathSync3(root)).digest("hex").slice(0, 16);
+  return createHash2("sha256").update(realpathSync4(root)).digest("hex").slice(0, 16);
 }
 function brokerSocketPath(dir, instanceId) {
-  return join9(dir, `${instanceId}.sock`);
+  return join10(dir, `${instanceId}.sock`);
 }
 function readBounded2(path) {
   const fd = openSync3(path, FS2.O_RDONLY | FS2.O_NOFOLLOW);
@@ -12450,7 +12521,7 @@ function listBrokerRegistrations(dir, root) {
   const found = [];
   const refused = [];
   for (const name of names) {
-    const path = join9(dir, name);
+    const path = join10(dir, name);
     try {
       assertPrivate(path, "file");
       const reg = brokerRegistrationSchema.parse(JSON.parse(readBounded2(path)));
@@ -12497,10 +12568,10 @@ var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   }
 };
 function routedCredentialsPath() {
-  return join10(homedir3(), ".sterling", "credentials", "served.json");
+  return join11(homedir3(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join10(root, CONFIG_REL2);
+  const path = join11(root, CONFIG_REL2);
   try {
     lstatSync4(path);
   } catch (e) {
@@ -12553,13 +12624,13 @@ function pgStoreNames(projectId, stackTags) {
   return { metaSchema, projectSchema, domains };
 }
 function resolveStoreRoute(root) {
-  const absRoot = resolve3(root);
+  const absRoot = resolve4(root);
   const read = readConfig(absRoot);
   if (read === null)
     return null;
   const { config } = read;
   if (read.raw.storage !== "postgres") {
-    return { storage: "sqlite", root: absRoot, config, projectDbPath: join10(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+    return { storage: "sqlite", root: absRoot, config, projectDbPath: join11(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
   }
   const shown = absRoot.replace(/\\/g, "/");
   const identity = readProjectIdentity(absRoot);
@@ -12749,8 +12820,8 @@ function routeOrDefault(root) {
   if (route !== null)
     return route;
   const config = parseConfig({});
-  const absRoot = resolve3(root);
-  return { storage: "sqlite", root: absRoot, config, projectDbPath: join10(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+  const absRoot = resolve4(root);
+  return { storage: "sqlite", root: absRoot, config, projectDbPath: join11(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
 }
 function openRoutedStores(root, opts = {}) {
   const route = routeOrDefault(root);
@@ -12794,8 +12865,8 @@ function schemaOf(route, name) {
 }
 
 // scripts/lib/store-path.mjs
-import { lstatSync as lstatSync5, realpathSync as realpathSync4 } from "node:fs";
-import { join as join11, resolve as resolve4, sep } from "node:path";
+import { lstatSync as lstatSync5, realpathSync as realpathSync5 } from "node:fs";
+import { join as join12, resolve as resolve5, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -12818,8 +12889,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve4(root);
-  const target = resolve4(rootResolved, ...segments);
+  const rootResolved = resolve5(root);
+  const target = resolve5(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -12838,7 +12909,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join11(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join12(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -12846,7 +12917,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join11(cursor, part);
+    const next = join12(cursor, part);
     let st;
     try {
       st = lstatSync5(next);
@@ -12860,13 +12931,13 @@ function resolveStoreWritePath(root, ...segments) {
     if (st.isSymbolicLink()) {
       let resolvedRoot;
       try {
-        resolvedRoot = realpathSync4(rootResolved);
+        resolvedRoot = realpathSync5(rootResolved);
       } catch {
         resolvedRoot = rootResolved;
       }
       let resolvedEscape;
       try {
-        resolvedEscape = realpathSync4(next);
+        resolvedEscape = realpathSync5(next);
       } catch {
         resolvedEscape = null;
       }
@@ -12880,7 +12951,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   let realRoot;
   try {
-    realRoot = realpathSync4(rootResolved);
+    realRoot = realpathSync5(rootResolved);
   } catch (e) {
     if (e && e.code === "ENOENT") {
       realRoot = rootResolved;
@@ -12896,7 +12967,7 @@ function resolveStoreWritePath(root, ...segments) {
     realDeepest = realRoot;
   } else {
     try {
-      realDeepest = realpathSync4(deepestExisting);
+      realDeepest = realpathSync5(deepestExisting);
     } catch (e) {
       throw new StorePathContainmentError(
         `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
@@ -12911,7 +12982,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join11(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join12(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -12952,77 +13023,6 @@ function arg(name, argv = process.argv.slice(2)) {
   return found.length ? found[0] : void 0;
 }
 
-// scripts/lib/worktree-root.mjs
-import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5, realpathSync as realpathSync5, statSync as statSync4 } from "node:fs";
-import { basename as basename2, dirname as dirname6, join as join12, resolve as resolve5 } from "node:path";
-function resolveLinkedWorktree(cwd2 = process.cwd()) {
-  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
-  const real = (p) => {
-    try {
-      return realpathSync5(p);
-    } catch {
-      return null;
-    }
-  };
-  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd2);
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = real(resolve5(cwd2, gitDir));
-  const commonReal = real(resolve5(cwd2, commonDir));
-  const worktree = real(toplevel);
-  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd2);
-  const settings = {};
-  if (!core.error && core.status === 0) {
-    for (const line of core.stdout.split("\n")) {
-      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
-      if (m) settings[m[1]] = m[2];
-    }
-  }
-  if (settings.bare === "true") return null;
-  let mainRoot = null;
-  if (settings.worktree) mainRoot = real(resolve5(commonReal, settings.worktree));
-  else if (basename2(commonReal) === ".git") mainRoot = dirname6(commonReal);
-  if (!mainRoot || mainRoot === worktree) return null;
-  return { worktree, mainRoot };
-}
-function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
-  if (!linkedWorktree) return target;
-  const configRel = join12(".sterling", "config.json");
-  const worktreeOnlyConfig = !existsSync5(join12(linkedWorktree.mainRoot, configRel)) && existsSync5(join12(linkedWorktree.worktree, configRel));
-  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
-}
-var linkedProbes = /* @__PURE__ */ new Map();
-function linkedWorktreeOnce(dir) {
-  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
-  return linkedProbes.get(dir);
-}
-function gitFileAt(dir) {
-  try {
-    return statSync4(join12(dir, ".git")).isFile();
-  } catch {
-    return false;
-  }
-}
-function storeRootFor(dir, isRoot = isSterlingRoot) {
-  if (!dir) return dir;
-  const at = resolve5(String(dir));
-  if (!gitFileAt(at)) return dir;
-  const linked = linkedWorktreeOnce(at);
-  if (!linked || realOf(at) !== linked.worktree) return dir;
-  const storeRoot = resolveStoreRoot(linked.worktree, linked);
-  return isRoot(storeRoot) ? storeRoot : dir;
-}
-function realOf(p) {
-  try {
-    return realpathSync5(p);
-  } catch {
-    return p;
-  }
-}
-
 // scripts/lib/project.mjs
 function fail(message, code = 1) {
   console.error(message);
@@ -13031,7 +13031,7 @@ function fail(message, code = 1) {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync6 } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute2, join as join13, relative, resolve as resolve6 } from "node:path";
+import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/broker-client.mjs
 import { realpathSync as realpathSync6 } from "node:fs";
@@ -13605,7 +13605,7 @@ try {
 } catch (e) {
   fail2(e.message);
 }
-mkdirSync7(dirname8(notePath), { recursive: true });
+mkdirSync7(dirname7(notePath), { recursive: true });
 writeFileSync5(notePath, JSON.stringify(note, null, 2) + "\n");
 process.stdout.write(
   `rotation note written (single slot \u2014 this supersedes any prior note).
