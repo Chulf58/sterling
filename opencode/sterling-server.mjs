@@ -14827,21 +14827,22 @@ function retiredTermNotice(store, text) {
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
 import { join as join14 } from "node:path";
-function isForeignTree(record, root, workingTrees) {
+function isForeignTree(record, root, workingTrees, storeRoot = root ? storeRootFor(root) : root) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
   const mapped = typeof raw === "string" && raw ? raw : void 0;
-  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join14(root, mapped);
-  return !sameLocationAnyHost(location, root);
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join14(storeRoot, mapped);
+  return !sameLocationAnyHost(location, root) && !sameLocationAnyHost(location, storeRoot);
 }
 function workingTreesAt(root) {
   const trees = root ? loadConfig(root)?.working_trees : void 0;
   return trees && typeof trees === "object" ? trees : {};
 }
 function ownsHere(root, workingTrees = workingTreesAt(root)) {
-  return (record) => !isForeignTree(record, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  return (record) => !isForeignTree(record, root, workingTrees, storeRoot);
 }
 
 // scripts/hooks/lib/delivery.mjs
@@ -27043,7 +27044,8 @@ function ownershipJoin(store, root, workingTrees = workingTreesAt(root)) {
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isForeign = (r) => isForeignTree(r, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  const isForeign = (r) => isForeignTree(r, root, workingTrees, storeRoot);
   const isUnowned = (p) => !ownerRows(p).some((r) => !isForeign(r));
   const foreignOnlyOwners = (p) => isUnowned(p) ? ownerRows(p) : [];
   return { ownerRows, isUnowned, isForeign, foreignOnlyOwners };

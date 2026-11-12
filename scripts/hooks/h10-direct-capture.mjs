@@ -243,6 +243,9 @@ let store;
 // The store, config, PR-loop state and domain-write ledgers are the store root's
 // (the main checkout for a linked worktree outside it); transient state, git and
 // files are input.cwd's, the checkout (common.mjs readStdin).
+// True in a linked worktree outside the main checkout, whose filesystem cannot
+// judge a demand another checkout raised (the article_missing recompute below).
+const checkoutLocal = input.storeRoot !== input.cwd;
 if (storeBackend(input.storeRoot) === 'sqlite') {
   store = openStore(input.storeRoot);
 } else {
@@ -2205,8 +2208,21 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow('article-demand-carried-gitignore', 'no_git');
+    // ANOTHER CHECKOUT'S OBLIGATIONS ARE NOT THIS CHECKOUT'S TO CLEAR (board
+    // 22f7f45d; decision maintenance-reconciliation-retains-checkout-evidence-and-use:
+    // checkout disappearance is not payment evidence). In a linked worktree
+    // outside the main checkout, an older or diverged tree may lack a file, ignore
+    // it or hold a directory there that the checkout which raised the demand does
+    // not, so the filesystem rules prune only the paths this session demands from
+    // its own checkout. A carried name stays owed until an owner pays it (the store
+    // answers that, whichever checkout asks) or a Stop in the main checkout prunes it.
+    const checkoutJudges = (p) => !checkoutLocal || unowned.includes(p);
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p)) || unclaimableDirectory(p))
+      carriedAll.filter(
+        (p) =>
+          exemptFromDemand(p) ||
+          (checkoutJudges(p) && ((carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p)) || unclaimableDirectory(p)))
+      )
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
@@ -2889,7 +2905,9 @@ try {
     //
     // A failed git probe KEEPS the name (toward signaling, recorded loudly) —
     // the same degradation direction the demand's own gitignore probe takes.
-    const vanished = demandKeysRaw.filter((p) => !existsSync(join(input.cwd, p)));
+    // A carried name is judged only by the checkout that holds it (see the live
+    // recompute's checkoutJudges above): a linked worktree drops only its own.
+    const vanished = demandKeysRaw.filter((p) => (!checkoutLocal || unowned.includes(p)) && !existsSync(join(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);

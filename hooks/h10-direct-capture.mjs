@@ -13637,21 +13637,22 @@ import { join as join15, dirname as dirname9 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 import { join as join12 } from "node:path";
-function isForeignTree(record, root, workingTrees) {
+function isForeignTree(record, root, workingTrees, storeRoot = root ? storeRootFor(root) : root) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
   const mapped = typeof raw === "string" && raw ? raw : void 0;
-  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join12(root, mapped);
-  return !sameLocationAnyHost(location, root);
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join12(storeRoot, mapped);
+  return !sameLocationAnyHost(location, root) && !sameLocationAnyHost(location, storeRoot);
 }
 function workingTreesAt(root) {
   const trees = root ? loadConfig(root)?.working_trees : void 0;
   return trees && typeof trees === "object" ? trees : {};
 }
 function ownsHere(root, workingTrees = workingTreesAt(root)) {
-  return (record) => !isForeignTree(record, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  return (record) => !isForeignTree(record, root, workingTrees, storeRoot);
 }
 
 // scripts/hooks/lib/reconcile-origins.mjs
@@ -15234,7 +15235,8 @@ function ownershipJoin(store2, root, workingTrees = workingTreesAt(root)) {
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isForeign = (r) => isForeignTree(r, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  const isForeign = (r) => isForeignTree(r, root, workingTrees, storeRoot);
   const isUnowned = (p) => !ownerRows(p).some((r) => !isForeign(r));
   const foreignOnlyOwners = (p) => isUnowned(p) ? ownerRows(p) : [];
   return { ownerRows, isUnowned, isForeign, foreignOnlyOwners };
@@ -15374,6 +15376,7 @@ var residueLines = await (async () => {
   }
 })();
 var store;
+var checkoutLocal = input.storeRoot !== input.cwd;
 if (storeBackend(input.storeRoot) === "sqlite") {
   store = openStore(input.storeRoot);
 } else {
@@ -16115,8 +16118,11 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
+    const checkoutJudges = (p) => !checkoutLocal || unowned.includes(p);
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)) || unclaimableDirectory(p))
+      carriedAll.filter(
+        (p) => exemptFromDemand(p) || checkoutJudges(p) && ((carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)) || unclaimableDirectory(p))
+      )
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
@@ -16375,7 +16381,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync13(join22(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => (!checkoutLocal || unowned.includes(p)) && !existsSync13(join22(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);

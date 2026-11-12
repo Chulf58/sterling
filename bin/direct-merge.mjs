@@ -13750,21 +13750,22 @@ function loadConfig(cwd) {
 }
 
 // scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root, workingTrees) {
+function isForeignTree(record, root, workingTrees, storeRoot2 = root ? storeRootFor(root) : root) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
   const mapped = typeof raw === "string" && raw ? raw : void 0;
-  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join13(root, mapped);
-  return !sameLocationAnyHost(location, root);
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join13(storeRoot2, mapped);
+  return !sameLocationAnyHost(location, root) && !sameLocationAnyHost(location, storeRoot2);
 }
 function workingTreesAt(root) {
   const trees = root ? loadConfig(root)?.working_trees : void 0;
   return trees && typeof trees === "object" ? trees : {};
 }
 function ownsHere(root, workingTrees = workingTreesAt(root)) {
-  return (record) => !isForeignTree(record, root, workingTrees);
+  const storeRoot2 = root ? storeRootFor(root) : root;
+  return (record) => !isForeignTree(record, root, workingTrees, storeRoot2);
 }
 
 // scripts/hooks/lib/reconcile-origins.mjs
