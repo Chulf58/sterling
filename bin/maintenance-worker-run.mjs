@@ -13407,8 +13407,11 @@ function pluginRootFrom(moduleUrl = new URL("../scripts/hooks/lib/maintenance-wo
   return null;
 }
 function errorResultSummary(result, subtype) {
-  const text = typeof result?.result === "string" ? result.result.replace(/\s+/g, " ").trim() : "";
-  if (text && !subtype.startsWith("error")) return `error result: ${text.length > 160 ? `${text.slice(0, 159)}\u2026` : text}`;
+  const text = typeof result?.result === "string" ? result.result.replace(/(?:\u001b\]|\u009d)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?/g, "").replace(/(?:\u001b\[|\u009b)[\u0030-\u003f]*[\u0020-\u002f]*[\u0040-\u007e]?/g, "").replace(/\u001b[\u0020-\u002f]*[\u0030-\u007e]?/g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim() : "";
+  if (text && !subtype.startsWith("error")) {
+    const line = `error result: ${text}`;
+    return line.length > 160 ? `${line.slice(0, 159)}\u2026` : line;
+  }
   return `error result (${result?.subtype ?? "unknown"})`;
 }
 function readJson(path) {

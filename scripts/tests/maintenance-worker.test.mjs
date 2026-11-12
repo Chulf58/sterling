@@ -562,6 +562,23 @@ test('runWorker: a non-zero exit, an error_max_budget result or a permission den
     assert.equal(authErr, 'error result: Failed to authenticate: OAuth session expired and could not be refreshed');
     assert.ok(workerBreakage({ ok: false, at: new Date().toISOString(), error: authErr }), 'the cause text still counts as breakage');
 
+    const prefix = 'error result: ';
+    const recorded = async (text) => {
+      const f = fakeClaude([resultEvent({ subtype: 'success', is_error: true, result: text })]);
+      assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: f.fn, trigger: 'stop' }), 1);
+      return JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error;
+    };
+    assert.equal(await recorded('x'.repeat(160 - prefix.length)), prefix + 'x'.repeat(160 - prefix.length), 'exactly 160 is kept whole');
+    const over = await recorded('x'.repeat(161 - prefix.length));
+    assert.equal(over.length, 160, 'one over is clipped to 160 in total');
+    assert.equal(over, `${prefix}${'x'.repeat(145)}…`);
+    assert.equal((await recorded('y'.repeat(200))).length, 160);
+    assert.equal(
+      await recorded('\u001b[31mred\u001b[0m \u001b]0;title\u0007ok\u001b]8;;http://x\u001b\\link\u001b(B a\u0000b\u0007c\u0085d\u007fe\u009bf\u009b31mg'),
+      `${prefix}red oklink a b c d eg`,
+      'escape sequences and control characters never reach last_run.error',
+    );
+
     const crashed = fakeClaude(['not json'], { code: 3 });
     assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: crashed.fn, trigger: 'stop' }), 1);
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;

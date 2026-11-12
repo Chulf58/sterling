@@ -239,8 +239,20 @@ export function pluginRootFrom(moduleUrl = import.meta.url) {
 // error subtype (claude reports "success" with is_error true for an auth
 // failure) carries its cause only in the result text, so name that text.
 function errorResultSummary(result, subtype) {
-  const text = typeof result?.result === 'string' ? result.result.replace(/\s+/g, ' ').trim() : '';
-  if (text && !subtype.startsWith('error')) return `error result: ${text.length > 160 ? `${text.slice(0, 159)}…` : text}`;
+  // Escape sequences (OSC, CSI incl. the C1 forms, two-byte ESC) go first, then
+  // every remaining control character (C0, DEL, C1) becomes a space.
+  const text = typeof result?.result === 'string'
+    ? result.result
+      .replace(/(?:\u001b\]|\u009d)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?/g, '')
+      .replace(/(?:\u001b\[|\u009b)[\u0030-\u003f]*[\u0020-\u002f]*[\u0040-\u007e]?/g, '')
+      .replace(/\u001b[\u0020-\u002f]*[\u0030-\u007e]?/g, '')
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+      .replace(/\s+/g, ' ').trim()
+    : '';
+  if (text && !subtype.startsWith('error')) {
+    const line = `error result: ${text}`;
+    return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+  }
   return `error result (${result?.subtype ?? 'unknown'})`;
 }
 
