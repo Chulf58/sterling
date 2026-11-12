@@ -556,6 +556,12 @@ test('runWorker: a non-zero exit, an error_max_budget result or a permission den
     assert.match(st.last_run.error, /error_max_budget_usd/);
     assert.equal(st.last_run.cost_usd, 2.01, 'a failed run still records its reported cost');
 
+    const auth = fakeClaude([resultEvent({ subtype: 'success', is_error: true, result: 'Failed to authenticate:\n  OAuth session expired and could not be refreshed' })]);
+    assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: auth.fn, trigger: 'stop' }), 1);
+    const authErr = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error;
+    assert.equal(authErr, 'error result: Failed to authenticate: OAuth session expired and could not be refreshed');
+    assert.ok(workerBreakage({ ok: false, at: new Date().toISOString(), error: authErr }), 'the cause text still counts as breakage');
+
     const crashed = fakeClaude(['not json'], { code: 3 });
     assert.equal(await runWorker({ itemProvenance: INTEGRATED, ...eligibleRun(fx, []), spawn: crashed.fn, trigger: 'stop' }), 1);
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;

@@ -13406,6 +13406,11 @@ function pluginRootFrom(moduleUrl = new URL("../scripts/hooks/lib/maintenance-wo
   }
   return null;
 }
+function errorResultSummary(result, subtype) {
+  const text = typeof result?.result === "string" ? result.result.replace(/\s+/g, " ").trim() : "";
+  if (text && !subtype.startsWith("error")) return `error result: ${text.length > 160 ? `${text.slice(0, 159)}\u2026` : text}`;
+  return `error result (${result?.subtype ?? "unknown"})`;
+}
 function readJson(path) {
   try {
     return JSON.parse(readFileSync7(path, "utf8"));
@@ -14670,7 +14675,7 @@ async function runWorker(opts) {
         timedOut ? `killed after ${Math.round(timeoutMs2 / 6e4)} min timeout` : null,
         code !== 0 && !budgetEnd ? `exit ${code}` : null,
         result ? null : run.host === "opencode" ? "no final text or error event from opencode run" : "no stream-json result event",
-        (result?.is_error || subtype.startsWith("error")) && !budgetEnd ? `error result (${result?.subtype ?? "unknown"})` : null,
+        (result?.is_error || subtype.startsWith("error")) && !budgetEnd ? errorResultSummary(result, subtype) : null,
         denials ? `${denials} permission denial(s)` : null,
         mcpBroken(mcpStatus, sterlingOk) ? `MCP server '${SERVER2}' not connected (${mcpStatus}${mcpStatus === "failed" || mcpStatus === "disconnected" ? "" : "; no successful sterling tool call"})` : null,
         unpoliced.length ? `unpoliced write: ${unpoliced.length} successful knowledge write(s) without this run's ${STAMP_KEY} (${unpoliced.slice(0, 3).join("; ")})` : null
