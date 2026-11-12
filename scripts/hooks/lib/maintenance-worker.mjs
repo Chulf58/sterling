@@ -235,6 +235,27 @@ export function pluginRootFrom(moduleUrl = import.meta.url) {
   return null;
 }
 
+// The recorded reason for an error result. A result whose subtype is not an
+// error subtype (claude reports "success" with is_error true for an auth
+// failure) carries its cause only in the result text, so name that text.
+function errorResultSummary(result, subtype) {
+  // Escape sequences (OSC, CSI incl. the C1 forms, two-byte ESC) go first, then
+  // every remaining control character (C0, DEL, C1) becomes a space.
+  const text = typeof result?.result === 'string'
+    ? result.result
+      .replace(/(?:\u001b\]|\u009d)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?/g, '')
+      .replace(/(?:\u001b\[|\u009b)[\u0030-\u003f]*[\u0020-\u002f]*[\u0040-\u007e]?/g, '')
+      .replace(/\u001b[\u0020-\u002f]*[\u0030-\u007e]?/g, '')
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+      .replace(/\s+/g, ' ').trim()
+    : '';
+  if (text && !subtype.startsWith('error')) {
+    const line = `error result: ${text}`;
+    return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+  }
+  return `error result (${result?.subtype ?? 'unknown'})`;
+}
+
 function readJson(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
@@ -2056,7 +2077,7 @@ export async function runWorker(opts) {
         timedOut ? `killed after ${Math.round(timeoutMs / 60_000)} min timeout` : null,
         code !== 0 && !budgetEnd ? `exit ${code}` : null,
         result ? null : run.host === 'opencode' ? 'no final text or error event from opencode run' : 'no stream-json result event',
-        (result?.is_error || subtype.startsWith('error')) && !budgetEnd ? `error result (${result?.subtype ?? 'unknown'})` : null,
+        (result?.is_error || subtype.startsWith('error')) && !budgetEnd ? errorResultSummary(result, subtype) : null,
         denials ? `${denials} permission denial(s)` : null,
         mcpBroken(mcpStatus, sterlingOk) ? `MCP server '${SERVER}' not connected (${mcpStatus}${mcpStatus === 'failed' || mcpStatus === 'disconnected' ? '' : '; no successful sterling tool call'})` : null,
         unpoliced.length ? `unpoliced write: ${unpoliced.length} successful knowledge write(s) without this run's ${STAMP_KEY} (${unpoliced.slice(0, 3).join('; ')})` : null,
