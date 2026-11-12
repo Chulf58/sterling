@@ -11294,7 +11294,15 @@ var SterlingStore = class _SterlingStore {
       return entry;
     });
   }
-  remove(id, drainedAt, removal) {
+  /**
+   * `closedBy` is the session closing a board task (board_remove): a user task
+   * whose claim another session holds is refused with ClaimMovedError inside
+   * the transaction, before the journal row (decision
+   * board-remove-of-a-claimed-task-a-displaced-holder-is-refused). No session,
+   * no claim or a maintenance item is not checked; the holder's own close
+   * passes whether or not its lease expired, because nobody displaced it.
+   */
+  remove(id, drainedAt, removal, closedBy) {
     this.assertWritable("remove");
     let checkedRemoval;
     if (removal !== void 0) {
@@ -11311,6 +11319,12 @@ var SterlingStore = class _SterlingStore {
         this.passWriteFence();
       const record = this.get(id);
       const isSystemDrain = record && record.type === "todo" && record.source === "system";
+      if (closedBy && record && record.type === "todo" && record.source === "user") {
+        const claim = record.claim;
+        if (claim && claim.holder_session !== closedBy.session) {
+          throw new ClaimMovedError(`remove: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}, claimed at ${claim.claimed_at}. Nothing was removed; stop work on it, or coordinate with that session.`);
+        }
+      }
       if (checkedRemoval) {
         if (!record || record.type !== "todo" || record.source !== "user") {
           throw new Error(`remove: '${id}' is ${record ? record.type === "todo" ? `a ${record.source ?? "sourceless"} todo` : `a ${record.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);

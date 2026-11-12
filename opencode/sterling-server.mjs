@@ -12760,7 +12760,15 @@ var init_dist2 = __esm({
           return entry;
         });
       }
-      remove(id, drainedAt, removal) {
+      /**
+       * `closedBy` is the session closing a board task (board_remove): a user task
+       * whose claim another session holds is refused with ClaimMovedError inside
+       * the transaction, before the journal row (decision
+       * board-remove-of-a-claimed-task-a-displaced-holder-is-refused). No session,
+       * no claim or a maintenance item is not checked; the holder's own close
+       * passes whether or not its lease expired, because nobody displaced it.
+       */
+      remove(id, drainedAt, removal, closedBy) {
         this.assertWritable("remove");
         let checkedRemoval;
         if (removal !== void 0) {
@@ -12777,6 +12785,12 @@ var init_dist2 = __esm({
             this.passWriteFence();
           const record = this.get(id);
           const isSystemDrain = record && record.type === "todo" && record.source === "system";
+          if (closedBy && record && record.type === "todo" && record.source === "user") {
+            const claim = record.claim;
+            if (claim && claim.holder_session !== closedBy.session) {
+              throw new ClaimMovedError(`remove: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}, claimed at ${claim.claimed_at}. Nothing was removed; stop work on it, or coordinate with that session.`);
+            }
+          }
           if (checkedRemoval) {
             if (!record || record.type !== "todo" || record.source !== "user") {
               throw new Error(`remove: '${id}' is ${record ? record.type === "todo" ? `a ${record.source ?? "sourceless"} todo` : `a ${record.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);
@@ -28605,8 +28619,8 @@ import { realpathSync as realpathSync12 } from "node:fs";
 import { basename as basename8, dirname as dirname24, join as join55, resolve as resolve18 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
-var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update"]);
-var OTHER_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_add", "board_edit", "board_get", "board_query", "board_remove"]);
+var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update", "board_remove"]);
+var OTHER_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_add", "board_edit", "board_get", "board_query"]);
 function classifyTool(tool) {
   const name = sterlingToolName(tool);
   if (name === null) return { claim: null };

@@ -48,6 +48,7 @@ import {
   type QueryOptions,
   type ToolStore,
   resolveDebtOwner,
+  ClaimMovedError,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
@@ -12003,8 +12004,8 @@ export class SterlingTools {
     return this.claimReceipt(record, {
       notice:
         `taken over from session '${holder}' (generation ${expected_generation}${wasState === 'held' ? ', which was still within its lease' : ''}); ` +
-        `that session's later board_reaffirm, board_release and board_update naming its session are refused and told the task moved; ` +
-        `board_remove does not check the claim, so it can still close the item; its running processes were not stopped`,
+        `that session's later board_reaffirm, board_release, board_update and board_remove naming its session are refused and told the task moved; ` +
+        `its running processes were not stopped`,
     });
   }
 
@@ -13460,8 +13461,10 @@ export class SterlingTools {
    * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
    * what sent callers hunting for a deleted item in the first place.
    */
-  boardRemove(id: string, close: { outcome?: unknown; note?: string; evidence?: unknown } = {}): {
+  boardRemove(id: string, close: { outcome?: unknown; note?: string; evidence?: unknown; session?: string } = {}): {
     removed: string;
+    /** a claimed task closed with no session: names the session that holds it */
+    claim_notice?: string;
     /** how a user task ended, as journaled in board_removal_journal with the removal */
     outcome?: BoardRemovalOutcome;
     /** a received handoff item's closure file, written before the row was deleted */
@@ -13482,6 +13485,17 @@ export class SterlingTools {
     const record = this.store.get(id);
     if (!record) throw this.removedItemError('board_remove', id);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
+    // A claimed user task is closed by its holder (decision
+    // board-remove-of-a-claimed-task-a-displaced-holder-is-refused). Checked
+    // before any handoff file is written; remove() re-checks under its lock.
+    const heldClaim = (record as unknown as { source?: unknown; claim?: { holder_session: string } }).source === 'user' ? (record as unknown as { claim?: { holder_session: string } }).claim : undefined;
+    const closer = close.session === undefined ? undefined : SterlingTools.requireClaimText('board_remove', 'session', close.session);
+    if (heldClaim && closer !== undefined && heldClaim.holder_session !== closer) {
+      throw new ClaimMovedError(
+        `board_remove: the task moved — session '${heldClaim.holder_session}' holds it now. Nothing was removed; stop work on it, or coordinate with that session.`
+      );
+    }
+    const claimNotice = heldClaim && closer === undefined ? `closed with no session while session '${heldClaim.holder_session}' holds the claim; pass your session to have a displaced close refused` : undefined;
     // A USER task's end is journaled with its removal (decision
     // board-issue-mirror-design-required-outcome-snapshot-read-single-writer):
     // the outcome is required, never defaulted, because a default records a
@@ -13578,9 +13592,10 @@ export class SterlingTools {
     this.store.remove(
       record.id,
       this.now(),
-      outcome ? { outcome, ...(checkedEvidence ? { evidence: checkedEvidence } : {}), ...(closeNote !== undefined ? { note: closeNote } : {}) } : undefined
+      outcome ? { outcome, ...(checkedEvidence ? { evidence: checkedEvidence } : {}), ...(closeNote !== undefined ? { note: closeNote } : {}) } : undefined,
+      closer !== undefined ? { session: closer } : undefined
     );
-    return { removed: record.id, ...(outcome ? { outcome } : {}), ...evidence };
+    return { removed: record.id, ...(outcome ? { outcome } : {}), ...evidence, ...(claimNotice ? { claim_notice: claimNotice } : {}) };
   }
 
   /**

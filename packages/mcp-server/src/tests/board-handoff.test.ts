@@ -1005,3 +1005,22 @@ test('outcome (removal journal): a received item closed as dropped reads CLOSED 
     h.cleanup();
   }
 });
+
+test('board_remove of a claimed received item by a displaced session writes no closure or evidence file and keeps the item', () => {
+  const h = harness();
+  try {
+    const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { transfer_id: string; delivered: { id: string } };
+    const b = h.betaTools();
+    try {
+      b.tools.boardClaim(d.delivered.id, 'sess-holder', 'main');
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', note: 'shipped', evidence: { commit: 'abc123' }, session: 'sess-other' }), /the task moved/);
+      assert.equal(existsSync(join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.json`)), false, 'no closure file');
+      assert.equal(existsSync(join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.evidence.json`)), false, 'no evidence file');
+      assert.ok(b.tools.boardGet(d.delivered.id), 'the item stays');
+    } finally {
+      b.close();
+    }
+  } finally {
+    h.cleanup();
+  }
+});

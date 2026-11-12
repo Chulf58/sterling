@@ -4513,7 +4513,15 @@ export class SterlingStore {
     });
   }
 
-  remove(id: string, drainedAt?: string, removal?: BoardRemoval): void {
+  /**
+   * `closedBy` is the session closing a board task (board_remove): a user task
+   * whose claim another session holds is refused with ClaimMovedError inside
+   * the transaction, before the journal row (decision
+   * board-remove-of-a-claimed-task-a-displaced-holder-is-refused). No session,
+   * no claim or a maintenance item is not checked; the holder's own close
+   * passes whether or not its lease expired, because nobody displaced it.
+   */
+  remove(id: string, drainedAt?: string, removal?: BoardRemoval, closedBy?: { session: string }): void {
     this.assertWritable('remove');
     let checkedRemoval: BoardRemoval | undefined;
     if (removal !== undefined) {
@@ -4531,6 +4539,15 @@ export class SterlingStore {
       if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id))) this.passWriteFence();
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[]; slug?: string; objective?: string; priority?: string }) | undefined;
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
+      if (closedBy && record && record.type === 'todo' && record.source === 'user') {
+        const claim = (record as unknown as { claim?: TodoClaim }).claim;
+        if (claim && claim.holder_session !== closedBy.session) {
+          throw new ClaimMovedError(
+            `remove: the task moved — session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}, claimed at ${claim.claimed_at}. ` +
+              `Nothing was removed; stop work on it, or coordinate with that session.`
+          );
+        }
+      }
       if (checkedRemoval) {
         if (!record || record.type !== 'todo' || record.source !== 'user') {
           throw new Error(

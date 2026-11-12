@@ -462,3 +462,46 @@ test('adoptClaims: a failure after the first transfer throws ClaimAdoptionIncomp
     close();
   }
 });
+
+test('remove by a session that does not hold the claim is refused in the transaction: item and journal unchanged', () => {
+  const { a, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(item.id, { session: 'holder', checkout: 'main', now: at(0) });
+    a.takeoverClaim(item.id, { session: 'taker', checkout: 'wt', expected_holder: 'holder', expected_generation: get(a, item.id).claim!.generation, now: at(1) });
+    const closure = { outcome: 'done' as const };
+    assert.throws(() => a.remove(item.id, at(2), closure, { session: 'holder' }), (e) => e instanceof ClaimMovedError && /the task moved — session 'taker' in checkout 'wt'.*Nothing was removed/.test((e as Error).message));
+    assert.equal(get(a, item.id).claim?.holder_session, 'taker', 'the item stays');
+    assert.deepEqual(a.boardRemovalJournal(), [], 'no journal row');
+    a.remove(item.id, at(3), closure, { session: 'taker' });
+    assert.equal(a.get(item.id), undefined, 'the current holder closes it');
+    assert.equal(a.boardRemovalJournal().length, 1);
+  } finally {
+    close();
+  }
+});
+
+test('remove: a holder whose lease expired closes its own task; a close with no session, an unclaimed item and a maintenance item are not checked', () => {
+  const { a, close } = pair();
+  try {
+    const expired = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(expired.id, { session: 's1', checkout: 'main', now: at(0) });
+    a.remove(expired.id, at(500), { outcome: 'done' }, { session: 's1' });
+    assert.equal(a.get(expired.id), undefined);
+
+    const claimed = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(claimed.id, { session: 's2', checkout: 'main', now: at(0) });
+    a.remove(claimed.id, at(1), { outcome: 'dropped' });
+    assert.equal(a.get(claimed.id), undefined, 'no session given: not checked at the store');
+
+    const free = a.create(todo()) as unknown as Claimed;
+    a.remove(free.id, at(1), { outcome: 'done' }, { session: 'anyone' });
+    assert.equal(a.get(free.id), undefined);
+
+    const sys = a.create(todo('system')) as unknown as Claimed;
+    a.remove(sys.id, at(1), undefined, { session: 'anyone' });
+    assert.equal(a.get(sys.id), undefined);
+  } finally {
+    close();
+  }
+});
