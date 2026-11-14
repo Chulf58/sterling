@@ -26274,7 +26274,20 @@ var SterlingStore = class _SterlingStore {
       return entry;
     });
   }
-  remove(id, drainedAt, removal) {
+  /**
+   * `closedBy` is the session closing a board task (board_remove): a user task
+   * whose claim another session holds is refused with ClaimMovedError inside
+   * the transaction, before the journal row (decision
+   * board-remove-of-a-claimed-task-a-displaced-holder-is-refused). No session,
+   * no claim or a maintenance item is not checked; the holder's own close
+   * passes whether or not its lease expired, because nobody displaced it.
+   * `beforeDelete` runs inside the same transaction, after the claim check and
+   * the journal insert and before the delete, with the record and the claim as
+   * read under the write lock: a caller's handoff files are written there, so a
+   * refused close writes none and a takeover cannot land between check and
+   * write. If it throws, the transaction rolls back and the item stays.
+   */
+  remove(id, drainedAt, removal, closedBy) {
     this.assertWritable("remove");
     let checkedRemoval;
     if (removal !== void 0) {
@@ -26291,6 +26304,13 @@ var SterlingStore = class _SterlingStore {
         this.passWriteFence();
       const record2 = this.get(id);
       const isSystemDrain = record2 && record2.type === "todo" && record2.source === "system";
+      const heldClaim = record2 && record2.type === "todo" && record2.source === "user" ? record2.claim : void 0;
+      if (closedBy?.session !== void 0 && record2 && record2.type === "todo" && record2.source === "user") {
+        const claim = heldClaim;
+        if (claim && claim.holder_session !== closedBy.session) {
+          throw new ClaimMovedError(`remove: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}, claimed at ${claim.claimed_at}. Nothing was removed; stop work on it, or coordinate with that session.`);
+        }
+      }
       if (checkedRemoval) {
         if (!record2 || record2.type !== "todo" || record2.source !== "user") {
           throw new Error(`remove: '${id}' is ${record2 ? record2.type === "todo" ? `a ${record2.source ?? "sourceless"} todo` : `a ${record2.type}` : "not in this store"}; a removal outcome is journaled for user board tasks only. Nothing was removed.`);
@@ -26307,6 +26327,8 @@ var SterlingStore = class _SterlingStore {
       if (record2 && !isSystemDrain) {
         this.logActivity("removed", record2, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
       }
+      if (closedBy?.beforeDelete && record2)
+        closedBy.beforeDelete(record2, heldClaim);
       this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
       this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
@@ -39906,7 +39928,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const wasState = boardClaimView(before, opts.now ?? Date.now(), opts.leaseMinutes ?? DEFAULT_CLAIM_LEASE_MINUTES)?.state;
     const record2 = this.store.takeoverClaim(item.id, { session: s2, checkout: c, expected_holder: holder, expected_generation, now: this.now() });
     return this.claimReceipt(record2, {
-      notice: `taken over from session '${holder}' (generation ${expected_generation}${wasState === "held" ? ", which was still within its lease" : ""}); that session's later board_reaffirm, board_release and board_update naming its session are refused and told the task moved; board_remove does not check the claim, so it can still close the item; its running processes were not stopped`
+      notice: `taken over from session '${holder}' (generation ${expected_generation}${wasState === "held" ? ", which was still within its lease" : ""}); that session's later board_reaffirm, board_release, board_update and board_remove naming its session are refused and told the task moved; its running processes were not stopped`
     });
   }
   /**
@@ -40952,6 +40974,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw this.removedItemError("board_remove", id);
     if (record2.type !== "todo")
       throw new Error(`board_remove: '${id}' is a ${record2.type}, not a task`);
+    const closer = close.session === void 0 ? void 0 : _SterlingTools.requireClaimText("board_remove", "session", close.session);
     const isUser = record2.source === "user";
     const outcomeValues = BOARD_REMOVAL_OUTCOMES.join(", ");
     if (!isUser) {
@@ -40991,15 +41014,16 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     }
     let closurePath;
     let evidencePath;
-    if (isReceived && receivedMeta?.success) {
+    const writeHandoffFiles = () => {
+      if (!(isReceived && receivedMeta?.success))
+        return;
       if (checkedEvidence || outcome)
         evidencePath = this.writeHandoffEvidence(record2.id, receivedMeta.data.transfer_id, checkedEvidence, outcome);
       else
         this.removeStaleHandoffEvidence(record2.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record2.id, receivedMeta.data.transfer_id, closeNote);
-    }
-    const closure = { ...closurePath ? { handoff_closure: closurePath } : {}, ...evidencePath ? { handoff_evidence: evidencePath } : {} };
-    const evidence = { ...this.removalArtifactEvidence(record2), ...closure };
+    };
+    const evidence = this.removalArtifactEvidence(record2);
     const attestation = this.attestAlreadyPaidClose("board_remove", record2);
     if (attestation && "domain_held" in attestation) {
       return { removed: record2.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
@@ -41012,8 +41036,18 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         ...attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}
       };
     }
-    this.store.remove(record2.id, this.now(), outcome ? { outcome, ...checkedEvidence ? { evidence: checkedEvidence } : {}, ...closeNote !== void 0 ? { note: closeNote } : {} } : void 0);
-    return { removed: record2.id, ...outcome ? { outcome } : {}, ...evidence };
+    let claimNotice;
+    this.store.remove(record2.id, this.now(), outcome ? { outcome, ...checkedEvidence ? { evidence: checkedEvidence } : {}, ...closeNote !== void 0 ? { note: closeNote } : {} } : void 0, {
+      ...closer !== void 0 ? { session: closer } : {},
+      beforeDelete: (_locked, claim) => {
+        writeHandoffFiles();
+        if (claim && closer === void 0) {
+          claimNotice = `closed with no session while session '${claim.holder_session}' holds the claim; pass your session to have a displaced close refused`;
+        }
+      }
+    });
+    const closure = { ...closurePath ? { handoff_closure: closurePath } : {}, ...evidencePath ? { handoff_evidence: evidencePath } : {} };
+    return { removed: record2.id, ...outcome ? { outcome } : {}, ...evidence, ...closure, ...claimNotice ? { claim_notice: claimNotice } : {} };
   }
   /**
    * Delete `<root>/.sterling/handoffs/<transfer_id>.evidence.json` before a
@@ -42256,14 +42290,15 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ target_project, ...args2 }) => json(target_project !== void 0 ? tools.foreignBoardQuery({ ...args2, target_project }) : tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
-    description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). A user board task needs `outcome`: done (finished), dropped (will not be done), superseded (replaced by other work) or duplicate (the same as another task); a removal without one is refused. The outcome, with optional `evidence` and `note`, is written to the board removal journal in the same transaction as the removal, and the GitHub issue mirror reads it from there. A maintenance-queue item takes the id alone. The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.evidence.json with the outcome and any evidence, then .sterling/handoffs/<transfer_id>.json, which carries the note; the sending project reads both and shows the item as done, or as closed with its other outcome. A failed write of either file refuses the removal.",
+    description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). A user board task needs `outcome`: done (finished), dropped (will not be done), superseded (replaced by other work) or duplicate (the same as another task); a removal without one is refused. The outcome, with optional `evidence` and `note`, is written to the board removal journal in the same transaction as the removal, and the GitHub issue mirror reads it from there. A maintenance-queue item takes the id alone. A claimed user task is closed by the session that holds the claim: a close naming another session is refused (the task moved) and nothing is removed, with no handoff file written; the holder's own close succeeds even after its lease expired; a close naming no session succeeds and the result carries claim_notice naming the holder. There is no override. `session` is filled in by the OpenCode plugin. The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.evidence.json with the outcome and any evidence, then .sterling/handoffs/<transfer_id>.json, which carries the note; the sending project reads both and shows the item as done, or as closed with its other outcome. A failed write of either file refuses the removal.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_EXACT_DESTROY),
       outcome: external_exports.enum(BOARD_REMOVAL_OUTCOMES).describe("user board tasks: required. done, dropped, superseded or duplicate").optional(),
       note: external_exports.string().describe("user board tasks only: what was done or why it ended; journaled, and sent back to the project a handed-over task came from").optional(),
-      evidence: cloneZod(handoffEvidenceSchema).describe("user board tasks only: what the work shipped as; at least one non-blank value of commit, pr, deploy or url").optional()
+      evidence: cloneZod(handoffEvidenceSchema).describe("user board tasks only: what the work shipped as; at least one non-blank value of commit, pr, deploy or url").optional(),
+      session: external_exports.string().describe("your session id; the OpenCode plugin fills it in. A claimed task is closed only by its holder").optional()
     })
-  }, ({ id, outcome, note, evidence }) => json(tools.boardRemove(id, { outcome, note, evidence })));
+  }, ({ id, outcome, note, evidence, session }) => json(tools.boardRemove(id, { outcome, note, evidence, session })));
   server.registerTool("maintenance_remove", {
     description: 'Remove a maintenance-queue (source:"system") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove \u2014 an empty list means verify against HEAD before closing.',
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
@@ -42310,7 +42345,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, session, generation }) => json(tools.boardRelease(id, session, generation)));
   server.registerTool("board_takeover", {
-    description: "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm, board_release, and board_update naming its session are refused and told the task moved (board_remove does not check the claim). Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
+    description: "Take over a board task another session holds, typically one whose claim_state is expired (check owner). Name the holder and generation you read from board_get or board_query (expected_holder, expected_generation); if the claim changed since, the call is refused naming who holds it now and nothing is written. The new claim gets a new generation and records the displaced holder in taken_over_from; that holder's later board_reaffirm, board_release, board_update and board_remove naming its session are refused and told the task moved. Running processes of the old holder are not stopped. Returns {id, slug?, label?, claim_state, notice}.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       session: external_exports.string().describe("your session id"),
@@ -42320,7 +42355,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, session, checkout, expected_holder, expected_generation }) => json(tools.boardTakeover(id, session, checkout, expected_holder, expected_generation)));
   server.registerTool("board_adopt", {
-    description: "Adopt the board claims an earlier session held in this checkout, typically after a new session (/new) replaced it. Every user board item whose claim names from_session as holder and this checkout moves to your session with a new generation and taken_over_from; each item is compare-and-set against the holder and generation read, so one another session took in between is refused and listed as moved. A claim from_session holds in ANOTHER checkout is refused and listed (that session may be live there; use board_takeover). Repeatable: running it again adopts nothing new and lists items already adopted from that session under already. Name from_session only for a session you know has ended; its later board_reaffirm, board_release and board_update naming its session are refused. Returns {from_session, adopted[], already[], refused[{reason, why}], notice}.",
+    description: "Adopt the board claims an earlier session held in this checkout, typically after a new session (/new) replaced it. Every user board item whose claim names from_session as holder and this checkout moves to your session with a new generation and taken_over_from; each item is compare-and-set against the holder and generation read, so one another session took in between is refused and listed as moved. A claim from_session holds in ANOTHER checkout is refused and listed (that session may be live there; use board_takeover). Repeatable: running it again adopts nothing new and lists items already adopted from that session under already. Name from_session only for a session you know has ended; its later board_reaffirm, board_release, board_update and board_remove naming its session are refused. Returns {from_session, adopted[], already[], refused[{reason, why}], notice}.",
     inputSchema: strict({
       from_session: external_exports.string().describe("the earlier session whose claims to adopt (the rotation note session_id, or the holder_session named in the session-start notice)"),
       session: external_exports.string().describe("your session id"),

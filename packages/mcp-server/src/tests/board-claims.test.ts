@@ -39,6 +39,7 @@ function harness(leaseMinutes = 60) {
   const store = new SterlingStore(join(alpha, '.sterling', 'sterling.db'));
   const tools = new SterlingTools({ store, repoRoot: alpha, registryPath: reg, now: () => clock.now, config: parseConfig({ board_claims: { lease_minutes: leaseMinutes } }) });
   return {
+    alpha,
     beta,
     clock,
     store,
@@ -496,5 +497,76 @@ test('board_adopt: adopts the predecessor\'s claims, refuses another checkout, r
     await server.close();
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board_remove: a displaced holder is refused and the item and journal stay; the holder, a sessionless close and an unclaimed item succeed', () => {
+  const h = harness(60);
+  try {
+    const item = addItem(h.tools, 'Closed by the wrong session\nsee packages/store/src/index.ts');
+    const g1 = (h.tools.boardClaim(item.id, 'sess-A', 'main') as { claim_state: ClaimState }).claim_state.generation!;
+    h.clock.now = at(61);
+    h.tools.boardTakeover(item.id, 'sess-B', 'wt-b', 'sess-A', g1);
+    assert.throws(() => h.tools.boardRemove(item.id, { outcome: 'done', session: 'sess-A' }), /the task moved — session 'sess-B' in checkout 'wt-b' holds it now.*Nothing was removed/);
+    assert.ok(h.store.get(item.id), 'the item stays');
+    assert.deepEqual(h.store.boardRemovalJournal(), [], 'the journal is unchanged');
+    assert.equal(h.tools.boardRemove(item.id, { outcome: 'done', session: 'sess-B' }).removed, item.id, 'the holder closes it');
+
+    const two = addItem(h.tools, 'Expired holder closes\nsee packages/store/src/index.ts');
+    h.tools.boardClaim(two.id, 'sess-A', 'main');
+    h.clock.now = at(500);
+    assert.equal(h.tools.boardRemove(two.id, { outcome: 'done', session: 'sess-A' }).removed, two.id, 'an expired lease nobody took over');
+
+    const three = addItem(h.tools, 'Closed with no session\nsee packages/store/src/index.ts');
+    h.tools.boardClaim(three.id, 'sess-C', 'main');
+    const res = h.tools.boardRemove(three.id, { outcome: 'dropped' });
+    assert.equal(res.removed, three.id);
+    assert.match(res.claim_notice ?? '', /session 'sess-C' holds the claim/);
+
+    const four = addItem(h.tools, 'Unclaimed\nsee packages/store/src/index.ts');
+    const plain = h.tools.boardRemove(four.id, { outcome: 'done', session: 'whoever' });
+    assert.equal(plain.removed, four.id);
+    assert.equal(plain.claim_notice, undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_remove with no session: the notice names the holder at the moment of removal, not the one read before the transaction', () => {
+  const h = harness(60);
+  const rival = new SterlingStore(join(h.alpha, '.sterling', 'sterling.db'));
+  /** run `between` once, just before the closing store opens its first write transaction (after boardRemove read the item) */
+  const beforeFirstTx = (between: () => void) => {
+    const handle = h.store as unknown as { tx: (fn: () => void) => void };
+    const original = handle.tx.bind(handle);
+    let fired = false;
+    handle.tx = (fn) => {
+      if (!fired) {
+        fired = true;
+        between();
+      }
+      original(fn);
+    };
+    return () => {
+      assert.equal(fired, true, 'the interleaving was forced');
+      handle.tx = original;
+    };
+  };
+  try {
+    const moved = addItem(h.tools, 'Held by A, taken by B\nsee packages/store/src/index.ts');
+    const g = (h.tools.boardClaim(moved.id, 'sess-A', 'main') as { claim_state: ClaimState }).claim_state.generation!;
+    const done1 = beforeFirstTx(() => rival.takeoverClaim(moved.id, { session: 'sess-B', checkout: 'wt-b', expected_holder: 'sess-A', expected_generation: g, now: T0 }));
+    const res = h.tools.boardRemove(moved.id, { outcome: 'dropped' });
+    done1();
+    assert.match(res.claim_notice ?? '', /session 'sess-B' holds the claim/, 'names the holder when the item was removed');
+
+    const late = addItem(h.tools, 'Unclaimed at read, claimed before removal\nsee packages/store/src/index.ts');
+    const done2 = beforeFirstTx(() => rival.claimTodo(late.id, { session: 'sess-C', checkout: 'wt-c', now: T0 }));
+    const res2 = h.tools.boardRemove(late.id, { outcome: 'dropped' });
+    done2();
+    assert.match(res2.claim_notice ?? '', /session 'sess-C' holds the claim/, 'a claim that arrived just before the close is named');
+  } finally {
+    rival.close();
+    h.cleanup();
   }
 });
