@@ -505,3 +505,25 @@ test('remove: a holder whose lease expired closes its own task; a close with no 
     close();
   }
 });
+
+test('remove: beforeDelete runs in the transaction after the claim check; a refusal never calls it and a throw keeps the item and journal', () => {
+  const { a, close } = pair();
+  try {
+    const item = a.create(todo()) as unknown as Claimed;
+    a.claimTodo(item.id, { session: 'holder', checkout: 'main', now: at(0) });
+    let calls = 0;
+    assert.throws(() => a.remove(item.id, at(1), { outcome: 'done' }, { session: 'other', beforeDelete: () => void calls++ }), ClaimMovedError);
+    assert.equal(calls, 0);
+    assert.throws(
+      () => a.remove(item.id, at(1), { outcome: 'done' }, { session: 'holder', beforeDelete: () => { throw new Error('file write failed'); } }),
+      /file write failed/
+    );
+    assert.ok(a.get(item.id), 'the item stays');
+    assert.deepEqual(a.boardRemovalJournal(), [], 'the journal row rolled back');
+    let seen = '';
+    a.remove(item.id, at(2), { outcome: 'done' }, { beforeDelete: (_r, claim) => void (seen = claim?.holder_session ?? '') });
+    assert.equal(seen, 'holder', 'the claim read under the lock is handed over');
+  } finally {
+    close();
+  }
+});

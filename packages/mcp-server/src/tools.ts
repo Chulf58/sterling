@@ -48,7 +48,6 @@ import {
   type QueryOptions,
   type ToolStore,
   resolveDebtOwner,
-  ClaimMovedError,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
@@ -13486,16 +13485,11 @@ export class SterlingTools {
     if (!record) throw this.removedItemError('board_remove', id);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
     // A claimed user task is closed by its holder (decision
-    // board-remove-of-a-claimed-task-a-displaced-holder-is-refused). Checked
-    // before any handoff file is written; remove() re-checks under its lock.
-    const heldClaim = (record as unknown as { source?: unknown; claim?: { holder_session: string } }).source === 'user' ? (record as unknown as { claim?: { holder_session: string } }).claim : undefined;
+    // board-remove-of-a-claimed-task-a-displaced-holder-is-refused). The claim
+    // is read and checked only inside remove()'s write transaction, together
+    // with the handoff file writes (beforeDelete below), so a takeover cannot
+    // land between the check and the files.
     const closer = close.session === undefined ? undefined : SterlingTools.requireClaimText('board_remove', 'session', close.session);
-    if (heldClaim && closer !== undefined && heldClaim.holder_session !== closer) {
-      throw new ClaimMovedError(
-        `board_remove: the task moved — session '${heldClaim.holder_session}' holds it now. Nothing was removed; stop work on it, or coordinate with that session.`
-      );
-    }
-    const claimNotice = heldClaim && closer === undefined ? `closed with no session while session '${heldClaim.holder_session}' holds the claim; pass your session to have a displaced close refused` : undefined;
     // A USER task's end is journaled with its removal (decision
     // board-issue-mirror-design-required-outcome-snapshot-read-single-writer):
     // the outcome is required, never defaulted, because a default records a
@@ -13562,13 +13556,13 @@ export class SterlingTools {
     // not give.
     let closurePath: string | undefined;
     let evidencePath: string | undefined;
-    if (isReceived && receivedMeta?.success) {
+    const writeHandoffFiles = (): void => {
+      if (!(isReceived && receivedMeta?.success)) return;
       if (checkedEvidence || outcome) evidencePath = this.writeHandoffEvidence(record.id, receivedMeta.data.transfer_id, checkedEvidence, outcome);
       else this.removeStaleHandoffEvidence(record.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record.id, receivedMeta.data.transfer_id, closeNote);
-    }
-    const closure = { ...(closurePath ? { handoff_closure: closurePath } : {}), ...(evidencePath ? { handoff_evidence: evidencePath } : {}) };
-    const evidence = { ...this.removalArtifactEvidence(record), ...closure };
+    };
+    const evidence = this.removalArtifactEvidence(record);
     // R9 PARITY (board 8c8b6d78): a system reconcile_needed item closes the SAME
     // way from either removal tool. board_remove is the conductor's surface and
     // maintenance_remove the librarian's, but the item and the debt are identical,
@@ -13587,15 +13581,25 @@ export class SterlingTools {
         ...(attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}),
       };
     }
+    let claimNotice: string | undefined;
     // System todos land in the §3.2.7 drain log; a user task's journal row is
     // written in the same transaction as its delete.
     this.store.remove(
       record.id,
       this.now(),
       outcome ? { outcome, ...(checkedEvidence ? { evidence: checkedEvidence } : {}), ...(closeNote !== undefined ? { note: closeNote } : {}) } : undefined,
-      closer !== undefined ? { session: closer } : undefined
+      {
+        ...(closer !== undefined ? { session: closer } : {}),
+        beforeDelete: (_locked, claim) => {
+          writeHandoffFiles();
+          if (claim && closer === undefined) {
+            claimNotice = `closed with no session while session '${claim.holder_session}' holds the claim; pass your session to have a displaced close refused`;
+          }
+        },
+      }
     );
-    return { removed: record.id, ...(outcome ? { outcome } : {}), ...evidence, ...(claimNotice ? { claim_notice: claimNotice } : {}) };
+    const closure = { ...(closurePath ? { handoff_closure: closurePath } : {}), ...(evidencePath ? { handoff_evidence: evidencePath } : {}) };
+    return { removed: record.id, ...(outcome ? { outcome } : {}), ...evidence, ...closure, ...(claimNotice ? { claim_notice: claimNotice } : {}) };
   }
 
   /**

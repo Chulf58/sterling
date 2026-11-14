@@ -4520,8 +4520,13 @@ export class SterlingStore {
    * board-remove-of-a-claimed-task-a-displaced-holder-is-refused). No session,
    * no claim or a maintenance item is not checked; the holder's own close
    * passes whether or not its lease expired, because nobody displaced it.
+   * `beforeDelete` runs inside the same transaction, after the claim check and
+   * the journal insert and before the delete, with the record and the claim as
+   * read under the write lock: a caller's handoff files are written there, so a
+   * refused close writes none and a takeover cannot land between check and
+   * write. If it throws, the transaction rolls back and the item stays.
    */
-  remove(id: string, drainedAt?: string, removal?: BoardRemoval, closedBy?: { session: string }): void {
+  remove(id: string, drainedAt?: string, removal?: BoardRemoval, closedBy?: { session?: string; beforeDelete?: (record: DurableRecord, claim: TodoClaim | undefined) => void }): void {
     this.assertWritable('remove');
     let checkedRemoval: BoardRemoval | undefined;
     if (removal !== undefined) {
@@ -4539,8 +4544,9 @@ export class SterlingStore {
       if (direct && this.writeFence && (id === this.writeFence.owner || this.writeFence.items.has(id))) this.passWriteFence();
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[]; slug?: string; objective?: string; priority?: string }) | undefined;
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
-      if (closedBy && record && record.type === 'todo' && record.source === 'user') {
-        const claim = (record as unknown as { claim?: TodoClaim }).claim;
+      const heldClaim = record && record.type === 'todo' && record.source === 'user' ? (record as unknown as { claim?: TodoClaim }).claim : undefined;
+      if (closedBy?.session !== undefined && record && record.type === 'todo' && record.source === 'user') {
+        const claim = heldClaim;
         if (claim && claim.holder_session !== closedBy.session) {
           throw new ClaimMovedError(
             `remove: the task moved — session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}, claimed at ${claim.claimed_at}. ` +
@@ -4593,6 +4599,7 @@ export class SterlingStore {
       if (record && !isSystemDrain) {
         this.logActivity('removed', record, drainedAt ?? new Date().toISOString());
       }
+      if (closedBy?.beforeDelete && record) closedBy.beforeDelete(record, heldClaim);
       this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
       this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
       this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);

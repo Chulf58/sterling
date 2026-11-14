@@ -26281,6 +26281,11 @@ var SterlingStore = class _SterlingStore {
    * board-remove-of-a-claimed-task-a-displaced-holder-is-refused). No session,
    * no claim or a maintenance item is not checked; the holder's own close
    * passes whether or not its lease expired, because nobody displaced it.
+   * `beforeDelete` runs inside the same transaction, after the claim check and
+   * the journal insert and before the delete, with the record and the claim as
+   * read under the write lock: a caller's handoff files are written there, so a
+   * refused close writes none and a takeover cannot land between check and
+   * write. If it throws, the transaction rolls back and the item stays.
    */
   remove(id, drainedAt, removal, closedBy) {
     this.assertWritable("remove");
@@ -26299,8 +26304,9 @@ var SterlingStore = class _SterlingStore {
         this.passWriteFence();
       const record2 = this.get(id);
       const isSystemDrain = record2 && record2.type === "todo" && record2.source === "system";
-      if (closedBy && record2 && record2.type === "todo" && record2.source === "user") {
-        const claim = record2.claim;
+      const heldClaim = record2 && record2.type === "todo" && record2.source === "user" ? record2.claim : void 0;
+      if (closedBy?.session !== void 0 && record2 && record2.type === "todo" && record2.source === "user") {
+        const claim = heldClaim;
         if (claim && claim.holder_session !== closedBy.session) {
           throw new ClaimMovedError(`remove: the task moved \u2014 session '${claim.holder_session}' in checkout '${claim.checkout}' holds it now at claim generation ${claim.generation}, claimed at ${claim.claimed_at}. Nothing was removed; stop work on it, or coordinate with that session.`);
         }
@@ -26321,6 +26327,8 @@ var SterlingStore = class _SterlingStore {
       if (record2 && !isSystemDrain) {
         this.logActivity("removed", record2, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
       }
+      if (closedBy?.beforeDelete && record2)
+        closedBy.beforeDelete(record2, heldClaim);
       this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
       this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
@@ -40966,12 +40974,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw this.removedItemError("board_remove", id);
     if (record2.type !== "todo")
       throw new Error(`board_remove: '${id}' is a ${record2.type}, not a task`);
-    const heldClaim = record2.source === "user" ? record2.claim : void 0;
     const closer = close.session === void 0 ? void 0 : _SterlingTools.requireClaimText("board_remove", "session", close.session);
-    if (heldClaim && closer !== void 0 && heldClaim.holder_session !== closer) {
-      throw new ClaimMovedError(`board_remove: the task moved \u2014 session '${heldClaim.holder_session}' holds it now. Nothing was removed; stop work on it, or coordinate with that session.`);
-    }
-    const claimNotice = heldClaim && closer === void 0 ? `closed with no session while session '${heldClaim.holder_session}' holds the claim; pass your session to have a displaced close refused` : void 0;
     const isUser = record2.source === "user";
     const outcomeValues = BOARD_REMOVAL_OUTCOMES.join(", ");
     if (!isUser) {
@@ -41011,15 +41014,16 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     }
     let closurePath;
     let evidencePath;
-    if (isReceived && receivedMeta?.success) {
+    const writeHandoffFiles = () => {
+      if (!(isReceived && receivedMeta?.success))
+        return;
       if (checkedEvidence || outcome)
         evidencePath = this.writeHandoffEvidence(record2.id, receivedMeta.data.transfer_id, checkedEvidence, outcome);
       else
         this.removeStaleHandoffEvidence(record2.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record2.id, receivedMeta.data.transfer_id, closeNote);
-    }
-    const closure = { ...closurePath ? { handoff_closure: closurePath } : {}, ...evidencePath ? { handoff_evidence: evidencePath } : {} };
-    const evidence = { ...this.removalArtifactEvidence(record2), ...closure };
+    };
+    const evidence = this.removalArtifactEvidence(record2);
     const attestation = this.attestAlreadyPaidClose("board_remove", record2);
     if (attestation && "domain_held" in attestation) {
       return { removed: record2.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
@@ -41032,8 +41036,18 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         ...attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}
       };
     }
-    this.store.remove(record2.id, this.now(), outcome ? { outcome, ...checkedEvidence ? { evidence: checkedEvidence } : {}, ...closeNote !== void 0 ? { note: closeNote } : {} } : void 0, closer !== void 0 ? { session: closer } : void 0);
-    return { removed: record2.id, ...outcome ? { outcome } : {}, ...evidence, ...claimNotice ? { claim_notice: claimNotice } : {} };
+    let claimNotice;
+    this.store.remove(record2.id, this.now(), outcome ? { outcome, ...checkedEvidence ? { evidence: checkedEvidence } : {}, ...closeNote !== void 0 ? { note: closeNote } : {} } : void 0, {
+      ...closer !== void 0 ? { session: closer } : {},
+      beforeDelete: (_locked, claim) => {
+        writeHandoffFiles();
+        if (claim && closer === void 0) {
+          claimNotice = `closed with no session while session '${claim.holder_session}' holds the claim; pass your session to have a displaced close refused`;
+        }
+      }
+    });
+    const closure = { ...closurePath ? { handoff_closure: closurePath } : {}, ...evidencePath ? { handoff_evidence: evidencePath } : {} };
+    return { removed: record2.id, ...outcome ? { outcome } : {}, ...evidence, ...closure, ...claimNotice ? { claim_notice: claimNotice } : {} };
   }
   /**
    * Delete `<root>/.sterling/handoffs/<transfer_id>.evidence.json` before a
