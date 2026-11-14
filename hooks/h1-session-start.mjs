@@ -13325,7 +13325,7 @@ function walkUpPluginRoot(moduleUrl) {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync7 } from "node:fs";
-import { dirname as dirname9, isAbsolute, join as join14, relative, resolve as resolve5 } from "node:path";
+import { join as join14 } from "node:path";
 init_dist();
 init_dist2();
 
@@ -14151,8 +14151,8 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
     if (gitFileAt(dir)) {
       const linked = linkedWorktreeOnce(dir);
       if (linked) {
-        const storeRoot = resolveStoreRoot(linked.worktree, linked);
-        if (isRoot(storeRoot)) return { storeRoot, checkoutRoot: linked.worktree };
+        const storeRoot2 = resolveStoreRoot(linked.worktree, linked);
+        if (isRoot(storeRoot2)) return { storeRoot: storeRoot2, checkoutRoot: linked.worktree };
       }
     }
     if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
@@ -14167,8 +14167,8 @@ function storeRootFor(dir, isRoot = isSterlingRoot) {
   if (!gitFileAt(at)) return dir;
   const linked = linkedWorktreeOnce(at);
   if (!linked || realOf(at) !== linked.worktree) return dir;
-  const storeRoot = resolveStoreRoot(linked.worktree, linked);
-  return isRoot(storeRoot) ? storeRoot : dir;
+  const storeRoot2 = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot2) ? storeRoot2 : dir;
 }
 function realOf(p) {
   try {
@@ -14178,7 +14178,8 @@ function realOf(p) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname9, isAbsolute, relative, resolve as resolve5 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve5(String(from));
@@ -14189,24 +14190,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync7(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 }
-function inertWorktreeLine({ storeRoot, checkoutRoot }) {
-  return `STERLING HOOKS INERT: this session runs in the linked git worktree ${checkoutRoot} of the Sterling project at ${storeRoot}. Claude Code's Sterling hooks do not run in a worktree outside the main checkout (no knowledge delivery, no touch register, no settlement), because they cannot yet keep this checkout's transient state apart from the main checkout's. Work from ${storeRoot}, or use OpenCode, whose Sterling plugin supports linked worktrees.`;
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync7(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -14859,7 +14860,7 @@ function legacyRegisterLockDir(root) {
   return join19(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function configPath(root) {
-  return join19(root, ".sterling", "config.json");
+  return join19(storeRootFor(root), ".sterling", "config.json");
 }
 function readStaleMinutesDefault(root) {
   try {
@@ -17983,15 +17984,10 @@ function computeH1DeadDispatchResidue(cwd, source) {
   }
   return lines;
 }
-var input = readStdin({ reportInertWorktree: true });
+var input = readStdin();
+var storeRoot = input.storeRoot;
 if (isSpareSession(input.session_id)) {
   exitAfterWrite(`${SPARE_SKIP_LINE}
-`, 0);
-  await new Promise(() => {
-  });
-}
-if (input.inertWorktree) {
-  exitAfterWrite(`${inertWorktreeLine(input.inertWorktree)}
 `, 0);
   await new Promise(() => {
   });
@@ -18006,7 +18002,7 @@ if (input.source === "startup" || input.source === "clear") {
 var sessionMarkerPath = join34(input.cwd, ".sterling", "transient", "session.json");
 var sessionMarkerTmp = join34(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync21(join34(input.cwd, ".sterling", "config.json"))) {
+  if (existsSync21(join34(storeRoot, ".sterling", "config.json"))) {
     mkdirSync13(join34(input.cwd, ".sterling", "transient"), { recursive: true });
     writeFileSync10(
       sessionMarkerTmp,
@@ -18050,10 +18046,10 @@ var storeVersionWarning = "";
 var storeVersionContext = "";
 var projectStoreBlocked = false;
 try {
-  const projectDb = join34(input.cwd, ".sterling", "sterling.db");
+  const projectDb = join34(storeRoot, ".sterling", "sterling.db");
   const behind = [];
   const other = [];
-  for (const db of machineStores(input.cwd)) {
+  for (const db of machineStores(storeRoot)) {
     let found;
     try {
       found = probeSchemaVersion(db);
@@ -18127,11 +18123,11 @@ if (domainMapResult) {
 var storeOpenWarning = "";
 var store = null;
 if (!projectStoreBlocked) {
-  if (storeBackend(input.cwd) === "sqlite") {
-    store = openStore(input.cwd);
+  if (storeBackend(storeRoot) === "sqlite") {
+    store = openStore(storeRoot);
   } else {
     try {
-      store = openStore(input.cwd);
+      store = openStore(storeRoot);
     } catch (e) {
       storeOpenWarning = `\u26A0 Sterling store: DEGRADED \u2014 the project store could not be opened (${namedError(e)}). Knowledge tools, delivery and the session-end duties cannot reach it until this is fixed.
 `;
@@ -18140,11 +18136,11 @@ if (!projectStoreBlocked) {
 }
 if (!store) {
   const earlyWarning = storeOpenWarning + storeVersionWarning + postUpdateWarning;
-  const sterlingProject = projectStoreBlocked || storeOpenWarning !== "" || existsSync21(join34(input.cwd, ".sterling", "config.json"));
+  const sterlingProject = projectStoreBlocked || storeOpenWarning !== "" || existsSync21(join34(storeRoot, ".sterling", "config.json"));
   let earlyStorageContext = "";
   if (sterlingProject) earlyStorageContext = `
 
-${storageLine({ ...readProjectConfig(input.cwd), root: input.cwd })}`;
+${storageLine({ ...readProjectConfig(storeRoot), root: storeRoot })}`;
   if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
@@ -18159,7 +18155,7 @@ ${storageLine({ ...readProjectConfig(input.cwd), root: input.cwd })}`;
   await deleteRegisterUnderLock(input.cwd);
   allow();
 }
-var { config, configUnreadable } = readProjectConfig(input.cwd);
+var { config, configUnreadable } = readProjectConfig(storeRoot);
 var roleContext = "";
 try {
   const root = pluginRoot2();
@@ -18189,17 +18185,17 @@ var handoffContext = "";
 try {
   handoffContext = `
 
-${handoffFilesLine({ config, configUnreadable, root: input.cwd })}`;
+${handoffFilesLine({ config, configUnreadable, root: storeRoot })}`;
 } catch {
 }
 var storageContext = "";
 try {
   storageContext = `
 
-${storageLine({ config, configUnreadable, root: input.cwd })}`;
+${storageLine({ config, configUnreadable, root: storeRoot })}`;
 } catch {
 }
-var domainLines = mountedDomainLines({ config, configUnreadable, root: input.cwd });
+var domainLines = mountedDomainLines({ config, configUnreadable, root: storeRoot });
 var domainsContext = domainLines.length ? `
 
 ${domainLines.join("\n")}` : "";
@@ -18378,7 +18374,7 @@ try {
   const grouped = userTodos.filter((t) => t.objective);
   counts.groupedTodos = grouped.length;
   counts.objectives = new Set(grouped.map((t) => t.objective)).size;
-  const m = readMaintenanceState(store, input.cwd);
+  const m = readMaintenanceState(store, storeRoot);
   counts.maintenance = m.total;
   reconcile = m.reconcile;
   drainable = m.drainable;
@@ -18403,7 +18399,7 @@ var queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
 var queueContext = queueLine ? `
 
 ${queueLine}` : "";
-var backlog = reconcileBacklog({ reconcile, cwd: input.cwd });
+var backlog = reconcileBacklog({ reconcile, cwd: storeRoot });
 var reconcileBanner = backlog.banner;
 var reconcileContext = backlog.line ? `
 
@@ -18412,7 +18408,7 @@ var registryContext = "";
 {
   let refreshed = null;
   try {
-    refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+    refreshed = refreshRegistryRow(storeRoot, { config, configUnreadable });
   } catch (e) {
     registryContext = `
 
@@ -18449,7 +18445,7 @@ try {
   const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? existsSync21(join34(root, "mcp")) ? join34(root, "mcp") : join34(root, "packages", "mcp-server", "dist") : null);
   const currentBuildId = serverDist && existsSync21(buildIdPath(serverDist)) ? readFileSync22(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join34(input.cwd, ".sterling", "sterling.db"));
+  const markerPath = runtimeMarkerPath(join34(storeRoot, ".sterling", "sterling.db"));
   if (existsSync21(markerPath)) {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync22(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;

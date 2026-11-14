@@ -224,22 +224,19 @@ test('the plugin\'s execute.before fills the claim from the session\'s own direc
   }
 });
 
-test('Claude Code hooks: readStdin keeps the old walk; a worktree outside the main checkout is marked inert', () => {
-  const probe = `import { readStdin } from ${JSON.stringify(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'common.mjs')).href)}; const i = readStdin(JSON.parse(process.argv[1])); process.stdout.write(JSON.stringify({ cwd: i.cwd, inert: i.inertWorktree ?? null }));`;
-  const run = (cwd, opts = { reportInertWorktree: true }) => {
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe, JSON.stringify(opts)], { input: JSON.stringify({ cwd }), encoding: 'utf8', env });
+test('Claude Code hooks: readStdin splits a worktree outside the main checkout into checkout and store roots; the old walk holds elsewhere', () => {
+  const probe = `import { readStdin } from ${JSON.stringify(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'common.mjs')).href)}; const i = readStdin(); process.stdout.write(JSON.stringify({ cwd: i.cwd, storeRoot: i.storeRoot ?? null }));`;
+  const run = (cwd) => {
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { input: JSON.stringify({ cwd }), encoding: 'utf8', env });
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
   };
-  assert.deepEqual(run(join(outside, 'src')), { cwd: join(outside, 'src'), inert: { storeRoot: main, checkoutRoot: outside } });
-  const plainRead = spawnSync(process.execPath, ['--input-type=module', '-e', probe, '{}'], { input: JSON.stringify({ cwd: outside }), encoding: 'utf8', env });
-  assert.equal(plainRead.status, 0, plainRead.stderr);
-  assert.equal(plainRead.stdout, '', 'every other hook allows and exits inside readStdin, before touching anything');
-  assert.deepEqual(run(join(main, 'src')), { cwd: main, inert: null });
-  assert.deepEqual(run(nested), { cwd: main, inert: null }, 'a nested worktree resolves to the main root, as before this branch');
+  assert.deepEqual(run(join(outside, 'src')), { cwd: outside, storeRoot: main });
+  assert.deepEqual(run(join(main, 'src')), { cwd: main, storeRoot: main });
+  assert.deepEqual(run(nested), { cwd: main, storeRoot: main }, 'a nested worktree resolves to the main root, as before this branch');
   const none = join(base, 'not-a-project');
   mkdirSync(none, { recursive: true });
-  assert.deepEqual(run(none), { cwd: none, inert: null });
+  assert.deepEqual(run(none), { cwd: none, storeRoot: none }, 'outside a project cwd is left exactly as given');
 });
 
 /** Runs a BUNDLED hook (hooks/<name>) with `input` on stdin. */
@@ -247,29 +244,61 @@ function runHook(name, input) {
   return spawnSync(process.execPath, [join(repo, 'hooks', name)], { input: JSON.stringify(input), encoding: 'utf8', env });
 }
 
-test('bundled H16 and H7 are inert in a worktree outside the main checkout, and H1 says so once', () => {
-  const eventsMain = join(main, '.sterling', 'transient', 'session-events.json');
-  const touchesMain = join(main, '.sterling', 'transient', 'touches.json');
-  rmSync(join(main, '.sterling', 'transient'), { recursive: true, force: true });
-  rmSync(join(outside, '.sterling', 'transient'), { recursive: true, force: true });
+test('bundled H16, H7 and H1 in a worktree outside the main checkout keep transient state in the worktree and read the main store', () => {
+  const mainTransient = join(main, '.sterling', 'transient');
+  const wtTransient = join(outside, '.sterling', 'transient');
+  rmSync(mainTransient, { recursive: true, force: true });
+  rmSync(wtTransient, { recursive: true, force: true });
   const h16 = (cwd) => runHook('h16-event-register.mjs', { cwd, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'q' }, tool_response: {} });
   const h7 = (cwd, file) => runHook('h7-file-touch.mjs', { cwd, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: file, old_string: 'a', new_string: 'b' }, tool_response: {} });
-  let r = h16(outside);
+  let r = h16(join(outside, 'src'));
   assert.equal(r.status, 0, r.stderr);
-  r = h7(outside, join(outside, 'src', 'b.mjs'));
+  r = h7(join(outside, 'src'), join(outside, 'src', 'b.mjs'));
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(existsSync(eventsMain), false, 'H16 from the worktree wrote nothing under main');
-  assert.equal(existsSync(touchesMain), false, 'H7 from the worktree wrote nothing under main');
-  assert.equal(existsSync(join(outside, '.sterling', 'transient')), false, 'nor anything in the worktree');
-  // Control: the same calls in the main checkout do write, so the inert result is not a broken probe.
-  assert.equal(h16(main).status, 0);
-  assert.equal(h7(main, join(main, 'src', 'a.mjs')).status, 0);
-  assert.ok(existsSync(eventsMain), 'H16 writes in the main checkout');
-  assert.ok(existsSync(touchesMain), 'H7 writes in the main checkout');
+  const events = JSON.parse(readFileSync(join(wtTransient, 'session-events.json'), 'utf8'));
+  assert.ok(Array.isArray(events) && events.length > 0, 'H16 registered the event in the worktree');
+  // H7 registers only when it opened a store; the worktree has none, so it opened main's.
+  assert.deepEqual(JSON.parse(readFileSync(join(wtTransient, 'touches.json'), 'utf8')).map((t) => t.path), ['src/b.mjs'], 'H7 registered the worktree edit, repo-relative to the worktree');
+  assert.equal(existsSync(mainTransient), false, 'nothing was written under the main checkout');
   const h1 = runHook('h1-session-start.mjs', { cwd: outside, session_id: 's-wt', source: 'startup', hook_event_name: 'SessionStart' });
   assert.equal(h1.status, 0, h1.stderr);
-  assert.match(h1.stdout, /STERLING HOOKS INERT: this session runs in the linked git worktree/);
-  assert.equal(h1.stdout.trim().split('\n').length, 1, 'one line');
+  assert.doesNotMatch(h1.stdout, /STERLING HOOKS INERT/);
+  assert.equal(JSON.parse(readFileSync(join(wtTransient, 'session.json'), 'utf8')).session_id, 's-wt', 'H1 wrote the session marker into the worktree');
+  assert.equal(existsSync(join(mainTransient, 'session.json')), false, 'and not into the main checkout');
+  assert.equal(existsSync(join(outside, '.sterling', 'sterling.db')), false, 'no store was created in the worktree');
+  assert.equal(existsSync(join(outside, '.sterling', 'config.json')), false, 'nor a config');
+  // Control: the same calls in the main checkout write the main checkout's state.
+  assert.equal(h16(main).status, 0);
+  assert.equal(h7(main, join(main, 'src', 'a.mjs')).status, 0);
+  assert.ok(existsSync(join(mainTransient, 'session-events.json')), 'H16 writes in the main checkout');
+  assert.deepEqual(JSON.parse(readFileSync(join(mainTransient, 'touches.json'), 'utf8')).map((t) => t.path), ['src/a.mjs']);
+});
+
+test('the Claude MCP server started with --project <external worktree> reads the main store and writes session events into the worktree', async () => {
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const bundle = join(repo, 'mcp', 'sterling-mcp.mjs');
+  const call = async (project, name, args) => {
+    const client = new Client({ name: 'checkout-boundary-test', version: '0.0.1' });
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: ['--disable-warning=ExperimentalWarning', bundle, '--project', project], cwd: project, env, stderr: 'pipe' }));
+    try {
+      const res = await client.callTool({ name, arguments: args });
+      assert.notEqual(res.isError, true, JSON.stringify(res.content));
+      return res.content.map((c) => c.text ?? '').join('\n');
+    } finally {
+      await client.close();
+    }
+  };
+  rmSync(join(main, '.sterling', 'transient'), { recursive: true, force: true });
+  rmSync(join(outside, '.sterling'), { recursive: true, force: true });
+  await call(main, 'board_add', { text: 'worktree-mcp-fixture-item', source: 'user' });
+  const listed = await call(outside, 'board_query', { contains: 'worktree-mcp-fixture-item' });
+  assert.match(listed, /worktree-mcp-fixture-item/, 'board_query from the worktree reads the main store');
+  await call(outside, 'no_capture', { reason: 'worktree fixture' });
+  const events = JSON.parse(readFileSync(join(outside, '.sterling', 'transient', 'session-events.json'), 'utf8'));
+  assert.ok(events.some((e) => e.kind === 'no_capture'), 'the session event landed in the worktree');
+  assert.equal(existsSync(join(main, '.sterling', 'transient', 'session-events.json')), false, 'and not in the main checkout');
+  assert.equal(existsSync(join(outside, '.sterling', 'sterling.db')), false, 'no store was created in the worktree');
 });
 
 test('a worktree session\'s settlement baseline is its own checkout\'s HEAD', () => {
@@ -430,7 +459,7 @@ test('a linked worktree of a Sterling git submodule resolves to the submodule ch
   assert.equal(resolveLinkedWorktree(bareWt), null, 'a bare main repo has no main checkout');
 });
 
-test('bundled H16 in a worktree beside its project under a Sterling hub stays inert and never writes the hub\'s state', () => {
+test('bundled H16 in a worktree beside its project under a Sterling hub writes the worktree\'s state, never the hub\'s', () => {
   const hub = join(base, 'hub');
   const proj = join(hub, 'project');
   mkdirSync(join(hub, '.sterling'), { recursive: true });
@@ -448,10 +477,9 @@ test('bundled H16 in a worktree beside its project under a Sterling hub stays in
   const r = runHook('h16-event-register.mjs', { cwd: alpha, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'q' }, tool_response: {} });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(existsSync(join(hub, '.sterling', 'transient')), false, 'the hub is not the worktree\'s project');
-  assert.equal(existsSync(join(proj, '.sterling', 'transient')), false);
-  assert.equal(existsSync(join(alpha, '.sterling', 'transient')), false);
-  const h1 = runHook('h1-session-start.mjs', { cwd: alpha, session_id: 's-a', source: 'startup', hook_event_name: 'SessionStart' });
-  assert.match(h1.stdout, new RegExp(`STERLING HOOKS INERT: this session runs in the linked git worktree ${alpha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} of the Sterling project at`));
+  assert.equal(existsSync(join(proj, '.sterling', 'transient')), false, 'the main checkout keeps its own transient state');
+  assert.ok(existsSync(join(alpha, '.sterling', 'transient', 'session-events.json')), 'the worktree holds its session events');
+  assert.equal(existsSync(join(alpha, '.sterling', 'sterling.db')), false);
   // Control: from the hub itself H16 writes the hub's register.
   assert.equal(runHook('h16-event-register.mjs', { cwd: hub, session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'q' }, tool_response: {} }).status, 0);
   assert.ok(existsSync(join(hub, '.sterling', 'transient', 'session-events.json')));

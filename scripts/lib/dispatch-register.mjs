@@ -52,6 +52,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash } from 'node:crypto';
 import { refusal, disclosure, render } from './review-errors.mjs';
 import { parseSterlingDelivery } from '../hooks/lib/dispatch-prompt.mjs';
+import { storeRootFor } from './worktree-root.mjs';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -71,8 +72,11 @@ function sessionPath(root) {
   return join(root, '.sterling', 'transient', 'session.json');
 }
 
+// The config is the project's shared one: a linked worktree's checkout root maps
+// to its store root (storeRootFor), while the register and session marker above
+// stay in the checkout's own transient state.
 function configPath(root) {
-  return join(root, '.sterling', 'config.json');
+  return join(storeRootFor(root), '.sterling', 'config.json');
 }
 
 // H1's latest-value cell, {session_id, source, at}. null when absent or

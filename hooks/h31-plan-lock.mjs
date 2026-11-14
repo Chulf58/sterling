@@ -11,7 +11,6 @@ import { basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5831,7 +5830,8 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname2, isAbsolute, relative, resolve as resolve2 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve2(String(from));
@@ -5842,21 +5842,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input = JSON.parse(readFileSync2(0, "utf8"));
-  const roots = resolveProjectRoots(input.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input.inertWorktree = roots;
-    return input;
-  }
-  const root = hookProjectRoot(input.cwd);
-  if (root) input.cwd = root;
-  return input;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input = JSON.parse(readFileSync2(0, "utf8"));
+  const roots = hookRoots(input.cwd);
+  if (roots) input.cwd = roots.checkoutRoot;
+  input.storeRoot = roots ? roots.storeRoot : input.cwd;
+  return input;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -5968,7 +5971,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join4 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
@@ -5984,7 +5987,7 @@ function isSterlingProject(cwd) {
   return isSterlingRoot(cwd);
 }
 function sterlingDirOf(cwd) {
-  return join5(cwd, ".sterling");
+  return join4(cwd, ".sterling");
 }
 function sanitizeForContext(value, max) {
   if (typeof value !== "string") return "";
@@ -6083,7 +6086,7 @@ function invalidReason(l) {
   return null;
 }
 function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  const read = readStoreFileBounded(join4(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
   if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
   const raw = read.text;
   let parsed;
@@ -6099,15 +6102,15 @@ function readLock(sterlingDir) {
 }
 function writeAtomicExclusive(dir, name, text) {
   mkdirSync(dir, { recursive: true });
-  const tmp = join5(dir, `.tmp-${name}-${randomUUID()}`);
+  const tmp = join4(dir, `.tmp-${name}-${randomUUID()}`);
   writeFileSync(tmp, text, { flag: "wx", mode: 384 });
-  renameSync(tmp, join5(dir, name));
+  renameSync(tmp, join4(dir, name));
 }
 function writeLock(sterlingDir, lock) {
   writeAtomicExclusive(sterlingDir, LOCK_FILE, JSON.stringify(lock, null, 2) + "\n");
 }
 function writeMarker(sterlingDir, name, body) {
-  writeAtomicExclusive(join5(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
+  writeAtomicExclusive(join4(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
 }
 
 // scripts/hooks/h31-plan-lock.mjs
@@ -6122,7 +6125,7 @@ try {
   const input = readStdin();
   const cwd = input?.cwd;
   if (!cwd) allow();
-  if (!isSterlingProject(cwd)) allow();
+  if (!isSterlingProject(input.storeRoot)) allow();
   const sterlingDir = sterlingDirOf(cwd);
   if (input.hook_event_name !== "PostToolUse") allow();
   if (input.tool_name !== "ExitPlanMode") allow();

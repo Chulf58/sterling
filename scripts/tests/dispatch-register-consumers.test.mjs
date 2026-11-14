@@ -196,3 +196,45 @@ test('R1-A67: every inFlightAdvisory line carries a [snake_case] code token', as
     corrupt.cleanup();
   }
 });
+
+// ===========================================================================
+// Linked worktree (board 22f7f45d): the lease comes from the shared config at the
+// store root, while the register stays in the worktree's own transient state.
+// ===========================================================================
+
+test('in a linked worktree the default lease is the main checkout\'s dispatch_register.stale_minutes, and the register is the worktree\'s', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { realpathSync } = await import('node:fs');
+  const { presumedActiveEntries } = await import('../lib/dispatch-register.mjs');
+  const { liveLanes } = await import('../hooks/lib/board-ready.mjs');
+  const env = { ...process.env };
+  delete env.OPENCODE;
+  delete env.OPENCODE_SESSION_ID;
+  const git = (cwd, args) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', env });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'sterling-reg-worktree-')));
+  try {
+    const main = join(base, 'main');
+    mkdirSync(join(main, '.sterling'), { recursive: true });
+    writeFileSync(join(main, '.sterling', 'config.json'), JSON.stringify({ dispatch_register: { stale_minutes: 600 } }));
+    writeFileSync(join(main, '.gitignore'), '.sterling/\n');
+    git(main, ['init', '-q']);
+    git(main, ['add', '-A']);
+    git(main, ['commit', '-q', '-m', 'main']);
+    const wt = join(base, 'wt');
+    git(main, ['worktree', 'add', '-q', '-b', 'wt', wt]);
+    mkdirSync(join(wt, '.sterling', 'transient'), { recursive: true });
+    // Two hours old: outside the 60-minute built-in default, inside the configured 600.
+    writeFileSync(join(wt, '.sterling', 'transient', 'dispatch-register.json'), JSON.stringify([entry('lane', 120 * MIN)]));
+
+    const active = presumedActiveEntries(wt, { sessionId: 's1' });
+    assert.equal(active.availability, 'ok');
+    assert.deepEqual(active.entries.map((e) => e.agent_id), ['lane'], 'the 600-minute lease from the main config applies');
+    assert.equal(liveLanes(wt, 's1').count, 1, 'liveLanes counts the lane under the shared lease');
+    assert.equal(liveLanes(main, 's1').count, 0, 'the main checkout has no register of its own');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

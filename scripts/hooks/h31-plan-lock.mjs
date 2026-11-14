@@ -65,7 +65,7 @@ try {
   // A bare .sterling directory is NOT a project (~/.sterling exists on every
   // machine): the same sterling.db predicate readStdin's project-root walk and
   // scripts/lib/project.mjs both use. No ceremony outside a Sterling project (P1).
-  if (!isSterlingProject(cwd)) allow();
+  if (!isSterlingProject(input.storeRoot)) allow();
   const sterlingDir = sterlingDirOf(cwd);
 
   if (input.hook_event_name !== 'PostToolUse') allow();
