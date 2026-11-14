@@ -1005,3 +1005,36 @@ test('outcome (removal journal): a received item closed as dropped reads CLOSED 
     h.cleanup();
   }
 });
+
+test('board_remove of a received item: a takeover landing between the read and the removal transaction refuses the close and leaves no closure or evidence file', () => {
+  const h = harness();
+  try {
+    const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { transfer_id: string; delivered: { id: string } };
+    const b = h.betaTools();
+    const rival = new SterlingStore(join(h.beta, '.sterling', 'sterling.db'));
+    try {
+      const claim = (b.tools.boardClaim(d.delivered.id, 'sess-A', 'main') as { claim_state: { generation: number } }).claim_state;
+      // The takeover runs once, just before the closing store opens its first write transaction: after boardRemove has read the item.
+      const handle = (b.tools as unknown as { store: { tx: (fn: () => void) => void } }).store;
+      const original = handle.tx.bind(handle);
+      let fired = false;
+      handle.tx = (fn) => {
+        if (!fired) {
+          fired = true;
+          rival.takeoverClaim(d.delivered.id, { session: 'sess-B', checkout: 'wt-b', expected_holder: 'sess-A', expected_generation: claim.generation, now: NOW });
+        }
+        original(fn);
+      };
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, { outcome: 'done', note: 'shipped', evidence: { commit: 'abc123' }, session: 'sess-A' }), /the task moved/);
+      assert.equal(fired, true, 'the takeover was forced between the read and the transaction');
+      assert.equal(existsSync(join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.json`)), false, 'no closure file');
+      assert.equal(existsSync(join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.evidence.json`)), false, 'no evidence file');
+      assert.ok(b.tools.boardGet(d.delivered.id), 'the item stays');
+    } finally {
+      rival.close();
+      b.close();
+    }
+  } finally {
+    h.cleanup();
+  }
+});

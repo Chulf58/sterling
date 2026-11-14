@@ -13,9 +13,9 @@ import { sterlingToolName } from './mcp-name.mjs';
 // segment of the host's tool name is the name the plugin registers), then classified by
 // its Sterling tool name. Another server's tool, a kanban board_claim say, is never touched.
 // board_update counts only when it names a session.
-const CLAIM_TOOLS = new Set(['board_claim', 'board_reaffirm', 'board_release', 'board_takeover', 'board_adopt', 'board_update']);
+const CLAIM_TOOLS = new Set(['board_claim', 'board_reaffirm', 'board_release', 'board_takeover', 'board_adopt', 'board_update', 'board_remove']);
 // The other board tools the Sterling server serves (packages/mcp-server/src/server.ts).
-const OTHER_BOARD_TOOLS = new Set(['board_add', 'board_edit', 'board_get', 'board_query', 'board_remove']);
+const OTHER_BOARD_TOOLS = new Set(['board_add', 'board_edit', 'board_get', 'board_query']);
 
 /**
  * What `tool` is to the claim check: { claim: 'board_claim' | ... } for a claim tool,
