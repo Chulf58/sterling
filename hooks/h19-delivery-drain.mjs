@@ -7,11 +7,10 @@ var __export = (target, all) => {
 
 // scripts/hooks/h19-delivery-drain.mjs
 import { readFileSync as readFileSync4, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
-import { join as join7 } from "node:path";
+import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5831,7 +5830,8 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname2, isAbsolute, relative, resolve as resolve2 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve2(String(from));
@@ -5842,21 +5842,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync2(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -5966,20 +5969,20 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 });
 
 // scripts/hooks/lib/delivery.mjs
-import { join as join5, dirname as dirname3 } from "node:path";
+import { join as join4, dirname as dirname3 } from "node:path";
 function noticesDir(cwd) {
-  return join5(cwd, ".sterling", "transient", "notices");
+  return join4(cwd, ".sterling", "transient", "notices");
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/hooks/lib/ledger.mjs
 import { readFileSync as readFileSync3, writeFileSync, existsSync as existsSync4, rmSync } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join5 } from "node:path";
 function ledgerPath(cwd, runId, agentId) {
-  if (runId && agentId) return join6(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
-  if (agentId) return join6(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
-  return join6(cwd, ".sterling", "transient", "conductor-reads.json");
+  if (runId && agentId) return join5(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
+  if (agentId) return join5(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
+  return join5(cwd, ".sterling", "transient", "conductor-reads.json");
 }
 function readLedgerEntries(path) {
   if (!existsSync4(path)) return [];
@@ -6019,7 +6022,7 @@ try {
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
-  const files = names.map((name) => join7(dir, name));
+  const files = names.map((name) => join6(dir, name));
   const texts = [];
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
   for (const file of files) {
@@ -6037,7 +6040,7 @@ try {
       texts.push("\u24D8 STERLING: removed malformed immutable notice; its contents were unreadable.");
     }
   }
-  const legacy = join7(input.cwd, ".sterling", "transient", "delivery", "pending.json");
+  const legacy = join6(input.cwd, ".sterling", "transient", "delivery", "pending.json");
   let legacyExists = false;
   try {
     statSync2(legacy);

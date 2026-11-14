@@ -12,6 +12,7 @@ import { KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRIT
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { openRoutedForHook } from './broker-client.mjs';
 import { isForeignTree, workingTreesAt } from './working-tree.mjs';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
 
 // Register timestamps are compared LEXICALLY, so only a canonical ISO stamp is
 // comparable (see the isValidAt note in h10-direct-capture.mjs).
@@ -359,7 +360,8 @@ export function ownershipJoin(store, root, workingTrees = workingTreesAt(root)) 
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isForeign = (r) => isForeignTree(r, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  const isForeign = (r) => isForeignTree(r, root, workingTrees, storeRoot);
   const isUnowned = (p) => !ownerRows(p).some((r) => !isForeign(r));
   const foreignOnlyOwners = (p) => (isUnowned(p) ? ownerRows(p) : []);
   return { ownerRows, isUnowned, isForeign, foreignOnlyOwners };

@@ -7,6 +7,7 @@ import { resolveStoreRoute } from '@sterling/store/routing';
 import { createSterlingServer } from './server.js';
 import { recordRuntimeMarker } from './runtime.js';
 import { startHookBroker } from './broker.js';
+import { hookRoots } from '../../../scripts/hooks/lib/hook-roots.mjs';
 
 const args = process.argv.slice(2);
 const valueOf = (flag: string): string | undefined => {
@@ -81,8 +82,20 @@ if (pathArg.includes('${')) {
 // With --project, storePath is the local anchor <root>/.sterling/sterling.db:
 // the runtime marker, ledgers and locks live beside it in both modes, whether
 // or not a SQLite file exists there (Postgres storage has none).
-export const projectRoot = projectArg !== undefined ? resolve(projectArg) : undefined;
-export const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : projectRoot;
+//
+// Without --checkout (Claude Code's plugin config passes only
+// --project ${CLAUDE_PROJECT_DIR}), a --project inside a linked git worktree
+// OUTSIDE its main checkout is split the way the Claude Code hooks split it
+// (scripts/hooks/lib/hook-roots.mjs hookRoots): the store root is the main
+// checkout, so the session shares its store and board instead of opening a phantom
+// store in the worktree, and the checkout is the worktree, which keeps HEAD, file
+// checks and the session-event register. Every other --project, a nested
+// .claude/worktrees/* included, is used as given, as before; an explicit --checkout
+// is never second-guessed.
+const claudeRoots = projectArg !== undefined && checkoutArg === undefined ? hookRoots(resolve(projectArg)) : null;
+const splitRoots = claudeRoots && claudeRoots.storeRoot !== claudeRoots.checkoutRoot ? claudeRoots : null;
+export const projectRoot = projectArg !== undefined ? (splitRoots?.storeRoot ?? resolve(projectArg)) : undefined;
+export const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : (splitRoots?.checkoutRoot ?? projectRoot);
 export const storePath = projectRoot !== undefined ? join(projectRoot, '.sterling', 'sterling.db') : resolve(pathArg);
 
 // The stores open first, so a refused boot (a Postgres store that is missing

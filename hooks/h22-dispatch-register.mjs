@@ -11,7 +11,7 @@ import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve2 } from "node:path";
+import { join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5861,7 +5861,8 @@ function realOf(p) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname2, isAbsolute, relative, resolve as resolve2 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve2(String(from));
@@ -5872,21 +5873,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync2(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync2(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -7674,7 +7678,7 @@ async function endTaskStoppedDispatch(input2, lines) {
 }
 var input = readStdin();
 try {
-  if (!existsSync6(`${input.cwd}/.sterling/config.json`)) allow();
+  if (!existsSync6(join6(input.storeRoot, ".sterling", "config.json"))) allow();
   mkdirSync2(join6(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;

@@ -114,7 +114,8 @@ const input = readStdin();
  */
 function buildModelPin(inp) {
   if (typeof inp.tool_name !== 'string' || !inp.tool_name.startsWith('mcp__codex__')) return null;
-  const root = inp.cwd ? String(inp.cwd) : '';
+  // The config is the store root's (the main checkout for a linked worktree outside it).
+  const root = inp.storeRoot ? String(inp.storeRoot) : '';
   const sterling = join(root, '.sterling');
   // Outside a Sterling project there is no config to read and nothing to say.
   if (!existsSync(join(sterling, 'sterling.db')) && !existsSync(join(sterling, 'config.json'))) return null;
