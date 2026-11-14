@@ -11,7 +11,7 @@ import { join as join15 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
+import { join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -13020,7 +13020,8 @@ function realOf(p) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname6, isAbsolute, relative, resolve as resolve4 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve4(String(from));
@@ -13031,21 +13032,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync6(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -13187,7 +13191,7 @@ function storeUnavailableLine(who, e) {
 `;
 }
 function openStoreOrDegrade(cwd, who, open2 = openStore) {
-  if (storeBackend(cwd) === "sqlite") return open2(cwd);
+  if (storeBackend(storeRootFor(cwd)) === "sqlite") return open2(cwd);
   try {
     return open2(cwd);
   } catch (e) {
@@ -13208,21 +13212,22 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/working-tree.mjs
 import { join as join11 } from "node:path";
-function isForeignTree(record, root, workingTrees) {
+function isForeignTree(record, root, workingTrees, storeRoot = root ? storeRootFor(root) : root) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
   const mapped = typeof raw === "string" && raw ? raw : void 0;
-  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join11(root, mapped);
-  return !sameLocationAnyHost(location, root);
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join11(storeRoot, mapped);
+  return !sameLocationAnyHost(location, root) && !sameLocationAnyHost(location, storeRoot);
 }
 function workingTreesAt(root) {
   const trees = root ? loadConfig(root)?.working_trees : void 0;
   return trees && typeof trees === "object" ? trees : {};
 }
 function ownsHere(root, workingTrees = workingTreesAt(root)) {
-  return (record) => !isForeignTree(record, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  return (record) => !isForeignTree(record, root, workingTrees, storeRoot);
 }
 
 // scripts/hooks/lib/hazard-lane-mode.mjs

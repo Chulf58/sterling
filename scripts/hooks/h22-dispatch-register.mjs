@@ -311,7 +311,7 @@ async function endTaskStoppedDispatch(input, lines) {
 const input = readStdin();
 
 try {
-  if (!existsSync(`${input.cwd}/.sterling/config.json`)) allow();
+  if (!existsSync(join(input.storeRoot, '.sterling', 'config.json'))) allow();
   // The owner-mkdir lock's directory sits under .sterling/transient/, whose
   // own mkdir is deliberately NON-recursive (mkdir-exclusivity IS the lock
   // primitive) — its parent must already exist before any registerStart/

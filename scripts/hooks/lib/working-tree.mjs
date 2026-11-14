@@ -20,16 +20,26 @@
 // owns root paths at every hook site as it already does on the server (GitHub
 // issues #112, #115). Every caller passes the project's working_trees; a site
 // that only knows the root reads them with workingTreesAt.
+//
+// TWO ROOTS IN A LINKED WORKTREE (board 22f7f45d). `root` is the session's
+// checkout; its store root is storeRootFor(root), the main checkout for a linked
+// worktree and `root` itself everywhere else. A relative mapping joins onto the
+// STORE root, as the MCP server's treeRootFor joins it onto repoRoot, and a
+// working_tree owns here when its location is the project (the store root) or
+// this checkout. So a record naming the main checkout keeps owning the project's
+// paths in a worktree session, and a name mapped to that worktree owns there.
 import { join } from 'node:path';
 import { isAbsolutePathAnyHost, sameLocationAnyHost } from '@sterling/schemas';
 import { loadConfig } from './common.mjs';
+import { storeRootFor } from '../../lib/worktree-root.mjs';
 
-/** True when `record` declares a working_tree that is NOT `root`. No
- *  working_tree → false (a root record). A name mapped in `workingTrees`
- *  compares by its resolved path; an unmapped one by its own spelling. No
+/** True when `record` declares a working_tree that is neither the project
+ *  (`storeRoot`) nor the checkout `root`. No working_tree → false (a root
+ *  record). A name mapped in `workingTrees` compares by its resolved path
+ *  (relative joined onto `storeRoot`); an unmapped one by its own spelling. No
  *  `root` to compare against → any declared working_tree stays foreign, the
  *  pre-existing direction. */
-export function isForeignTree(record, root, workingTrees) {
+export function isForeignTree(record, root, workingTrees, storeRoot = root ? storeRootFor(root) : root) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
@@ -38,8 +48,8 @@ export function isForeignTree(record, root, workingTrees) {
   // root (join(root, '') IS the root).
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : undefined;
   const mapped = typeof raw === 'string' && raw ? raw : undefined;
-  const location = mapped === undefined ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join(root, mapped);
-  return !sameLocationAnyHost(location, root);
+  const location = mapped === undefined ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join(storeRoot, mapped);
+  return !sameLocationAnyHost(location, root) && !sameLocationAnyHost(location, storeRoot);
 }
 
 /** The project's config.working_trees map ({} when unset). A corrupt
@@ -52,5 +62,6 @@ export function workingTreesAt(root) {
 /** The ownership filter every hook site applies: keeps a record unless it
  *  names a foreign tree. Reads config.working_trees once per call. */
 export function ownsHere(root, workingTrees = workingTreesAt(root)) {
-  return (record) => !isForeignTree(record, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  return (record) => !isForeignTree(record, root, workingTrees, storeRoot);
 }

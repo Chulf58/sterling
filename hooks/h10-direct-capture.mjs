@@ -13,7 +13,7 @@ import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join10, relative, resolve as resolve4 } from "node:path";
+import { join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -13071,7 +13071,8 @@ function realOf(p) {
   }
 }
 
-// scripts/hooks/lib/common.mjs
+// scripts/hooks/lib/hook-roots.mjs
+import { dirname as dirname6, isAbsolute, relative, resolve as resolve4 } from "node:path";
 function hookProjectRoot(from) {
   if (!from) return null;
   let dir = resolve4(String(from));
@@ -13082,21 +13083,24 @@ function hookProjectRoot(from) {
     dir = parent;
   }
 }
-function readStdin({ reportInertWorktree = false } = {}) {
-  const input2 = JSON.parse(readFileSync6(0, "utf8"));
-  const roots = resolveProjectRoots(input2.cwd, isSterlingRoot);
-  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) {
-    if (!reportInertWorktree) allow();
-    input2.inertWorktree = roots;
-    return input2;
-  }
-  const root = hookProjectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
-}
 function isWithin(child, parent) {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function hookRoots(from) {
+  const roots = resolveProjectRoots(from, isSterlingRoot);
+  if (roots && roots.checkoutRoot !== roots.storeRoot && !isWithin(roots.checkoutRoot, roots.storeRoot)) return roots;
+  const root = hookProjectRoot(from);
+  return root ? { storeRoot: root, checkoutRoot: root } : null;
+}
+
+// scripts/hooks/lib/common.mjs
+function readStdin() {
+  const input2 = JSON.parse(readFileSync6(0, "utf8"));
+  const roots = hookRoots(input2.cwd);
+  if (roots) input2.cwd = roots.checkoutRoot;
+  input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
   let stdoutWritten = false;
@@ -13633,21 +13637,22 @@ import { join as join15, dirname as dirname9 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 import { join as join12 } from "node:path";
-function isForeignTree(record, root, workingTrees) {
+function isForeignTree(record, root, workingTrees, storeRoot = root ? storeRootFor(root) : root) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
   const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
   const mapped = typeof raw === "string" && raw ? raw : void 0;
-  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join12(root, mapped);
-  return !sameLocationAnyHost(location, root);
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join12(storeRoot, mapped);
+  return !sameLocationAnyHost(location, root) && !sameLocationAnyHost(location, storeRoot);
 }
 function workingTreesAt(root) {
   const trees = root ? loadConfig(root)?.working_trees : void 0;
   return trees && typeof trees === "object" ? trees : {};
 }
 function ownsHere(root, workingTrees = workingTreesAt(root)) {
-  return (record) => !isForeignTree(record, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  return (record) => !isForeignTree(record, root, workingTrees, storeRoot);
 }
 
 // scripts/hooks/lib/reconcile-origins.mjs
@@ -15230,7 +15235,8 @@ function ownershipJoin(store2, root, workingTrees = workingTreesAt(root)) {
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isForeign = (r) => isForeignTree(r, root, workingTrees);
+  const storeRoot = root ? storeRootFor(root) : root;
+  const isForeign = (r) => isForeignTree(r, root, workingTrees, storeRoot);
   const isUnowned = (p) => !ownerRows(p).some((r) => !isForeign(r));
   const foreignOnlyOwners = (p) => isUnowned(p) ? ownerRows(p) : [];
   return { ownerRows, isUnowned, isForeign, foreignOnlyOwners };
@@ -15370,11 +15376,12 @@ var residueLines = await (async () => {
   }
 })();
 var store;
-if (storeBackend(input.cwd) === "sqlite") {
-  store = openStore(input.cwd);
+var checkoutLocal = input.storeRoot !== input.cwd;
+if (storeBackend(input.storeRoot) === "sqlite") {
+  store = openStore(input.storeRoot);
 } else {
   try {
-    store = openStore(input.cwd);
+    store = openStore(input.storeRoot);
   } catch (e) {
     const why = `H10: the project store could not be opened (${namedError(e)}), so the session-end duties cannot be checked.`;
     if (residueLines.length) process.stderr.write(residueLines.join("\n\n") + "\n\n");
@@ -15866,7 +15873,7 @@ try {
   }
   const prLoopNaggedPath = join22(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
   const prLoop = (() => {
-    const { state, degraded } = evaluatePrLoop(input.cwd);
+    const { state, degraded } = evaluatePrLoop(input.storeRoot);
     if (degraded) degradationParts.push(degraded);
     if (!state) return null;
     const spent = (() => {
@@ -15995,7 +16002,7 @@ try {
   });
   const dutyRecords = openDutyRecords(store, config, {
     onUnreadable: (name, error) => degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties \u2014 ${error}; a record written there this session is not counted`),
-    root: input.cwd,
+    root: input.storeRoot,
     onLedgerUnreadable: (error, file) => degradationParts.push(`H10: the domain-write ledger (${file}) could not be read \u2014 ${error}; a domain-scoped record logged only in that file is not counted toward the session-end duties, and entries in this project's other ledger files still count. Fix or remove the file`)
   });
   const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
@@ -16111,8 +16118,11 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
+    const checkoutJudges = (p) => !checkoutLocal || unowned.includes(p);
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)) || unclaimableDirectory(p))
+      carriedAll.filter(
+        (p) => exemptFromDemand(p) || checkoutJudges(p) && ((carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)) || unclaimableDirectory(p))
+      )
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
@@ -16371,7 +16381,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync13(join22(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => (!checkoutLocal || unowned.includes(p)) && !existsSync13(join22(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);
@@ -16408,7 +16418,7 @@ ${parts.join("\n\n")}`;
       store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
     } catch {
     }
-    if (storeBackend(input.cwd) === "routed") {
+    if (storeBackend(input.storeRoot) === "routed") {
       const why = `H10: session-end duties could not be checked (${namedError(e)}).`;
       if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.
 `);
