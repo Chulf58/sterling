@@ -480,7 +480,7 @@ function lastCopilotReview(reviews, pinned) {
   return copilot.length ? copilot.reduce((a, b) => b.id > a.id ? b : a) : null;
 }
 var EVIDENCE_MAX_BUFFER = 64 * 1024 * 1024;
-var RUN_CONCLUSIONS_OK = /* @__PURE__ */ new Set(["success", "skipped"]);
+var RUN_CONCLUSIONS_OK = /* @__PURE__ */ new Set(["success", "skipped", "neutral"]);
 var REQUIRED_CONCLUSIONS_OK = /* @__PURE__ */ new Set(["success", "skipped", "neutral"]);
 var httpStatusOf = (text) => Number(String(text).match(/\(HTTP (\d{3})\)/)?.[1] ?? 0) || null;
 function evidenceRead(host, path, { paginate = false, deadline: deadline2 = null } = {}) {

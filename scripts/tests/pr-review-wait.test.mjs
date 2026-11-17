@@ -2015,6 +2015,15 @@ test('a required check that appears during the --checks-timeout wait is waited f
   assert.match(r.stderr, /authorized to merge/);
 });
 
+// "Match GitHub" (user-ruled 2026-11-17): GitHub treats a neutral conclusion as
+// non-failing, so a workflow run that concluded neutral passes like success.
+test('a workflow run that concluded neutral counts as passing (as GitHub counts it): authorized', () => {
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'neutral', run_attempt: 1, head_sha: HEAD }] }));
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.deepEqual(r.out.withheld_reasons, []);
+});
+
 test('a workflow run still in progress is waited for: authorized once it completes green', () => {
   const run0 = { id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD };
   const r = settleWaiting((f) => {
@@ -2027,8 +2036,9 @@ test('a workflow run still in progress is waited for: authorized once it complet
 });
 
 test('a required check still missing when --checks-timeout runs out withholds the merge, naming the check and the wait', () => {
-  // 4s, not less: each evidence read is 7 fake gh calls, slow on a loaded machine.
-  const r = settleWaiting((f) => putEvidence(f, 'check_runs', ONLY_COPILOT), ['--checks-interval', '0.2', '--checks-timeout', '4']);
+  // 10s: each evidence read is 7 fake gh calls, and under the full suite's load a
+  // 4s budget once cut the FIRST read short, which (correctly) reads as unreadable.
+  const r = settleWaiting((f) => putEvidence(f, 'check_runs', ONLY_COPILOT), ['--checks-interval', '0.5', '--checks-timeout', '10']);
   assertWithheld(r, /required check ci not reported on the head commit/, 'missing after the wait');
   assert.equal(r.out.checks_timed_out, true);
   assert.ok(r.out.withheld_reasons.some((x) => /required checks or workflow runs were still not finished after waiting \d+s/.test(x)), JSON.stringify(r.out.withheld_reasons));

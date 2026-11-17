@@ -147,7 +147,8 @@
 // every required check of the base branch (rulesets and classic branch
 // protection) is reported on the head and passed (success, skipped or
 // neutral, as GitHub branch protection counts it), the head's newest workflow
-// run per workflow and event is completed and succeeded (or was skipped), and
+// run per workflow and event is completed and succeeded (or was skipped or
+// neutral), and
 // the branch is not behind its base. A required check not reported or not
 // finished yet, or a workflow run still running, is waited for inside the
 // --checks-timeout wait below; it withholds only when that wait runs out
@@ -347,7 +348,10 @@ function lastCopilotReview(reviews, pinned) {
 // branch is not behind its base. Absent, unreadable or unmet evidence
 // withholds the merge with a named reason; it never refuses the settle.
 const EVIDENCE_MAX_BUFFER = 64 * 1024 * 1024; // compare and check-runs answers can be large
-const RUN_CONCLUSIONS_OK = new Set(['success', 'skipped']); // a skipped run ran no job, so it hides no failure
+// A workflow run passes on success, skipped (it ran no job, so it hides no
+// failure) or neutral, which GitHub treats as non-failing (user-ruled
+// 2026-11-17, "Match GitHub").
+const RUN_CONCLUSIONS_OK = new Set(['success', 'skipped', 'neutral']);
 // A required check passes as GitHub branch protection counts it (user-ruled
 // 2026-11-17, "Match GitHub, and wait"): success, skipped or neutral. failure,
 // cancelled, timed_out, action_required, stale and startup_failure withhold.
