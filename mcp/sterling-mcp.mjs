@@ -31614,7 +31614,7 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync11, existsSync as existsSync8, lstatSync as lstatSync7, realpathSync as realpathSync7, rmSync as rmSync4, statSync as statSync5 } from "node:fs";
+import { readFileSync as readFileSync11, existsSync as existsSync8, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
 import { join as join16, dirname as dirname9, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve7, sep as sep2 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
@@ -42014,33 +42014,98 @@ var strict = (shape, hints = {}) => {
   return advertised;
 };
 var DRAFTS_DIR = ".sterling/drafts";
-function resolveDraftsFile(repoRoot, path) {
-  const dir = join16(repoRoot, DRAFTS_DIR);
-  const refuse = (why) => new Error(`knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${dir.replace(/\\/g, "/")}). Nothing was written.`);
-  let dirStat;
-  try {
-    dirStat = lstatSync7(dir);
-  } catch {
-    throw refuse(`the drafts folder ${DRAFTS_DIR}/ does not exist`);
-  }
-  if (!dirStat.isDirectory())
-    throw refuse(`${DRAFTS_DIR} is not a real directory (a symlink or a file)`);
-  const realDir = realpathSync7(dir);
-  let real;
-  try {
-    real = realpathSync7(isAbsolute2(path) ? path : resolve7(dir, path));
-  } catch {
-    throw refuse(`'${path}' does not exist`);
-  }
-  const rel = relative2(realDir, real);
-  if (rel === "" || rel === ".." || rel.startsWith(".." + sep2) || isAbsolute2(rel))
-    throw refuse(`'${path}' resolves to ${real.replace(/\\/g, "/")}, outside the drafts folder`);
-  if (!statSync5(real).isFile())
-    throw refuse(`'${path}' is not a regular file`);
-  return { file: real, label: `${DRAFTS_DIR}/${rel.split(sep2).join("/")}` };
+var PINNED_DIR = fsConstants2.O_RDONLY | fsConstants2.O_DIRECTORY | fsConstants2.O_NOFOLLOW;
+var PINNED_LEAF = fsConstants2.O_RDONLY | fsConstants2.O_NOFOLLOW | fsConstants2.O_NONBLOCK;
+var viaFd = (fd, name) => `/proc/self/fd/${fd}/${name}`;
+var fileId = (fd) => {
+  const st = fstatSync3(fd);
+  return { dev: st.dev, ino: st.ino };
+};
+var errCode = (e) => e?.code;
+function draftsRefusal(repoRoot, why) {
+  return new Error(`knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${join16(repoRoot, DRAFTS_DIR).replace(/\\/g, "/")}). Nothing was written.`);
 }
-function rootFieldOf(field) {
-  return field.split(/[[.]/, 1)[0];
+function closeDraft(d) {
+  for (const fd of [d.leafFd, ...d.dirFds])
+    closeSync5(fd);
+}
+function openDraft(repoRoot, path) {
+  if (process.platform !== "linux") {
+    throw draftsRefusal(repoRoot, `this tool pins the drafts folder through /proc/self/fd, which exists only on Linux (run Sterling under WSL on Windows); platform '${process.platform}' is refused`);
+  }
+  const base2 = join16(repoRoot, DRAFTS_DIR);
+  const inside = (b) => {
+    const rel2 = relative2(b, isAbsolute2(path) ? path : resolve7(b, path));
+    return rel2 === "" || rel2 === ".." || rel2.startsWith(".." + sep2) || isAbsolute2(rel2) ? void 0 : rel2;
+  };
+  const rel = inside(base2) ?? (isAbsolute2(path) ? inside(join16(realpathSync7(repoRoot), DRAFTS_DIR)) : void 0);
+  if (rel === void 0)
+    throw draftsRefusal(repoRoot, `'${path}' resolves outside the drafts folder`);
+  const parts = [...DRAFTS_DIR.split("/"), ...rel.split(sep2)];
+  const names = parts.slice(0, -1);
+  const leaf = parts[parts.length - 1];
+  const label = parts.join("/");
+  const dirFds = [];
+  let leafFd;
+  try {
+    dirFds.push(openSync5(repoRoot, fsConstants2.O_RDONLY | fsConstants2.O_DIRECTORY));
+    for (const [i, name] of names.entries()) {
+      try {
+        dirFds.push(openSync5(viaFd(dirFds[dirFds.length - 1], name), PINNED_DIR));
+      } catch (e) {
+        const at = parts.slice(0, i + 1).join("/");
+        if (errCode(e) === "ENOENT")
+          throw draftsRefusal(repoRoot, i < 2 ? `the drafts folder ${DRAFTS_DIR}/ does not exist` : `'${path}' does not exist`);
+        if (errCode(e) === "ELOOP" || errCode(e) === "ENOTDIR")
+          throw draftsRefusal(repoRoot, `${at} is not a real directory (a symlink or a file)`);
+        throw e;
+      }
+    }
+    try {
+      leafFd = openSync5(viaFd(dirFds[dirFds.length - 1], leaf), PINNED_LEAF);
+    } catch (e) {
+      if (errCode(e) === "ENOENT")
+        throw draftsRefusal(repoRoot, `'${path}' does not exist`);
+      if (errCode(e) === "ELOOP")
+        throw draftsRefusal(repoRoot, `'${path}' is a symlink, which could point outside the drafts folder; a drafts file must be a regular file`);
+      throw e;
+    }
+    if (!fstatSync3(leafFd).isFile())
+      throw draftsRefusal(repoRoot, `'${path}' is not a regular file`);
+    return { dirFds, dirIds: dirFds.map(fileId), names, leaf, leafFd, leafId: fileId(leafFd), label };
+  } catch (e) {
+    for (const fd of leafFd === void 0 ? dirFds : [leafFd, ...dirFds])
+      closeSync5(fd);
+    throw e;
+  }
+}
+function draftMoved(repoRoot, d) {
+  const fresh = [];
+  try {
+    fresh.push(openSync5(repoRoot, fsConstants2.O_RDONLY | fsConstants2.O_DIRECTORY));
+    for (const name of d.names)
+      fresh.push(openSync5(viaFd(fresh[fresh.length - 1], name), PINNED_DIR));
+    const changed = fresh.findIndex((fd, i) => {
+      const id = fileId(fd);
+      return id.dev !== d.dirIds[i].dev || id.ino !== d.dirIds[i].ino;
+    });
+    if (changed >= 0)
+      return `${d.names.slice(0, changed).join("/") || "the project root"} is no longer the folder that was opened`;
+  } catch (e) {
+    return `the drafts folder path no longer leads through real directories (${errCode(e) ?? e.message})`;
+  } finally {
+    for (const fd of fresh)
+      closeSync5(fd);
+  }
+  let now;
+  try {
+    now = lstatSync7(viaFd(d.dirFds[d.dirFds.length - 1], d.leaf));
+  } catch (e) {
+    return `${d.label} is gone from the drafts folder (${errCode(e) ?? e.message})`;
+  }
+  if (now.dev !== d.leafId.dev || now.ino !== d.leafId.ino)
+    return `${d.label} was replaced in the drafts folder`;
+  return void 0;
 }
 function measureField(value) {
   if (typeof value === "string")
@@ -42199,21 +42264,33 @@ function createSterlingServer(target, opts = {}) {
       }
       case "append": {
         const { op: _op, ...args2 } = op;
-        return { result: applyAppend(args2), fields: [rootFieldOf(args2.field)] };
+        return { result: applyAppend(args2), fields: [rootField(args2.field)] };
       }
       case "edit": {
         const { op: _op, ...args2 } = op;
-        return { result: applyEdit(args2), fields: [rootFieldOf(args2.field)] };
+        return { result: applyEdit(args2), fields: [rootField(args2.field)] };
       }
       case "array_remove": {
         const { op: _op, ...args2 } = op;
-        return { result: applyArrayRemove(args2), fields: [rootFieldOf(args2.selector)] };
+        return { result: applyArrayRemove(args2), fields: [rootField(args2.selector)] };
       }
     }
   };
   const applyDrafts = (path, dryRun) => {
-    const { file, label } = resolveDraftsFile(repoRoot, path);
-    const ops = parseDraftOps(readFileSync11(file, "utf8"), label);
+    const draft = openDraft(repoRoot, path);
+    try {
+      return applyPinnedDraft(draft, dryRun);
+    } finally {
+      closeDraft(draft);
+    }
+  };
+  const applyPinnedDraft = (draft, dryRun) => {
+    const label = draft.label;
+    const text = readFileSync11(draft.leafFd, "utf8");
+    const moved = draftMoved(repoRoot, draft);
+    if (moved)
+      throw draftsRefusal(repoRoot, `${label} changed while it was read: ${moved}`);
+    const ops = parseDraftOps(text, label);
     if (dryRun) {
       return {
         path: label,
@@ -42239,10 +42316,14 @@ function createSterlingServer(target, opts = {}) {
       const written = Object.fromEntries(ran.fields.map((f) => [f, measureField(record2[f])]));
       applied.push({ index, op: op.op, id: record2.id, version: record2.version, written, ...ran.result.warnings.length ? { warnings: ran.result.warnings } : {} });
     }
+    const keep = (why) => ({ path: label, applied, file_removed: false, file_remove_error: `${why}; every op was written, so remove the file by hand before anything re-runs it` });
+    const movedNow = draftMoved(repoRoot, draft);
+    if (movedNow)
+      return keep(`not removed: ${movedNow}`);
     try {
-      rmSync4(file);
+      unlinkSync3(viaFd(draft.dirFds[draft.dirFds.length - 1], draft.leaf));
     } catch (e) {
-      return { path: label, applied, file_removed: false, file_remove_error: `${e instanceof Error ? e.message : String(e)}; every op was written, so remove the file by hand before anything re-runs it` };
+      return keep(e instanceof Error ? e.message : String(e));
     }
     return { path: label, applied, file_removed: true };
   };
@@ -42401,7 +42482,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ ...arrayRemoveArgs, projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(applyArrayRemove(args2), projection)));
   server.registerTool("knowledge_apply_drafts", {
-    description: `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute); after symlinks are resolved it must still be a regular file inside that folder, which must be a real directory, else the call is refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written; the file is kept, and the refusal lists the written ops (re-running the file re-applies them, so remove them from it first). When every op applied, the file is deleted and the receipt says file_removed:true; a failed delete returns file_removed:false with file_remove_error, and the writes stand. dry_run:true checks the file and resolves each op's record, writing and deleting nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}], file_removed, file_remove_error?}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
+    description: `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute). Every component below the project root (.sterling, drafts, any subfolder, the file) must be a real directory or regular file, never a symlink, else the call is refused; each is opened through the descriptor of the one above, the content is read from the file's descriptor, and the read is refused if the path no longer leads to that file afterwards. Linux (and WSL) only: other platforms are refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written; the file is kept, and the refusal lists the written ops (re-running the file re-applies them, so remove them from it first). When every op applied, the file is deleted through the held drafts folder, only while the path still leads to the file that was read, and the receipt says file_removed:true; otherwise, or when the delete fails, the file is kept and the receipt says file_removed:false with file_remove_error, and the writes stand. Not excluded: a same-user process replacing the file's name inside the drafts folder between that last check and the delete (Node has no unlinkat), which removes the replacement, never a file outside the folder. dry_run:true checks the file and resolves each op's record, writing and deleting nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}], file_removed, file_remove_error?}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
     inputSchema: strict({
       path: external_exports.string().min(1).describe(`the drafts file: relative to ${DRAFTS_DIR}/, or an absolute path inside it`),
       dry_run: external_exports.boolean().optional().describe("check the file and resolve every record without writing")
@@ -42797,7 +42878,7 @@ function isSterlingRoot(dir) {
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync10, realpathSync as realpathSync9, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync10, realpathSync as realpathSync9, statSync as statSync5 } from "node:fs";
 import { basename as basename5, dirname as dirname11, join as join18, resolve as resolve8 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
   const git3 = (args2, at) => spawnSync4("git", args2, { cwd: at, encoding: "utf8", timeout: 3e4 });
@@ -42844,7 +42925,7 @@ function linkedWorktreeOnce(dir) {
 }
 function gitFileAt(dir) {
   try {
-    return statSync6(join18(dir, ".git")).isFile();
+    return statSync5(join18(dir, ".git")).isFile();
   } catch {
     return false;
   }

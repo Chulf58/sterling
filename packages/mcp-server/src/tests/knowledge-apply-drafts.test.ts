@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -302,5 +303,157 @@ test('a delete that fails after a full apply is reported in the receipt, and the
   } finally {
     chmodSync(drafts, 0o755);
     await h.cleanup();
+  }
+});
+
+// Race tests (task-end review of #290): containment checked once by pathname and
+// the file then re-opened and unlinked by pathname let a swap between the check
+// and the use redirect the read and the delete outside the drafts folder. The
+// swap is injected deterministically through a fake fs layer: the CJS `fs`
+// functions are wrapped and syncBuiltinESMExports() pushes the wrappers into
+// the `node:fs` named imports server.ts uses, so the swap runs at a chosen fs
+// call inside the tool, the same way for any implementation. Linux only: the
+// tool pins the drafts folder through /proc/self/fd.
+const cjsFs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+const WRAPPED = ['openSync', 'lstatSync', 'statSync', 'realpathSync', 'rmSync', 'unlinkSync', 'readFileSync', 'existsSync'] as const;
+
+/** Runs `action` once, before or after the first wrapped fs call whose string
+ *  path satisfies `match`. Returns a restore function. */
+function injectSwap(match: (path: string) => boolean, when: 'before' | 'after', action: () => void): () => void {
+  const orig: Record<string, (...a: unknown[]) => unknown> = {};
+  let fired = false;
+  let busy = false;
+  for (const name of WRAPPED) {
+    const fn = cjsFs[name] as (...a: unknown[]) => unknown;
+    orig[name] = fn;
+    const wrapped = function (this: unknown, ...a: unknown[]) {
+      const p = typeof a[0] === 'string' ? a[0] : undefined;
+      const hit = !fired && !busy && p !== undefined && (() => { busy = true; try { return match(p); } finally { busy = false; } })();
+      const fire = () => { fired = true; busy = true; try { action(); } finally { busy = false; } };
+      if (hit && when === 'before') fire();
+      const r = fn.apply(this, a);
+      if (hit && when === 'after') fire();
+      return r;
+    };
+    if (name === 'realpathSync') (wrapped as unknown as { native: unknown }).native = (fn as unknown as { native: unknown }).native;
+    cjsFs[name] = wrapped;
+  }
+  syncBuiltinESMExports();
+  return () => {
+    for (const name of WRAPPED) cjsFs[name] = orig[name];
+    syncBuiltinESMExports();
+  };
+}
+
+const linuxOnly = { skip: process.platform !== 'linux' ? 'the tool pins the drafts folder through /proc/self/fd (Linux/WSL)' : false };
+
+test('race: the draft swapped for a symlink to an outside file right after it is located is refused, nothing applied', linuxOnly, async () => {
+  const h = await harness();
+  try {
+    const id = h.decision();
+    const draft = h.draft('leafswap.json', [{ op: 'update', id, body: { rationale: 'from the draft' } }]);
+    const outside = join(h.dir, 'outside.json');
+    writeFileSync(outside, JSON.stringify([{ op: 'update', id, body: { rationale: 'escaped' } }]));
+    const restore = injectSwap((p) => p.endsWith('/leafswap.json'), 'after', () => {
+      renameSync(draft, draft + '.orig');
+      symlinkSync(outside, draft);
+    });
+    let res;
+    try {
+      res = await h.apply({ path: 'leafswap.json' });
+    } finally {
+      restore();
+    }
+    assert.notEqual(h.get(id).rationale, 'escaped', 'ops from the outside file were applied');
+    assert.equal(res.isError, true, text(res));
+    assert.match(text(res), /changed while it was read/);
+    assert.equal(h.get(id).version, 1, 'nothing was applied');
+    assert.equal(existsSync(outside), true);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('race: the drafts folder swapped for a symlink to an outside folder right after it is located is refused, nothing applied', linuxOnly, async () => {
+  const h = await harness();
+  try {
+    const id = h.decision();
+    const drafts = join(h.dir, '.sterling', 'drafts');
+    h.draft('ancswap.json', [{ op: 'update', id, body: { rationale: 'from the draft' } }]);
+    const outsideDir = join(h.dir, 'outside');
+    mkdirSync(outsideDir);
+    writeFileSync(join(outsideDir, 'ancswap.json'), JSON.stringify([{ op: 'update', id, body: { rationale: 'escaped' } }]));
+    const restore = injectSwap((p) => p.endsWith('/drafts'), 'after', () => {
+      renameSync(drafts, drafts + '.real');
+      symlinkSync(outsideDir, drafts);
+    });
+    let res;
+    try {
+      res = await h.apply({ path: 'ancswap.json' });
+    } finally {
+      restore();
+    }
+    assert.notEqual(h.get(id).rationale, 'escaped', 'ops from the outside folder were applied');
+    assert.equal(res.isError, true, text(res));
+    assert.match(text(res), /changed while it was read/);
+    assert.equal(h.get(id).version, 1, 'nothing was applied');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('race: the drafts folder swapped for a symlink after the apply and before the delete leaves the outside file alone and keeps the draft', linuxOnly, async () => {
+  const h = await harness();
+  try {
+    const id = h.decision();
+    const drafts = join(h.dir, '.sterling', 'drafts');
+    h.draft('delswap.json', [{ op: 'update', id, body: { rationale: 'landed' } }]);
+    const outsideDir = join(h.dir, 'outside');
+    mkdirSync(outsideDir);
+    const unrelated = join(outsideDir, 'delswap.json');
+    writeFileSync(unrelated, 'an unrelated file outside the drafts folder');
+    // Fires at the first fs call after the op's write has landed.
+    const restore = injectSwap(() => (h.store.get(id) as Loose | undefined)?.rationale === 'landed', 'before', () => {
+      renameSync(drafts, drafts + '.real');
+      symlinkSync(outsideDir, drafts);
+    });
+    let res;
+    try {
+      res = await h.apply({ path: 'delswap.json' });
+    } finally {
+      restore();
+    }
+    assert.equal(existsSync(unrelated), true, 'the unrelated outside file was deleted');
+    assert.equal(existsSync(join(drafts + '.real', 'delswap.json')), true, 'the real draft is kept');
+    assert.notEqual(res.isError, true, text(res));
+    const receipt = JSON.parse(text(res)) as Loose;
+    assert.equal(receipt.file_removed, false);
+    assert.match(String(receipt.file_remove_error), /drafts folder/);
+    assert.equal(h.get(id).rationale, 'landed', 'the write stands');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a .sterling folder that is a symlink is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-apply-drafts-link-'));
+  mkdirSync(join(dir, 'real-sterling', 'drafts'), { recursive: true });
+  symlinkSync(join(dir, 'real-sterling'), join(dir, '.sterling'));
+  const { server, store, tools } = createSterlingServer(join(dir, '.sterling', 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const id = (tools.knowledgeCreate('decision', { title: 'linked sterling fixture', statement: 's', alternatives_rejected: [], rationale: 'short' }).record as unknown as { id: string }).id;
+    writeFileSync(join(dir, 'real-sterling', 'drafts', 'ops.json'), JSON.stringify([{ op: 'update', id, body: { rationale: 'via link' } }]));
+    const res = await client.callTool({ name: 'knowledge_apply_drafts', arguments: { path: 'ops.json' } });
+    assert.equal(res.isError, true, text(res));
+    assert.match(text(res), /\.sterling is not a real directory/);
+    assert.equal((tools.knowledgeGet(id) as unknown as Loose).rationale, 'short');
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
