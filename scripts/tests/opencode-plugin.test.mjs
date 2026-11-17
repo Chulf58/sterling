@@ -1865,7 +1865,7 @@ test('context fence: an over-budget delivery logs its slowest sections with ms',
   try {
     await ctx.hooks.session.prompt(promptInput('go'));
     const log = readFileSync(join(p.dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8');
-    assert.match(log, /context: over budget \(\d+ ms, synchronous\) \(slowest: [^)]*\bstatus \d+ ms/);
+    assert.match(log, /context: over budget \(\d+ ms, synchronous\) \(slowest: [a-z-]+ \d+ ms(, [a-z-]+ \d+ ms){0,2}\)$/m);
   } finally {
     server.BUDGET_MS.context = saved;
     await cleanup?.();
@@ -1874,15 +1874,14 @@ test('context fence: an over-budget delivery logs its slowest sections with ms',
 });
 
 test('createSectionTimer: times sync and async sections, lists the slowest three at 50 ms or more', async () => {
-  const t = server.createSectionTimer();
+  let clock = 0;
+  const t = server.createSectionTimer(() => clock);
   assert.equal(t.slowest(), '');
-  const busy = (ms) => { const end = Date.now() + ms; while (Date.now() < end); };
-  assert.equal(t.time('a', () => (busy(60), 7)), 7);
-  await t.time('b', async () => busy(90));
-  t.time('c', () => busy(70));
-  t.time('d', () => busy(55));
-  t.time('fast', () => 1);
-  assert.throws(() => t.time('boom', () => { busy(80); throw new Error('x'); }), /x/);
-  const out = t.slowest();
-  assert.match(out, /^ \(slowest: b \d+ ms, boom \d+ ms, c \d+ ms\)$/);
+  assert.equal(t.time('a', () => ((clock += 60), 7)), 7);
+  await t.time('b', async () => { clock += 90; });
+  t.time('c', () => { clock += 70; });
+  t.time('d', () => { clock += 55; });
+  t.time('fast', () => { clock += 49; });
+  assert.throws(() => t.time('boom', () => { clock += 80; throw new Error('x'); }), /x/);
+  assert.equal(t.slowest(), ' (slowest: b 90 ms, boom 80 ms, c 70 ms)');
 });

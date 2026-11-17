@@ -28738,12 +28738,12 @@ function sameDirectory(a, b) {
   const equal = real(a) === real(b);
   return { equal, unresolved };
 }
-function createSectionTimer() {
+function createSectionTimer(now = Date.now) {
   const spans = [];
-  const record = (name, started) => spans.push({ name, ms: Date.now() - started });
+  const record = (name, started) => spans.push({ name, ms: now() - started });
   return {
     time(name, fn) {
-      const started = Date.now();
+      const started = now();
       let result;
       try {
         result = fn();

@@ -144,15 +144,15 @@ function sameDirectory(a, b) {
  */
 /**
  * Times the named sections of one fenced call. time(name, fn) runs fn and records its
- * duration, awaiting it when it returns a promise; slowest() is ' (slowest: a 1200 ms, ...)'
+ * duration (by `now`, a clock in ms, for tests), awaiting it when it returns a promise; slowest() is ' (slowest: a 1200 ms, ...)'
  * for the sections that took 50 ms or more (top 3), or '' when none did.
  */
-export function createSectionTimer() {
+export function createSectionTimer(now = Date.now) {
   const spans = [];
-  const record = (name, started) => spans.push({ name, ms: Date.now() - started });
+  const record = (name, started) => spans.push({ name, ms: now() - started });
   return {
     time(name, fn) {
-      const started = Date.now();
+      const started = now();
       let result;
       try {
         result = fn();
