@@ -673,15 +673,17 @@ if (argv.includes("--settle")) {
         }
         if (bounded && Date.now() > deadline2) {
           timedOut = true;
+          if (lastEvidence) lastEvidence = { ...lastEvidence, read: reads };
           break;
         }
         const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
         let waitingFor = pending ? `the head's check rollup is ${state.check_rollup}` : null;
         if (!pending && (state.check_rollup === "SUCCESS" || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
-          const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded ? deadline2 : null }), read: reads };
-          if (bounded && Date.now() > deadline2) {
+          const reRead = lastEvidence !== null;
+          const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded && reRead ? deadline2 : null }), read: reads };
+          if (reRead && bounded && Date.now() > deadline2) {
             timedOut = true;
-            lastEvidence = lastEvidence ? { ...lastEvidence, read: reads } : fresh;
+            lastEvidence = { ...lastEvidence, read: reads };
             break;
           }
           lastEvidence = fresh;

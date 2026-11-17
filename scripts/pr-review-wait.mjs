@@ -183,7 +183,9 @@
 // #150); a timeout withholds the merge and says so (checks_timed_out). With a
 // SUCCESS or null rollup, merge evidence that is only still to finish (a
 // required check not reported or not completed, a workflow run not finished)
-// is read again the same way; evidence with a failure is not waited for.
+// is read again the same way; evidence with a failure is not waited for. The
+// first evidence read always completes (each gh call keeps its own timeout);
+// --checks-timeout bounds only the evidence re-reads after it.
 // --checks-timeout is one absolute deadline over every read (the first one
 // too), page, retry and sleep, and a late SUCCESS is timed out too; a first
 // read that cannot finish by it refuses the settle; only --checks-timeout 0 is
@@ -589,6 +591,8 @@ if (argv.includes('--settle')) {
         }
         if (bounded && Date.now() > deadline) {
           timedOut = true; // finished, but not within --checks-timeout
+          // The last complete evidence read stands for this late merge-state read.
+          if (lastEvidence) lastEvidence = { ...lastEvidence, read: reads };
           break;
         }
         const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
@@ -598,13 +602,17 @@ if (argv.includes('--settle')) {
         // running, is waited for inside the same bounded wait. Only a rollup that
         // could still authorize (SUCCESS or null) on an unblocked PR is worth it.
         if (!pending && (state.check_rollup === 'SUCCESS' || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
-          const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded ? deadline : null }), read: reads };
-          if (bounded && Date.now() > deadline) {
-            // Read, but not within --checks-timeout: a read the deadline cut
+          // The FIRST evidence read always completes, bounded only by each gh
+          // call's own timeout (a read that errors still withholds); the
+          // deadline bounds only the re-reads of the wait after it.
+          const reRead = lastEvidence !== null;
+          const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded && reRead ? deadline : null }), read: reads };
+          if (reRead && bounded && Date.now() > deadline) {
+            // A re-read not within --checks-timeout: a read the deadline cut
             // short is no evidence, so the last complete one stands, as the
-            // last complete merge-state read does. With none, this one stands.
+            // last complete merge-state read does.
             timedOut = true;
-            lastEvidence = lastEvidence ? { ...lastEvidence, read: reads } : fresh;
+            lastEvidence = { ...lastEvidence, read: reads };
             break;
           }
           lastEvidence = fresh;

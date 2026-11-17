@@ -2036,9 +2036,9 @@ test('a workflow run still in progress is waited for: authorized once it complet
 });
 
 test('a required check still missing when --checks-timeout runs out withholds the merge, naming the check and the wait', () => {
-  // 10s: each evidence read is 7 fake gh calls, and under the full suite's load a
-  // 4s budget once cut the FIRST read short, which (correctly) reads as unreadable.
-  const r = settleWaiting((f) => putEvidence(f, 'check_runs', ONLY_COPILOT), ['--checks-interval', '0.5', '--checks-timeout', '10']);
+  // The first evidence read always completes, so a loaded machine cannot cut it
+  // short and turn "ci not reported" into "unreadable".
+  const r = settleWaiting((f) => putEvidence(f, 'check_runs', ONLY_COPILOT), ['--checks-interval', '0.2', '--checks-timeout', '4']);
   assertWithheld(r, /required check ci not reported on the head commit/, 'missing after the wait');
   assert.equal(r.out.checks_timed_out, true);
   assert.ok(r.out.withheld_reasons.some((x) => /required checks or workflow runs were still not finished after waiting \d+s/.test(x)), JSON.stringify(r.out.withheld_reasons));
@@ -2054,6 +2054,23 @@ test('an evidence read the --checks-timeout deadline cuts short does not replace
   assertWithheld(r, /required check ci not reported on the head commit/, 'cut read');
   assert.equal(r.out.checks_timed_out, true);
   assert.ok(!r.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+// Approved 2026-11-17: the first evidence read always completes (each gh call
+// keeps its own timeout); --checks-timeout bounds only the re-reads after it.
+test('a FIRST evidence read slower than --checks-timeout still completes: green evidence authorizes, missing evidence is named (never "unreadable")', () => {
+  const green = settleWaiting((f) => putEvidence(f, 'check_runs_delay', [2500]), ['--checks-interval', '0.05', '--checks-timeout', '1']);
+  assert.equal(green.code, 0, oneLine(green.stdout + green.stderr));
+  assert.equal(green.out.merge_authorized, true, JSON.stringify(green.out.withheld_reasons));
+  assert.equal(green.out.checks_timed_out, false);
+  const missing = settleWaiting((f) => {
+    putEvidence(f, 'check_runs', ONLY_COPILOT);
+    putEvidence(f, 'check_runs_delay', [2500]);
+  }, ['--checks-interval', '0.05', '--checks-timeout', '1']);
+  assertWithheld(missing, /required check ci not reported on the head commit/, 'slow first read, ci missing');
+  assert.equal(missing.out.checks_timed_out, true);
+  assert.ok(!missing.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable/.test(x)), JSON.stringify(missing.out.withheld_reasons));
+  assert.equal(missing.checkRunReads, 1, 'the deadline had passed: no re-read');
 });
 
 test('a failed required check is not waited for, even beside a missing one', () => {
