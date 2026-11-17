@@ -43,7 +43,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { storeRootFor } from '../../lib/worktree-root.mjs';
 // THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), shared with
 // enqueueSystemTodo's own fold-to-union in packages/store — a pure function,
@@ -378,7 +378,9 @@ export function explainReconcileDebtLiveness(store, root, item) {
 // and unions them with the register; settlement (mintSettlementReconcile
 // above) receives one candidate list and cannot tell the two sources apart.
 //
-// STATE: .sterling/transient/git-settled.json = { sha, dirty: {path: sha256|null}, at }
+// STATE: .sterling/transient/git-settled.json = { sha, dirty: {path: sha256|null}, at, reflog? }
+// (`reflog`: hash of the newest HEAD reflog line at settlement, the boundary
+// fastForwardedPaths needs; absent when that line did not end at `sha`)
 // — the tree as it stood at the last SUCCESSFUL settlement: the HEAD commit
 // plus the content hash of every path that differed from it (tracked changes
 // in the working tree or index, and untracked non-ignored files). A path is a
@@ -418,28 +420,75 @@ function changedSince(root, base) {
 }
 
 /**
- * Paths that reached HEAD only through fast-forward moves (`git merge --ff-only`,
- * `git pull`) since `base`, GitHub #279: those commits were authored elsewhere,
- * so they are not this session's edits. The HEAD reflog tells a fast-forward
- * (subject "merge <x>: Fast-forward" or "pull...: Fast-forward") from a commit,
- * checkout, reset or rebase; every other move counts as the session's own, and a
- * path a non-fast-forward move (a commit, checkout, rebase) or the working tree
- * also changed is not returned, and the reflog is scanned from the oldest
- * entry at `base`, so a return to `base` cannot hide session commits. An empty set when the reflog cannot reach
- * `base` (expired or unreadable): nothing is excluded, so the answer errs toward minting.
+ * The HEAD reflog, oldest first, as [{ old, new, msg, line }], read from the
+ * file `git rev-parse --git-path logs/HEAD` names (a linked worktree has its
+ * own). The file carries the old sha that `git reflog show` cannot print; its
+ * format is git's documented `old SP new SP committer SP time SP tz [TAB msg]`.
+ * null when there is no such file (no reflog yet, or a reftable repository) or
+ * a line does not parse: the caller then excludes nothing.
  */
-function fastForwardedPaths(root, base) {
-  const r = spawnSync('git', ['reflog', 'show', '--format=%H%x09%gs', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
-  if (r.status !== 0) return new Set();
-  const entries = r.stdout.split('\n').filter(Boolean).map((l) => {
-    const [sha, subject = ''] = l.split('\t');
-    return { sha, subject };
-  });
-  // The OLDEST reflog entry at the settled sha: a session that returns to it (checkout of the
-  // settled commit, then a fast-forward onto its own branch) must not hide its commits.
-  const at = entries.findLastIndex((e) => e.sha === base);
-  if (at <= 0) return new Set();
-  const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
+function readHeadReflog(root) {
+  const r = spawnSync('git', ['rev-parse', '--git-path', 'logs/HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  if (r.status !== 0) return null;
+  let raw;
+  try {
+    raw = readFileSync(resolve(root, r.stdout.trim()), 'utf8');
+  } catch {
+    return null;
+  }
+  const entries = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    const m = /^([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) [^\t]* \d+ [+-]\d{4}(?:\t(.*))?$/.exec(line);
+    if (!m) return null;
+    entries.push({ old: m[1], new: m[2], msg: m[3] ?? '', line });
+  }
+  return entries;
+}
+
+const reflogLineHash = (line) => createHash('sha256').update(line).digest('hex');
+
+/** The settlement boundary to store with the snapshot: the hash of the newest HEAD reflog line, when that line ends at `head`. */
+function reflogAnchor(entries, head) {
+  const last = entries?.at(-1);
+  return last && last.new === head ? reflogLineHash(last.line) : null;
+}
+
+/**
+ * Paths that reached HEAD only through fast-forward moves (`git merge --ff-only`,
+ * `git pull`) since the settlement, GitHub #279: those commits were authored
+ * elsewhere, so they are not this session's edits. The HEAD reflog tells a
+ * fast-forward (message "merge <x>: Fast-forward" or "pull...: Fast-forward")
+ * from a commit, checkout, reset or rebase; every other move counts as the
+ * session's own, and a path a non-fast-forward move or the working tree also
+ * changed is not returned.
+ *
+ * BOUNDARY RULE. The range is read only when the reflog provably still reaches
+ * the settlement: the snapshot's `reflog` (hash of the newest reflog line at
+ * settlement, recorded only when that line ended at the settled sha) must match
+ * a surviving line that ends at `settled.sha`; every later line must start where
+ * the one before it ended (a gap means entries expired inside the range, for
+ * example as unreachable after an amend); and the newest line must end at
+ * `head`. Anything else (no anchor in the snapshot, the anchor line expired,
+ * the chain broken, the reflog unreadable) excludes NOTHING, so the answer errs
+ * toward minting. Seeing the settled sha somewhere in the reflog is not proof:
+ * a later return to it looks the same once the boundary line has expired. The
+ * oldest matching line is taken, so an identical earlier line can only widen
+ * the range, and every session move inside it stays counted. No clock is
+ * involved. Not guaranteed: a run of expired entries that leaves and returns to
+ * the same sha (A to X to A) leaves no gap, so it goes unseen, and commits
+ * made outside this checkout's HEAD (another worktree, `git branch -f`) and
+ * then fast-forwarded are excluded as #279 intends even when this user made
+ * them.
+ */
+function fastForwardedPaths(root, settled, entries, head) {
+  if (typeof settled.reflog !== 'string' || !entries) return new Set();
+  const at = entries.findIndex((e) => e.new === settled.sha && reflogLineHash(e.line) === settled.reflog);
+  if (at < 0) return new Set();
+  const range = entries.slice(at);
+  for (let i = 1; i < range.length; i++) if (range[i].old !== range[i - 1].new) return new Set();
+  if (range.at(-1).new !== head) return new Set();
+  const moves = range.slice(1).map((e) => ({ from: e.old, to: e.new, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.msg) }));
   if (!moves.some((m) => m.ff)) return new Set();
   const between = (m) => new Set(gitZ(root, ['diff', '--name-only', '-z', '--no-renames', '--relative', m.from, m.to]));
   const own = new Set();
@@ -502,7 +551,9 @@ export function gitTouches(root, now) {
     }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
-    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    const reflog = head === EMPTY_TREE ? null : readHeadReflog(root);
+    const anchor = reflogAnchor(reflog, head);
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now, ...(anchor ? { reflog: anchor } : {}) };
     if (!settled) return { ok: true, settled: null, candidates: [], changed: new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
     let fromBase = base ? changedSince(root, base) : dirtyNow;
@@ -511,7 +562,7 @@ export function gitTouches(root, now) {
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
     }
     if (base && base !== EMPTY_TREE) {
-      const pulled = fastForwardedPaths(root, base);
+      const pulled = fastForwardedPaths(root, settled, reflog, head);
       if (pulled.size) {
         const dirtyHead = changedSince(root, head);
         fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
