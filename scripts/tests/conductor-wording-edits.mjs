@@ -390,6 +390,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'polls in five days).\n',
     after: 'polls in five days).\n- Keep your board claims alive while you wait. Each time a lane lands, and before you start a background wait (a lane or a long shell) that may outlast a quarter of the claim lease (`board_claims.lease_minutes`, 60 by default), call `board_reaffirm` for every item this session holds; a `board_update` naming `session` also renews, at most once per quarter lease. A claim not renewed for the full lease shows as "check owner" and any session may take it over (decision `board-task-claims-for-parallel-sessions-claim-generation-ren`; CH.Core pilot, 2026-10-27: a conductor waited on a long background lane without renewing, the 60-minute lease expired, and another session took the item over while uncommitted work existed; user-ruled 2026-10-27 through the question form, "Conductor rule only (Recommended)").\n',
   },
+  {
+    commit: 'board 241b0189',
+    date: '2026-11-17',
+    reason: 'new paragraph: capture an outside party\'s answer the user brings in, in the same turn (GitHub #299; user-ruled 2026-11-17, "Add the rule")',
+    before: "Promotion is a backstop for a record that was scoped wrong, not the normal path.",
+    after: "Promotion is a backstop for a record that was scoped wrong, not the normal path.\n\nWhen the user brings in an outside party's answer (a colleague's reply, a vendor's email, another team's ruling), write it as a `decision` or `research_finding` in the same turn, so it never lives only in chat. Quote the source and name who said it, and mark it as the outside party's words, not the user's and not yours (the AGENTS.md rule \"Source attribution\"). GitHub #299 found such answers kept only in conversation; user-ruled 2026-11-17 through the question form, \"Add the rule (Recommended)\".",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
