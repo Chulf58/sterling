@@ -10740,7 +10740,13 @@ export class SterlingTools {
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
 
   configSet(args: { path: string; value: unknown; expected_digest?: string }): { path: string; previous_value: unknown; value: unknown; digest: string } {
-    return configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
+    const result = configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
+    // The cached copy feeds every live working-tree read (treeRootFor's default and the rest);
+    // without this a mapping saved here stayed unmapped until a reload (GitHub #222).
+    if (result.path === 'working_trees' || result.path.startsWith('working_trees.')) {
+      this.config = { ...this.config, working_trees: this.freshWorkingTrees() };
+    }
+    return result;
   }
 
   // enforcement_reconcile (the H17 (B) surface taint-latch front door) was

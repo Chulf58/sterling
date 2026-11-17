@@ -133,3 +133,18 @@ test('append-join refusal (tools.ts targetWorkingTree): a SELF-ROOTED target dis
     cleanup();
   }
 });
+
+test('config_set of working_trees takes effect in live resolution without a reload (GitHub #222)', () => {
+  const { dir, tools, cleanup } = harness();
+  try {
+    const t = tools as unknown as TreeRootFor;
+    const lane = join(dir, 'lane');
+    assert.deepEqual(t.treeRootFor({ working_tree: 'example-lane' }), { root: undefined, unresolved: true }, 'unmapped before config_set');
+    tools.configSet({ path: 'working_trees.example-lane', value: lane });
+    assert.deepEqual(t.treeRootFor({ working_tree: 'example-lane' }), { root: lane, unresolved: false }, 'the new mapping resolves with no reload');
+    tools.configSet({ path: 'working_trees.example-lane', value: 'rel' });
+    assert.deepEqual(t.treeRootFor({ working_tree: 'example-lane' }), { root: join(dir, 'rel'), unresolved: false }, 'a later change is live too');
+  } finally {
+    cleanup();
+  }
+});
