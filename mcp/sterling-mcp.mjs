@@ -39817,7 +39817,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw new Error(`board_update: ${unknown3.map((k) => `'${k}'`).join(", ")} ${unknown3.length === 1 ? "is" : "are"} not editable through board_update \u2014 only ${updatable.join("/")} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; status/id/created_at/type/superseded_by are server-owned. Updating never closes an item \u2014 board_remove, bound to the fulfilling artifact-write, remains the only exit. Valid fields: ${updatable.join(", ")}.`);
     }
     if (Object.keys(patch).length === 0) {
-      throw new Error(`board_update: no fields to update \u2014 pass at least one of ${updatable.join(", ")}`);
+      const renew = opts.session !== void 0 ? ` (session alone renews nothing: to renew a claim without an edit, call board_reaffirm with the generation board_get shows in claim_state)` : "";
+      throw new Error(`board_update: no fields to update \u2014 pass at least one of ${updatable.join(", ")}${renew}`);
     }
     if ("blocked_by" in patch) {
       if (old.source === "system")
@@ -39859,7 +39860,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         patch = { ...patch, measured_at_head: head };
     }
     const next = { ...old, ...patch, updated_at: this.now() };
-    if (next.objective === "standalone")
+    if (next.objective === "standalone" || next.objective === "")
       delete next.objective;
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0)
       delete next.blocked_by;
@@ -42000,7 +42001,18 @@ knowledgeCreateInput.safeParseAsync = async (data, params) => {
   }
   return knowledgeCreateParseSchema.safeParseAsync(resolved.args, params);
 };
-var strict = (shape) => external_exports.object(shape).strict();
+var strict = (shape, hints = {}) => {
+  const enforced = external_exports.object(shape).strict();
+  const advertised = external_exports.object(shape).passthrough();
+  advertised.safeParseAsync = async (data, params) => {
+    const result = await enforced.safeParseAsync(data, params);
+    if (result.success)
+      return result;
+    const extra = result.error.issues.flatMap((issue2) => issue2.code === "unrecognized_keys" ? issue2.keys.filter((key) => hints[key] !== void 0).map((key) => ({ code: "custom", path: [key], message: hints[key] })) : []);
+    return extra.length ? { success: false, error: new ZodError2([...result.error.issues, ...extra]) } : result;
+  };
+  return advertised;
+};
 function unreadableDomainWarning(d) {
   return `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`;
 }
@@ -42296,7 +42308,7 @@ function createSterlingServer(target, opts = {}) {
       target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional(),
       readiness: external_exports.array(external_exports.enum(BOARD_READINESS_STATES)).min(1).describe("user items in these readiness states only, computed over the whole board before paging").optional(),
       handoff_to_item_id: external_exports.string().describe("the receiver's item id: finds this board's tracker for that handoff").optional()
-    })
+    }, { id: "board_query has no id filter: read one item, its claim_state included, with board_get(id)" })
   }, ({ target_project, ...args2 }) => json(target_project !== void 0 ? tools.foreignBoardQuery({ ...args2, target_project }) : tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
     description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). A user board task needs `outcome`: done (finished), dropped (will not be done), superseded (replaced by other work) or duplicate (the same as another task); a removal without one is refused. The outcome, with optional `evidence` and `note`, is written to the board removal journal in the same transaction as the removal, and the GitHub issue mirror reads it from there. A maintenance-queue item takes the id alone. A claimed user task is closed by the session that holds the claim: a close naming another session is refused (the task moved) and nothing is removed, with no handoff file written; the holder's own close succeeds even after its lease expired; a close naming no session succeeds and the result carries claim_notice naming the holder. There is no override. `session` is filled in by the OpenCode plugin. The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.evidence.json with the outcome and any evidence, then .sterling/handoffs/<transfer_id>.json, which carries the note; the sending project reads both and shows the item as done, or as closed with its other outcome. A failed write of either file refuses the removal.",
@@ -42313,24 +42325,24 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server.registerTool("board_update", {
-    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; "" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits ("" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" or "" removes the objective. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; "" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits ("" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required: a call naming only session is refused and renews nothing (renew a claim without an edit with board_reaffirm). The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),
       priority: external_exports.enum(["low", "normal", "high"]).optional(),
       file_keys: external_exports.array(external_exports.string()).optional(),
-      objective: external_exports.string().optional(),
+      objective: external_exports.string().describe(`(re)groups the task; "standalone" or '' removes the objective`).optional(),
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
       needs_reason: external_exports.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
-      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
+      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease), but only alongside a real edit: a call with session and no field to change is refused and renews nothing, so renew without an edit through board_reaffirm. When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, session, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch, session !== void 0 ? { session } : {}), projection)));
   const CLAIM_LEASE = "config board_claims.lease_minutes (default 60)";
   server.registerTool("board_claim", {
-    description: `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_update calls that pass your session, and through board_reaffirm; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
+    description: `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_reaffirm, and through a board_update that changes a field and passes your session; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       session: external_exports.string().describe("your session id"),
@@ -42338,7 +42350,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, session, checkout }) => json(tools.boardClaim(id, session, checkout)));
   server.registerTool("board_reaffirm", {
-    description: `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
+    description: `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. This is the way to renew without an edit: a board_update naming only session is refused and renews nothing. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       session: external_exports.string().describe("your session id"),

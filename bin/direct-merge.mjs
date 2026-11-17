@@ -12486,7 +12486,7 @@ var init_dist2 = __esm({
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync7 } from "node:fs";
-import { join as join21, resolve as resolve8 } from "node:path";
+import { join as join21, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -13684,7 +13684,7 @@ var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { readFileSync as readFileSync11, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
-import { join as join16, dirname as dirname8 } from "node:path";
+import { join as join16, dirname as dirname8, resolve as resolve7 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/working-tree.mjs
@@ -14107,7 +14107,7 @@ function isVersionOnlyBetweenCommits(root, baseSha, tipSha, path) {
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync5 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join17, resolve as resolve7 } from "node:path";
+import { join as join17, resolve as resolve8 } from "node:path";
 var RELEASE_PACKAGE = "@chulf58/sterling";
 var RELEASE_BRANCH = "opencode-release";
 var BUILD_CLASS_SCRIPTS = ["postinstall", "build", "preinstall", "install", "prepack", "prepare"];
@@ -14180,7 +14180,7 @@ function buildReleaseTree(target2, headSha, pkgText) {
   }
 }
 function rerunCommand(target2, ref) {
-  return `node ${quote(join17(resolve7(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve7(target2))} --ref ${quote(ref)}`;
+  return `node ${quote(join17(resolve8(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve8(target2))} --ref ${quote(ref)}`;
 }
 function releaseVersion({ target: target2, into: into2, headSha, version, pkgText, remoteGit, log, prefix }) {
   const tag = `v${version}`;
@@ -14989,9 +14989,9 @@ Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
 if (!linkedWorktree && !existsSync11(join21(target, CONFIG_REL4))) {
   const dirs = spawnSync9("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
-  if (gitDir && commonDir && realpathSync7(resolve8(target, gitDir)) !== realpathSync7(resolve8(target, commonDir))) {
+  if (gitDir && commonDir && realpathSync7(resolve9(target, gitDir)) !== realpathSync7(resolve9(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync7(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync7(resolve9(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
