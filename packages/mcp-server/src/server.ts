@@ -674,7 +674,7 @@ export function createSterlingServer(
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then pass that item id here; only those paths advance'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance'),
         expected_version: z
           .number()
           .int()
@@ -708,7 +708,7 @@ export function createSterlingServer(
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then pass that item id here; only those paths advance'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
