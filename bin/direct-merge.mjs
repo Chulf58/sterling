@@ -14273,6 +14273,26 @@ function resolveGhPath(env = process.env) {
   return null;
 }
 
+// scripts/lib/gh-rate-limit.mjs
+function isRateLimitText(text) {
+  return /rate limit/i.test(String(text ?? ""));
+}
+function readCoreRateLimit(runGh, host) {
+  const r = runGh(["api", "--hostname", host, "rate_limit"]);
+  if (r.error || r.status !== 0) return null;
+  try {
+    const core = JSON.parse(r.stdout)?.resources?.core;
+    if (typeof core?.remaining !== "number") return null;
+    return { exhausted: core.remaining <= 0, resetMs: typeof core.reset === "number" ? core.reset * 1e3 : null };
+  } catch {
+    return null;
+  }
+}
+function describeReset(resetMs, now = Date.now()) {
+  const mins = Math.max(0, Math.ceil((resetMs - now) / 6e4));
+  return `at ${new Date(resetMs).toISOString()} (in ${mins} min)`;
+}
+
 // scripts/lib/work-pr.mjs
 function gh(cwd, args, timeoutMs2 = 12e4) {
   return spawnSync8("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
@@ -14335,6 +14355,11 @@ Install gh, then authenticate: gh auth login`
   }
   const auth = gh(cwd, ["auth", "status", "--hostname", origin.host]);
   if (auth.status !== 0) {
+    const limit = readCoreRateLimit((args) => gh(cwd, args), origin.host);
+    if (limit?.exhausted || isRateLimitText(streams(auth))) {
+      const when = limit?.resetMs ? `It resets ${describeReset(limit.resetMs)}.` : "The reset time could not be read; check `gh api rate_limit`.";
+      return { refusal: `direct-merge: work mode needs the GitHub API, and the GitHub REST rate limit for ${origin.host} is exhausted \u2014 this is not a login problem, do not run gh auth login. ${when} Rerun after the reset.` };
+    }
     return { refusal: `direct-merge: work mode needs gh authenticated for ${origin.host} \u2014 \`gh auth status --hostname ${origin.host}\` failed:
 ${streams(auth)}
 Run: gh auth login --hostname ${origin.host}` };
