@@ -563,7 +563,7 @@ test('parseJsonc: comments and trailing commas go only outside strings', async (
   assert.throws(() => parseJsonc('{ oops }'));
 });
 
-test('project config: invalid JSON or a tracked opencode.json is refused and not touched', () => {
+test('project config: invalid JSON is refused; a tracked opencode.json is skipped (agents still sync, #288); neither is touched', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   mkdirSync(join(dir, '.opencode'));
@@ -577,8 +577,9 @@ test('project config: invalid JSON or a tracked opencode.json is refused and not
   git(dir2, ['add', '.opencode/opencode.json']);
   git(dir2, ['commit', '-qm', 'cfg']);
   const r = run(dir2, home);
-  assert.equal(statusOf(r, 'opencode.json'), 'refused');
-  assert.match(r.rows.find((x) => x.item.endsWith('opencode.json')).instruction, /git rm --cached \.opencode\/opencode\.json/);
+  assert.equal(statusOf(r, 'opencode.json'), 'skipped');
+  assert.ok(!r.rows.some((x) => x.refused));
+  assert.match(r.rows.find((x) => x.item.endsWith('opencode.json')).detail, /git rm --cached \.opencode\/opencode\.json/);
   assert.equal(readFileSync(join(dir2, '.opencode', 'opencode.json'), 'utf8'), '{}\n');
 });
 

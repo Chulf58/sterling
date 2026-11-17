@@ -19232,7 +19232,7 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir9(),
   const rel = PROJECT_CONFIG_REL;
   const path = join30(projectDir, rel);
   if (tracked.includes(rel)) {
-    return [refusal(rel, `${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config)`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`)];
+    return [{ item: rel, status: "skipped", detail: `NOT written: ${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config); the Sterling agent files were still refreshed; to get the store guard and default_agent, untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update` }];
   }
   let config = {};
   let before = null;
