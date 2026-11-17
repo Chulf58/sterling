@@ -480,11 +480,14 @@ function lastCopilotReview(reviews, pinned) {
   return copilot.length ? copilot.reduce((a, b) => b.id > a.id ? b : a) : null;
 }
 var EVIDENCE_MAX_BUFFER = 64 * 1024 * 1024;
-var RUN_CONCLUSIONS_OK = /* @__PURE__ */ new Set(["success", "skipped"]);
+var RUN_CONCLUSIONS_OK = /* @__PURE__ */ new Set(["success", "skipped", "neutral"]);
+var REQUIRED_CONCLUSIONS_OK = /* @__PURE__ */ new Set(["success", "skipped", "neutral"]);
 var httpStatusOf = (text) => Number(String(text).match(/\(HTTP (\d{3})\)/)?.[1] ?? 0) || null;
-function evidenceRead(host, path, { paginate = false } = {}) {
+function evidenceRead(host, path, { paginate = false, deadline: deadline2 = null } = {}) {
+  const remaining = deadline2 === null ? GH_CALL_TIMEOUT_MS : deadline2 - Date.now();
+  if (remaining <= 0) return { ok: false, http: null, error: `--checks-timeout ran out before gh api ${path} could be read` };
   const args = ["api", "--hostname", host, ...paginate ? ["--paginate"] : [], path];
-  const r = spawnSync3("gh", args, { cwd: target, encoding: "utf8", timeout: GH_CALL_TIMEOUT_MS, maxBuffer: EVIDENCE_MAX_BUFFER, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  const r = spawnSync3("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), maxBuffer: EVIDENCE_MAX_BUFFER, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
   const text = `${r.stderr ?? ""}
 ${r.stdout ?? ""}`.trim();
   if (!r.error && r.status !== 0 && isRateLimitText(text)) {
@@ -498,23 +501,29 @@ ${r.stdout ?? ""}`.trim();
     return { ok: false, http: null, error: `gh api ${path} returned unreadable JSON (${e.message})` };
   }
 }
-function mergeEvidence(originRepo, number, headSha) {
+function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null } = {}) {
   const [host, owner2, name2] = originRepo.split("/");
   const repoPath = `repos/${owner2}/${name2}`;
   const reasons = [];
-  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
-  const pull = evidenceRead(host, `${repoPath}/pulls/${number}`);
+  let finals = 0;
+  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
+  const read = (path, opts = {}) => evidenceRead(host, path, { ...opts, deadline: deadline2 });
+  const final = (reason) => {
+    reasons.push(reason);
+    finals++;
+  };
+  const pull = read(`${repoPath}/pulls/${number}`);
   const baseRef = pull.ok ? pull.pages[0]?.base?.ref : void 0;
   if (typeof baseRef !== "string" || baseRef === "") {
-    reasons.push(`the PR's base branch could not be read (${pull.ok ? "no base.ref in the answer" : pull.error}), so its required checks and the behind-base check cannot be read`);
-    return { reasons, evidence };
+    final(`the PR's base branch could not be read (${pull.ok ? "no base.ref in the answer" : pull.error}), so its required checks and the behind-base check cannot be read`);
+    return { reasons, evidence, pending: reasons.length > 0 && finals === 0 };
   }
   evidence.base_ref = baseRef;
   const branch = encodeURIComponent(baseRef);
   const required = /* @__PURE__ */ new Set();
   const unreadable = [];
   const notFound = [];
-  const rules = evidenceRead(host, `${repoPath}/rules/branches/${branch}`, { paginate: true });
+  const rules = read(`${repoPath}/rules/branches/${branch}`, { paginate: true });
   if (rules.ok) {
     for (const rule of rules.pages) {
       if (rule?.type !== "required_status_checks") continue;
@@ -522,7 +531,7 @@ function mergeEvidence(originRepo, number, headSha) {
     }
   } else if (rules.http === 403 || rules.http === 404) notFound.push(`rulesets: HTTP ${rules.http}`);
   else unreadable.push(`rulesets: ${rules.error}`);
-  const classic = evidenceRead(host, `${repoPath}/branches/${branch}/protection/required_status_checks`);
+  const classic = read(`${repoPath}/branches/${branch}/protection/required_status_checks`);
   if (classic.ok) {
     const p = classic.pages[0] ?? {};
     for (const c of [...Array.isArray(p.contexts) ? p.contexts : [], ...Array.isArray(p.checks) ? p.checks.map((x) => x?.context) : []]) if (typeof c === "string" && c) required.add(c);
@@ -530,14 +539,14 @@ function mergeEvidence(originRepo, number, headSha) {
   else unreadable.push(`branch protection: ${classic.error}`);
   evidence.required_checks = [...required].sort();
   if (unreadable.length) {
-    reasons.push(`required checks not configured or unreadable for ${baseRef}: ${unreadable.join("; ")}`);
+    final(`required checks not configured or unreadable for ${baseRef}: ${unreadable.join("; ")}`);
   } else if (!required.size) {
-    reasons.push(`required checks not configured or unreadable for ${baseRef} (${notFound.length ? notFound.join(", ") : "no required status check found"}): configure required status checks for ${baseRef} in a ruleset or branch protection so the merge can be authorized`);
+    final(`required checks not configured or unreadable for ${baseRef} (${notFound.length ? notFound.join(", ") : "no required status check found"}): configure required status checks for ${baseRef} in a ruleset or branch protection so the merge can be authorized`);
   } else {
-    const runs = evidenceRead(host, `${repoPath}/commits/${headSha}/check-runs?per_page=100`, { paginate: true });
-    const statuses = evidenceRead(host, `${repoPath}/commits/${headSha}/status?per_page=100`);
+    const runs = read(`${repoPath}/commits/${headSha}/check-runs?per_page=100`, { paginate: true });
+    const statuses = read(`${repoPath}/commits/${headSha}/status?per_page=100`);
     if (!runs.ok || !statuses.ok) {
-      reasons.push(`the head commit's checks could not be read (${[runs, statuses].filter((x) => !x.ok).map((x) => x.error).join("; ")}), so the required checks cannot be confirmed`);
+      final(`the head commit's checks could not be read (${[runs, statuses].filter((x) => !x.ok).map((x) => x.error).join("; ")}), so the required checks cannot be confirmed`);
     } else {
       const latest = /* @__PURE__ */ new Map();
       for (const cr of runs.pages.flatMap((p) => Array.isArray(p?.check_runs) ? p.check_runs : [])) {
@@ -550,17 +559,20 @@ function mergeEvidence(originRepo, number, headSha) {
         const cr = latest.get(name3);
         const st = contexts.get(name3);
         if (cr) {
-          if (cr.status !== "completed" || cr.conclusion !== "success") evidence.required_checks_failing.push(`${name3} (${cr.status === "completed" ? cr.conclusion : cr.status})`);
+          if (cr.status !== "completed") evidence.required_checks_pending.push(`${name3} (${cr.status})`);
+          else if (!REQUIRED_CONCLUSIONS_OK.has(cr.conclusion)) evidence.required_checks_failing.push(`${name3} (${cr.conclusion})`);
         } else if (st) {
-          if (st.state !== "success") evidence.required_checks_failing.push(`${name3} (${st.state})`);
+          if (st.state === "pending") evidence.required_checks_pending.push(`${name3} (pending)`);
+          else if (st.state !== "success") evidence.required_checks_failing.push(`${name3} (${st.state})`);
         } else evidence.required_checks_missing.push(name3);
       }
       if (evidence.required_checks_missing.length) reasons.push(`required check${evidence.required_checks_missing.length > 1 ? "s" : ""} ${evidence.required_checks_missing.join(", ")} not reported on the head commit (never created, or not started yet): if it is still to run, run --settle clean again on this unchanged head once it has passed; otherwise re-run the workflow`);
-      if (evidence.required_checks_failing.length) reasons.push(`required check${evidence.required_checks_failing.length > 1 ? "s" : ""} not successful on the head commit: ${evidence.required_checks_failing.join(", ")}`);
+      if (evidence.required_checks_pending.length) reasons.push(`required check${evidence.required_checks_pending.length > 1 ? "s" : ""} not finished on the head commit: ${evidence.required_checks_pending.join(", ")}: run --settle clean again on this unchanged head once ${evidence.required_checks_pending.length > 1 ? "they finish" : "it finishes"}`);
+      if (evidence.required_checks_failing.length) final(`required check${evidence.required_checks_failing.length > 1 ? "s" : ""} not successful on the head commit: ${evidence.required_checks_failing.join(", ")}`);
     }
   }
-  const wr = evidenceRead(host, `${repoPath}/actions/runs?head_sha=${headSha}&per_page=100`, { paginate: true });
-  if (!wr.ok) reasons.push(`the head commit's workflow runs could not be read (${wr.error}), so a failed or unfinished run cannot be ruled out`);
+  const wr = read(`${repoPath}/actions/runs?head_sha=${headSha}&per_page=100`, { paginate: true });
+  if (!wr.ok) final(`the head commit's workflow runs could not be read (${wr.error}), so a failed or unfinished run cannot be ruled out`);
   else {
     const newest = /* @__PURE__ */ new Map();
     for (const run of wr.pages.flatMap((p) => Array.isArray(p?.workflow_runs) ? p.workflow_runs : [])) {
@@ -573,17 +585,17 @@ function mergeEvidence(originRepo, number, headSha) {
     const unfinished = evidence.workflow_runs.filter((r) => r.status !== "completed");
     const failed = evidence.workflow_runs.filter((r) => r.status === "completed" && !RUN_CONCLUSIONS_OK.has(r.conclusion));
     const label = (r) => `'${r.name ?? r.id}' (run ${r.id}, ${r.status === "completed" ? r.conclusion : r.status})`;
-    if (failed.length) reasons.push(`workflow run${failed.length > 1 ? "s" : ""} for the head did not succeed: ${failed.map(label).join(", ")}: fix or re-run, then settle again`);
+    if (failed.length) final(`workflow run${failed.length > 1 ? "s" : ""} for the head did not succeed: ${failed.map(label).join(", ")}: fix or re-run, then settle again`);
     if (unfinished.length) reasons.push(`workflow run${unfinished.length > 1 ? "s" : ""} for the head not finished: ${unfinished.map(label).join(", ")}: run --settle clean again on this unchanged head once ${unfinished.length > 1 ? "they finish" : "it finishes"}`);
   }
-  const cmp = evidenceRead(host, `${repoPath}/compare/${branch}...${headSha}`);
+  const cmp = read(`${repoPath}/compare/${branch}...${headSha}`);
   const behind = cmp.ok ? cmp.pages[0]?.behind_by : void 0;
-  if (!Number.isInteger(behind) || behind < 0) reasons.push(`whether the branch is behind ${baseRef} could not be read (${cmp.ok ? `behind_by is ${JSON.stringify(behind)}` : cmp.error})`);
+  if (!Number.isInteger(behind) || behind < 0) final(`whether the branch is behind ${baseRef} could not be read (${cmp.ok ? `behind_by is ${JSON.stringify(behind)}` : cmp.error})`);
   else {
     evidence.behind_by = behind;
-    if (behind > 0) reasons.push(`the branch is behind base: ${behind} commit${behind > 1 ? "s" : ""} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
+    if (behind > 0) final(`the branch is behind base: ${behind} commit${behind > 1 ? "s" : ""} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
   }
-  return { reasons, evidence };
+  return { reasons, evidence, pending: reasons.length > 0 && finals === 0 };
 }
 if (argv.includes("--settle")) {
   let merge = null;
@@ -607,6 +619,8 @@ if (argv.includes("--settle")) {
       const deadline2 = started + checksWait.timeoutMs;
       let pinnedAt = null;
       let bodyRead = null;
+      let reads = 0;
+      let lastEvidence = null;
       for (; ; ) {
         const firstRead = pinnedAt === null;
         try {
@@ -619,6 +633,7 @@ if (argv.includes("--settle")) {
           timedOut = true;
           break;
         }
+        reads++;
         if (state.merged || state.pr_state !== "OPEN") break;
         const settledHead = armed.settled_head_sha ?? armed.head_sha;
         if (resettle && state.head_sha !== settledHead) {
@@ -658,16 +673,29 @@ if (argv.includes("--settle")) {
         }
         if (bounded && Date.now() > deadline2) {
           timedOut = true;
+          if (lastEvidence) lastEvidence = { ...lastEvidence, read: reads };
           break;
         }
         const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
-        if (!pending) break;
+        let waitingFor = pending ? `the head's check rollup is ${state.check_rollup}` : null;
+        if (!pending && (state.check_rollup === "SUCCESS" || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
+          const reRead = lastEvidence !== null;
+          const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded && reRead ? deadline2 : null }), read: reads };
+          if (reRead && bounded && Date.now() > deadline2) {
+            timedOut = true;
+            lastEvidence = { ...lastEvidence, read: reads };
+            break;
+          }
+          lastEvidence = fresh;
+          if (lastEvidence.pending) waitingFor = `the head's required checks or workflow runs are not finished (${[...lastEvidence.evidence.required_checks_missing.map((n) => `${n} not reported`), ...lastEvidence.evidence.required_checks_pending, ...lastEvidence.evidence.workflow_runs.filter((r) => r.status !== "completed").map((r) => `run ${r.id} ${r.status}`)].join(", ")})`;
+        }
+        if (!waitingFor) break;
         const remaining = deadline2 - Date.now();
         if (remaining <= 0) {
           timedOut = true;
           break;
         }
-        process.stderr.write(`pr-review-wait: the head's check rollup is ${state.check_rollup}; waiting for the checks to finish (up to ${Math.ceil(remaining / 1e3)}s more)
+        process.stderr.write(`pr-review-wait: ${waitingFor}; waiting for the checks to finish (up to ${Math.ceil(remaining / 1e3)}s more)
 `);
         sleep(Math.min(checksWait.intervalMs, remaining));
       }
@@ -688,12 +716,13 @@ if (argv.includes("--settle")) {
       if (verdict.awaiting_human_review) withheld.push("the PR awaits a required human review");
       else if (verdict.mergeable_now !== true) withheld.push("GitHub does not report the PR mergeable now");
       if (timedOut && PENDING_ROLLUPS.has(rollup)) withheld.push(`the head commit's check rollup is ${rollup}, still not SUCCESS after waiting ${checksWaitedS}s: once the checks finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
-      else if (timedOut) withheld.push(`the head commit's check rollup reached ${rollup} only after --checks-timeout ran out (${checksWaitedS}s): run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      else if (timedOut && !lastEvidence?.pending) withheld.push(`the head commit's check rollup reached ${rollup} only after --checks-timeout ran out (${checksWaitedS}s): run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
       else if (rollup === null) withheld.push(`the head commit reports no checks (check rollup null): no checks ran, or they are being re-created by a re-run, so nothing shows the head passed: run --settle clean again on this unchanged head once its checks have run`);
       else if (rollup !== "SUCCESS") withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing check, push, and run the loop again`);
+      if (timedOut && lastEvidence?.pending && lastEvidence.read === reads) withheld.push(`the head's required checks or workflow runs were still not finished after waiting ${checksWaitedS}s (--checks-timeout): once they finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
       let evidence = null;
       if (!verdict.blockers.length) {
-        const found = mergeEvidence(originRepo, armed.pr_number, state.head_sha);
+        const found = lastEvidence?.read === reads ? lastEvidence : mergeEvidence(originRepo, armed.pr_number, state.head_sha);
         withheld.push(...found.reasons);
         evidence = found.evidence;
       }
