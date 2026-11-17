@@ -114,7 +114,10 @@ if (path === 'graphql') {
   process.exit(0);
 }
 // Merge evidence of a clean settle: <kind>.json answers (default: green
-// evidence), fail_<kind> exits 1 with its content on stderr.
+// evidence), fail_<kind> exits 1 with its content on stderr. <kind>.<k>.json,
+// when present, answers once k earlier calls of that kind were made (the
+// highest such k wins), so a check can appear during the settle's wait.
+// <kind>_delay.json (an array of ms per call of that kind) delays an answer.
 const EVIDENCE = [
   ['repos/acme/widget/rules/branches/', 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }] } }]],
   ['repos/acme/widget/branches/', 'protection', null],
@@ -126,7 +129,13 @@ if (path.startsWith('repos/acme/widget/commits/')) evidence = path.includes('/ch
 if (evidence) {
   const [, kind, dflt] = evidence;
   if (existsSync(join(state, 'fail_' + kind))) { console.error(readFileSync(join(state, 'fail_' + kind), 'utf8')); process.exit(1); }
-  const file = join(state, kind + '.json');
+  const evCount = join(state, 'count_ev_' + kind);
+  const seenEv = existsSync(evCount) ? Number(readFileSync(evCount, 'utf8')) : 0;
+  writeFileSync(evCount, String(seenEv + 1));
+  const evDelays = existsSync(join(state, kind + '_delay.json')) ? JSON.parse(readFileSync(join(state, kind + '_delay.json'), 'utf8')) : [];
+  if (evDelays[seenEv]) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, evDelays[seenEv]);
+  let file = join(state, kind + '.json');
+  for (let k = 0; k <= seenEv; k++) if (existsSync(join(state, kind + '.' + k + '.json'))) file = join(state, kind + '.' + k + '.json');
   if (!existsSync(file) && dflt === null) { console.error('gh: Branch not protected (HTTP 404)'); process.exit(1); }
   process.stdout.write(existsSync(file) ? readFileSync(file, 'utf8') : JSON.stringify(dflt));
   process.exit(0);
@@ -1938,6 +1947,7 @@ test('merge authorized: required check present and green on the head, workflow r
     base_ref: 'main',
     required_checks: ['ci'],
     required_checks_missing: [],
+    required_checks_pending: [], // added with the evidence wait (user-ruled 2026-11-17)
     required_checks_failing: [],
     workflow_runs: [{ id: 11, name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1 }],
     behind_by: 0,
@@ -1957,6 +1967,93 @@ test('merge authorized: a classic branch-protection context satisfied by a commi
   assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
   assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
   assert.deepEqual(r.out.merge_evidence.required_checks, ['ci/legacy']);
+});
+
+// User-ruled 2026-11-17, "Match GitHub, and wait": a required check passes on
+// success, skipped or neutral, as GitHub branch protection counts it; a required
+// check not reported yet or a workflow run still running is waited for inside
+// the bounded --checks-timeout wait, and withholds only when that wait runs out.
+for (const conclusion of ['skipped', 'neutral']) {
+  test(`a required check that concluded ${conclusion} counts as passing (as GitHub branch protection counts it): authorized`, () => {
+    const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion }] }));
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+    assert.deepEqual(r.out.withheld_reasons, []);
+  });
+}
+for (const conclusion of ['cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure']) {
+  test(`a required check that concluded ${conclusion} withholds the merge at once`, () => {
+    const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion }] }));
+    assertWithheld(r, new RegExp(`required check not successful on the head commit: ci \\(${conclusion}\\)`), conclusion);
+  });
+}
+
+function settleWaiting(setup, waitArgs) {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
+    setup(f);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', ...waitArgs]);
+    return { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')), checkRunReads: calls(f).filter((a) => a[a.length - 1].includes('/check-runs')).length, runReads: calls(f).filter((a) => a[a.length - 1].includes('/actions/runs')).length };
+  } finally {
+    f.cleanup();
+  }
+}
+const ONLY_COPILOT = { total_count: 1, check_runs: [{ id: 3, name: 'Copilot', status: 'completed', conclusion: 'success' }] };
+
+test('a required check that appears during the --checks-timeout wait is waited for: authorized once it passes', () => {
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'check_runs.0', ONLY_COPILOT);
+    putEvidence(f, 'check_runs.2', { total_count: 2, check_runs: [ONLY_COPILOT.check_runs[0], { id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] });
+  }, ['--checks-interval', '0.05', '--checks-timeout', '20']);
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.out.checks_timed_out, false);
+  assert.equal(r.checkRunReads, 3, 'read until the required check appeared');
+  assert.match(r.stderr, /required checks or workflow runs are not finished \(ci not reported\); waiting for the checks to finish/);
+  assert.match(r.stderr, /authorized to merge/);
+});
+
+test('a workflow run still in progress is waited for: authorized once it completes green', () => {
+  const run0 = { id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD };
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'workflow_runs.0', { workflow_runs: [run0] });
+    putEvidence(f, 'workflow_runs.1', { workflow_runs: [{ ...run0, status: 'completed', conclusion: 'success' }] });
+  }, ['--checks-interval', '0.05', '--checks-timeout', '20']);
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.runReads, 2);
+});
+
+test('a required check still missing when --checks-timeout runs out withholds the merge, naming the check and the wait', () => {
+  // 4s, not less: each evidence read is 7 fake gh calls, slow on a loaded machine.
+  const r = settleWaiting((f) => putEvidence(f, 'check_runs', ONLY_COPILOT), ['--checks-interval', '0.2', '--checks-timeout', '4']);
+  assertWithheld(r, /required check ci not reported on the head commit/, 'missing after the wait');
+  assert.equal(r.out.checks_timed_out, true);
+  assert.ok(r.out.withheld_reasons.some((x) => /required checks or workflow runs were still not finished after waiting \d+s/.test(x)), JSON.stringify(r.out.withheld_reasons));
+  assert.ok(!r.out.withheld_reasons.some((x) => /check rollup reached/.test(x)), 'the rollup was not what timed out');
+  assert.ok(r.checkRunReads >= 2, `it read the checks again before giving up: ${r.checkRunReads}`);
+});
+
+test('an evidence read the --checks-timeout deadline cuts short does not replace the last complete one: still named as not finished, never as unreadable', () => {
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'check_runs', ONLY_COPILOT);
+    putEvidence(f, 'check_runs_delay', [0, 0, 10000]); // the third evidence read hangs past the deadline and is cut
+  }, ['--checks-interval', '0.05', '--checks-timeout', '4']);
+  assertWithheld(r, /required check ci not reported on the head commit/, 'cut read');
+  assert.equal(r.out.checks_timed_out, true);
+  assert.ok(!r.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+test('a failed required check is not waited for, even beside a missing one', () => {
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'publish' }] } }]);
+    putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'failure' }] });
+  }, ['--checks-interval', '5', '--checks-timeout', '60']);
+  assertWithheld(r, /ci \(failure\)/, 'failed beside missing');
+  assert.equal(r.checkRunReads, 1, 'no wait');
+  assert.ok(r.ms < 5000, `no wait: ${r.ms}ms`);
 });
 
 test('issue #273: a null check rollup (a failed check being re-run, no checks re-created yet) withholds the merge', () => {
