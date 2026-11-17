@@ -899,8 +899,8 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
           unreadable(fwd(path), err);
           continue;
         }
-        // An unedited file Sterling rendered (the plan agent's edit rules deny "*" and
-        // allow only .sterling/plans/*) never allows the store, so it gets no row.
+        // An unedited file Sterling rendered (the plan agent is `edit: deny`; the conductor
+        // saves and binds plans) never allows the store, so it gets no row.
         if (!isUneditedSterlingFull(text) && agentFileLoosensGuard(text)) {
           problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
