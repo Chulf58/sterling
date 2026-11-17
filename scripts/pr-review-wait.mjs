@@ -75,7 +75,7 @@
 //    body_findings_without_comments,
 //    copilot_request:null|{requested, error?}, copilot_review_pending,
 //    observed_copilot_login, stale_review, awaiting_head_review,
-//    identity_confirmed[, error]}
+//    identity_confirmed, next_since_review[, error]}
 // previously_missed is the findings under a "Previously missed" (or "N
 // previously missed issues") heading of the review body, as list items or as
 // nested <details> blocks ([] when absent);
@@ -96,8 +96,11 @@
 // read when the head's review is returned, otherwise only the ids and bodies
 // show) and the wait goes on for the head's review until --timeout, or until
 // no request is pending (no_review_requested), as without it. The stale
-// reviews are never skipped: advance --since-review to the highest id across
-// review and stale_reviews. WITHOUT --head nothing changes (the #80 behaviour:
+// reviews are never skipped: the next --since-review is next_since_review,
+// the highest id such that every unconsumed review up to it was returned (in
+// review or stale_reviews), never simply the highest id returned: a late stale
+// review can have a higher id than a head review not yet returned. A stale
+// review above the watermark is listed again on the next call. WITHOUT --head nothing changes (the #80 behaviour:
 // the oldest unconsumed review returns at once, stale_review true if not the
 // head).
 // A failed --request-copilot ends the call at once with status error (exit 1),
@@ -349,6 +352,7 @@ function lastCopilotReview(reviews, pinned) {
 // the head's newest workflow runs are all completed and none failed, and the
 // branch is not behind its base. Absent, unreadable or unmet evidence
 // withholds the merge with a named reason; it never refuses the settle.
+const RATE_LIMIT_PROBE_MS = 30_000; // the gh api rate_limit read after a rate-limited call, capped to any deadline left
 const EVIDENCE_MAX_BUFFER = 64 * 1024 * 1024; // compare and check-runs answers can be large
 // A workflow run passes on success, skipped (it ran no job, so it hides no
 // failure) or neutral, which GitHub treats as non-failing (user-ruled
@@ -360,9 +364,46 @@ const RUN_CONCLUSIONS_OK = new Set(['success', 'skipped', 'neutral']);
 const REQUIRED_CONCLUSIONS_OK = new Set(['success', 'skipped', 'neutral']);
 const httpStatusOf = (text) => Number(String(text).match(/\(HTTP (\d{3})\)/)?.[1] ?? 0) || null;
 
+/** The top-level JSON values of a gh answer (one per page under --paginate),
+ * NOT flattened. Strict, unlike parsePages: an empty answer, a top-level value
+ * that is not an object or an array, text outside the values, or a truncated
+ * value throws, so a malformed answer is never read as an empty inventory. */
+function strictPages(text) {
+  const values = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (depth === 0 && c !== '[' && c !== '{') {
+      if (/\s/.test(c)) continue;
+      throw new Error(`unexpected '${c}' outside a JSON object or array`);
+    }
+    if (c === '"') inString = true;
+    else if (c === '[' || c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) values.push(JSON.parse(text.slice(start, i + 1)));
+    }
+  }
+  if (depth !== 0 || inString) throw new Error('truncated JSON');
+  if (!values.length) throw new Error('an empty answer');
+  return values;
+}
+
 /** One REST read for the merge evidence: { ok, pages } or { ok: false,
- * http, error }. A rate-limited read names the reset. Never throws on gh.
- * With `deadline` (ms since the epoch) the call ends by it. */
+ * http, error }. pages are strictPages' values. A rate-limited read names the
+ * reset. Never throws on gh. With `deadline` (ms since the epoch) the call,
+ * and the rate-limit probe after it, end by it. */
 function evidenceRead(host, path, { paginate = false, deadline = null } = {}) {
   const remaining = deadline === null ? GH_CALL_TIMEOUT_MS : deadline - Date.now();
   if (remaining <= 0) return { ok: false, http: null, error: `--checks-timeout ran out before gh api ${path} could be read` };
@@ -370,12 +411,13 @@ function evidenceRead(host, path, { paginate = false, deadline = null } = {}) {
   const r = spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), maxBuffer: EVIDENCE_MAX_BUFFER, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   const text = `${r.stderr ?? ''}\n${r.stdout ?? ''}`.trim();
   if (!r.error && r.status !== 0 && isRateLimitText(text)) {
-    const limit = readCoreRateLimit((a) => spawnSync('gh', a, { cwd: target, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), host);
+    const probeMs = deadline === null ? RATE_LIMIT_PROBE_MS : Math.min(RATE_LIMIT_PROBE_MS, deadline - Date.now());
+    const limit = probeMs > 0 ? readCoreRateLimit((a) => spawnSync('gh', a, { cwd: target, encoding: 'utf8', timeout: probeMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), host) : null;
     return { ok: false, http: 403, error: `GitHub's REST rate limit is exhausted${limit?.resetMs ? ` (resets ${describeReset(limit.resetMs)})` : ''}` };
   }
   if (r.error || r.status !== 0) return { ok: false, http: httpStatusOf(text), error: `gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || '').trim()}` };
   try {
-    return { ok: true, pages: parsePages(r.stdout) };
+    return { ok: true, pages: strictPages(r.stdout) };
   } catch (e) {
     return { ok: false, http: null, error: `gh api ${path} returned unreadable JSON (${e.message})` };
   }
@@ -393,58 +435,92 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
   let finals = 0; // reasons that waiting cannot change
   const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
   const read = (path, opts = {}) => evidenceRead(host, path, { ...opts, deadline });
+  // ENVELOPES (Sol review): every answer must have its endpoint's shape, or it
+  // is unreadable and withholds; it never reads as an empty inventory. A paged
+  // list must hold every item its total_count declares.
+  const one = (res, path, check) => {
+    if (!res.ok) return res;
+    if (res.pages.length !== 1 || !check(res.pages[0])) return { ok: false, http: null, error: `gh api ${path} returned an answer of an unexpected shape: ${JSON.stringify(res.pages).slice(0, 200)}` };
+    return { ok: true, value: res.pages[0] };
+  };
+  const paged = (res, path, key) => {
+    if (!res.ok) return res;
+    const bad = res.pages.find((p) => p === null || typeof p !== 'object' || Array.isArray(p) || !Array.isArray(p[key]) || !Number.isInteger(p.total_count));
+    if (bad !== undefined) return { ok: false, http: null, error: `gh api ${path} returned a page without a ${key} list and a total_count: ${JSON.stringify(bad).slice(0, 200)}` };
+    const items = res.pages.flatMap((p) => p[key]);
+    const total = res.pages[0].total_count;
+    if (items.length < total) return { ok: false, http: null, error: `gh api ${path} returned ${items.length} of the ${total} ${key} it declares (incomplete pages)` };
+    return { ok: true, items };
+  };
   const final = (reason) => {
     reasons.push(reason);
     finals++;
   };
 
-  const pull = read(`${repoPath}/pulls/${number}`);
-  const baseRef = pull.ok ? pull.pages[0]?.base?.ref : undefined;
-  if (typeof baseRef !== 'string' || baseRef === '') {
-    final(`the PR's base branch could not be read (${pull.ok ? 'no base.ref in the answer' : pull.error}), so its required checks and the behind-base check cannot be read`);
+  const pullPath = `${repoPath}/pulls/${number}`;
+  const pull = one(read(pullPath), pullPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.base?.ref === 'string' && v.base.ref !== '');
+  const baseRef = pull.ok ? pull.value.base.ref : undefined;
+  if (!pull.ok) {
+    final(`the PR's base branch could not be read (${pull.error}), so its required checks and the behind-base check cannot be read`);
     return { reasons, evidence, pending: reasons.length > 0 && finals === 0 };
   }
   evidence.base_ref = baseRef;
   const branch = encodeURIComponent(baseRef);
 
-  // Required checks: rulesets plus classic branch protection. 403/404 means not
-  // configured or not readable with this token; any other failure is unreadable.
+  // Required checks: rulesets plus classic branch protection (Sol review). Only
+  // a PROVEN absence counts as not configured: rulesets answering a readable
+  // list (an empty one, or one without a required_status_checks rule), and
+  // classic protection answering 404 "Branch not protected". Anything else (a
+  // 403, a plain 404 Not Found, which is also what a token without access gets,
+  // a rate limit, a 5xx, an answer of the wrong shape) makes that source
+  // unreadable, and an unreadable source withholds even when the other one
+  // names passing checks: the unread source may require more.
   const required = new Set();
   const unreadable = [];
-  const notFound = [];
-  const rules = read(`${repoPath}/rules/branches/${branch}`, { paginate: true });
-  if (rules.ok) {
-    for (const rule of rules.pages) {
-      if (rule?.type !== 'required_status_checks') continue;
-      for (const c of rule?.parameters?.required_status_checks ?? []) if (typeof c?.context === 'string' && c.context) required.add(c.context);
+  const notConfigured = [];
+  const rulesPath = `${repoPath}/rules/branches/${branch}`;
+  const rules = read(rulesPath, { paginate: true });
+  const ruleShapeOk = (r) => r !== null && typeof r === 'object' && !Array.isArray(r) && typeof r.type === 'string' && (r.type !== 'required_status_checks' || (Array.isArray(r.parameters?.required_status_checks) && r.parameters.required_status_checks.every((c) => typeof c?.context === 'string' && c.context !== '')));
+  if (!rules.ok) unreadable.push(`rulesets: ${rules.error}`);
+  else if (!rules.pages.every((p) => Array.isArray(p) && p.every(ruleShapeOk))) unreadable.push(`rulesets: gh api ${rulesPath} returned an answer of an unexpected shape: ${JSON.stringify(rules.pages).slice(0, 200)}`);
+  else {
+    const before = required.size;
+    for (const rule of rules.pages.flat()) if (rule.type === 'required_status_checks') for (const c of rule.parameters.required_status_checks) required.add(c.context);
+    if (required.size === before) notConfigured.push('no ruleset requires a status check');
+  }
+  const classicPath = `${repoPath}/branches/${branch}/protection/required_status_checks`;
+  const classicRead = read(classicPath);
+  if (!classicRead.ok && classicRead.http === 404 && /Branch not protected/i.test(classicRead.error)) notConfigured.push('the branch is not protected');
+  else {
+    const classic = one(classicRead, classicPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Array.isArray(v.contexts) && v.contexts.every((c) => typeof c === 'string') && (v.checks === undefined || (Array.isArray(v.checks) && v.checks.every((c) => typeof c?.context === 'string'))));
+    if (!classic.ok) unreadable.push(`branch protection: ${classic.error}`);
+    else {
+      const contexts = [...classic.value.contexts, ...(classic.value.checks ?? []).map((c) => c.context)].filter((c) => c !== '');
+      for (const c of contexts) required.add(c);
+      if (!contexts.length) notConfigured.push('branch protection requires no status check');
     }
-  } else if (rules.http === 403 || rules.http === 404) notFound.push(`rulesets: HTTP ${rules.http}`);
-  else unreadable.push(`rulesets: ${rules.error}`);
-  const classic = read(`${repoPath}/branches/${branch}/protection/required_status_checks`);
-  if (classic.ok) {
-    const p = classic.pages[0] ?? {};
-    for (const c of [...(Array.isArray(p.contexts) ? p.contexts : []), ...(Array.isArray(p.checks) ? p.checks.map((x) => x?.context) : [])]) if (typeof c === 'string' && c) required.add(c);
-  } else if (classic.http === 403 || classic.http === 404) notFound.push(`branch protection: HTTP ${classic.http}`);
-  else unreadable.push(`branch protection: ${classic.error}`);
+  }
   evidence.required_checks = [...required].sort();
   if (unreadable.length) {
-    final(`required checks not configured or unreadable for ${baseRef}: ${unreadable.join('; ')}`);
+    final(`required checks not configured or unreadable for ${baseRef}: ${unreadable.join('; ')}: a source that cannot be read may require checks the other does not name, so the merge cannot be authorized`);
   } else if (!required.size) {
-    final(`required checks not configured or unreadable for ${baseRef} (${notFound.length ? notFound.join(', ') : 'no required status check found'}): configure required status checks for ${baseRef} in a ruleset or branch protection so the merge can be authorized`);
+    final(`required checks not configured or unreadable for ${baseRef} (${notConfigured.join(', ')}): configure required status checks for ${baseRef} in a ruleset or branch protection so the merge can be authorized`);
   } else {
     // The newest check run per name, and the combined status's latest per context.
-    const runs = read(`${repoPath}/commits/${headSha}/check-runs?per_page=100`, { paginate: true });
-    const statuses = read(`${repoPath}/commits/${headSha}/status?per_page=100`);
+    const runsPath = `${repoPath}/commits/${headSha}/check-runs?per_page=100`;
+    const statusPath = `${repoPath}/commits/${headSha}/status?per_page=100`;
+    const runs = paged(read(runsPath, { paginate: true }), runsPath, 'check_runs');
+    const statuses = paged(read(statusPath), statusPath, 'statuses');
     if (!runs.ok || !statuses.ok) {
       final(`the head commit's checks could not be read (${[runs, statuses].filter((x) => !x.ok).map((x) => x.error).join('; ')}), so the required checks cannot be confirmed`);
     } else {
       const latest = new Map();
-      for (const cr of runs.pages.flatMap((p) => (Array.isArray(p?.check_runs) ? p.check_runs : []))) {
+      for (const cr of runs.items) {
         if (typeof cr?.name !== 'string') continue;
         const seen = latest.get(cr.name);
         if (!seen || (cr.id ?? 0) > (seen.id ?? 0)) latest.set(cr.name, cr);
       }
-      const contexts = new Map((statuses.pages[0]?.statuses ?? []).filter((s) => typeof s?.context === 'string').map((s) => [s.context, s]));
+      const contexts = new Map(statuses.items.filter((s) => typeof s?.context === 'string').map((s) => [s.context, s]));
       for (const name of evidence.required_checks) {
         const cr = latest.get(name);
         const st = contexts.get(name);
@@ -464,11 +540,12 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
 
   // Workflow runs for the head: the newest run per workflow and event must be
   // completed with no failure, whatever the check rollup says (#275, #273).
-  const wr = read(`${repoPath}/actions/runs?head_sha=${headSha}&per_page=100`, { paginate: true });
+  const wrPath = `${repoPath}/actions/runs?head_sha=${headSha}&per_page=100`;
+  const wr = paged(read(wrPath, { paginate: true }), wrPath, 'workflow_runs');
   if (!wr.ok) final(`the head commit's workflow runs could not be read (${wr.error}), so a failed or unfinished run cannot be ruled out`);
   else {
     const newest = new Map();
-    for (const run of wr.pages.flatMap((p) => (Array.isArray(p?.workflow_runs) ? p.workflow_runs : []))) {
+    for (const run of wr.items) {
       if (run?.head_sha !== undefined && run.head_sha !== headSha) continue;
       const key = `${run?.workflow_id ?? run?.name}:${run?.event ?? ''}`;
       const seen = newest.get(key);
@@ -483,9 +560,10 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
   }
 
   // Behind base (#248): the head must contain the base branch's head.
-  const cmp = read(`${repoPath}/compare/${branch}...${headSha}`);
-  const behind = cmp.ok ? cmp.pages[0]?.behind_by : undefined;
-  if (!Number.isInteger(behind) || behind < 0) final(`whether the branch is behind ${baseRef} could not be read (${cmp.ok ? `behind_by is ${JSON.stringify(behind)}` : cmp.error})`);
+  const cmpPath = `${repoPath}/compare/${branch}...${headSha}`;
+  const cmp = one(read(cmpPath), cmpPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Number.isInteger(v.behind_by) && v.behind_by >= 0);
+  const behind = cmp.ok ? cmp.value.behind_by : undefined;
+  if (!cmp.ok) final(`whether the branch is behind ${baseRef} could not be read (${cmp.error})`);
   else {
     evidence.behind_by = behind;
     if (behind > 0) final(`the branch is behind base: ${behind} commit${behind > 1 ? 's' : ''} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
@@ -715,6 +793,7 @@ let intervalS = seconds('--interval', DEFAULT_INTERVAL_S);
 const sinceRaw = flag('--since-review');
 if (sinceRaw !== undefined && !/^\d+$/.test(sinceRaw)) error(`--since-review must be a review id, got '${sinceRaw}'`);
 const sinceReview = sinceRaw === undefined ? null : Number(sinceRaw);
+result.next_since_review = sinceReview;
 const headRaw = flag('--head');
 if (headRaw !== undefined && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
 const expectedHead = headRaw === undefined ? null : headRaw.toLowerCase();
@@ -760,7 +839,10 @@ class RateLimited extends Error {
 }
 const SECONDARY_BACKOFF_MS = 60_000; // a secondary limit or unreadable reset: no reset time to wait for
 function rateLimitReset() {
-  const limit = readCoreRateLimit((args) => spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), origin.host);
+  // The probe is capped to the --timeout budget left (Sol review): it never
+  // keeps the call running past --timeout. With no budget left it is skipped.
+  const probeMs = Math.min(RATE_LIMIT_PROBE_MS, deadline - Date.now());
+  const limit = probeMs > 0 ? readCoreRateLimit((args) => spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: probeMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), origin.host) : null;
   return limit?.exhausted && limit.resetMs ? limit.resetMs : Date.now() + SECONDARY_BACKOFF_MS;
 }
 function ghApi(path, { paginate = false, extra = [] } = {}) {
@@ -954,6 +1036,20 @@ function poll(recheckAbsent = true) {
   const fresh = expectedHead === null ? unconsumed : unconsumed.filter(isHeadReview);
   const staleHeld = expectedHead === null ? [] : unconsumed.filter((r) => !isHeadReview(r)).sort((a, b) => a.id - b.id);
   result.stale_reviews = staleHeld.map((r) => ({ id: r.id, commit_id: r.commit_id, author: r.user.login, state: r.state, body: r.body ?? '', comments: [] }));
+  // NEXT WATERMARK (Sol review of #300): the highest id such that every
+  // unconsumed review up to it was returned (as the review or in
+  // stale_reviews). The skill passes it as the next --since-review, so a head
+  // review with a lower id than a returned stale one is never skipped.
+  const ascending = [...unconsumed].sort((a, b) => a.id - b.id);
+  const watermark = (returnedIds) => {
+    let next = sinceReview;
+    for (const r of ascending) {
+      if (!returnedIds.has(r.id)) break;
+      next = r.id;
+    }
+    result.next_since_review = next;
+  };
+  watermark(new Set(staleHeld.map((r) => r.id)));
   if (!fresh.length) {
     if (pending) return null;
     if (!recheckAbsent) throw new NoReviewRequested();
@@ -987,6 +1083,7 @@ function poll(recheckAbsent = true) {
       return null;
     }
   }
+  watermark(new Set([review.id, ...staleHeld.map((r) => r.id)]));
   const body = review.body ?? '';
   const missed = parsePreviouslyMissed(body);
   return {

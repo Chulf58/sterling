@@ -67,6 +67,7 @@ if (argv[0] !== 'api') { console.error('fake gh: unhandled ' + JSON.stringify(ar
 const VALUED = new Set(['--hostname', '--jq', '-f', '-F']);
 const path = argv.filter((a, i) => i > 0 && !a.startsWith('-') && !VALUED.has(argv[i - 1])).pop();
 if (path === 'rate_limit') {
+  if (existsSync(join(state, 'rate_limit_delay_ms'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(readFileSync(join(state, 'rate_limit_delay_ms'), 'utf8')));
   const inFile = join(state, 'rate_limit_reset_in');
   const reset = Math.ceil(Date.now() / 1000) + (existsSync(inFile) ? Number(readFileSync(inFile, 'utf8')) : 0);
   process.stdout.write(JSON.stringify({ resources: { core: { limit: 5000, remaining: existsSync(inFile) ? 0 : 5000, reset } } }));
@@ -125,7 +126,7 @@ const EVIDENCE = [
   ['repos/acme/widget/actions/runs?', 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: '${HEAD}' }] }],
 ];
 let evidence = EVIDENCE.find(([prefix]) => path.startsWith(prefix));
-if (path.startsWith('repos/acme/widget/commits/')) evidence = path.includes('/check-runs') ? ['', 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }] }] : ['', 'statuses', { state: 'pending', statuses: [] }];
+if (path.startsWith('repos/acme/widget/commits/')) evidence = path.includes('/check-runs') ? ['', 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }] }] : ['', 'statuses', { state: 'pending', total_count: 0, statuses: [] }];
 if (evidence) {
   const [, kind, dflt] = evidence;
   if (existsSync(join(state, 'fail_' + kind))) { console.error(readFileSync(join(state, 'fail_' + kind), 'utf8')); process.exit(1); }
@@ -263,7 +264,44 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       copilot_request: null,
       copilot_review_pending: true,
       stale_reviews: [], // added for GitHub #300; empty without --head
+      next_since_review: 101, // added by the Sol review of #300: the watermark the skill passes next
     });
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol review, HIGH 3 (#300 watermark): head reviews 101 and 102, then a late
+// review 103 of an old head. The first call returns 101 with 103 stale; the
+// highest id returned is 103, and jumping there would skip 102. next_since_review
+// is 101, so the next call returns 102.
+test('#300 watermark: with head reviews 101, 102 and a late old-head review 103, next_since_review never skips 102', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101), review(102), review(103, { commit: OLD_HEAD })]]);
+    const first = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    assert.equal(first.out?.status, 'review', oneLine(first.stdout + first.stderr));
+    assert.equal(first.out.review.id, 101);
+    assert.deepEqual(first.out.stale_reviews.map((x) => x.id), [103]);
+    assert.equal(first.out.next_since_review, 101, 'not 103: review 102 is not returned yet');
+    const second = run(f, ['7', '--since-review', String(first.out.next_since_review), '--head', HEAD, ...FAST]);
+    assert.equal(second.out?.review?.id, 102, oneLine(second.stdout + second.stderr));
+    assert.deepEqual(second.out.stale_reviews.map((x) => x.id), [103]);
+    assert.equal(second.out.next_since_review, 103, 'everything up to 103 is returned now');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#300 watermark: a timeout that lists only stale reviews advances past them; with nothing unconsumed it keeps --since-review', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101, { commit: OLD_HEAD })]]);
+    const r = run(f, ['7', '--since-review', '100', '--head', HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out?.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.next_since_review, 101);
+    const g = run(f, ['7', '--since-review', '101', '--head', HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(g.out.next_since_review, 101);
   } finally {
     f.cleanup();
   }
@@ -1911,6 +1949,7 @@ for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNS
 // are present and successful on the head, the head's workflow runs show no
 // failure or unfinished run, and the branch is not behind base. It never merges.
 const putEvidence = (f, kind, value) => writeFileSync(join(f.state, `${kind}.json`), JSON.stringify(value));
+const putEvidenceRaw = (f, kind, text) => writeFileSync(join(f.state, `${kind}.json`), text); // e.g. pages back to back, or not JSON
 const failEvidence = (f, kind, stderr) => writeFileSync(join(f.state, `fail_${kind}`), stderr);
 function settleWith(setup, { rollup = GREEN_ROLLUP } = {}) {
   const f = makeFixture();
@@ -1962,7 +2001,7 @@ test('merge authorized: a classic branch-protection context satisfied by a commi
     putEvidence(f, 'rules', []);
     putEvidence(f, 'protection', { strict: false, contexts: ['ci/legacy'], checks: [{ context: 'ci/legacy', app_id: null }] });
     putEvidence(f, 'check_runs', { total_count: 0, check_runs: [] });
-    putEvidence(f, 'statuses', { state: 'success', statuses: [{ context: 'ci/legacy', state: 'success' }] });
+    putEvidence(f, 'statuses', { state: 'success', total_count: 1, statuses: [{ context: 'ci/legacy', state: 'success' }] });
   });
   assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
   assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
@@ -2018,7 +2057,7 @@ test('a required check that appears during the --checks-timeout wait is waited f
 // "Match GitHub" (user-ruled 2026-11-17): GitHub treats a neutral conclusion as
 // non-failing, so a workflow run that concluded neutral passes like success.
 test('a workflow run that concluded neutral counts as passing (as GitHub counts it): authorized', () => {
-  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'neutral', run_attempt: 1, head_sha: HEAD }] }));
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'neutral', run_attempt: 1, head_sha: HEAD }] }));
   assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
   assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
   assert.deepEqual(r.out.withheld_reasons, []);
@@ -2027,8 +2066,8 @@ test('a workflow run that concluded neutral counts as passing (as GitHub counts 
 test('a workflow run still in progress is waited for: authorized once it completes green', () => {
   const run0 = { id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD };
   const r = settleWaiting((f) => {
-    putEvidence(f, 'workflow_runs.0', { workflow_runs: [run0] });
-    putEvidence(f, 'workflow_runs.1', { workflow_runs: [{ ...run0, status: 'completed', conclusion: 'success' }] });
+    putEvidence(f, 'workflow_runs.0', { total_count: 1, workflow_runs: [run0] });
+    putEvidence(f, 'workflow_runs.1', { total_count: 1, workflow_runs: [{ ...run0, status: 'completed', conclusion: 'success' }] });
   }, ['--checks-interval', '0.05', '--checks-timeout', '20']);
   assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
   assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
@@ -2090,12 +2129,12 @@ test('issue #273: a null check rollup (a failed check being re-run, no checks re
 });
 
 test('issue #273: a workflow run re-running on the head (in_progress) withholds the merge until it finishes', () => {
-  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD }] }));
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD }] }));
   assertWithheld(r, /workflow run for the head not finished: 'CI' \(run 11, in_progress\)/, '#273 re-run');
 });
 
 test('issue #275: a workflow run that concluded failure withholds the merge although the check rollup is SUCCESS', () => {
-  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { workflow_runs: [
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { total_count: 3, workflow_runs: [
     { id: 10, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: HEAD },
     { id: 12, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: HEAD },
     { id: 13, name: 'Lint', workflow_id: 6, event: 'pull_request', status: 'completed', conclusion: 'skipped', run_attempt: 1, head_sha: HEAD },
@@ -2124,8 +2163,10 @@ test('issue #248: a branch behind its base withholds the merge, naming the base'
 });
 
 for (const [label, setup, pattern] of [
-  ['no ruleset and no branch protection (404)', (f) => putEvidence(f, 'rules', []), /required checks not configured or unreadable for main \(branch protection: HTTP 404\)/],
-  ['rulesets and protection both forbidden (403/404)', (f) => failEvidence(f, 'rules', 'gh: Resource not accessible by integration (HTTP 403)'), /required checks not configured or unreadable for main \(rulesets: HTTP 403, branch protection: HTTP 404\)/],
+  // A proven absence (an empty ruleset list, 404 "Branch not protected") is named as such.
+  ['no ruleset and no branch protection (404)', (f) => putEvidence(f, 'rules', []), /required checks not configured or unreadable for main \(no ruleset requires a status check, the branch is not protected\)/],
+  // Changed by the Sol review: a 403 is unreadable, no longer counted as "not configured".
+  ['rulesets forbidden (403), branch not protected', (f) => failEvidence(f, 'rules', 'gh: Resource not accessible by integration (HTTP 403)'), /required checks not configured or unreadable for main: rulesets: .*HTTP 403/],
   ['the rulesets read fails with a server error, even with classic contexts', (f) => { failEvidence(f, 'rules', 'gh: Server Error (HTTP 502)'); putEvidence(f, 'protection', { contexts: ['ci'] }); }, /required checks not configured or unreadable for main: rulesets: .*HTTP 502/],
   ['the base branch cannot be read', (f) => f.put('pull', 0, [{ number: 7, head: { sha: HEAD } }]), /base branch could not be read/],
   ['the check runs cannot be read', (f) => failEvidence(f, 'check_runs', 'gh: Server Error (HTTP 500)'), /checks could not be read/],
@@ -2137,6 +2178,48 @@ for (const [label, setup, pattern] of [
     assertWithheld(settleWith(setup), pattern, label);
   });
 }
+
+// Sol review, CRITICAL 1: only a PROVEN absence counts as "not configured"
+// (rulesets: a readable list; classic protection: 404 "Branch not protected").
+// A 403, a plain 404 or any other failure from EITHER source withholds, even
+// when the other source names checks that all passed.
+for (const [label, setup] of [
+  ['rulesets 403, classic protection names a passing ci', (f) => { failEvidence(f, 'rules', 'gh: Resource not accessible by integration (HTTP 403)'); putEvidence(f, 'protection', { contexts: ['ci'], checks: [{ context: 'ci', app_id: null }] }); }],
+  ['classic protection 403, rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: Resource not accessible by integration (HTTP 403)')],
+  ['classic protection plain 404 Not Found (no access), rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: Not Found (HTTP 404)')],
+  ['classic protection rate-limited, rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: API rate limit exceeded for user ID 1. (HTTP 403)')],
+  ['classic protection 502, rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: Server Error (HTTP 502)')],
+]) {
+  test(`Sol review: one required-check source unreadable (${label}) withholds the merge`, () => {
+    assertWithheld(settleWith(setup), /required checks not configured or unreadable for main: .*(rulesets|branch protection):/, label);
+  });
+}
+
+// Sol review, CRITICAL 2: an answer of the wrong shape, not JSON, or with
+// fewer items than its total_count is unreadable and withholds; it is never
+// read as an empty inventory.
+for (const [label, setup, pattern] of [
+  ['workflow runs answer {}', (f) => putEvidence(f, 'workflow_runs', {}), /workflow runs could not be read .*without a workflow_runs list/],
+  ['workflow runs answer {message}', (f) => putEvidence(f, 'workflow_runs', { message: 'unreadable' }), /workflow runs could not be read/],
+  ['workflow runs answer is not JSON', (f) => putEvidenceRaw(f, 'workflow_runs', 'not json'), /workflow runs could not be read .*unreadable JSON/],
+  ['workflow runs answer is empty', (f) => putEvidenceRaw(f, 'workflow_runs', ''), /workflow runs could not be read .*an empty answer/],
+  ['workflow runs pages incomplete (2 of 3)', (f) => putEvidence(f, 'workflow_runs', { total_count: 3, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD }, { id: 12, name: 'Lint', workflow_id: 6, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD }] }), /2 of the 3 workflow_runs it declares/],
+  ['rulesets answer an object, classic names a passing ci', (f) => { putEvidence(f, 'rules', { message: 'unreadable' }); putEvidence(f, 'protection', { contexts: ['ci'] }); }, /rulesets: .*unexpected shape/],
+  ['a required_status_checks rule without its list', (f) => putEvidence(f, 'rules', [{ type: 'required_status_checks', parameters: {} }]), /rulesets: .*unexpected shape/],
+  ['check runs answer {}', (f) => putEvidence(f, 'check_runs', {}), /checks could not be read .*without a check_runs list/],
+  ['combined status without statuses', (f) => putEvidence(f, 'statuses', { state: 'pending' }), /checks could not be read .*without a statuses list/],
+  ['compare answer is an array', (f) => putEvidence(f, 'compare', [{ behind_by: 0 }]), /behind main could not be read .*unexpected shape/],
+]) {
+  test(`Sol review: malformed evidence (${label}) withholds the merge`, () => {
+    assertWithheld(settleWith(setup), pattern, label);
+  });
+}
+
+test('Sol review control: check runs on two pages (gh --paginate prints them back to back) are read whole: authorized', () => {
+  const r = settleWith((f) => putEvidenceRaw(f, 'check_runs', JSON.stringify({ total_count: 2, check_runs: [{ id: 3, name: 'Copilot', status: 'completed', conclusion: 'success' }] }) + JSON.stringify({ total_count: 2, check_runs: [{ id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] })));
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+});
 
 test('the merge evidence is not read when the settle is blocked (nothing would be authorized)', () => {
   const f = makeFixture();
@@ -2700,6 +2783,23 @@ test('rate limit (GitHub issue #294): a rate-limited poll waits for the reset an
     assert.ok(r.ms < 15_000, `did not wait for the 60s timeout, took ${r.ms}ms`);
     const calls = readFileSync(join(f.state, 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(calls.filter((c) => c.includes('rate_limit')).length, 1, 'rate_limit is read once, after the failure only');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol review, MEDIUM 4: the rate-limit reset probe is capped to the --timeout
+// budget left; a probe that hangs never keeps the wait past --timeout.
+test('rate limit: a hanging rate_limit probe is cut at --timeout, never waited out (it had its own 30s timeout)', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'rate_limited_first'), '99');
+    writeFileSync(join(f.state, 'rate_limit_reset_in'), '3600');
+    writeFileSync(join(f.state, 'rate_limit_delay_ms'), '20000');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '3']);
+    assert.equal(r.code, 4, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'rate_limited');
+    assert.ok(r.ms < 8000, `the probe was cut at the 3s budget, not waited for 20s: took ${r.ms}ms`);
   } finally {
     f.cleanup();
   }
