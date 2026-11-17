@@ -33485,7 +33485,7 @@ var SterlingTools = class _SterlingTools {
     if (tree.unresolved)
       return tree;
     const name = record2.working_tree;
-    if (!name || !workingTrees?.[name] && !this.declaresForeignTree(name))
+    if (!name || !workingTrees?.[name] && !this.declaresForeignTree(name, workingTrees))
       return { root: this.repoRoot, unresolved: false };
     return tree;
   }
@@ -33507,7 +33507,7 @@ var SterlingTools = class _SterlingTools {
       return { root: this.checkoutRoot, unresolved: false };
     const mapped = workingTrees?.[name];
     if (!mapped) {
-      if (!this.declaresForeignTree(name))
+      if (!this.declaresForeignTree(name, workingTrees))
         return { root: this.checkoutRoot, unresolved: false };
       return { root: void 0, unresolved: true };
     }
@@ -33526,10 +33526,16 @@ var SterlingTools = class _SterlingTools {
    * ruling 2026-09-28 "Code: self-root = own"). Mirrors H10's isUnowned, which
    * asks the same question through the same shared sameLocationAnyHost.
    */
-  declaresForeignTree(workingTree) {
+  declaresForeignTree(workingTree, workingTrees = this.config.working_trees) {
     if (!workingTree)
       return false;
-    return !(this.repoRoot && sameLocationAnyHost(String(workingTree), this.repoRoot));
+    const name = String(workingTree);
+    const raw = workingTrees && Object.hasOwn(workingTrees, name) ? workingTrees[name] : void 0;
+    const mapped = typeof raw === "string" && raw ? raw : void 0;
+    const location = mapped === void 0 ? name : isAbsolutePathAnyHost(mapped) ? mapped : this.repoRoot ? join15(this.repoRoot, mapped) : void 0;
+    if (location === void 0)
+      return true;
+    return !(this.repoRoot && sameLocationAnyHost(location, this.repoRoot) || this.checkoutRoot && sameLocationAnyHost(location, this.checkoutRoot));
   }
   /**
    * Is `rel` registered as a generated projection (config.generated_projections)?
@@ -36539,9 +36545,10 @@ var SterlingTools = class _SterlingTools {
    * project rather than imagined:
    *
    * (1) "matched_filter: 179" against rank_terms:["garage","loadout"] was read
-   *     as "179 garage decisions". It is not — rank_terms ORDER the set through
-   *     bm25, they never narrow it (store query(): ORDER BY bm25, not WHERE), so
-   *     the count belongs to types/stack_tags/file_keys alone. Saying only
+   *     as "179 garage decisions". It is not — the count is rank-BLIND and
+   *     belongs to types/stack_tags/file_keys alone, while rank_terms both ORDER
+   *     the result through bm25 and RESTRICT it to full-text matches (store
+   *     axis.ts adds records_fts MATCH to WHERE; GitHub #231). Saying only
    *     "records matching this filter" was technically true and still misread,
    *     which makes it a bad message: it let a reader believe a capped window
    *     was a relevance ranking over a relevant set.
@@ -36553,7 +36560,7 @@ var SterlingTools = class _SterlingTools {
   cappedNote(returned, matchedFilter, ranked, projection) {
     const parts = [`cap reached \u2014 showing ${returned} of ${matchedFilter} records matching the FILTER (types/stack_tags/file_keys)`];
     if (ranked) {
-      parts.push(`rank_terms ORDERED those ${matchedFilter} and did not narrow them, so this count is NOT a measure of how many are relevant \u2014 and a capped window can never establish absence`);
+      parts.push(`rank_terms ORDERED and RESTRICTED the result to full-text matches among those ${matchedFilter}, so this filter-only count is an upper bound, NOT a measure of how many are relevant \u2014 and a capped window can never establish absence`);
     }
     parts.push(projection === "digest" ? `raise cap to see the rest \u2014 at this projection every record is one headline line` : `raise cap, narrow the filter, or re-run with projection:"digest" to see all ${matchedFilter} as one-line headlines (id + title/trigger, no bodies) and then knowledge_get the few you want`);
     return parts.join("; ");
@@ -39037,7 +39044,11 @@ ${JSON.stringify(entry)}
   }
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
   configSet(args2) {
-    return configSetImpl(this.repoRoot, args2?.path, args2?.value, args2?.expected_digest);
+    const result = configSetImpl(this.repoRoot, args2?.path, args2?.value, args2?.expected_digest);
+    if (result.path === "working_trees" || result.path.startsWith("working_trees.")) {
+      this.config = { ...this.config, working_trees: this.freshWorkingTrees() };
+    }
+    return result;
   }
   // enforcement_reconcile (the H17 (B) surface taint-latch front door) was
   // removed together with H17 itself (decision
@@ -42092,7 +42103,7 @@ function createSterlingServer(target, opts = {}) {
     return json(tools.writeProjected(tools.knowledgeCreate(recordType2, restFields), projection));
   });
   server.registerTool("knowledge_query", {
-    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
+    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms are not a filter-count term: they ORDER by bm25 AND restrict the result to records with a full-text match, so returned can be below matched_filter and a capped window is at most matched_filter records (a non-capped one says how many FTS matches remained). projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
     inputSchema: strict({
       types: external_exports.array(external_exports.string()).optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
@@ -42184,7 +42195,7 @@ function createSterlingServer(target, opts = {}) {
       // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
       body: external_exports.object({}).passthrough().optional().describe("the partial patch; exactly one of body or fields"),
       fields: external_exports.object({}).passthrough().optional().describe("alias of body, the name knowledge_create uses; exactly one of body or fields"),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe(`open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then pass that item id here; only those paths advance`),
       expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
@@ -42204,7 +42215,7 @@ function createSterlingServer(target, opts = {}) {
       id: external_exports.string().describe(ID_LADDER),
       field: external_exports.string(),
       entries: external_exports.array(external_exports.unknown()),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe(`open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then pass that item id here; only those paths advance`),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection)));
