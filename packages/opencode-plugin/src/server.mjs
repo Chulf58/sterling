@@ -142,6 +142,37 @@ function sameDirectory(a, b) {
  * the post-update sync run once per project per process, whichever location reaches
  * the project first.
  */
+/**
+ * Times the named sections of one fenced call. time(name, fn) runs fn and records its
+ * duration, awaiting it when it returns a promise; slowest() is ' (slowest: a 1200 ms, ...)'
+ * for the sections that took 50 ms or more (top 3), or '' when none did.
+ */
+export function createSectionTimer() {
+  const spans = [];
+  const record = (name, started) => spans.push({ name, ms: Date.now() - started });
+  return {
+    time(name, fn) {
+      const started = Date.now();
+      let result;
+      try {
+        result = fn();
+      } catch (e) {
+        record(name, started);
+        throw e;
+      }
+      if (!result || typeof result.then !== 'function') {
+        record(name, started);
+        return result;
+      }
+      return result.then((v) => (record(name, started), v), (e) => { record(name, started); throw e; });
+    },
+    slowest() {
+      const top = spans.filter((s) => s.ms >= 50).sort((x, y) => y.ms - x.ms).slice(0, 3);
+      return top.length ? ` (slowest: ${top.map((s) => `${s.name} ${s.ms} ms`).join(', ')})` : '';
+    },
+  };
+}
+
 /** `dbPath` with a linked worktree's <checkout>/.sterling/sterling.db mapped to the store root's. */
 function storeDbPath(dbPath) {
   if (typeof dbPath !== 'string' || basename(dbPath) !== 'sterling.db' || basename(dirname(dbPath)) !== '.sterling') return dbPath;
@@ -173,18 +204,19 @@ export function createSterlingServer(deps = {}) {
   async function fenced(name, root, fn) {
     const started = Date.now();
     let timer;
+    const timing = createSectionTimer();
     try {
       await Promise.race([
-        Promise.resolve().then(fn),
+        Promise.resolve().then(() => fn(timing)),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(`${name} exceeded its ${BUDGET_MS[name]} ms budget`)), BUDGET_MS[name]);
         }),
       ]);
       const took = Date.now() - started;
-      if (took > BUDGET_MS[name]) logLine(root, `${name}: over budget (${took} ms, synchronous)`);
+      if (took > BUDGET_MS[name]) logLine(root, `${name}: over budget (${took} ms, synchronous)${timing.slowest()}`);
     } catch (e) {
       try {
-        logLine(root, `${name} failed: ${errText(e)}`);
+        logLine(root, `${name} failed: ${errText(e)}${timing.slowest()}`);
         addNotice(root, `Sterling plugin: ${name} failed (${errText(e)}). See ${LOG_REL}.`, now());
       } catch (reportError) {
         // The log and notice files are unwritable: stderr is the last place left.
