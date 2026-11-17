@@ -416,7 +416,7 @@ export const CONDUCTOR_WORDING_EDITS = [
     date: '2026-11-17',
     reason: "new sentences: past the review cap, and findings reproducing only with hand-built inputs, go to the user / residual risk (user-ruled 2026-11-17, \"Tighter conductor rules\")",
     before: " Work mode has its own shape below.",
-    after: " **Past that cap, the next review or fix round is put to the user through the question form and never started on your own judgment** (user-stated 2026-11-17 that a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\"; in this repo the cap is 3 reviewers, then one re-check). A review finding that reproduces only with hand-built inputs the real system has not been seen to produce is recorded as residual risk, not fixed, unless the user chooses otherwise through the question form (same ruling, 2026-11-17, \"Tighter conductor rules\"). Work mode has its own shape below.",
+    after: " **Past that cap, the next review or fix round is put to the user through the question form and never started on your own judgment** (user-stated 2026-11-17 that a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\"). A review finding that reproduces only with hand-built inputs the real system has not been seen to produce is recorded as residual risk, not fixed, unless the user chooses otherwise through the question form (same ruling, 2026-11-17, \"Tighter conductor rules\"). Work mode has its own shape below.",
   },
   {
     commit: 'conductor-on-target',
