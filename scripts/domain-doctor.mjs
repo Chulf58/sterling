@@ -3457,7 +3457,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId, r
           .filter((r) => !seen.has(`${r.record_id}\u0000${r.tag}`) && seen.add(`${r.record_id}\u0000${r.tag}`));
       }
       if (name === 'store_meta') {
-        a = a.filter((r) => r.key !== STORE_FENCE_KEY);
+        a = a.filter((r) => r.key !== STORE_FENCE_KEY && r.key !== RENAME_RECEIPT_KEY);
         const r = b.find((x) => x.key === RENAME_RECEIPT_KEY);
         receipt = r ? JSON.parse(r.value) : null;
         b = b.filter((x) => x.key !== RENAME_RECEIPT_KEY);
@@ -3505,7 +3505,8 @@ function renameCopy(oldPath, newPath, oldName, newName, operationId, retag = fal
   try {
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.prepare('DELETE FROM store_meta WHERE key = ?').run(STORE_FENCE_KEY);
+      // A chained rename copies the source's own receipt (and fence): drop both so the new receipt below is the only one.
+      db.prepare('DELETE FROM store_meta WHERE key IN (?, ?)').run(STORE_FENCE_KEY, RENAME_RECEIPT_KEY);
       foreign = foreignScopes(db, `domain:${oldName}`);
       if (foreign.length === 0) {
         const update = db.prepare('UPDATE records SET scope = ?, body = ? WHERE id = ?');

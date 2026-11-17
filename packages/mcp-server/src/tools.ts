@@ -2374,7 +2374,7 @@ export class SterlingTools {
     const tree = this.treeRootFor(record, workingTrees);
     if (tree.unresolved) return tree;
     const name = (record as { working_tree?: string }).working_tree;
-    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name))) return { root: this.repoRoot, unresolved: false };
+    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name, workingTrees))) return { root: this.repoRoot, unresolved: false };
     return tree;
   }
 
@@ -2396,7 +2396,7 @@ export class SterlingTools {
     if (!name) return { root: this.checkoutRoot, unresolved: false };
     const mapped = workingTrees?.[name];
     if (!mapped) {
-      if (!this.declaresForeignTree(name)) return { root: this.checkoutRoot, unresolved: false };
+      if (!this.declaresForeignTree(name, workingTrees)) return { root: this.checkoutRoot, unresolved: false };
       return { root: undefined, unresolved: true };
     }
     // HOST-INDEPENDENT classification (decision windows-linux-parity):
@@ -2419,9 +2419,18 @@ export class SterlingTools {
    * ruling 2026-09-28 "Code: self-root = own"). Mirrors H10's isUnowned, which
    * asks the same question through the same shared sameLocationAnyHost.
    */
-  private declaresForeignTree(workingTree: unknown): boolean {
+  private declaresForeignTree(workingTree: unknown, workingTrees: SterlingConfig['working_trees'] = this.config.working_trees): boolean {
     if (!workingTree) return false;
-    return !(this.repoRoot && sameLocationAnyHost(String(workingTree), this.repoRoot));
+    // Same ownership as the hooks' isForeignTree (scripts/hooks/lib/working-tree.mjs): a
+    // mapped name compares by its resolved path (relative joined onto the store root,
+    // repoRoot), an unmapped one by its own spelling, and the tree is the project's own
+    // when that location is the store root OR this session's checkout (a linked worktree).
+    const name = String(workingTree);
+    const raw = workingTrees && Object.hasOwn(workingTrees, name) ? workingTrees[name] : undefined;
+    const mapped = typeof raw === 'string' && raw ? raw : undefined;
+    const location = mapped === undefined ? name : isAbsolutePathAnyHost(mapped) ? mapped : this.repoRoot ? join(this.repoRoot, mapped) : undefined;
+    if (location === undefined) return true;
+    return !((this.repoRoot && sameLocationAnyHost(location, this.repoRoot)) || (this.checkoutRoot && sameLocationAnyHost(location, this.checkoutRoot)));
   }
 
   /**
@@ -6874,9 +6883,10 @@ export class SterlingTools {
    * project rather than imagined:
    *
    * (1) "matched_filter: 179" against rank_terms:["garage","loadout"] was read
-   *     as "179 garage decisions". It is not — rank_terms ORDER the set through
-   *     bm25, they never narrow it (store query(): ORDER BY bm25, not WHERE), so
-   *     the count belongs to types/stack_tags/file_keys alone. Saying only
+   *     as "179 garage decisions". It is not — the count is rank-BLIND and
+   *     belongs to types/stack_tags/file_keys alone, while rank_terms both ORDER
+   *     the result through bm25 and RESTRICT it to full-text matches (store
+   *     axis.ts adds records_fts MATCH to WHERE; GitHub #231). Saying only
    *     "records matching this filter" was technically true and still misread,
    *     which makes it a bad message: it let a reader believe a capped window
    *     was a relevance ranking over a relevant set.
@@ -6889,7 +6899,7 @@ export class SterlingTools {
     const parts = [`cap reached — showing ${returned} of ${matchedFilter} records matching the FILTER (types/stack_tags/file_keys)`];
     if (ranked) {
       parts.push(
-        `rank_terms ORDERED those ${matchedFilter} and did not narrow them, so this count is NOT a measure of how many are relevant — and a capped window can never establish absence`
+        `rank_terms ORDERED and RESTRICTED the result to full-text matches among those ${matchedFilter}, so this filter-only count is an upper bound, NOT a measure of how many are relevant — and a capped window can never establish absence`
       );
     }
     parts.push(
@@ -10739,7 +10749,13 @@ export class SterlingTools {
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
 
   configSet(args: { path: string; value: unknown; expected_digest?: string }): { path: string; previous_value: unknown; value: unknown; digest: string } {
-    return configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
+    const result = configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
+    // The cached copy feeds every live working-tree read (treeRootFor's default and the rest);
+    // without this a mapping saved here stayed unmapped until a reload (GitHub #222).
+    if (result.path === 'working_trees' || result.path.startsWith('working_trees.')) {
+      this.config = { ...this.config, working_trees: this.freshWorkingTrees() };
+    }
+    return result;
   }
 
   // enforcement_reconcile (the H17 (B) surface taint-latch front door) was
@@ -11821,7 +11837,10 @@ export class SterlingTools {
       );
     }
     if (Object.keys(patch).length === 0) {
-      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
+      // GitHub #282 (user-ruled 2026-11-17, "Fix the docs"): session alone is not an edit,
+      // so it renews nothing; say where renewal without an edit lives.
+      const renew = opts.session !== undefined ? ` (session alone renews nothing: to renew a claim without an edit, call board_reaffirm with the generation board_get shows in claim_state)` : '';
+      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}${renew}`);
     }
     if ('blocked_by' in patch) {
       if ((old as unknown as { source?: string }).source === 'system') throw SterlingTools.blockedBySystemRefusal('board_update');
@@ -11886,7 +11905,8 @@ export class SterlingTools {
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
     // 'standalone' clears the grouping to absent (decision foreign_a8d2ce6c) — the same
     // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
-    if (next.objective === 'standalone') delete next.objective;
+    // '' clears it too, as needs:'' and needs_reason:'' do (GitHub #272/#274, user-ruled 2026-11-17).
+    if (next.objective === 'standalone' || next.objective === '') delete next.objective;
     // An empty blocked_by clears the field to absent, like 'standalone' above.
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
     // needs:'' clears the field to absent, the same way.

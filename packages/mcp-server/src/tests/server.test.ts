@@ -1122,6 +1122,18 @@ test('knowledge_create serves capture_date and source_date inline as date string
   }
 });
 
+test('knowledge_query description says rank_terms restrict to FTS matches, never "never narrow" (GitHub #231)', async () => {
+  const { client, cleanup } = await harness();
+  try {
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_query');
+    assert.ok(tool, 'knowledge_query is served');
+    assert.match(tool!.description ?? '', /ORDER by bm25 AND restrict the result to records with a full-text match/);
+    assert.doesNotMatch(tool!.description ?? '', /never narrow/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe research_finding foreign_15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
   const { client, tools, cleanup } = await harness();
   try {

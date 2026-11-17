@@ -45,6 +45,8 @@ const WORKER_ALERTS = /last worker run FAILED at [\s\S]*? \(log: [^)]*\)|worker 
 // (deliver). Below the context handler's 4000 ms fence (server.mjs BUDGET_MS), so a call that
 // never settles cannot hold the session's delivery chain (serialized) past one hook.
 export const SYNTHETIC_TIMEOUT_MS = 3000;
+// The section timer fenced() hands its function; a fence without one (a test stub) times nothing.
+const NO_TIMING = { time: (_name, fn) => fn() };
 
 /**
  * `getSession()` returns the plugin context's session domain, as restore.mjs and sync.mjs take it; a session it cannot classify gets the loud not-staged line.
@@ -60,6 +62,8 @@ export const SYNTHETIC_TIMEOUT_MS = 3000;
  */
 export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale, swept = new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = new Map();
+  // Each mounted domain store's description read, by `${dbPath}\0${key}`, refreshed on the status line's TTL.
+  const domainMetaCache = new Map();
   // The undeclared-source scan, per project root: root sessions only, refreshed on UNDECLARED_TTL_MS.
   const undeclaredCache = new Map();
   // The system-queue summary, refreshed on the status line's TTL: it reads every system todo.
@@ -92,6 +96,41 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   function holdLine(key, line) {
     latestGeneration.set(key, (latestGeneration.get(key) ?? 0) + 1);
     heldLines.set(key, line);
+  }
+
+  /**
+   * The opener operatingStateLines hands mountedDomainLines. The domain lines read one meta value per
+   * mounted store (its description), and every other operating-state line is read live, so only that
+   * read is cached: per store path and key, for STATUS_TTL_MS, a failure included (a locked open blocks
+   * the event loop for the store's busy timeout, so retrying it on every prompt is the cost).
+   */
+  function clearDomainMeta() {
+    domainMetaCache.clear();
+  }
+
+  function domainOpener(dbPath) {
+    return {
+      getMeta(key) {
+        const id = `${dbPath}\0${key}`;
+        let hit = domainMetaCache.get(id);
+        if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
+          try {
+            const store = openStore(dbPath);
+            try {
+              hit = { at: Date.now(), value: store.getMeta(key) };
+            } finally {
+              store.close();
+            }
+          } catch (e) {
+            hit = { at: Date.now(), error: e };
+          }
+          domainMetaCache.set(id, hit);
+        }
+        if (hit.error) throw hit.error;
+        return hit.value;
+      },
+      close() {},
+    };
   }
 
   function statusLine(root) {
@@ -368,14 +407,14 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
    * `cleared` is said once when a delivered keyed block becomes empty, so a stale READY
    * list or plan lock is not left standing as current in the conversation.
    */
-  async function volatileBlocks(root, sessionID, kind) {
+  async function volatileBlocks(root, sessionID, kind, t = NO_TIMING) {
     // An unresolved root is reported by the layer in the system prompt; the lines read it as null.
     const { pluginRoot } = resolvePluginRoot();
-    const state = operatingStateLines(root, pluginRoot, { opener: openStore });
+    const state = t.time('operating-state', () => operatingStateLines(root, pluginRoot, { opener: domainOpener }));
     const out = [
-      { key: 'status', text: statusLine(root) },
+      { key: 'status', text: t.time('status', () => statusLine(root)) },
       { key: 'operating-state', text: state.lines.join('\n\n') },
-      { key: 'maintenance', ...maintenanceBlocks(root, state.config) },
+      { key: 'maintenance', ...t.time('maintenance', () => maintenanceBlocks(root, state.config)) },
     ];
     if (kind === 'root') {
       // H1's PLAN LOCK section (scripts/hooks/lib/plan-lock-section.mjs), each time it
@@ -387,7 +426,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       if (!inWorkerChild(env)) {
         let planLock;
         try {
-          planLock = planLockSection({ cwd: root, source: 'opencode' }).context.trim();
+          planLock = t.time('plan-lock', () => planLockSection({ cwd: root, source: 'opencode' })).context.trim();
         } catch (e) {
           logLine(root, `context: plan lock section failed: ${errText(e)}`);
           planLock = `PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`;
@@ -401,7 +440,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         swept.add(root);
         let line;
         try {
-          line = await sweepStale(root);
+          line = await t.time('sweep', () => sweepStale(root));
         } catch (e) {
           // A failed sweep costs its own line, not the rest of the context.
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; run \`opencode reload\` to retry the sweep.`;
@@ -417,7 +456,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
         registrySeen.set(root, sessionID);
         try {
-          const refreshed = refreshRegistryRow(storeRootFor(root), { config: state.config, at: now() });
+          const refreshed = t.time('registry', () => refreshRegistryRow(storeRootFor(root), { config: state.config, at: now() }));
           if (refreshed?.notice) {
             holdLine(`${root}\0registry-name`, refreshed.notice);
             logLine(root, `context: ${refreshed.notice}`);
@@ -427,22 +466,22 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
         }
       }
-      out.push({ key: 'undeclared', text: undeclaredBlock(root, state.config), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
+      out.push({ key: 'undeclared', text: t.time('undeclared', () => undeclaredBlock(root, state.config)), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
       // Root sessions only, and never inside the maintenance worker's own child
       // (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)): the worker is not the conductor filling lanes.
       if (!inWorkerChild(env)) {
-        out.push({ key: 'board', ...boardBlock(root, state.config, sessionID, state.configUnreadable), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
+        out.push({ key: 'board', ...t.time('board', () => boardBlock(root, state.config, sessionID, state.configUnreadable)), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
         // The live-lane count, a line of its own so it can change without re-sending the board.
-        out.push({ key: 'lanes', text: laneLine(root, state.config, sessionID) });
+        out.push({ key: 'lanes', text: t.time('lanes', () => laneLine(root, state.config, sessionID)) });
       }
     }
-    out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });
+    out.push({ key: 'restore', text: await t.time('restore', () => rotationRestore(root, sessionID)) });
     // Claims in this checkout held by another session, named with board_adopt; never adopted
     // by guess. After the restore, whose claim hand-over drops the board cache, so a claim it
     // just adopted is read as moved (the board block above may show it under the old holder
     // once; it is re-read and re-sent on the next prompt).
     if (kind === 'root' && !inWorkerChild(env)) {
-      out.push({ key: 'claim-orphans', text: orphanBlock(root, state.config, sessionID, state.configUnreadable), cleared: 'CLAIMS HELD BY AN EARLIER SESSION: none in this checkout now; the list shown earlier no longer applies.' });
+      out.push({ key: 'claim-orphans', text: t.time('claim-orphans', () => orphanBlock(root, state.config, sessionID, state.configUnreadable)), cleared: 'CLAIMS HELD BY AN EARLIER SESSION: none in this checkout now; the list shown earlier no longer applies.' });
     }
     // Held one-shot lines are claimed here, synchronously after the last await, so two
     // overlapping calls cannot both select one. dueText puts a claim back (`restore`)
@@ -470,10 +509,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
    * delivered to (a new or resumed session, any session after an OpenCode restart or a
    * compaction) gets the whole current set once.
    */
-  async function dueText(root, sessionID, where) {
+  async function dueText(root, sessionID, where, t = NO_TIMING) {
     const kind = await sessionKind(getSession?.(), sessionID, parents);
     if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its ${where} (${kind.why}); only the lines every session gets are delivered`);
-    const blocks = await volatileBlocks(root, sessionID, kind.why ? 'unknown' : kind.kind);
+    const blocks = await volatileBlocks(root, sessionID, kind.why ? 'unknown' : kind.kind, t);
     const seen = delivered.get(sessionID) ?? new Map();
     const marks = new Map();
     const due = [];
@@ -505,7 +544,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     if (!kind.why && kind.kind === 'root' && !inWorkerChild(env)) {
       let notices;
       try {
-        claimedNotices = claimNotices(root, now());
+        claimedNotices = t.time('notices', () => claimNotices(root, now()));
         notices = claimedNotices.notices;
       } catch (e) {
         // P5: said in-band and logged. The other lines are held back, unmarked, until it reads again.
@@ -660,10 +699,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
-    await fenced('context', root, async () => {
+    await fenced('context', root, async (t) => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       await serialized(input.sessionID, async () => {
-        const due = await dueText(root, input.sessionID, 'prompt');
+        const due = await dueText(root, input.sessionID, 'prompt', t);
         await deliver(input.sessionID, due, { append: (text) => { input.prompt.text = `${input.prompt.text}\n\n${text}`; } });
       });
     });
@@ -681,12 +720,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     if (!isDeliveryTool(input?.tool) || input.status !== 'completed') return;
     const root = rootOf();
     if (!root) return;
-    await fenced('context', root, async () => {
+    await fenced('context', root, async (t) => {
       // Checked before anything is marked delivered or a notice taken, so an unknown shape loses nothing.
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
       await serialized(input.sessionID, async () => {
-        const due = await dueText(root, input.sessionID, 'tool call');
+        const due = await dueText(root, input.sessionID, 'tool call', t);
         // 'steer' lands in the model's current turn; 'queue' would add a model turn of its own.
         await deliver(input.sessionID, due, { delivery: 'steer', append: (text) => appendToResult(input.result, text) });
       });
@@ -697,7 +736,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     onContext,
     onPrompt,
     onToolResult,
-    resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
+    resetStatus: (root) => (statusCache.delete(root), clearDomainMeta(), maintenanceCache.delete(root), boardCache.delete(root)),
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.

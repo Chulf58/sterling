@@ -15,11 +15,12 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-10-12T12:00:00.000Z';
 
 let SterlingStore;
+let createDomain;
 let contextMod;
 let notices;
 let staging;
 before(async () => {
-  ({ SterlingStore } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ SterlingStore, createDomain } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href));
   contextMod = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'context.mjs')).href);
   notices = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'notices.mjs')).href);
   staging = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'staging.mjs')).href);
@@ -1023,6 +1024,30 @@ test('a failed older delivery does not restore a registry failure line after a n
   } finally {
     if (prior === undefined) delete process.env.STERLING_REGISTRY_DB;
     else process.env.STERLING_REGISTRY_DB = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// GitHub #221: operatingStateLines opens one store per mounted domain, and ran on every prompt and every tool result.
+test('a second delivery inside the status TTL does not reopen the mounted domain stores', async () => {
+  const dir = makeProject();
+  const domainDb = join(dir, 'd', 'alpha', 'sterling.db');
+  try {
+    mkdirSync(dirname(domainDb), { recursive: true });
+    createDomain('alpha', 'Alpha engine facts that hold in any project using it', domainDb);
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture-proj', stack_tags: ['alpha'], domain_paths: { alpha: domainDb } }));
+    const opened = [];
+    const h = handler(dir, { openStore: (p) => (opened.push(p), new SterlingStore(p)) });
+    assert.match(await appended(h, 'ses_root'), /Mounted domain 'alpha': Alpha engine facts/);
+    const first = opened.filter((p) => p === domainDb).length;
+    assert.ok(first >= 1, 'the first delivery opened the domain store');
+    // Another session, so the second delivery computes its lines in full.
+    assert.match(await appended(h, 'ses_other'), /Mounted domain 'alpha': Alpha engine facts/);
+    assert.equal(opened.filter((p) => p === domainDb).length, first, 'the second delivery reused the cached operating-state lines');
+    h.resetStatus(dir);
+    await appended(h, 'ses_root');
+    assert.ok(opened.filter((p) => p === domainDb).length > first, 'resetStatus drops the cache');
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
