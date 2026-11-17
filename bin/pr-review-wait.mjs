@@ -56,6 +56,26 @@ function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target
   return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
 }
 
+// scripts/lib/gh-rate-limit.mjs
+function isRateLimitText(text) {
+  return /rate limit/i.test(String(text ?? ""));
+}
+function readCoreRateLimit(runGh, host) {
+  const r = runGh(["api", "--hostname", host, "rate_limit"]);
+  if (r.error || r.status !== 0) return null;
+  try {
+    const core = JSON.parse(r.stdout)?.resources?.core;
+    if (typeof core?.remaining !== "number") return null;
+    return { exhausted: core.remaining <= 0, resetMs: typeof core.reset === "number" ? core.reset * 1e3 : null };
+  } catch {
+    return null;
+  }
+}
+function describeReset(resetMs, now = Date.now()) {
+  const mins = Math.max(0, Math.ceil((resetMs - now) / 6e4));
+  return `at ${new Date(resetMs).toISOString()} (in ${mins} min)`;
+}
+
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync2, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -375,7 +395,7 @@ var result = { status: "error", head_sha: null, review: null, comments: [], obse
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + "\n");
-  process.exit(status === "review" ? 0 : status === "timeout" ? 2 : status === "no_review_requested" ? 3 : 1);
+  process.exit(status === "review" ? 0 : status === "timeout" ? 2 : status === "no_review_requested" ? 3 : status === "rate_limited" ? 4 : 1);
 }
 var error = (message) => finish("error", { review: null, comments: [], error: message });
 function readPinnedLogins() {
@@ -633,12 +653,27 @@ var [, owner, name] = origin.repo.split("/");
 var base = `repos/${owner}/${name}/pulls/${prNumber}`;
 var DeadlineReached = class extends Error {
 };
+var RateLimited = class extends Error {
+  constructor(message, resetMs) {
+    super(message);
+    this.resetMs = resetMs;
+  }
+};
+var SECONDARY_BACKOFF_MS = 6e4;
+function rateLimitReset() {
+  const limit = readCoreRateLimit((args) => spawnSync3("gh", args, { cwd: target, encoding: "utf8", timeout: 3e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } }), origin.host);
+  return limit?.exhausted && limit.resetMs ? limit.resetMs : Date.now() + SECONDARY_BACKOFF_MS;
+}
 function ghApi(path, { paginate = false, extra = [] } = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new DeadlineReached();
   const args = ["api", "--hostname", origin.host, ...paginate ? ["--paginate"] : [], ...extra, path];
   const r = spawnSync3("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
   if (r.error?.code === "ETIMEDOUT" && Date.now() >= deadline) throw new DeadlineReached();
+  if (!r.error && r.status !== 0 && isRateLimitText(`${r.stderr}
+${r.stdout}`)) {
+    throw new RateLimited(`gh ${args.join(" ")} hit the GitHub rate limit: ${(r.stderr || r.stdout || "").trim()}`, rateLimitReset());
+  }
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(" ")} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || "").trim()}`);
   }
@@ -824,6 +859,17 @@ for (; ; ) {
       process.stderr.write(`pr-review-wait: ${message}
 `);
       finish("no_review_requested", { review: null, comments: [], error: message });
+    }
+    if (e instanceof RateLimited) {
+      const resumeAt = e.resetMs + 1e3;
+      if (resumeAt >= deadline) {
+        const message = `GitHub's REST rate limit is exhausted and resets ${describeReset(e.resetMs)}, after this wait's --timeout; run the wait again after the reset`;
+        process.stderr.write(`pr-review-wait: ${message}
+`);
+        finish("rate_limited", { review: null, comments: [], error: message, rate_limit_reset: new Date(e.resetMs).toISOString() });
+      }
+      sleep(Math.max(0, resumeAt - Date.now()));
+      continue;
     }
     error(e.message);
   }

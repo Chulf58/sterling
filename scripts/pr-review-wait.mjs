@@ -87,8 +87,15 @@
 // awaiting_head_review is true when the returned review is stale AND a Copilot
 // request is still pending: a review of the current head is still on its way
 // (a hint only; GitHub issue #162, behaviour unchanged).
-// Exit 0 = review, 2 = timeout, 3 = no_review_requested, 1 = error. None but
-// a review of the current head (stale_review false) is ever clean.
+// Exit 0 = review, 2 = timeout, 3 = no_review_requested, 4 = rate_limited,
+// 1 = error. None but a review of the current head (stale_review false) is
+// ever clean.
+// RATE LIMIT (GitHub issue #294): when a poll's gh call fails with GitHub's
+// rate-limit message, the helper reads `gh api rate_limit` once (only after
+// such a failure, never per poll), sleeps until the core budget resets and
+// polls again. If the reset falls after the --timeout deadline it ends at once
+// with status rate_limited (exit 4), rate_limit_reset (ISO time) and error
+// naming the reset; it never claims a review, and it is not a timeout.
 //
 // RESOLVE-THREADS: replying to a finding never resolves its review thread, and
 // an org ruleset (required_review_thread_resolution) blocks the merge until it
@@ -151,6 +158,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
+import { describeReset, isRateLimitText, readCoreRateLimit } from './lib/gh-rate-limit.mjs';
 import { autoMergeOnCleanOf, DeadlineReachedError, fetchPrMergeState, fetchReviewBody, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
@@ -182,7 +190,7 @@ const result = { status: 'error', head_sha: null, review: null, comments: [], ob
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
-  process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : status === 'no_review_requested' ? 3 : 1);
+  process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : status === 'no_review_requested' ? 3 : status === 'rate_limited' ? 4 : 1);
 }
 const error = (message) => finish('error', { review: null, comments: [], error: message });
 
@@ -500,12 +508,28 @@ const base = `repos/${owner}/${name}/pulls/${prNumber}`;
 // gh call, and each call's own timeout is capped to the budget left, so a
 // hanging gh ends the call at --timeout instead of after another full poll.
 class DeadlineReached extends Error {}
+/** A gh call failed on GitHub's rate limit; resetMs is the epoch ms the budget
+ * resets (null when it could not be read). */
+class RateLimited extends Error {
+  constructor(message, resetMs) {
+    super(message);
+    this.resetMs = resetMs;
+  }
+}
+const SECONDARY_BACKOFF_MS = 60_000; // a secondary limit or unreadable reset: no reset time to wait for
+function rateLimitReset() {
+  const limit = readCoreRateLimit((args) => spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), origin.host);
+  return limit?.exhausted && limit.resetMs ? limit.resetMs : Date.now() + SECONDARY_BACKOFF_MS;
+}
 function ghApi(path, { paginate = false, extra = [] } = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new DeadlineReached();
   const args = ['api', '--hostname', origin.host, ...(paginate ? ['--paginate'] : []), ...extra, path];
   const r = spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   if (r.error?.code === 'ETIMEDOUT' && Date.now() >= deadline) throw new DeadlineReached();
+  if (!r.error && r.status !== 0 && isRateLimitText(`${r.stderr}\n${r.stdout}`)) {
+    throw new RateLimited(`gh ${args.join(' ')} hit the GitHub rate limit: ${(r.stderr || r.stdout || '').trim()}`, rateLimitReset());
+  }
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(' ')} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || '').trim()}`);
   }
@@ -736,6 +760,17 @@ for (;;) {
       const message = `no Copilot review is requested on PR #${prNumber} and no unconsumed Copilot review exists${sinceReview === null ? '' : ` after --since-review ${sinceReview}`}, so nothing will arrive: run the wait again with --request-copilot (always after a push)`;
       process.stderr.write(`pr-review-wait: ${message}\n`);
       finish('no_review_requested', { review: null, comments: [], error: message });
+    }
+    if (e instanceof RateLimited) {
+      // Wait out the reset (plus a second) and poll again, unless it lands after the deadline.
+      const resumeAt = e.resetMs + 1000;
+      if (resumeAt >= deadline) {
+        const message = `GitHub's REST rate limit is exhausted and resets ${describeReset(e.resetMs)}, after this wait's --timeout; run the wait again after the reset`;
+        process.stderr.write(`pr-review-wait: ${message}\n`);
+        finish('rate_limited', { review: null, comments: [], error: message, rate_limit_reset: new Date(e.resetMs).toISOString() });
+      }
+      sleep(Math.max(0, resumeAt - Date.now()));
+      continue;
     }
     error(e.message);
   }

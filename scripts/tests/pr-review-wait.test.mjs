@@ -66,6 +66,12 @@ appendFileSync(join(state, 'log.jsonl'), JSON.stringify(argv) + '\\n');
 if (argv[0] !== 'api') { console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3); }
 const VALUED = new Set(['--hostname', '--jq', '-f', '-F']);
 const path = argv.filter((a, i) => i > 0 && !a.startsWith('-') && !VALUED.has(argv[i - 1])).pop();
+if (path === 'rate_limit') {
+  const inFile = join(state, 'rate_limit_reset_in');
+  const reset = Math.ceil(Date.now() / 1000) + (existsSync(inFile) ? Number(readFileSync(inFile, 'utf8')) : 0);
+  process.stdout.write(JSON.stringify({ resources: { core: { limit: 5000, remaining: existsSync(inFile) ? 0 : 5000, reset } } }));
+  process.exit(0);
+}
 if (path === 'graphql') {
   const q = (argv.find((a) => a.startsWith('query=')) ?? '');
   if (q.includes('resolveReviewThread')) {
@@ -119,6 +125,16 @@ const m = path.match(/^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)(?:\\/(reviews|
 if (!m) { console.error('fake gh: unexpected path ' + path); process.exit(3); }
 if (m[1] + '/' + m[2] !== 'acme/widget') { console.error('gh: Not Found (HTTP 404)'); process.exit(1); }
 const endpoint = m[4] ?? 'pull';
+// rate_limited_first holds N: the first N calls to the pull endpoint fail with GitHub's rate-limit message.
+const rlFile = join(state, 'rate_limited_first');
+if (endpoint === 'pull' && existsSync(rlFile)) {
+  const rlCount = join(state, 'count_rate_limited');
+  const seen = existsSync(rlCount) ? Number(readFileSync(rlCount, 'utf8')) : 0;
+  if (seen < Number(readFileSync(rlFile, 'utf8'))) {
+    writeFileSync(rlCount, String(seen + 1));
+    console.error('gh: API rate limit exceeded for user ID 1. (HTTP 403)'); process.exit(1);
+  }
+}
 if (existsSync(join(state, 'delay_ms'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(readFileSync(join(state, 'delay_ms'), 'utf8')));
 if (existsSync(join(state, 'fail_' + endpoint))) { console.error('gh: Server Error (HTTP 502)'); process.exit(1); }
 const countFile = join(state, 'count_' + endpoint);
@@ -2305,6 +2321,41 @@ test('a worktree that carries its own config while the main checkout has none ke
     const r = run(fromWorktree, ['7', ...FAST]);
     assert.equal(r.out.review.id, 901, oneLine(r.stdout));
     assert.equal(r.out.identity_confirmed, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('rate limit (GitHub issue #294): a rate-limited poll waits for the reset and then continues to the review', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'rate_limited_first'), '1');
+    writeFileSync(join(f.state, 'rate_limit_reset_in'), '1');
+    f.put('reviews', 0, [[{ id: 100, user: { login: COPILOT, type: 'Bot' }, state: 'COMMENTED', commit_id: HEAD, body: '' }]]);
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '60']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'review');
+    assert.ok(r.ms >= 1500, `waited for the reset (about 2s), took ${r.ms}ms`);
+    assert.ok(r.ms < 15_000, `did not wait for the 60s timeout, took ${r.ms}ms`);
+    const calls = readFileSync(join(f.state, 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(calls.filter((c) => c.includes('rate_limit')).length, 1, 'rate_limit is read once, after the failure only');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('rate limit (GitHub issue #294): a reset beyond --timeout exits rate_limited (exit 4) with the reset time, not error or timeout', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'rate_limited_first'), '99');
+    writeFileSync(join(f.state, 'rate_limit_reset_in'), '3600');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '5']);
+    assert.equal(r.code, 4, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'rate_limited');
+    assert.equal(r.out.review, null);
+    assert.ok(Math.abs(Date.parse(r.out.rate_limit_reset) - (Date.now() + 3_600_000)) < 60_000, `reset time carried: ${r.out.rate_limit_reset}`);
+    assert.match(r.out.error, /rate limit is exhausted and resets at /);
+    assert.ok(r.ms < 4000, `ends at once, took ${r.ms}ms`);
   } finally {
     f.cleanup();
   }
