@@ -106,3 +106,28 @@ test('codex-reply is never given a config', () => {
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('headers inside multiline strings and comments are not servers', () => {
+  const dir = project();
+  const toml = [
+    'developer_instructions = """',
+    '[mcp_servers.inbasic]',
+    '"""',
+    "other = '''",
+    '[mcp_servers.inliteral]',
+    "'''",
+    'one = """one-line""" # [mcp_servers.x]',
+    '# [mcp_servers.commented]',
+    '  # [mcp_servers.commented2]',
+    '[mcp_servers.real]',
+    'command = "node"',
+  ].join('\n');
+  const home = codexHome(toml);
+  try {
+    const { ui } = run(dir, home, { prompt: 'p' });
+    assert.deepEqual(ui.config.mcp_servers, { real: { enabled: false } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
