@@ -1128,7 +1128,11 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   const rel = PROJECT_CONFIG_REL;
   const path = join(projectDir, rel);
   if (tracked.includes(rel)) {
-    return [refusal(rel, `${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config)`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`)];
+    // Skipped, not refused: the untracked Sterling agent files are still written and the
+    // sync exits clean, so the post-update marker is written and the notice stops repeating
+    // (GitHub #288). Only this config write is withheld; the store guard and default_agent
+    // it would carry stay unset until the file is untracked.
+    return [{ item: rel, status: 'skipped', detail: `NOT written: ${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config); the Sterling agent files were still refreshed; to get the store guard and default_agent, untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update` }];
   }
   let config = {};
   let before = null;
