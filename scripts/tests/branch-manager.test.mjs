@@ -38,7 +38,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from '../lib/branch-manager.mjs';
+import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches, sweepMergedWorktrees } from '../lib/branch-manager.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -294,6 +294,8 @@ test('direct-merge.mjs: pushes the base to origin after the merge (--no-push opt
     // sweep failed the whole gate over that housekeeping
     git(dir, ['branch', 'pinned/merged']);
     git(dir, ['worktree', 'add', join(outside, 'wt'), 'pinned/merged']);
+    // dirty, so the worktree sweep (#223) keeps it: a clean merged worktree is removed now
+    writeFileSync(join(outside, 'wt', 'scratch.txt'), 'x');
 
     git(dir, ['checkout', '-b', 'feat/push']);
     writeFileSync(join(dir, 'src', 'p.mjs'), 'export const p = 1;\n');
@@ -367,6 +369,87 @@ test('direct-merge.mjs: an unbumped version refuses when the diff goes beyond ge
     const waived = runDirectMerge(dir, ['--allow-same-version']);
     assert.equal(waived.status, 0, waived.stderr);
   } finally {
+    cleanup();
+  }
+});
+
+test('sweepMergedWorktrees (#223): removes clean merged worktrees; keeps dirty, untracked, unmerged, locked and current ones with a reason', async () => {
+  const { dir, cleanup } = await makeGitProject();
+  const wtRoot = mkdtempSync(join(tmpdir(), 'sterling-wt-'));
+  try {
+    const add = (name, commit = false) => {
+      const p = join(wtRoot, name);
+      git(dir, ['worktree', 'add', '-b', name, p, 'main']);
+      if (commit) {
+        git(p, ['config', 'user.email', 'test@sterling.local']);
+        git(p, ['config', 'user.name', 'Sterling Test']);
+        writeFileSync(join(p, `${name}.txt`), 'x\n');
+        git(p, ['add', '-A']);
+        git(p, ['commit', '-m', name]);
+      }
+      return p;
+    };
+    const clean = add('clean');
+    const ignored = add('ignored');
+    mkdirSync(join(ignored, '.sterling'), { recursive: true }); // ignored by .gitignore
+    writeFileSync(join(ignored, '.sterling', 'junk'), 'x');
+    const modified = add('modified');
+    writeFileSync(join(modified, 'src', 'base.mjs'), 'changed\n');
+    const untracked = add('untracked');
+    writeFileSync(join(untracked, 'new.txt'), 'x');
+    const unmerged = add('unmerged', true);
+    const locked = add('locked');
+    git(dir, ['worktree', 'lock', locked]);
+    const detached = join(wtRoot, 'detached');
+    git(dir, ['worktree', 'add', '--detach', detached, 'main']);
+    // current worktree: a merged clean one that the command runs from
+    const current = add('current');
+
+    const r = sweepMergedWorktrees({ cwd: current, into: 'main' });
+    const removedBranches = r.removed.map((w) => w.branch).sort();
+    assert.deepEqual(removedBranches, ['clean', 'ignored']);
+    for (const b of ['clean', 'ignored']) {
+      assert.equal(git(dir, ['branch', '--list', b]), '', `${b} branch deleted`);
+      assert.equal(existsSync(join(wtRoot, b)), false, `${b} worktree removed`);
+    }
+    const reason = (b) => r.kept.find((k) => k.branch === b)?.reason ?? '';
+    assert.match(reason('modified'), /modified or untracked/);
+    assert.match(reason('untracked'), /modified or untracked/);
+    assert.match(reason('unmerged'), /not fully merged/);
+    assert.match(reason('locked'), /locked/);
+    assert.match(reason('current'), /runs in/);
+    assert.match(r.kept.find((k) => k.path === detached)?.reason ?? '', /detached/);
+    for (const p of [modified, untracked, unmerged, locked, current, detached]) assert.ok(existsSync(p), `${p} kept`);
+    assert.ok(git(dir, ['branch', '--list', 'modified']).includes('modified'), 'kept worktree keeps its branch');
+  } finally {
+    spawnSync('git', ['worktree', 'unlock', join(wtRoot, 'locked')], { cwd: dir });
+    rmSync(wtRoot, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('direct-merge.mjs (#223): reports removed and kept worktrees after the merge', async () => {
+  const { dir, cleanup } = await makeGitProject();
+  const wtRoot = mkdtempSync(join(tmpdir(), 'sterling-wt-'));
+  try {
+    git(dir, ['checkout', '-b', 'feat/y']);
+    writeFileSync(join(dir, 'src', 'y.mjs'), 'export const y = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'y']);
+    git(dir, ['worktree', 'add', '-b', 'done/clean', join(wtRoot, 'done'), 'feat/y']);
+    git(dir, ['worktree', 'add', '-b', 'wip/open', join(wtRoot, 'wip'), 'feat/y']);
+    writeFileSync(join(wtRoot, 'wip', 'scratch.txt'), 'x');
+
+    const r = runDirectMerge(dir);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.deepEqual(out.worktrees_removed.map((w) => w.branch), ['done/clean']);
+    assert.equal(out.worktrees_kept.length, 1);
+    assert.match(out.worktrees_kept[0].reason, /modified or untracked/);
+    assert.equal(existsSync(join(wtRoot, 'done')), false);
+    assert.equal(git(dir, ['branch', '--list', 'done/clean']), '');
+  } finally {
+    rmSync(wtRoot, { recursive: true, force: true });
     cleanup();
   }
 });

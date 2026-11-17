@@ -12487,7 +12487,7 @@ var init_dist2 = __esm({
 
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync7 } from "node:fs";
 import { join as join21, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13145,6 +13145,7 @@ function openProject(cwd = process.cwd()) {
 
 // scripts/lib/branch-manager.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
+import { realpathSync as realpathSync4 } from "node:fs";
 function git(cwd, args, { allowFail = false, treeWrite = false } = {}) {
   if (treeWrite) {
     console.error(`branch-manager: running \`git ${args[0]}\` with no time limit; this can take minutes on a slow drive; do not interrupt it.`);
@@ -13269,13 +13270,58 @@ function sweepMergedBranches({ cwd, into: into2 }) {
   }
   return deleted;
 }
+function sweepMergedWorktrees({ cwd, into: into2 }) {
+  const here = realpathSync4(git(cwd, ["rev-parse", "--show-toplevel"]));
+  const blocks = git(cwd, ["worktree", "list", "--porcelain"]).split(/\n\s*\n/).map((b) => b.split("\n").filter(Boolean)).filter((b) => b.length > 0);
+  const removed = [];
+  const kept = [];
+  blocks.forEach((lines, i) => {
+    if (i === 0) return;
+    const path = lines.find((l) => l.startsWith("worktree "))?.slice("worktree ".length);
+    const ref = lines.find((l) => l.startsWith("branch "))?.slice("branch ".length);
+    const branch2 = ref?.replace(/^refs\/heads\//, "");
+    const keep = (reason) => kept.push({ path, branch: branch2 ?? null, reason });
+    if (!path) return;
+    if (lines.some((l) => l === "locked" || l.startsWith("locked "))) return keep("locked");
+    if (lines.includes("bare")) return keep("bare");
+    if (!branch2) return keep("detached HEAD");
+    if (branch2 === into2) return keep(`checks out the base branch ${into2}`);
+    let real = path;
+    try {
+      real = realpathSync4(path);
+    } catch {
+    }
+    if (real === here) return keep("the worktree this command runs in");
+    const isAncestor2 = spawnSync2("git", ["merge-base", "--is-ancestor", branch2, into2], { cwd }).status === 0;
+    if (!isAncestor2) return keep(`${branch2} is not fully merged into ${into2}`);
+    let dirty;
+    try {
+      dirty = git(path, ["--no-optional-locks", "status", "--porcelain"]);
+    } catch (e) {
+      return keep(`could not read its status: ${e.message.split("\n")[0]}`);
+    }
+    if (dirty) return keep("has modified or untracked files");
+    try {
+      git(cwd, ["worktree", "remove", path]);
+    } catch (e) {
+      return keep(`removal failed: ${e.message.split("\n")[0]}`);
+    }
+    try {
+      git(cwd, ["branch", "-d", branch2]);
+    } catch (e) {
+      return keep(`worktree removed but branch delete failed: ${e.message.split("\n")[0]}`);
+    }
+    removed.push({ path, branch: branch2 });
+  });
+  return { removed, kept };
+}
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { dirname as dirname6, join as join11 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync7, readdirSync, realpathSync as realpathSync4 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync7, readdirSync, realpathSync as realpathSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join10, resolve as resolve5, sep as sep2 } from "node:path";
 import { createHash as createHash2 } from "node:crypto";
@@ -13792,7 +13838,7 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
 
 // scripts/hooks/lib/reconcile-origins.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { lstatSync as lstatSync5, readFileSync as readFileSync10, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
+import { lstatSync as lstatSync5, readFileSync as readFileSync10, readlinkSync, realpathSync as realpathSync6 } from "node:fs";
 import { basename as basename3, join as join14, resolve as resolve6 } from "node:path";
 var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 function git2(root, args, input) {
@@ -13801,7 +13847,7 @@ function git2(root, args, input) {
 }
 var realOr = (p) => {
   try {
-    return realpathSync5(p);
+    return realpathSync6(p);
   } catch {
     return p;
   }
@@ -14920,9 +14966,9 @@ Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
 if (!linkedWorktree && !existsSync11(join21(target, CONFIG_REL4))) {
   const dirs = spawnSync9("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
-  if (gitDir && commonDir && realpathSync6(resolve8(target, gitDir)) !== realpathSync6(resolve8(target, commonDir))) {
+  if (gitDir && commonDir && realpathSync7(resolve8(target, gitDir)) !== realpathSync7(resolve8(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync6(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync7(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
@@ -15347,6 +15393,7 @@ if (shipsPr) {
 }
 var merged;
 var swept;
+var worktreeSweep = { removed: [], kept: [] };
 try {
   merged = mergeBranchInto({ cwd: target, branch, into });
 } catch (e) {
@@ -15383,7 +15430,10 @@ try {
   console.error(`direct-merge: board-payment nudge did not run (${e?.message ?? e}) \u2014 advisory only, the merge stands.`);
 }
 try {
+  worktreeSweep = sweepMergedWorktrees({ cwd: target, into });
   swept = sweepMergedBranches({ cwd: target, into });
+  for (const w of worktreeSweep.removed) console.error(`direct-merge: removed merged clean worktree ${w.path} (${w.branch}).`);
+  for (const w of worktreeSweep.kept) console.error(`direct-merge: kept worktree ${w.path}${w.branch ? ` (${w.branch})` : ""}: ${w.reason}.`);
 } catch (e) {
   console.error(
     [
@@ -15410,7 +15460,7 @@ if (existsSync11(bundleChecker)) {
         (rebuilt.stdout + rebuilt.stderr).trim()
       ].join("\n")
     );
-    emit({ ...merged, branches_swept: swept, bundles_unverified: true }, 1);
+    emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, bundles_unverified: true }, 1);
   }
   const bundles = spawnSync9(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
   if (bundles.status !== 0) {
@@ -15426,7 +15476,7 @@ if (existsSync11(bundleChecker)) {
         (bundles.stdout + bundles.stderr).trim()
       ].join("\n")
     );
-    emit({ ...merged, branches_swept: swept, bundles_stale: true }, 1);
+    emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, bundles_stale: true }, 1);
   }
 }
 var parkedClosed = 0;
@@ -15475,7 +15525,7 @@ if (noOriginFallback) {
           (push.stderr || push.stdout || String(push.error?.message ?? "")).trim()
         ].join("\n")
       );
-      emit({ ...merged, branches_swept: swept, pushed: false, opencode_release: "skipped" }, 1);
+      emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, pushed: false, opencode_release: "skipped" }, 1);
     }
   }
 }
@@ -15488,4 +15538,4 @@ if (mergedHead.status === 0) {
   opencodeRelease = { status: "skipped" };
 }
 if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
-emit({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, opencodeRelease.status === "failed" ? 1 : 0);
+emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, pushed, opencode_release: opencodeRelease.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, opencodeRelease.status === "failed" ? 1 : 0);
