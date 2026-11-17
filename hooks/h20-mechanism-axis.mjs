@@ -15542,8 +15542,31 @@ function codexUserMcpServers(env = process.env) {
     return e && e.code === "ENOENT" ? { names: [] } : { names: [], error: `${file}: ${e && e.message || e}` };
   }
   const names = /* @__PURE__ */ new Set();
-  for (const m of text.matchAll(/^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/gm)) {
-    names.add(m[1] !== void 0 ? m[1].replace(/\\(["\\])/g, "$1") : m[2] ?? m[3]);
+  const header = /^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/;
+  const DQ = '"'.repeat(3);
+  const SQ = "'".repeat(3);
+  let open2 = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (open2 === null) {
+      const m = header.exec(line);
+      if (m) names.add(m[1] !== void 0 ? m[1].replace(/\\(["\\])/g, "$1") : m[2] ?? m[3]);
+    }
+    let rest = line;
+    for (; ; ) {
+      if (open2 === null) {
+        const dq = rest.indexOf(DQ);
+        const sq = rest.indexOf(SQ);
+        const at = dq === -1 ? sq : sq === -1 ? dq : Math.min(dq, sq);
+        if (at === -1) break;
+        open2 = at === dq ? DQ : SQ;
+        rest = rest.slice(at + 3);
+      } else {
+        const at = rest.indexOf(open2);
+        if (at === -1) break;
+        open2 = null;
+        rest = rest.slice(at + 3);
+      }
+    }
   }
   return { names: [...names] };
 }

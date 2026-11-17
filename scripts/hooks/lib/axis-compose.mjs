@@ -239,8 +239,34 @@ export function codexUserMcpServers(env = process.env) {
     return e && e.code === 'ENOENT' ? { names: [] } : { names: [], error: `${file}: ${(e && e.message) || e}` };
   }
   const names = new Set();
-  for (const m of text.matchAll(/^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/gm)) {
-    names.add(m[1] !== undefined ? m[1].replace(/\\(["\\])/g, '$1') : (m[2] ?? m[3]));
+  const header = /^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/;
+  // Line-wise scan: a header counts only outside TOML multiline strings (triple double
+  // or triple single quotes). A commented line never matches: the header must be the
+  // line's first token.
+  const DQ = '"'.repeat(3);
+  const SQ = "'".repeat(3);
+  let open = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (open === null) {
+      const m = header.exec(line);
+      if (m) names.add(m[1] !== undefined ? m[1].replace(/\\(["\\])/g, '$1') : (m[2] ?? m[3]));
+    }
+    let rest = line;
+    for (;;) {
+      if (open === null) {
+        const dq = rest.indexOf(DQ);
+        const sq = rest.indexOf(SQ);
+        const at = dq === -1 ? sq : sq === -1 ? dq : Math.min(dq, sq);
+        if (at === -1) break;
+        open = at === dq ? DQ : SQ;
+        rest = rest.slice(at + 3);
+      } else {
+        const at = rest.indexOf(open);
+        if (at === -1) break;
+        open = null;
+        rest = rest.slice(at + 3);
+      }
+    }
   }
   return { names: [...names] };
 }
