@@ -2981,7 +2981,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve10.call(this, root, ref);
+      let _sch = resolve11.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3008,7 +3008,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve10(root, ref) {
+    function resolve11(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3639,55 +3639,55 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve10(baseURI, relativeURI, options) {
+    function resolve11(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base2, relative3, options, skipNormalization) {
+    function resolveComponent(base2, relative4, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base2 = parse3(serialize(base2, options), options);
-        relative3 = parse3(serialize(relative3, options), options);
+        relative4 = parse3(serialize(relative4, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative3.scheme) {
-        target.scheme = relative3.scheme;
-        target.userinfo = relative3.userinfo;
-        target.host = relative3.host;
-        target.port = relative3.port;
-        target.path = removeDotSegments(relative3.path || "");
-        target.query = relative3.query;
+      if (!options.tolerant && relative4.scheme) {
+        target.scheme = relative4.scheme;
+        target.userinfo = relative4.userinfo;
+        target.host = relative4.host;
+        target.port = relative4.port;
+        target.path = removeDotSegments(relative4.path || "");
+        target.query = relative4.query;
       } else {
-        if (relative3.userinfo !== void 0 || relative3.host !== void 0 || relative3.port !== void 0) {
-          target.userinfo = relative3.userinfo;
-          target.host = relative3.host;
-          target.port = relative3.port;
-          target.path = removeDotSegments(relative3.path || "");
-          target.query = relative3.query;
+        if (relative4.userinfo !== void 0 || relative4.host !== void 0 || relative4.port !== void 0) {
+          target.userinfo = relative4.userinfo;
+          target.host = relative4.host;
+          target.port = relative4.port;
+          target.path = removeDotSegments(relative4.path || "");
+          target.query = relative4.query;
         } else {
-          if (!relative3.path) {
+          if (!relative4.path) {
             target.path = base2.path;
-            if (relative3.query !== void 0) {
-              target.query = relative3.query;
+            if (relative4.query !== void 0) {
+              target.query = relative4.query;
             } else {
               target.query = base2.query;
             }
           } else {
-            if (relative3.path[0] === "/") {
-              target.path = removeDotSegments(relative3.path);
+            if (relative4.path[0] === "/") {
+              target.path = removeDotSegments(relative4.path);
             } else {
               if ((base2.userinfo !== void 0 || base2.host !== void 0 || base2.port !== void 0) && !base2.path) {
-                target.path = "/" + relative3.path;
+                target.path = "/" + relative4.path;
               } else if (!base2.path) {
-                target.path = relative3.path;
+                target.path = relative4.path;
               } else {
-                target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative3.path;
+                target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative4.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative3.query;
+            target.query = relative4.query;
           }
           target.userinfo = base2.userinfo;
           target.host = base2.host;
@@ -3695,7 +3695,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base2.scheme;
       }
-      target.fragment = relative3.fragment;
+      target.fragment = relative4.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -3897,7 +3897,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve10,
+      resolve: resolve11,
       resolveComponent,
       equal,
       serialize,
@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname13, isAbsolute as isAbsolute3, join as join19, resolve as resolve9 } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute4, join as join19, resolve as resolve10 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13000,12 +13000,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve10) => {
+    return new Promise((resolve11) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve10();
+        resolve11();
       } else {
-        this._stdout.once("drain", resolve10);
+        this._stdout.once("drain", resolve11);
       }
     });
   }
@@ -17161,9 +17161,9 @@ function retiredTermRegex(term) {
 function protectedSpans(text) {
   const spans = [];
   const paragraphEnd = (at) => {
-    const sep2 = /\n[ \t]*\n/g;
-    sep2.lastIndex = at;
-    const m = sep2.exec(text);
+    const sep3 = /\n[ \t]*\n/g;
+    sep3.lastIndex = at;
+    const m = sep3.exec(text);
     return m ? m.index : text.length;
   };
   const straight = [...text.matchAll(/"/g)].map((m) => m.index ?? 0);
@@ -29584,7 +29584,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
+        await new Promise((resolve11) => setTimeout(resolve11, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -29601,7 +29601,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve11, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -29679,7 +29679,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve10(parseResult.data);
+            resolve11(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -29940,12 +29940,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve11, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve10, interval);
+      const timeoutId = setTimeout(resolve11, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -31045,7 +31045,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
+      await new Promise((resolve11) => setTimeout(resolve11, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -31614,8 +31614,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync11, existsSync as existsSync8 } from "node:fs";
-import { join as join16, dirname as dirname9 } from "node:path";
+import { readFileSync as readFileSync11, existsSync as existsSync8, lstatSync as lstatSync7, realpathSync as realpathSync7, statSync as statSync5 } from "node:fs";
+import { join as join16, dirname as dirname9, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve7, sep as sep2 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
 function holdRoutedStores(opened, reopen, announce) {
@@ -42013,6 +42013,44 @@ var strict = (shape, hints = {}) => {
   };
   return advertised;
 };
+var DRAFTS_DIR = ".sterling/drafts";
+function resolveDraftsFile(repoRoot, path) {
+  const dir = join16(repoRoot, DRAFTS_DIR);
+  const refuse = (why) => new Error(`knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${dir.replace(/\\/g, "/")}). Nothing was written.`);
+  let dirStat;
+  try {
+    dirStat = lstatSync7(dir);
+  } catch {
+    throw refuse(`the drafts folder ${DRAFTS_DIR}/ does not exist`);
+  }
+  if (!dirStat.isDirectory())
+    throw refuse(`${DRAFTS_DIR} is not a real directory (a symlink or a file)`);
+  const realDir = realpathSync7(dir);
+  let real;
+  try {
+    real = realpathSync7(isAbsolute2(path) ? path : resolve7(dir, path));
+  } catch {
+    throw refuse(`'${path}' does not exist`);
+  }
+  const rel = relative2(realDir, real);
+  if (rel === "" || rel === ".." || rel.startsWith(".." + sep2) || isAbsolute2(rel))
+    throw refuse(`'${path}' resolves to ${real.replace(/\\/g, "/")}, outside the drafts folder`);
+  if (!statSync5(real).isFile())
+    throw refuse(`'${path}' is not a regular file`);
+  return { file: real, label: `${DRAFTS_DIR}/${rel.split(sep2).join("/")}` };
+}
+function rootFieldOf(field) {
+  return field.split(/[[.]/, 1)[0];
+}
+function measureField(value) {
+  if (typeof value === "string")
+    return { chars: value.length, utf8_bytes: Buffer.byteLength(value, "utf8") };
+  if (Array.isArray(value))
+    return { entries: value.length };
+  if (value === void 0)
+    return { absent: "not set after the write" };
+  return { json_chars: JSON.stringify(value).length };
+}
 function unreadableDomainWarning(d) {
   return `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`;
 }
@@ -42105,6 +42143,138 @@ function createSterlingServer(target, opts = {}) {
   const FOREIGN_BOARD_READ = "a project name from this machine's project registry (/sterling:projects); reads that project's user board read-only instead of this one. A name that is no longer registered is followed through this board's hand-off trackers to the project their receiver is now (renamed, or moved with list-projects.mjs --move); refused when no registered project matches";
   const ID_EXACT_DESTROY = "the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused";
   const RESOLVES_FULL_IDS = "full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted";
+  const RESOLVES_RECORD_CHAIN = "open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write";
+  const RESTAMP_HINT = '. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance';
+  const updateArgs = {
+    id: external_exports.string().describe(ID_LADDER),
+    // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
+    body: external_exports.object({}).passthrough().optional().describe("the partial patch; exactly one of body or fields"),
+    fields: external_exports.object({}).passthrough().optional().describe("alias of body, the name knowledge_create uses; exactly one of body or fields"),
+    resolves: external_exports.array(external_exports.string()).optional().describe(RESOLVES_RECORD_CHAIN + RESTAMP_HINT),
+    expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written")
+  };
+  const appendArgs = {
+    id: external_exports.string().describe(ID_LADDER),
+    field: external_exports.string(),
+    entries: external_exports.array(external_exports.unknown()),
+    resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write" + RESTAMP_HINT)
+  };
+  const editArgs = {
+    id: external_exports.string().describe(ID_LADDER),
+    field: external_exports.string(),
+    find: external_exports.string(),
+    replace: external_exports.string(),
+    resolves: external_exports.array(external_exports.string()).optional().describe(RESOLVES_RECORD_CHAIN)
+  };
+  const arrayRemoveArgs = {
+    id: external_exports.string().describe("the EXACT full uuid \u2014 this call destroys, so no slug and no 8-char prefix is accepted"),
+    selector: external_exports.string().describe("arr[key=value] \u2014 knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
+    expected_version: external_exports.number().int().positive().describe("REQUIRED: the version you read \u2014 a stale token refuses naming both versions, with nothing written"),
+    resolves: external_exports.array(external_exports.string()).optional().describe(RESOLVES_RECORD_CHAIN)
+  };
+  const applyUpdate = ({ id, body, fields, resolves, expected_version }) => {
+    if (body !== void 0 && fields !== void 0) {
+      throw new Error("knowledge_update takes the payload as body or fields, not both: you passed both. Send one of them; nothing was written.");
+    }
+    const payload = body ?? fields;
+    if (payload === void 0) {
+      throw new Error("knowledge_update takes the payload as body (or fields): neither was passed. Nothing was written.");
+    }
+    return tools.knowledgeUpdateResult(id, payload, resolves, expected_version);
+  };
+  const applyAppend = ({ id, field, entries, resolves }) => tools.knowledgeAppend(id, field, entries, resolves);
+  const applyEdit = ({ id, field, find, replace, resolves }) => tools.knowledgeEdit(id, field, find, replace, resolves);
+  const applyArrayRemove = ({ id, selector, expected_version, resolves }) => tools.knowledgeArrayRemove(id, selector, expected_version, resolves);
+  const DRAFT_OPS = {
+    update: { schema: external_exports.object({ op: external_exports.literal("update"), ...updateArgs }).strict(), tool: "knowledge_update" },
+    append: { schema: external_exports.object({ op: external_exports.literal("append"), ...appendArgs }).strict(), tool: "knowledge_append" },
+    edit: { schema: external_exports.object({ op: external_exports.literal("edit"), ...editArgs }).strict(), tool: "knowledge_edit" },
+    array_remove: { schema: external_exports.object({ op: external_exports.literal("array_remove"), ...arrayRemoveArgs }).strict(), tool: "knowledge_array_remove" }
+  };
+  const runDraftOp = (op) => {
+    switch (op.op) {
+      case "update": {
+        const { op: _op, ...args2 } = op;
+        return { result: applyUpdate(args2), fields: Object.keys(args2.body ?? args2.fields ?? {}) };
+      }
+      case "append": {
+        const { op: _op, ...args2 } = op;
+        return { result: applyAppend(args2), fields: [rootFieldOf(args2.field)] };
+      }
+      case "edit": {
+        const { op: _op, ...args2 } = op;
+        return { result: applyEdit(args2), fields: [rootFieldOf(args2.field)] };
+      }
+      case "array_remove": {
+        const { op: _op, ...args2 } = op;
+        return { result: applyArrayRemove(args2), fields: [rootFieldOf(args2.selector)] };
+      }
+    }
+  };
+  const applyDrafts = (path, dryRun) => {
+    const { file, label } = resolveDraftsFile(repoRoot, path);
+    const ops = parseDraftOps(readFileSync11(file, "utf8"), label);
+    if (dryRun) {
+      return {
+        path: label,
+        dry_run: true,
+        ops: ops.map((op, index) => {
+          const record2 = tools.knowledgeGet(op.id);
+          return { index, op: op.op, id: record2.id, version: record2.version };
+        })
+      };
+    }
+    const applied = [];
+    for (const [index, op] of ops.entries()) {
+      let ran;
+      try {
+        ran = runDraftOp(op);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const done = applied.length ? `Ops 0-${index - 1} were written and stay written: ${JSON.stringify(applied)}. Re-running this file applies them again (an append duplicates its entries), so remove them from the file first.` : "No earlier op was written.";
+        const rest = index + 1 < ops.length ? ` Ops ${index + 1}-${ops.length - 1} were not attempted.` : "";
+        throw new Error(`knowledge_apply_drafts: op ${index} (${op.op} '${op.id}') in ${label} was refused by ${DRAFT_OPS[op.op].tool}: ${message} ${done}${rest}`);
+      }
+      const record2 = ran.result.record;
+      const written = Object.fromEntries(ran.fields.map((f) => [f, measureField(record2[f])]));
+      applied.push({ index, op: op.op, id: record2.id, version: record2.version, written, ...ran.result.warnings.length ? { warnings: ran.result.warnings } : {} });
+    }
+    return { path: label, applied };
+  };
+  const parseDraftOps = (text, label) => {
+    let raw;
+    try {
+      raw = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`knowledge_apply_drafts: ${label} is not valid JSON (${e instanceof Error ? e.message : String(e)}). Nothing was written.`);
+    }
+    if (!Array.isArray(raw) || raw.length === 0) {
+      throw new Error(`knowledge_apply_drafts: ${label} must hold a non-empty JSON array of operations. Nothing was written.`);
+    }
+    const problems = [];
+    const ops = [];
+    raw.forEach((entry, index) => {
+      const name = entry?.op;
+      if (name === "create") {
+        problems.push(`op ${index}: op 'create' is refused \u2014 this tool never creates a record; the conductor creates records directly with knowledge_create (decision conductor-creates-records-directly-librarian-stays-update-only)`);
+        return;
+      }
+      if (typeof name !== "string" || !Object.hasOwn(DRAFT_OPS, name)) {
+        problems.push(`op ${index}: op must be one of ${Object.keys(DRAFT_OPS).join(", ")}, got ${JSON.stringify(name)}`);
+        return;
+      }
+      const parsed = DRAFT_OPS[name].schema.safeParse(entry);
+      if (!parsed.success) {
+        problems.push(`op ${index} (${name}): ${parsed.error.issues.map((i) => `${i.path.join(".") || "(op)"}: ${i.message}${i.code === "unrecognized_keys" ? ` ${JSON.stringify(i.keys)}` : ""}`).join("; ")}`);
+        return;
+      }
+      ops.push(parsed.data);
+    });
+    if (problems.length) {
+      throw new Error(`knowledge_apply_drafts: ${label} has ${problems.length} malformed op(s), so nothing was written: ${problems.join(" | ")}`);
+    }
+    return ops;
+  };
   server.registerTool("knowledge_create", {
     description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` (\'project\' by default, or \'domain:<name>\') is given the same way, as the top-level `scope` or as fields.scope. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
     inputSchema: knowledgeCreateInput
@@ -42200,46 +42370,16 @@ function createSterlingServer(target, opts = {}) {
   }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));
   server.registerTool("knowledge_update", {
     description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` (or its alias `fields`, the name knowledge_create uses; pass exactly one) is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
-    inputSchema: strict({
-      id: external_exports.string().describe(ID_LADDER),
-      // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
-      body: external_exports.object({}).passthrough().optional().describe("the partial patch; exactly one of body or fields"),
-      fields: external_exports.object({}).passthrough().optional().describe("alias of body, the name knowledge_create uses; exactly one of body or fields"),
-      resolves: external_exports.array(external_exports.string()).optional().describe(`open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance`),
-      expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written"),
-      projection: external_exports.enum(["full", "digest"]).optional()
-    })
-  }, ({ id, body, fields, resolves, expected_version, projection }) => {
-    if (body !== void 0 && fields !== void 0) {
-      throw new Error("knowledge_update takes the payload as body or fields, not both: you passed both. Send one of them; nothing was written.");
-    }
-    const payload = body ?? fields;
-    if (payload === void 0) {
-      throw new Error("knowledge_update takes the payload as body (or fields): neither was passed. Nothing was written.");
-    }
-    return json(tools.writeProjected(tools.knowledgeUpdateResult(id, payload, resolves, expected_version), projection));
-  });
+    inputSchema: strict({ ...updateArgs, projection: external_exports.enum(["full", "digest"]).optional() })
+  }, ({ projection, ...args2 }) => json(tools.writeProjected(applyUpdate(args2), projection)));
   server.registerTool("knowledge_append", {
     description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
-    inputSchema: strict({
-      id: external_exports.string().describe(ID_LADDER),
-      field: external_exports.string(),
-      entries: external_exports.array(external_exports.unknown()),
-      resolves: external_exports.array(external_exports.string()).optional().describe(`open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance`),
-      projection: external_exports.enum(["full", "digest"]).optional()
-    })
-  }, ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection)));
+    inputSchema: strict({ ...appendArgs, projection: external_exports.enum(["full", "digest"]).optional() })
+  }, ({ projection, ...args2 }) => json(tools.writeProjected(applyAppend(args2), projection)));
   server.registerTool("knowledge_edit", {
     description: `Replace one passage inside a string field without retransmitting it. \`find\` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count; extend find to disambiguate. \`field\` may be an array-element selector 'arr[key=value].sub' (e.g. "files[path=scripts/prep.mjs].role"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field "files[path=scripts/prep.mjs].unverified", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field "files[path=skills/drain/SKILL.md].entry", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:"full" returns the whole stored record.`,
-    inputSchema: strict({
-      id: external_exports.string().describe(ID_LADDER),
-      field: external_exports.string(),
-      find: external_exports.string(),
-      replace: external_exports.string(),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
-      projection: external_exports.enum(["full", "digest"]).optional()
-    })
-  }, ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection)));
+    inputSchema: strict({ ...editArgs, projection: external_exports.enum(["full", "digest"]).optional() })
+  }, ({ projection, ...args2 }) => json(tools.writeProjected(applyEdit(args2), projection)));
   server.registerTool("knowledge_line_ref_fix", {
     description: "Move ONE stale path:line reference inside a feature_article string field, verified by the server \u2014 the background maintenance worker's only article write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only \u2014 a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
     inputSchema: strict({
@@ -42253,14 +42393,15 @@ function createSterlingServer(target, opts = {}) {
   }, ({ id, field, find, replace, anchor, projection }) => json(tools.writeProjected(tools.knowledgeLineRefFix(id, field, find, replace, anchor), projection)));
   server.registerTool("knowledge_array_remove", {
     description: `Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. "files[path=scripts/prep.mjs]". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says "removed 1 of N identical elements". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED \u2014 a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:"full" returns the whole stored record.`,
+    inputSchema: strict({ ...arrayRemoveArgs, projection: external_exports.enum(["full", "digest"]).optional() })
+  }, ({ projection, ...args2 }) => json(tools.writeProjected(applyArrayRemove(args2), projection)));
+  server.registerTool("knowledge_apply_drafts", {
+    description: `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute); after symlinks are resolved it must still be a regular file inside that folder, which must be a real directory, else the call is refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written (the refusal lists them; re-running the file re-applies them, so remove them first). dry_run:true checks the file and resolves each op's record, writing nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}]}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
     inputSchema: strict({
-      id: external_exports.string().describe("the EXACT full uuid \u2014 this call destroys, so no slug and no 8-char prefix is accepted"),
-      selector: external_exports.string().describe("arr[key=value] \u2014 knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
-      expected_version: external_exports.number().int().positive().describe("REQUIRED: the version you read \u2014 a stale token refuses naming both versions, with nothing written"),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
-      projection: external_exports.enum(["full", "digest"]).optional()
+      path: external_exports.string().min(1).describe(`the drafts file: relative to ${DRAFTS_DIR}/, or an absolute path inside it`),
+      dry_run: external_exports.boolean().optional().describe("check the file and resolve every record without writing")
     })
-  }, ({ id, selector, expected_version, resolves, projection }) => json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection)));
+  }, ({ path, dry_run }) => json(applyDrafts(path, dry_run === true)));
   server.registerTool("knowledge_promote", {
     description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
@@ -42476,7 +42617,7 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync13, realpathSync as realpathSync7 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync13, realpathSync as realpathSync8 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
     return readFileSync13(buildIdPath(serverDir), "utf8").trim() || "unknown";
@@ -42510,7 +42651,7 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
   if (dir === void 0)
     return null;
   const instanceId = randomBytes(16).toString("hex");
-  const root = realpathSync7(route.root);
+  const root = realpathSync8(route.root);
   const identity = {
     instance_id: instanceId,
     protocol: BROKER_PROTOCOL,
@@ -42638,7 +42779,7 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
 }
 
 // scripts/hooks/lib/hook-roots.mjs
-import { dirname as dirname12, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve8 } from "node:path";
+import { dirname as dirname12, isAbsolute as isAbsolute3, relative as relative3, resolve as resolve9 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync9, readFileSync as readFileSync14 } from "node:fs";
@@ -42651,13 +42792,13 @@ function isSterlingRoot(dir) {
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync10, realpathSync as realpathSync8, statSync as statSync5 } from "node:fs";
-import { basename as basename5, dirname as dirname11, join as join18, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync10, realpathSync as realpathSync9, statSync as statSync6 } from "node:fs";
+import { basename as basename5, dirname as dirname11, join as join18, resolve as resolve8 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
   const git3 = (args2, at) => spawnSync4("git", args2, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
-      return realpathSync8(p);
+      return realpathSync9(p);
     } catch {
       return null;
     }
@@ -42666,8 +42807,8 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = real(resolve7(cwd, gitDir));
-  const commonReal = real(resolve7(cwd, commonDir));
+  const gitDirReal = real(resolve8(cwd, gitDir));
+  const commonReal = real(resolve8(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
   const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
@@ -42680,7 +42821,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   }
   if (settings.bare === "true") return null;
   let mainRoot = null;
-  if (settings.worktree) mainRoot = real(resolve7(commonReal, settings.worktree));
+  if (settings.worktree) mainRoot = real(resolve8(commonReal, settings.worktree));
   else if (basename5(commonReal) === ".git") mainRoot = dirname11(commonReal);
   if (!mainRoot || mainRoot === worktree) return null;
   return { worktree, mainRoot };
@@ -42698,14 +42839,14 @@ function linkedWorktreeOnce(dir) {
 }
 function gitFileAt(dir) {
   try {
-    return statSync5(join18(dir, ".git")).isFile();
+    return statSync6(join18(dir, ".git")).isFile();
   } catch {
     return false;
   }
 }
 function resolveProjectRoots(from, isRoot = isSterlingRoot) {
   if (!from) return null;
-  let dir = resolve7(String(from));
+  let dir = resolve8(String(from));
   for (; ; ) {
     if (gitFileAt(dir)) {
       const linked = linkedWorktreeOnce(dir);
@@ -42724,7 +42865,7 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
 // scripts/hooks/lib/hook-roots.mjs
 function hookProjectRoot(from) {
   if (!from) return null;
-  let dir = resolve8(String(from));
+  let dir = resolve9(String(from));
   for (; ; ) {
     if (isSterlingRoot(dir)) return dir;
     const parent = dirname12(dir);
@@ -42733,8 +42874,8 @@ function hookProjectRoot(from) {
   }
 }
 function isWithin(child, parent) {
-  const rel = relative2(parent, child);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute2(rel);
+  const rel = relative3(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute3(rel);
 }
 function hookRoots(from) {
   const roots = resolveProjectRoots(from, isSterlingRoot);
@@ -42767,7 +42908,7 @@ if (workerPolicyArg === void 0 !== (workerTokenArg === void 0) || workerPolicyAr
   console.error("sterling-mcp: worker mode needs both --worker-policy <absolute path to eligible.json> and --worker-token <run lock token>, each with a value");
   process.exit(2);
 }
-if (workerPolicyArg !== void 0 && !isAbsolute3(workerPolicyArg)) {
+if (workerPolicyArg !== void 0 && !isAbsolute4(workerPolicyArg)) {
   console.error(`sterling-mcp: --worker-policy must be an absolute path, got '${workerPolicyArg}'`);
   process.exit(2);
 }
@@ -42777,11 +42918,11 @@ if (pathArg.includes("${")) {
   console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
   process.exit(2);
 }
-var claudeRoots = projectArg !== void 0 && checkoutArg === void 0 ? hookRoots(resolve9(projectArg)) : null;
+var claudeRoots = projectArg !== void 0 && checkoutArg === void 0 ? hookRoots(resolve10(projectArg)) : null;
 var splitRoots = claudeRoots && claudeRoots.storeRoot !== claudeRoots.checkoutRoot ? claudeRoots : null;
-var projectRoot = projectArg !== void 0 ? splitRoots?.storeRoot ?? resolve9(projectArg) : void 0;
-var checkoutRoot = checkoutArg !== void 0 ? resolve9(checkoutArg) : splitRoots?.checkoutRoot ?? projectRoot;
-var storePath = projectRoot !== void 0 ? join19(projectRoot, ".sterling", "sterling.db") : resolve9(pathArg);
+var projectRoot = projectArg !== void 0 ? splitRoots?.storeRoot ?? resolve10(projectArg) : void 0;
+var checkoutRoot = checkoutArg !== void 0 ? resolve10(checkoutArg) : splitRoots?.checkoutRoot ?? projectRoot;
+var storePath = projectRoot !== void 0 ? join19(projectRoot, ".sterling", "sterling.db") : resolve10(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot, checkoutRoot } : storePath, { workerPolicy });

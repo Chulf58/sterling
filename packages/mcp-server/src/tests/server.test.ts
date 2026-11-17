@@ -43,6 +43,10 @@ const SERVED_TOOLS = [
   // expected_version is REQUIRED here, unlike knowledge_update — a destroy
   // states what it read (board 39673f6a).
   'knowledge_array_remove',
+  // A drafts file of update/append/edit/array_remove ops read server-side from
+  // .sterling/drafts/, so a drafted value past an agent file reader's
+  // 2,000-character line limit lands byte-exact (GitHub #290).
+  'knowledge_apply_drafts',
   // Mechanized article split enforcing the foreign_8b87efcb invariants in one
   // transaction (board 136091d2, decision compaction-tooling-windowed-read-plus-split).
   'knowledge_split',
