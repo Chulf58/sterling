@@ -391,7 +391,7 @@ var DEFAULT_CHECKS_TIMEOUT_S = 540;
 var DEFAULT_CHECKS_INTERVAL_S = 30;
 var PENDING_ROLLUPS = /* @__PURE__ */ new Set(["PENDING", "EXPECTED"]);
 var sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null, stale_reviews: [] };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + "\n");
@@ -769,6 +769,7 @@ function requestCopilotReview() {
     result.copilot_request = { requested: false, error: `requestReviewsByLogin failed: ${message}` };
     process.stderr.write(`pr-review-wait: --request-copilot failed \u2014 ${message}
 `);
+    error(`--request-copilot failed, so no review of the head will be requested: ${message}`);
   }
 }
 function parsePages(text) {
@@ -817,7 +818,12 @@ function poll(recheckAbsent = true) {
   const reviews = parsePages(ghApi(`${base}/reviews`, { paginate: true }));
   const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => b.id > a.id ? b : a).user.login;
-  const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
+  const unconsumed = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
+  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
+  const isHeadReview = (r) => headExpected && r.commit_id === head;
+  const fresh = expectedHead === null ? unconsumed : unconsumed.filter(isHeadReview);
+  const staleHeld = expectedHead === null ? [] : unconsumed.filter((r) => !isHeadReview(r)).sort((a, b) => a.id - b.id);
+  result.stale_reviews = staleHeld.map((r) => ({ id: r.id, commit_id: r.commit_id, author: r.user.login, state: r.state, body: r.body ?? "", comments: [] }));
   if (!fresh.length) {
     if (pending) return null;
     if (!recheckAbsent) throw new NoReviewRequested();
@@ -825,9 +831,11 @@ function poll(recheckAbsent = true) {
     return poll(false);
   }
   const review = fresh.reduce((a, b) => b.id < a.id ? b : a);
-  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
-  const stale = !(headExpected && review.commit_id === head);
-  const comments = parsePages(ghApi(`${base}/comments`, { paginate: true })).filter((c) => c?.pull_request_review_id === review.id).map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? "", in_reply_to: c.in_reply_to_id ?? null }));
+  const stale = !isHeadReview(review);
+  const allComments = parsePages(ghApi(`${base}/comments`, { paginate: true }));
+  const commentsOf = (id) => allComments.filter((c) => c?.pull_request_review_id === id).map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? "", in_reply_to: c.in_reply_to_id ?? null }));
+  const comments = commentsOf(review.id);
+  for (const held of result.stale_reviews) held.comments = commentsOf(held.id);
   if (!stale) {
     const [again] = parsePages(ghApi(base));
     if (again?.head?.sha !== head) {

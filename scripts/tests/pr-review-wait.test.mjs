@@ -235,6 +235,7 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       body_findings_without_comments: false,
       copilot_request: null,
       copilot_review_pending: true,
+      stale_reviews: [], // added for GitHub #300; empty without --head
     });
   } finally {
     f.cleanup();
@@ -301,22 +302,71 @@ test('awaiting_head_review (GitHub issue #162): true only for a stale review whi
   }
 });
 
-test('issue #80: after a push, a review of the PREVIOUS head that lands late is returned before the new head is waited on; the new-head review comes once it is consumed', () => {
+test('issue #80 without --head: after a push, a review of the PREVIOUS head that lands late is returned before the new head is waited on; the new-head review comes once it is consumed', () => {
   const f = makeFixture();
   try {
     // 100 was consumed on OLD_HEAD; the fix pushed HEAD; 101 (started before
     // the push) lands on OLD_HEAD with findings; 102 later reviews HEAD.
     f.put('reviews', 0, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD }), review(102)]]);
     f.put('comments', 0, [[comment(1, 100), comment(2, 101), comment(3, 101), comment(4, 102)]]);
-    const late = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    const late = run(f, ['7', '--since-review', '100', ...FAST]);
     assert.equal(late.code, 0, oneLine(late.stdout + late.stderr));
     assert.equal(late.out.review.id, 101, 'the older-head review comes first, never skipped');
     assert.equal(late.out.stale_review, true);
     assert.deepEqual(late.out.comments.map((c) => c.id), [2, 3]);
-    const next = run(f, ['7', '--since-review', '101', '--head', HEAD, ...FAST]);
+    const next = run(f, ['7', '--since-review', '101', ...FAST]);
     assert.equal(next.out.review.id, 102);
     assert.equal(next.out.stale_review, false, 'a review of the current, expected head');
     assert.deepEqual(next.out.comments.map((c) => c.id), [4]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('GitHub #300/#296/#224: with --head, an unconsumed OLD-head review is held as stale and the wait returns the head review in ONE call, listing the stale one', () => {
+  const f = makeFixture();
+  try {
+    // 101 reviews OLD_HEAD and is unconsumed; 102 reviews HEAD and lands on the second poll.
+    f.put('reviews', 0, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD })]]);
+    f.put('reviews', 2, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD }), review(102)]]);
+    f.put('comments', 0, [[comment(2, 101), comment(3, 101), comment(4, 102)]]);
+    const r = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.review.id, 102, 'the head review, not the older-head one');
+    assert.equal(r.out.stale_review, false);
+    assert.deepEqual(r.out.comments.map((c) => c.id), [4]);
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [101], 'the stale review is reported, never skipped');
+    assert.equal(r.out.stale_reviews[0].commit_id, OLD_HEAD);
+    assert.deepEqual(r.out.stale_reviews[0].comments.map((c) => c.id), [2, 3]);
+    assert.ok(reviewReads(f) >= 2, 'it kept waiting past the stale review');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('GitHub #300: with --head and only an old-head review, a pending request keeps the wait going until the timeout, which still reports the stale review', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101, { commit: OLD_HEAD })]]);
+    const r = run(f, ['7', '--head', HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review, null);
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [101]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('GitHub #300: with --head, an old-head review and NO pending request ends no_review_requested (the head review will never come), listing the stale review', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+    f.put('reviews', 0, [[review(101, { commit: OLD_HEAD })]]);
+    const r = run(f, ['7', '--head', HEAD, '--recheck-delay', '0', ...FAST]);
+    assert.equal(r.code, 3, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'no_review_requested');
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [101]);
   } finally {
     f.cleanup();
   }
@@ -402,8 +452,11 @@ test('no_review_requested: a consumed current-head review with no request pendin
     assert.equal(consumed.out.status, 'no_review_requested');
     assert.match(consumed.out.error, /--since-review 500/);
     writeFileSync(join(f.state, 'fail_graphql'), '');
+    // A failed --request-copilot now ends the call as an error before any poll (GitHub #300):
+    // it no longer falls through to no_review_requested.
     const failed = run(f, ['7', '--since-review', '500', '--request-copilot', '--recheck-delay', '0', ...FAST]);
-    assert.equal(failed.code, 3, oneLine(failed.stdout + failed.stderr));
+    assert.equal(failed.code, 1, oneLine(failed.stdout + failed.stderr));
+    assert.equal(failed.out.status, 'error');
     assert.equal(failed.out.copilot_request.requested, false);
   } finally {
     f.cleanup();
@@ -503,14 +556,17 @@ test('--since-review: a Copilot review at or below the consumed id is not new; t
   }
 });
 
-test('--head: a review of the PR head is not taken as CURRENT while the PR head is not yet the expected pushed SHA; it comes back stale', () => {
+// Changed for GitHub #300 (hold for head): with --head, a review that is not of the
+// expected head is no longer RETURNED as the review; it is held in stale_reviews and
+// the wait goes on (here to its short timeout). The case without --head stays pinned above.
+test('--head: a review of the PR head is not taken as CURRENT while the PR head is not yet the expected pushed SHA; it is held as stale and the wait times out', () => {
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(600)]]);
-    const r = run(f, ['7', '--head', OLD_HEAD, ...FAST]);
-    assert.equal(r.out.status, 'review', oneLine(r.stdout + r.stderr));
-    assert.equal(r.out.review.id, 600);
-    assert.equal(r.out.stale_review, true, 'not a review of the expected head');
+    const r = run(f, ['7', '--head', OLD_HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review, null);
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [600], 'not a review of the expected head');
     assert.equal(r.out.head_sha, HEAD, 'head_sha reports what GitHub says the head is');
   } finally {
     f.cleanup();
@@ -835,15 +891,18 @@ test('issue #104: --settle settles the named PR\'s loop while other PRs\' loops 
 });
 
 // ------------------------------------------------- --head accepts a short sha
-test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not, so the review comes back stale', () => {
+// Changed for GitHub #300: a short sha that is not a prefix no longer returns the review
+// as stale; with --head it is held in stale_reviews and the wait times out.
+test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not, so the review is held as stale', () => {
   for (const [head, stale] of [[HEAD.slice(0, 7), false], [HEAD.slice(0, 12).toUpperCase(), false], [HEAD, false], ['aaaaaab', true]]) {
     const f = makeFixture();
     try {
       f.put('reviews', 0, [[review(600)]]);
       f.put('comments', 0, [[comment(1, 600)]]);
-      const r = run(f, ['7', '--head', head, ...FAST]);
-      assert.equal(r.out.status, 'review', `${head}: ${oneLine(r.stdout)}`);
-      assert.equal(r.out.stale_review, stale, `${head}: ${oneLine(r.stdout)}`);
+      const r = run(f, ['7', '--head', head, '--interval', '0.05', '--timeout', stale ? '1' : '60']);
+      assert.equal(r.out.status, stale ? 'timeout' : 'review', `${head}: ${oneLine(r.stdout)}`);
+      if (stale) assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [600], head);
+      else assert.equal(r.out.stale_review, false, `${head}: ${oneLine(r.stdout)}`);
     } finally {
       f.cleanup();
     }
@@ -1216,36 +1275,42 @@ test('--request-copilot: without the flag no mutation is fired and copilot_reque
   }
 });
 
-test('--request-copilot: a failing mutation is reported loudly in the output and on stderr, and the wait still completes', () => {
+// Changed for GitHub #300: a failed --request-copilot used to be swallowed (the wait
+// went on and could return a stale review as if the request had worked). It now ends
+// the call at once with status error (exit 1) and polls nothing.
+test('--request-copilot: a failing mutation ends the call with status error (exit 1), on stderr too, before any poll', () => {
   const f = makeFixture();
   try {
     f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
     writeFileSync(join(f.state, 'fail_graphql'), '');
     f.put('reviews', 0, [[review(802)]]);
     const r = run(f, ['7', '--request-copilot', ...FAST]);
-    assert.equal(r.out.status, 'review', 'the wait is not aborted');
-    assert.equal(r.code, 0);
+    assert.equal(r.out.status, 'error', 'the failed request is loud');
+    assert.equal(r.code, 1);
+    assert.equal(r.out.review, null);
     assert.equal(r.out.copilot_request.requested, false);
     assert.match(r.out.copilot_request.error, /requestReviewsByLogin|Could not resolve/);
+    assert.match(r.out.error, /--request-copilot failed/);
     assert.match(r.stderr, /request-copilot/);
+    assert.equal(reviewReads(f), 0, 'no poll after the failed request');
   } finally {
     f.cleanup();
   }
 });
 
-test('--request-copilot: a missing node id (jq prints null) is a recorded failure, no mutation, wait continues; a GraphQL errors payload is a failure too', () => {
+test('--request-copilot: a missing node id (jq prints null) is a failure (status error), no mutation; a GraphQL errors payload is a failure too', () => {
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(803)]]);
     let r = run(f, ['7', '--request-copilot', ...FAST]);
-    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.status, 'error');
     assert.equal(r.out.copilot_request.requested, false);
     assert.match(r.out.copilot_request.error, /node_id/);
     assert.equal(mutationCalls(f).length, 0);
     f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
     writeFileSync(join(f.state, 'graphql.json'), JSON.stringify({ errors: [{ message: 'nope' }] }));
     r = run(f, ['7', '--request-copilot', ...FAST]);
-    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.status, 'error');
     assert.equal(r.out.copilot_request.requested, false);
     assert.match(r.out.copilot_request.error, /nope/);
   } finally {

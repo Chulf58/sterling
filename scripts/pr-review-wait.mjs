@@ -51,7 +51,8 @@
 // repos/<o>/<r>/pulls/<n> --jq .node_id`) and fires the GraphQL mutation
 // requestReviewsByLogin once. Success or failure is recorded in the output as
 // copilot_request {requested, error?}; a failure is also written to stderr and
-// never aborts the wait.
+// ends the call at once with status error (exit 1): the request is not on the
+// PR, so no review would arrive.
 //
 // UNVERIFIED until the S0 first use on a work machine: the Copilot reviewer's
 // login (a Bot matched by /copilot/i until pinned in pr_review.copilot_logins,
@@ -86,7 +87,21 @@
 // copilot_review_pending is what the last poll read (null before any poll).
 // awaiting_head_review is true when the returned review is stale AND a Copilot
 // request is still pending: a review of the current head is still on its way
-// (a hint only; GitHub issue #162, behaviour unchanged).
+// (a hint only; GitHub issue #162).
+// HOLD FOR THE HEAD (GitHub issues #300, #296, #224; user-ruled 2026-11-17
+// "Hold for head review"): WITH --head, only a review whose commit_id is the
+// expected head (and the PR head is that head) is returned as the review. An
+// unconsumed review of any other head is consumed-as-stale: it is listed in
+// stale_reviews ({id, commit_id, author, state, body, comments}; comments are
+// read when the head's review is returned, otherwise only the ids and bodies
+// show) and the wait goes on for the head's review until --timeout, or until
+// no request is pending (no_review_requested), as without it. The stale
+// reviews are never skipped: advance --since-review to the highest id across
+// review and stale_reviews. WITHOUT --head nothing changes (the #80 behaviour:
+// the oldest unconsumed review returns at once, stale_review true if not the
+// head).
+// A failed --request-copilot ends the call at once with status error (exit 1),
+// the error naming the failure, and copilot_request {requested:false, error}.
 // Exit 0 = review, 2 = timeout, 3 = no_review_requested, 4 = rate_limited,
 // 1 = error. None but a review of the current head (stale_review false) is
 // ever clean.
@@ -186,7 +201,7 @@ const PENDING_ROLLUPS = new Set(['PENDING', 'EXPECTED']); // checks still runnin
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null, stale_reviews: [] };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
@@ -646,6 +661,7 @@ function requestCopilotReview() {
     const message = e instanceof DeadlineReached ? 'the --timeout budget ran out before the request completed' : e.message;
     result.copilot_request = { requested: false, error: `requestReviewsByLogin failed: ${message}` };
     process.stderr.write(`pr-review-wait: --request-copilot failed — ${message}\n`);
+    error(`--request-copilot failed, so no review of the head will be requested: ${message}`);
   }
 }
 
@@ -703,7 +719,14 @@ function poll(recheckAbsent = true) {
   const reviews = parsePages(ghApi(`${base}/reviews`, { paginate: true }));
   const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => (b.id > a.id ? b : a)).user.login;
-  const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
+  const unconsumed = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
+  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
+  // With --head only a review of the expected head is returned; the rest are
+  // consumed-as-stale and held for the result (see HOLD FOR THE HEAD).
+  const isHeadReview = (r) => headExpected && r.commit_id === head;
+  const fresh = expectedHead === null ? unconsumed : unconsumed.filter(isHeadReview);
+  const staleHeld = expectedHead === null ? [] : unconsumed.filter((r) => !isHeadReview(r)).sort((a, b) => a.id - b.id);
+  result.stale_reviews = staleHeld.map((r) => ({ id: r.id, commit_id: r.commit_id, author: r.user.login, state: r.state, body: r.body ?? '', comments: [] }));
   if (!fresh.length) {
     if (pending) return null;
     if (!recheckAbsent) throw new NoReviewRequested();
@@ -719,11 +742,13 @@ function poll(recheckAbsent = true) {
   // --since-review only after each returned review is fully dispositioned, so
   // the next call yields the next.
   const review = fresh.reduce((a, b) => (b.id < a.id ? b : a));
-  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
-  const stale = !(headExpected && review.commit_id === head);
-  const comments = parsePages(ghApi(`${base}/comments`, { paginate: true }))
-    .filter((c) => c?.pull_request_review_id === review.id)
+  const stale = !isHeadReview(review);
+  const allComments = parsePages(ghApi(`${base}/comments`, { paginate: true }));
+  const commentsOf = (id) => allComments
+    .filter((c) => c?.pull_request_review_id === id)
     .map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? '', in_reply_to: c.in_reply_to_id ?? null }));
+  const comments = commentsOf(review.id);
+  for (const held of result.stale_reviews) held.comments = commentsOf(held.id);
   if (!stale) {
     // HEAD RACE (Sol review): a push between the first head read and here
     // would make this a review of a superseded head. Re-read the head; return
