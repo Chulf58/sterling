@@ -14958,7 +14958,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve13) => setTimeout(resolve13, ms));
+  return new Promise((resolve14) => setTimeout(resolve14, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -16378,7 +16378,7 @@ init_agent_distribution();
 import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypto";
 import { readFileSync as readFileSync15, writeFileSync as writeFileSync6, mkdirSync as mkdirSync10, rmSync as rmSync6, statSync as statSync7, renameSync as renameSync5 } from "node:fs";
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { join as join26, dirname as dirname12 } from "node:path";
+import { join as join26, dirname as dirname12, resolve as resolve10 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/session-events.mjs
@@ -16409,16 +16409,37 @@ function changedSince(root, base2) {
     ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
   ]);
 }
-function fastForwardedPaths(root, base2) {
-  const r = spawnSync8("git", ["reflog", "show", "--format=%H%x09%gs", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
-  if (r.status !== 0) return /* @__PURE__ */ new Set();
-  const entries = r.stdout.split("\n").filter(Boolean).map((l) => {
-    const [sha, subject = ""] = l.split("	");
-    return { sha, subject };
-  });
-  const at = entries.findLastIndex((e) => e.sha === base2);
-  if (at <= 0) return /* @__PURE__ */ new Set();
-  const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
+function readHeadReflog(root) {
+  const r = spawnSync8("git", ["rev-parse", "--git-path", "logs/HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  if (r.status !== 0) return null;
+  let raw;
+  try {
+    raw = readFileSync15(resolve10(root, r.stdout.trim()), "utf8");
+  } catch {
+    return null;
+  }
+  const entries = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    const m = /^([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) [^\t]* \d+ [+-]\d{4}(?:\t(.*))?$/.exec(line);
+    if (!m) return null;
+    entries.push({ old: m[1], new: m[2], msg: m[3] ?? "", line });
+  }
+  return entries;
+}
+var reflogLineHash = (line) => createHash6("sha256").update(line).digest("hex");
+function reflogAnchor(entries, head) {
+  const last = entries?.at(-1);
+  return last && last.new === head ? reflogLineHash(last.line) : null;
+}
+function fastForwardedPaths(root, settled, entries, head) {
+  if (typeof settled.reflog !== "string" || !entries) return /* @__PURE__ */ new Set();
+  const at = entries.findIndex((e) => e.new === settled.sha && reflogLineHash(e.line) === settled.reflog);
+  if (at < 0) return /* @__PURE__ */ new Set();
+  const range = entries.slice(at);
+  for (let i = 1; i < range.length; i++) if (range[i].old !== range[i - 1].new) return /* @__PURE__ */ new Set();
+  if (range.at(-1).new !== head) return /* @__PURE__ */ new Set();
+  const moves = range.slice(1).map((e) => ({ from: e.old, to: e.new, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.msg) }));
   if (!moves.some((m) => m.ff)) return /* @__PURE__ */ new Set();
   const between = (m) => new Set(gitZ(root, ["diff", "--name-only", "-z", "--no-renames", "--relative", m.from, m.to]));
   const own = /* @__PURE__ */ new Set();
@@ -16455,7 +16476,9 @@ function gitTouches(root, now) {
     }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
-    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    const reflog = head === EMPTY_TREE ? null : readHeadReflog(root);
+    const anchor = reflogAnchor(reflog, head);
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now, ...anchor ? { reflog: anchor } : {} };
     if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
     let fromBase = base2 ? changedSince(root, base2) : dirtyNow;
@@ -16464,7 +16487,7 @@ function gitTouches(root, now) {
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
     }
     if (base2 && base2 !== EMPTY_TREE) {
-      const pulled = fastForwardedPaths(root, base2);
+      const pulled = fastForwardedPaths(root, settled, reflog, head);
       if (pulled.size) {
         const dirtyHead = changedSince(root, head);
         fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
@@ -16519,7 +16542,7 @@ import { join as join28 } from "node:path";
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync14, readFileSync as readFileSync16, readdirSync as readdirSync6, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { join as join27, resolve as resolve10, sep as sep2 } from "node:path";
+import { join as join27, resolve as resolve11, sep as sep2 } from "node:path";
 import { createHash as createHash7 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -16826,7 +16849,7 @@ function canonical(p) {
   try {
     return realpathSync8(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve10(p);
+    if (err?.code === "ENOENT") return resolve11(p);
     throw err;
   }
 }
@@ -16851,7 +16874,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir8() } = {}) {
 import { spawn, spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync16, readFileSync as readFileSync17, realpathSync as realpathSync9, statSync as statSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { join as join29, resolve as resolve11 } from "node:path";
+import { join as join29, resolve as resolve12 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
 var SYNC_MARKER_REL = join29(".sterling", "synced-version");
 var HOST_TEXT = {
@@ -16889,7 +16912,7 @@ function sameRealPath(a, b) {
     try {
       return realpathSync9(p);
     } catch {
-      return resolve11(p);
+      return resolve12(p);
     }
   };
   return real(a) === real(b);
@@ -17056,12 +17079,12 @@ function cloneBranchState(root) {
     if (statSync8(dotGit).isFile()) {
       const pointer = /^gitdir: (.+)$/.exec(readFileSync17(dotGit, "utf8").split(/\r?\n/)[0]);
       if (!pointer) return unreadable(".git: no gitdir line");
-      gitDir = resolve11(root, pointer[1].trim());
+      gitDir = resolve12(root, pointer[1].trim());
       commonDir = gitDir;
       try {
         const common = readFileSync17(join29(gitDir, "commondir"), "utf8").trim();
         if (!common) return unreadable("commondir: empty");
-        commonDir = resolve11(gitDir, common);
+        commonDir = resolve12(gitDir, common);
         if (!statSync8(commonDir).isDirectory()) return unreadable("commondir: not a directory");
       } catch (e) {
         if (e?.code !== "ENOENT" || existsSync16(join29(gitDir, "commondir"))) return unreadable(`commondir: ${errCode(e)}`);
@@ -17300,7 +17323,7 @@ import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync7, existsSync as existsSync18, mkdirSync as mkdirSync12, openSync as openSync7, readFileSync as readFileSync19, renameSync as renameSync6, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
-import { dirname as dirname14, isAbsolute as isAbsolute3, join as join31, resolve as resolve12, sep as sep3 } from "node:path";
+import { dirname as dirname14, isAbsolute as isAbsolute3, join as join31, resolve as resolve13, sep as sep3 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs

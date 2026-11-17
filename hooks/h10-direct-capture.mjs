@@ -13496,7 +13496,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -13655,7 +13655,7 @@ var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync5, statSync as statSync5, renameSync as renameSync3 } from "node:fs";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { join as join15, dirname as dirname9 } from "node:path";
+import { join as join15, dirname as dirname9, resolve as resolve7 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 import { join as join12 } from "node:path";
@@ -13972,16 +13972,37 @@ function changedSince(root, base2) {
     ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
   ]);
 }
-function fastForwardedPaths(root, base2) {
-  const r = spawnSync4("git", ["reflog", "show", "--format=%H%x09%gs", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
-  if (r.status !== 0) return /* @__PURE__ */ new Set();
-  const entries = r.stdout.split("\n").filter(Boolean).map((l) => {
-    const [sha, subject = ""] = l.split("	");
-    return { sha, subject };
-  });
-  const at = entries.findLastIndex((e) => e.sha === base2);
-  if (at <= 0) return /* @__PURE__ */ new Set();
-  const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
+function readHeadReflog(root) {
+  const r = spawnSync4("git", ["rev-parse", "--git-path", "logs/HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  if (r.status !== 0) return null;
+  let raw;
+  try {
+    raw = readFileSync9(resolve7(root, r.stdout.trim()), "utf8");
+  } catch {
+    return null;
+  }
+  const entries = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    const m = /^([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) [^\t]* \d+ [+-]\d{4}(?:\t(.*))?$/.exec(line);
+    if (!m) return null;
+    entries.push({ old: m[1], new: m[2], msg: m[3] ?? "", line });
+  }
+  return entries;
+}
+var reflogLineHash = (line) => createHash4("sha256").update(line).digest("hex");
+function reflogAnchor(entries, head) {
+  const last = entries?.at(-1);
+  return last && last.new === head ? reflogLineHash(last.line) : null;
+}
+function fastForwardedPaths(root, settled, entries, head) {
+  if (typeof settled.reflog !== "string" || !entries) return /* @__PURE__ */ new Set();
+  const at = entries.findIndex((e) => e.new === settled.sha && reflogLineHash(e.line) === settled.reflog);
+  if (at < 0) return /* @__PURE__ */ new Set();
+  const range = entries.slice(at);
+  for (let i = 1; i < range.length; i++) if (range[i].old !== range[i - 1].new) return /* @__PURE__ */ new Set();
+  if (range.at(-1).new !== head) return /* @__PURE__ */ new Set();
+  const moves = range.slice(1).map((e) => ({ from: e.old, to: e.new, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.msg) }));
   if (!moves.some((m) => m.ff)) return /* @__PURE__ */ new Set();
   const between = (m) => new Set(gitZ(root, ["diff", "--name-only", "-z", "--no-renames", "--relative", m.from, m.to]));
   const own = /* @__PURE__ */ new Set();
@@ -14018,7 +14039,9 @@ function gitTouches(root, now) {
     }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
-    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    const reflog = head === EMPTY_TREE ? null : readHeadReflog(root);
+    const anchor = reflogAnchor(reflog, head);
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now, ...anchor ? { reflog: anchor } : {} };
     if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
     let fromBase = base2 ? changedSince(root, base2) : dirtyNow;
@@ -14027,7 +14050,7 @@ function gitTouches(root, now) {
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
     }
     if (base2 && base2 !== EMPTY_TREE) {
-      const pulled = fastForwardedPaths(root, base2);
+      const pulled = fastForwardedPaths(root, settled, reflog, head);
       if (pulled.size) {
         const dirtyHead = changedSince(root, head);
         fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
@@ -14484,7 +14507,7 @@ var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number}
 import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync6, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync6, readFileSync as readFileSync14, renameSync as renameSync6, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync7, appendFileSync } from "node:fs";
-import { dirname as dirname13, isAbsolute as isAbsolute3, join as join20, resolve as resolve7, sep } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute3, join as join20, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -14910,7 +14933,7 @@ function launchWorker(opts) {
       if (!target?.working_tree) return { root: opts.root, head: git2.head, prefix: git2.prefix };
       const mapped = workingTrees[target.working_tree];
       if (typeof mapped !== "string" || !mapped) {
-        if (resolve7(String(target.working_tree)) === resolve7(opts.root)) return { root: opts.root, head: git2.head, prefix: git2.prefix };
+        if (resolve8(String(target.working_tree)) === resolve8(opts.root)) return { root: opts.root, head: git2.head, prefix: git2.prefix };
         return { unresolved: `working_tree '${target.working_tree}' is not mapped in config.working_trees` };
       }
       const root = isAbsolute3(mapped) ? mapped : join20(opts.root, mapped);

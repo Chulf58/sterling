@@ -5,10 +5,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { gitTouches, writeGitSettled } from '../hooks/lib/settlement.mjs';
+import { join, dirname, isAbsolute } from 'node:path';
+import { gitTouches, writeGitSettled, readGitSettled } from '../hooks/lib/settlement.mjs';
 
 const NOW = '2026-11-17T08:00:00.000Z';
 
@@ -50,13 +50,23 @@ function makeRepo() {
   settle();
   rmSync(other, { recursive: true, force: true });
   g(['worktree', 'add', '-q', '-b', 'up', other, 'main']);
-  const upstream = () => {
+  const upstream = (onto) => {
+    if (onto) run(other, ['reset', '-q', '--hard', onto]);
     put(other, 'main-only.mjs', 'm1\n');
     put(other, 'shared.mjs', 's1\n');
     run(other, ['add', '-A']);
     run(other, ['commit', '-qm', 'merged elsewhere']);
   };
-  return { dir, g, write, commit, settle, upstream, cleanup: () => (rmSync(dir, { recursive: true, force: true }), rmSync(other, { recursive: true, force: true })) };
+  const reflog = () => {
+    const p = g(['rev-parse', '--git-path', 'logs/HEAD']);
+    return isAbsolute(p) ? p : join(dir, p);
+  };
+  /** Rewrites the HEAD reflog's lines (oldest first), e.g. to keep what `git reflog expire` leaves after a time cutoff. */
+  const rewriteReflog = (fn) => {
+    const lines = readFileSync(reflog(), 'utf8').split('\n').filter(Boolean);
+    writeFileSync(reflog(), `${fn(lines).join('\n')}\n`);
+  };
+  return { dir, g, write, commit, settle, upstream, reflog, rewriteReflog, cleanup: () => (rmSync(dir, { recursive: true, force: true }), rmSync(other, { recursive: true, force: true })) };
 }
 
 const paths = (t) => t.candidates.map((c) => c.path).sort();
@@ -159,5 +169,107 @@ test('without a fast-forward nothing is excluded', () => {
     assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['a.mjs', 'main-only.mjs', 'shared.mjs']);
   } finally {
     r.cleanup();
+  }
+});
+
+// The exclusion needs proof that the HEAD reflog still reaches the settlement boundary. Finding the
+// settled sha somewhere in the surviving reflog is not that proof: a return to it after the boundary
+// entry expired looks the same.
+test('reflog expired up to a return to the settled sha: a later fast-forward onto session work is still counted', () => {
+  const r = makeRepo();
+  try {
+    r.g(['checkout', '-qb', 'feat']);
+    r.write('own.mjs', 'o\n');
+    r.commit('session work');
+    r.g(['checkout', '-q', 'main']);
+    r.rewriteReflog((lines) => lines.slice(-1));
+    r.g(['merge', '--ff-only', '-q', 'feat']);
+    assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['own.mjs']);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('the same expiry on a detached HEAD: the session commit is still counted', () => {
+  const r = makeRepo();
+  try {
+    const base = r.g(['rev-parse', 'HEAD']);
+    r.g(['checkout', '-q', '--detach']);
+    r.settle();
+    r.write('own.mjs', 'o\n');
+    r.commit('session work');
+    const own = r.g(['rev-parse', 'HEAD']);
+    r.g(['checkout', '-q', '--detach', base]);
+    r.rewriteReflog((lines) => lines.slice(-1));
+    r.g(['merge', '--ff-only', '-q', own]);
+    assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['own.mjs']);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('a fast-forward on a detached HEAD is excluded when the reflog reaches the boundary', () => {
+  const r = makeRepo();
+  try {
+    r.g(['checkout', '-q', '--detach']);
+    r.settle();
+    r.upstream();
+    r.write('a.mjs', 'a1\n');
+    r.g(['merge', '--ff-only', '-q', 'up']);
+    assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['a.mjs']);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('a gap in the reflog after the boundary (amended commits expired as unreachable) excludes nothing', () => {
+  const r = makeRepo();
+  try {
+    r.g(['checkout', '-qb', 'feat']);
+    r.write('own.mjs', 'o\n');
+    r.write('shared.mjs', 'own\n');
+    r.commit('session work');
+    r.write('own.mjs', 'o2\n');
+    r.g(['commit', '-qa', '--amend', '-m', 'session work']);
+    // Drops "commit" and "commit (amend)": the first commit is unreachable after the amend.
+    r.g(['reflog', 'expire', '--expire=never', '--expire-unreachable=now', 'HEAD']);
+    r.upstream('feat');
+    r.g(['merge', '--ff-only', '-q', 'up']);
+    // The fast-forward also rewrote shared.mjs, which a session commit changed; with the commit's
+    // reflog entry gone, nothing proves which paths were the session's, so nothing is excluded.
+    assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['main-only.mjs', 'own.mjs', 'shared.mjs']);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('a HEAD move the reflog did not record after a fast-forward excludes nothing', () => {
+  const r = makeRepo();
+  try {
+    r.upstream();
+    r.g(['merge', '--ff-only', '-q', 'up']);
+    r.write('shared.mjs', 'own\n');
+    r.commit('session work');
+    r.rewriteReflog((lines) => lines.slice(0, -1));
+    assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['main-only.mjs', 'shared.mjs']);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('a settled snapshot without the reflog anchor (written before it existed, or without at) excludes nothing', () => {
+  for (const drop of [['reflog'], ['reflog', 'at']]) {
+    const r = makeRepo();
+    try {
+      const file = join(r.dir, '.sterling', 'transient', 'git-settled.json');
+      const s = readGitSettled(r.dir);
+      for (const k of drop) delete s[k];
+      writeFileSync(file, JSON.stringify(s));
+      r.upstream();
+      r.g(['merge', '--ff-only', '-q', 'up']);
+      assert.deepEqual(paths(gitTouches(r.dir, NOW)), ['main-only.mjs', 'shared.mjs'], `without ${drop.join(', ')}`);
+    } finally {
+      r.cleanup();
+    }
   }
 });

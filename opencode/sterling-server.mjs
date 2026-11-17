@@ -16573,7 +16573,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve18) => setTimeout(resolve18, ms));
+  return new Promise((resolve19) => setTimeout(resolve19, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -23371,8 +23371,8 @@ async function boundedModelList(listModels, ms) {
   let timer;
   try {
     const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
-    const late2 = new Promise((resolve18) => {
-      timer = setTimeout(() => resolve18({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    const late2 = new Promise((resolve19) => {
+      timer = setTimeout(() => resolve19({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
     });
     return await Promise.race([call, late2]);
   } catch (e) {
@@ -24860,7 +24860,7 @@ function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
-  return new Promise((resolve18) => {
+  return new Promise((resolve19) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -24868,7 +24868,7 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve18(stepResult(r));
+      resolve19(stepResult(r));
     };
     let child;
     try {
@@ -25791,7 +25791,7 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
   }
   const setOff = (sessionID) => (remember(off, sessionID, true), "off");
-  async function resolve18(root, sessionID, messages) {
+  async function resolve19(root, sessionID, messages) {
     if (off.has(sessionID)) return "off";
     if (roots.has(sessionID)) return "on";
     const kind = await sessionKind(getSession?.(), sessionID, parents);
@@ -25838,7 +25838,7 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     markDisclosed(sessionID, policy);
     return notice;
   }
-  return { resolve: resolve18, disclose, markDisclosed };
+  return { resolve: resolve19, disclose, markDisclosed };
 }
 
 // packages/opencode-plugin/src/claim-handover.mjs
@@ -26391,8 +26391,8 @@ ${due.join("\n\n")}` : "",
     let timer;
     try {
       const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} })).then(() => ({ sent: true }));
-      const late2 = new Promise((resolve18) => {
-        timer = setTimeout(() => resolve18({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      const late2 = new Promise((resolve19) => {
+        timer = setTimeout(() => resolve19({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
       });
       return await Promise.race([call, late2]);
     } catch (e) {
@@ -27121,7 +27121,7 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 import { createHash as createHash9, randomUUID as randomUUID12 } from "node:crypto";
 import { readFileSync as readFileSync30, writeFileSync as writeFileSync15, mkdirSync as mkdirSync21, rmSync as rmSync14, statSync as statSync11, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { join as join49, dirname as dirname18 } from "node:path";
+import { join as join49, dirname as dirname18, resolve as resolve16 } from "node:path";
 init_dist2();
 function hashFile(root, rel) {
   try {
@@ -27214,16 +27214,37 @@ function changedSince(root, base2) {
     ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
   ]);
 }
-function fastForwardedPaths(root, base2) {
-  const r = spawnSync10("git", ["reflog", "show", "--format=%H%x09%gs", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
-  if (r.status !== 0) return /* @__PURE__ */ new Set();
-  const entries = r.stdout.split("\n").filter(Boolean).map((l) => {
-    const [sha, subject = ""] = l.split("	");
-    return { sha, subject };
-  });
-  const at = entries.findLastIndex((e) => e.sha === base2);
-  if (at <= 0) return /* @__PURE__ */ new Set();
-  const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
+function readHeadReflog(root) {
+  const r = spawnSync10("git", ["rev-parse", "--git-path", "logs/HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  if (r.status !== 0) return null;
+  let raw;
+  try {
+    raw = readFileSync30(resolve16(root, r.stdout.trim()), "utf8");
+  } catch {
+    return null;
+  }
+  const entries = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    const m = /^([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) [^\t]* \d+ [+-]\d{4}(?:\t(.*))?$/.exec(line);
+    if (!m) return null;
+    entries.push({ old: m[1], new: m[2], msg: m[3] ?? "", line });
+  }
+  return entries;
+}
+var reflogLineHash = (line) => createHash9("sha256").update(line).digest("hex");
+function reflogAnchor(entries, head) {
+  const last = entries?.at(-1);
+  return last && last.new === head ? reflogLineHash(last.line) : null;
+}
+function fastForwardedPaths(root, settled, entries, head) {
+  if (typeof settled.reflog !== "string" || !entries) return /* @__PURE__ */ new Set();
+  const at = entries.findIndex((e) => e.new === settled.sha && reflogLineHash(e.line) === settled.reflog);
+  if (at < 0) return /* @__PURE__ */ new Set();
+  const range = entries.slice(at);
+  for (let i = 1; i < range.length; i++) if (range[i].old !== range[i - 1].new) return /* @__PURE__ */ new Set();
+  if (range.at(-1).new !== head) return /* @__PURE__ */ new Set();
+  const moves = range.slice(1).map((e) => ({ from: e.old, to: e.new, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.msg) }));
   if (!moves.some((m) => m.ff)) return /* @__PURE__ */ new Set();
   const between = (m) => new Set(gitZ(root, ["diff", "--name-only", "-z", "--no-renames", "--relative", m.from, m.to]));
   const own = /* @__PURE__ */ new Set();
@@ -27260,7 +27281,9 @@ function gitTouches(root, now) {
     }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
-    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    const reflog = head === EMPTY_TREE ? null : readHeadReflog(root);
+    const anchor = reflogAnchor(reflog, head);
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now, ...anchor ? { reflog: anchor } : {} };
     if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
     let fromBase = base2 ? changedSince(root, base2) : dirtyNow;
@@ -27269,7 +27292,7 @@ function gitTouches(root, now) {
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
     }
     if (base2 && base2 !== EMPTY_TREE) {
-      const pulled = fastForwardedPaths(root, base2);
+      const pulled = fastForwardedPaths(root, settled, reflog, head);
       if (pulled.size) {
         const dirtyHead = changedSince(root, head);
         fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
@@ -28203,7 +28226,7 @@ function createProjectStores({ openRouted = (root) => openRoutedStores(root).sto
 // packages/opencode-plugin/src/session-move.mjs
 import { existsSync as existsSync31 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { isAbsolute as isAbsolute6, join as join51, resolve as resolve16 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join51, resolve as resolve17 } from "node:path";
 var MOVE_TOOLS = /* @__PURE__ */ new Set(["opencode_session_move", "session_move"]);
 function isSessionMove(tool) {
   return MOVE_TOOLS.has(tool);
@@ -28212,7 +28235,7 @@ function moveTarget(dir, base2, home = homedir9()) {
   let d = String(dir);
   if (d === "~") d = home;
   else if (d.startsWith("~/") || d.startsWith("~\\")) d = join51(home, d.slice(2));
-  return isAbsolute6(d) ? resolve16(d) : resolve16(base2, d);
+  return isAbsolute6(d) ? resolve17(d) : resolve17(base2, d);
 }
 var isAbsoluteMove = (dir) => dir === "~" || dir.startsWith("~/") || dir.startsWith("~\\") || isAbsolute6(dir);
 var sterlingAgent = (agent) => typeof agent === "string" && agentRole(agent) !== agent;
@@ -28301,7 +28324,7 @@ function mapResult({ error, signal, status, stdout, stderr }) {
 function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
   const { script, error } = mapScript(root);
   if (error) return Promise.resolve({ error });
-  return new Promise((resolve18) => {
+  return new Promise((resolve19) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -28309,7 +28332,7 @@ function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve18(mapResult(r));
+      resolve19(mapResult(r));
     };
     let child;
     try {
@@ -28650,7 +28673,7 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
 // packages/opencode-plugin/src/server.mjs
 init_dist();
 import { realpathSync as realpathSync12 } from "node:fs";
-import { basename as basename8, dirname as dirname23, join as join55, resolve as resolve17 } from "node:path";
+import { basename as basename8, dirname as dirname23, join as join55, resolve as resolve18 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
 var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update", "board_remove"]);
@@ -28702,7 +28725,7 @@ function sameDirectory(a, b) {
       return realpathSync12(p);
     } catch (e) {
       unresolved ||= `${p}: ${errText2(e)}`;
-      return resolve17(p);
+      return resolve18(p);
     }
   };
   const equal = real(a) === real(b);
@@ -28947,7 +28970,7 @@ ${notice}`;
       }
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       const evDir = ev.location?.directory;
-      if (evDir !== void 0 && resolve17(String(evDir)) !== resolve17(directory)) return;
+      if (evDir !== void 0 && resolve18(String(evDir)) !== resolve18(directory)) return;
       if (inWorkerChild(env)) return;
       const root = rootOf();
       if (!root) return;
@@ -29073,7 +29096,7 @@ ${notice}`;
         process.stderr.write("[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n");
         return void 0;
       }
-      const key = resolve17(directory);
+      const key = resolve18(directory);
       let loc = locations.get(key);
       if (!loc) {
         loc = createLocation(directory);
