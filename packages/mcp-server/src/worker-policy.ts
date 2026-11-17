@@ -132,8 +132,9 @@ export interface ProvenanceGate {
 }
 
 /** The root field a knowledge_edit field, append field or array_remove
- *  selector names: `files[path=x].role` -> `files`. */
-const rootField = (field: string): string => field.split(/[.[]/)[0];
+ *  selector names: `files[path=x].role` -> `files`. Shared with
+ *  knowledge_apply_drafts' receipt (server.ts). */
+export const rootField = (field: string): string => field.split(/[.[]/)[0];
 
 /** Record-targeted writes the field allow-list governs. */
 type Fault = { rule: 'field_not_allowed' | 'append_join'; text: string };
