@@ -1260,9 +1260,9 @@ test('AC8 enqueue: creates exactly ONE refresh_reference system maintenance item
 
 // Dome Farmer friction 2026-09-17 (sterling-issues.md): a bare "Refresh the KB
 // models catalog" with no file_keys named no delta, so no drain could act on
-// it. The mint must now name a concrete delta: the catalog's current entries,
-// and which of them still need a real lookup (tier 'unknown').
-test('AC8 enqueue: the item text names a delta — current entries and which ones still carry tier "unknown"', () => {
+// it. The mint names a concrete delta: the catalog's current entries and what to
+// re-verify. Tier 'unknown' is valid unset metadata, so it is never a lookup.
+test('AC8 enqueue: the item text names a delta — current entries — and never asks for tiers (unknown is valid unset metadata)', () => {
   const { dir, store } = tempStore();
   try {
     callBootstrap(store, { models: MODELS }, NOW); // bootstrap seeds tier:'unknown' for every entry
@@ -1273,7 +1273,9 @@ test('AC8 enqueue: the item text names a delta — current entries and which one
     for (const id of DISTINCT_IDS) {
       assert.ok(text.includes(id), `text names entry id ${id} so a drain knows the catalog's current contents`);
     }
-    assert.match(text, /tier is still 'unknown'/, 'freshly-bootstrapped entries all carry tier \'unknown\' — the item must call that out as the concrete lookup to do');
+    assert.doesNotMatch(text, /look these up|tier is still/, "tier 'unknown' is valid unset metadata (decision model-catalog-unknown-tier-is-valid-unset-metadata, GitHub #240/#246): the item must not ask for a tier lookup no source can answer");
+    assert.match(text, /valid unset metadata/, 'text says an unknown tier is to be left alone');
+    assert.match(text, /label, not a file/, 'text says the synthetic catalog location is not a file');
     assert.match(text, /resolves/, 'text tells the drain how to close the item (cite it in resolves on the write)');
   } finally {
     store.close();
