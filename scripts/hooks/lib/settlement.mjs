@@ -423,9 +423,10 @@ function changedSince(root, base) {
  * so they are not this session's edits. The HEAD reflog tells a fast-forward
  * (subject "merge <x>: Fast-forward" or "pull...: Fast-forward") from a commit,
  * checkout, reset or rebase; every other move counts as the session's own, and a
- * path a non-fast-forward move or the working tree also changed is not
- * returned. An empty set when the reflog cannot reach `base` (expired or
- * unreadable): nothing is excluded, so the answer errs toward minting.
+ * path a non-fast-forward move (a commit, checkout, rebase) or the working tree
+ * also changed is not returned, and the reflog is scanned from the oldest
+ * entry at `base`, so a return to `base` cannot hide session commits. An empty set when the reflog cannot reach
+ * `base` (expired or unreadable): nothing is excluded, so the answer errs toward minting.
  */
 function fastForwardedPaths(root, base) {
   const r = spawnSync('git', ['reflog', 'show', '--format=%H%x09%gs', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
@@ -434,7 +435,9 @@ function fastForwardedPaths(root, base) {
     const [sha, subject = ''] = l.split('\t');
     return { sha, subject };
   });
-  const at = entries.findIndex((e) => e.sha === base);
+  // The OLDEST reflog entry at the settled sha: a session that returns to it (checkout of the
+  // settled commit, then a fast-forward onto its own branch) must not hide its commits.
+  const at = entries.findLastIndex((e) => e.sha === base);
   if (at <= 0) return new Set();
   const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
   if (!moves.some((m) => m.ff)) return new Set();
