@@ -15,6 +15,7 @@ import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf, WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
+import { missingRouteRemedy, routeAvailability } from './overpass.mjs';
 
 /**
  * Whether this plugin runs inside the maintenance worker's own `opencode run`
@@ -64,7 +65,8 @@ export const NO_RUNNER_TEXT =
 /**
  * `launchWorkerFor(root, at)`: launch the worker for `root`. `claudeOnPath`,
  * `opencodeBin`, `launchWorker`, `nodeOnPath`, `execPath` and `spawnImpl`
- * default to the real ones (tests inject them).
+ * default to the real ones (tests inject them). `inventoryFor(root)` is OpenCode's model
+ * list as read for this launch (overpass.mjs readInventory), or null when none was read.
  */
 export function createWorkerLaunch({
   openStore,
@@ -74,8 +76,11 @@ export function createWorkerLaunch({
   nodeOnPath = nodeOnPathDefault,
   execPath = process.execPath,
   spawnImpl = spawn,
+  inventoryFor = () => null,
 }) {
   const skipReported = new Set();
+  // Per root, the missing-route notice last given, so it is given once per distinct cause.
+  const missingReported = new Map();
   function skipOnce(root, at, logText, noticeText) {
     if (skipReported.has(root)) return;
     skipReported.add(root);
@@ -112,6 +117,23 @@ export function createWorkerLaunch({
     if (!ocBin && tierModel) {
       skipOnce(root, at, 'maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through', OVERPASS_NO_RUNNER_TEXT);
       return;
+    }
+    // The availability check (overpass.mjs readInventory): a worker route OpenCode does not
+    // list is not launched, with one notice per distinct cause until the route loads again;
+    // a list that was not read, or could not be, launches unchecked and says so in the log.
+    if (tierModel) {
+      const route = routeAvailability(inventoryFor(root) ?? { state: 'unknown', why: 'no model list was read for this launch' }, tierModel);
+      if (route.state === 'missing') {
+        const text = `Sterling: the maintenance worker did not run: Overpass is ON but its route ${tierModel} for the maintenance worker is not available: ${route.why}. It is not run on a direct provider instead. ${missingRouteRemedy(tierModel.slice(0, tierModel.indexOf('/')), { bypass: false })} The next settlement checks again.`;
+        if (missingReported.get(root) !== text) {
+          missingReported.set(root, text);
+          logLine(root, `maintenance worker skipped: Overpass route ${tierModel} is not available: ${route.why}`);
+          addNotice(root, text, at);
+        }
+        return;
+      }
+      missingReported.delete(root);
+      if (route.state === 'unknown') logLine(root, `maintenance worker: Overpass availability UNKNOWN (${route.why}); launching on ${tierModel} unchecked`);
     }
     if (!ocBin && !claudeOnPath()) {
       skipOnce(root, at, 'maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)', NO_RUNNER_TEXT);

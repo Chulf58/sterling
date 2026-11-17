@@ -60,7 +60,7 @@
 //   axis.mjs (H20 and H23)                    dispatch.mjs (H22 and the root-session gate)
 //   config.mjs (registration), sync.mjs (post-update sync), store-guard.mjs (the store guard)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
-import { createAxisHandlers } from './axis.mjs';
+import { MODEL_LIST_TIMEOUT_MS, boundedModelList, createAxisHandlers } from './axis.mjs';
 import { createCompactionHandler } from './compaction.mjs';
 import { createBootstrapHandler, createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
@@ -74,7 +74,7 @@ import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { modelListItems } from './dispatch-model.mjs';
-import { convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, requestEffort, workerRequestEffort } from './overpass.mjs';
+import { availabilityLine, availableAgainLine, convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, readInventory, requestEffort, workerRequestEffort } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
@@ -129,7 +129,9 @@ function sameDirectory(a, b) {
  * project stores outright) or projectStores (a createProjectStores() result), now(),
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
  * configure(ctx), bootstrap(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
- * env (process.env for the worker-child check and sync.mjs), and opencodeSystemDir and
+ * env (process.env for the worker-child check and sync.mjs), opencodeBin() (the OpenCode binary
+ * the worker runs through), modelListTimeoutMs (how long a read of OpenCode's model list may
+ * take, default MODEL_LIST_TIMEOUT_MS), and opencodeSystemDir and
  * opencodeManagedPrefs (the OpenCode system config dir and macOS managed-preference paths the
  * session-move guard reads; default the platform's own).
  *
@@ -228,7 +230,11 @@ export function createSterlingServer(deps = {}) {
     }
   }
 
-  const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
+  const modelListTimeoutMs = deps.modelListTimeoutMs ?? MODEL_LIST_TIMEOUT_MS;
+  // Per store root, OpenCode's model list read for the settlement now running, for the
+  // worker launch's availability check; set just before that settlement and removed after it.
+  const workerInventory = new Map();
+  const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker, opencodeBin: deps.opencodeBin, inventoryFor: (root) => workerInventory.get(root) ?? null });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
   const configure = deps.configure ?? createConfigHandler(deps);
@@ -329,7 +335,9 @@ export function createSterlingServer(deps = {}) {
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     // OpenCode's model list as an array: ctx.model.list() returns { location, data } (modelListItems).
     const listModels = async () => modelListItems(await models?.list?.());
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels, modelListTimeoutMs });
+    /** OpenCode's model list read now, for the Overpass availability check (overpass.mjs readInventory). */
+    const readModelInventory = async () => readInventory(await boundedModelList(listModels, modelListTimeoutMs));
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     /** { agent, directory } of session `sessionID`, from session.get (throws when it cannot be read). */
@@ -436,6 +444,52 @@ export function createSterlingServer(deps = {}) {
       const seen = res && sessionModels.get(input?.sessionID);
       const notice = seen ? mismatchNotice(res, seen.agent, seen.model) : '';
       if (notice && typeof input?.prompt?.text === 'string') input.prompt.text = `${input.prompt.text}\n\n${notice}`;
+      let availability = '';
+      await fenced('overpass', root, async () => {
+        availability = await availabilityNotice(root, res, input?.sessionID);
+      });
+      if (availability && typeof input?.prompt?.text === 'string') input.prompt.text = `${input.prompt.text}\n\n${availability}`;
+    }
+    // Per session, the Overpass availability line it was last given ('' for none), and the
+    // line last logged at this location, so each is said once per change (bounded).
+    const availabilityShown = new Map();
+    let availabilityLogged = '';
+    /**
+     * The Overpass availability line for session `sessionID`'s prompt, or '': the missing or
+     * UNKNOWN line when it differs from the one the session was last given, the
+     * available-again line when every route loaded since. Read fresh each prompt, so a
+     * session is told at its start and recovery needs no reset. Never while Overpass is not
+     * effective (`res` null or not effective), which also forgets what the session was told.
+     */
+    async function availabilityNotice(root, res, sessionID) {
+      if (typeof sessionID !== 'string' || !sessionID) return '';
+      if (!res?.effective) {
+        availabilityShown.delete(sessionID);
+        return '';
+      }
+      const line = availabilityLine(res, await readModelInventory());
+      if (line !== availabilityLogged) {
+        availabilityLogged = line;
+        logLine(root, `overpass: ${line || 'every routed tier model is listed by OpenCode'}`);
+      }
+      const prev = availabilityShown.get(sessionID) ?? '';
+      if (line === prev) return '';
+      remember(availabilityShown, sessionID, line);
+      return line || availableAgainLine(res);
+    }
+    /**
+     * OpenCode's model list for the maintenance worker launch that settlement `root` may
+     * make, or null while Overpass is not effective there. An unreadable config or invalid
+     * overpass block gives null too: the launch resolves the setting itself and reports that.
+     */
+    async function workerRouteInventory(root) {
+      let read;
+      try {
+        read = dispatchOverpass(root);
+      } catch {
+        return null;
+      }
+      return read.res?.effective ? readModelInventory() : null;
     }
     // Which dispatch each child session came from, for the per-role effort (overpass.mjs).
     const laneDispatches = createLaneDispatches();
@@ -571,7 +625,17 @@ export function createSterlingServer(deps = {}) {
       });
       if (!gate.settle || !succeeded) return;
       resetStatus(root);
-      await fenced('settle', root, () => settle(root));
+      // The worker launch at the end of settlement checks its Overpass route against the model list read here.
+      const storeRoot = storeRootFor(root);
+      await fenced('settle', root, async () => {
+        const inventory = await workerRouteInventory(root);
+        if (inventory) workerInventory.set(storeRoot, inventory);
+      });
+      try {
+        await fenced('settle', root, () => settle(root));
+      } finally {
+        workerInventory.delete(storeRoot);
+      }
       await fenced('settle', root, () => prLoopNotice(root));
     }
 

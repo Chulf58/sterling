@@ -30,7 +30,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { OVERPASS_EFFORTS, OverpassUnknownRoleError, resolveOverpass } from '@sterling/schemas';
+import { MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OverpassUnknownRoleError, resolveOverpass } from '@sterling/schemas';
 import { WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV } from '../../../scripts/hooks/lib/maintenance-worker-opencode.mjs';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, sterlingRootFrom, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
@@ -151,6 +151,106 @@ export function dispatchPin(res, args) {
     model: lane,
     line: replaced ? `OVERPASS: this dispatch ran on ${lane}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null,
   };
+}
+
+// The availability check (GitHub #257, #258, #281; user-ruled 2026-11-17 "Check and refuse
+// loudly"). INVARIANT: while Overpass is effective, a routed tier model `<provider>/<tier>`
+// counts as available only when OpenCode's model list (ctx.model.list(), read at the moment
+// of the check) has an entry with that providerID and that id. A route the list lacks is
+// MISSING: a dispatch to it is refused before it starts, a worker launch on it is skipped,
+// and the session is told; nothing is moved to a direct provider (decision
+// overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice).
+// A list that times out, fails, is not a list or holds no model at all is UNKNOWN (an
+// empty list is one OpenCode has not filled yet: the session that asks runs on a model),
+// and UNKNOWN never refuses: the dispatch goes to its tier unchecked and says so. Nothing
+// is remembered between checks, so a route that loads is allowed at the next check.
+// NOT GUARANTEED: a listed model can still fail at request time (a key rejected after the
+// list was filled, a gateway outage), and OpenCode then reports it as before. The
+// maintenance worker's child disables the project's OpenCode config, so a provider defined
+// only there is listed for the parent but not loaded in the child; the parent's list is
+// the only one checked. A list read before the gateway plugin has registered its provider
+// reads as missing for that one check; the next check reads it again.
+
+/**
+ * OpenCode's model list for the availability check: { state: 'listed', providers } (a Map
+ * of providerID to the Set of its model ids) or { state: 'unknown', why }. `list` and
+ * `error` are boundedModelList's result, the list already through modelListItems.
+ */
+export function readInventory({ list, error } = {}) {
+  if (error) return { state: 'unknown', why: `OpenCode's model list could not be read (${error?.message ?? error})` };
+  if (!Array.isArray(list)) return { state: 'unknown', why: "OpenCode's model list could not be read (it is not a list)" };
+  const providers = new Map();
+  for (const m of list) {
+    if (typeof m?.providerID !== 'string' || !m.providerID) continue;
+    const ids = [m.id, m.modelID].filter((v) => typeof v === 'string' && v);
+    if (!ids.length) continue;
+    if (!providers.has(m.providerID)) providers.set(m.providerID, new Set());
+    for (const id of ids) providers.get(m.providerID).add(id);
+  }
+  if (!providers.size) return { state: 'unknown', why: "OpenCode's model list lists no model at all, so OpenCode has not filled it yet" };
+  return { state: 'listed', providers };
+}
+
+/** Whether route `ref` (`<provider>/<tier>`) is in inventory `inv` (readInventory): { state: 'available' | 'missing' | 'unknown', why? }. */
+export function routeAvailability(inv, ref) {
+  if (inv?.state !== 'listed') return { state: 'unknown', why: inv?.why ?? 'no model list was read' };
+  const slash = ref.indexOf('/');
+  const provider = ref.slice(0, slash);
+  const tier = ref.slice(slash + 1);
+  const ids = inv.providers.get(provider);
+  if (!ids) return { state: 'missing', why: `OpenCode lists no model from the provider '${provider}' (it is not loaded, or its gateway rejected the credential and dropped its models)` };
+  if (!ids.has(tier)) return { state: 'missing', why: `the provider '${provider}' is loaded, but OpenCode lists no tier '${tier}' on it (it lists ${[...ids].sort().join(', ')})` };
+  return { state: 'available' };
+}
+
+/** The fix steps for a missing route; `bypass` adds the per-dispatch OVERPASS-BYPASS way out. */
+export function missingRouteRemedy(provider, { bypass = true } = {}) {
+  return (
+    `To fix: check the ${provider} credential (the gateway drops its models when it rejects the key), then run /reload in the TUI (or \`opencode reload\`) so OpenCode loads the provider again;` +
+    (bypass ? ' or put a line "OVERPASS-BYPASS: <reason>" in the brief and name a loaded model on the call;' : '') +
+    ' or turn Overpass off with "overpass": {"enabled": false} in .sterling/config.json (TUI System tab).'
+  );
+}
+
+/** The message a dispatch to a missing route is refused with. */
+export function missingRouteRefusal(res, agent, model, why) {
+  return `Sterling refused this subagent dispatch: Overpass is ON but its route ${model} for ${agent || 'this agent'} is not available: ${why}. Nothing was sent, and the dispatch is not moved to a direct provider. ${missingRouteRemedy(res.provider)} Then dispatch again.`;
+}
+
+/** The line a dispatch carries when the availability of its route is UNKNOWN. */
+export function unknownRouteLine(model, why) {
+  return `OVERPASS: Overpass availability UNKNOWN: ${why}; this dispatch was sent to ${model} unchecked, and OpenCode reports it if that model is not loaded.`;
+}
+
+/** Each distinct routed model while Overpass is effective, with who runs on it: [{ model, users }]. */
+export function overpassRoutes(res) {
+  const byModel = new Map();
+  const add = (model, user) => {
+    if (!byModel.has(model)) byModel.set(model, []);
+    byModel.get(model).push(user);
+  };
+  if (res.conductorRouted) add(res.conductorModel, 'the conductor');
+  for (const [role, route] of Object.entries(res.roles ?? {})) add(route.model, role === MAINTENANCE_WORKER_ROLE ? 'the maintenance worker' : role);
+  add(res.laneModel, 'Plan and other agents');
+  return [...byModel].map(([model, users]) => ({ model, users }));
+}
+
+/** The session line for inventory `inv` while Overpass is effective: '' when every route is available. */
+export function availabilityLine(res, inv) {
+  if (!res?.effective) return '';
+  if (inv?.state !== 'listed') {
+    return `STERLING OVERPASS: Overpass ON, availability UNKNOWN: ${inv?.why ?? 'no model list was read'}, so whether the routed tier models are loaded is not known. Dispatches still go to their tier models unchecked (OpenCode reports one that is not loaded); this is checked again at the next prompt and dispatch.`;
+  }
+  const missing = overpassRoutes(res)
+    .map((r) => ({ ...r, ...routeAvailability(inv, r.model) }))
+    .filter((r) => r.state === 'missing');
+  if (!missing.length) return '';
+  return `STERLING OVERPASS: Overpass ON but not available: ${missing.map((r) => `${r.model} (${r.users.join(', ')}): ${r.why}`).join('; ')}. A subagent dispatch to a missing route is refused before it starts and the maintenance worker does not launch on one; nothing falls back to a direct provider. ${missingRouteRemedy(res.provider)}`;
+}
+
+/** The session line once every route is available again after a missing or UNKNOWN line. */
+export function availableAgainLine(res) {
+  return `STERLING OVERPASS: Overpass is available again: every routed tier model is loaded (${overpassRoutes(res).map((r) => r.model).join(', ')}).`;
 }
 
 /**
