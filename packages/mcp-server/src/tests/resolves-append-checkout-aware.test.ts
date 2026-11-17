@@ -97,3 +97,37 @@ test('an article whose working_tree is neither the project root nor the checkout
     f.cleanup();
   }
 });
+
+// The resolvers take the working_trees map they are handed (the worker fence
+// passes the on-disk map), so a mapping removed from disk while the server's
+// cached config still has it must read as unmapped, never as the checkout.
+type Resolvers = {
+  authoritativeTreeFor(r: Record<string, unknown>, wts?: Record<string, string>): { root?: string; unresolved: boolean };
+  treeRootFor(r: Record<string, unknown>, wts?: Record<string, string>): { root?: string; unresolved: boolean };
+  freshWorkingTrees(): Record<string, string> | undefined;
+};
+
+test('a mapping removed from the supplied map makes the symbolic tree unresolved in both resolvers, though the cached config still maps it', () => {
+  const f = fixture('my-wt');
+  try {
+    const r = f.tools as unknown as Resolvers;
+    const rec = { working_tree: 'my-wt' };
+    assert.equal(r.authoritativeTreeFor(rec).unresolved, false, 'control: cached mapping resolves');
+    assert.equal(r.authoritativeTreeFor(rec, {}).unresolved, true);
+    assert.equal(r.treeRootFor(rec, {}).unresolved, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('the worker fence resolver (authoritativeTreeFor over freshWorkingTrees) sees a checkout mapping removed on disk as unresolved', () => {
+  const f = fixture('my-wt');
+  try {
+    writeFileSync(join(f.main, '.sterling', 'config.json'), '{}');
+    const r = f.tools as unknown as Resolvers;
+    assert.deepEqual(r.freshWorkingTrees() ?? {}, {}, 'disk no longer maps my-wt');
+    assert.equal(r.authoritativeTreeFor({ working_tree: 'my-wt' }, r.freshWorkingTrees()).unresolved, true);
+  } finally {
+    f.cleanup();
+  }
+});

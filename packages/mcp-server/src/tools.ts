@@ -2374,7 +2374,7 @@ export class SterlingTools {
     const tree = this.treeRootFor(record, workingTrees);
     if (tree.unresolved) return tree;
     const name = (record as { working_tree?: string }).working_tree;
-    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name))) return { root: this.repoRoot, unresolved: false };
+    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name, workingTrees))) return { root: this.repoRoot, unresolved: false };
     return tree;
   }
 
@@ -2396,7 +2396,7 @@ export class SterlingTools {
     if (!name) return { root: this.checkoutRoot, unresolved: false };
     const mapped = workingTrees?.[name];
     if (!mapped) {
-      if (!this.declaresForeignTree(name)) return { root: this.checkoutRoot, unresolved: false };
+      if (!this.declaresForeignTree(name, workingTrees)) return { root: this.checkoutRoot, unresolved: false };
       return { root: undefined, unresolved: true };
     }
     // HOST-INDEPENDENT classification (decision windows-linux-parity):
