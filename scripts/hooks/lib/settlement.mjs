@@ -417,6 +417,34 @@ function changedSince(root, base) {
   ]);
 }
 
+/**
+ * Paths that reached HEAD only through fast-forward moves (`git merge --ff-only`,
+ * `git pull`) since `base`, GitHub #279: those commits were authored elsewhere,
+ * so they are not this session's edits. The HEAD reflog tells a fast-forward
+ * (subject "merge <x>: Fast-forward" or "pull...: Fast-forward") from a commit,
+ * checkout, reset or rebase; every other move counts as the session's own, and a
+ * path a non-fast-forward move or the working tree also changed is not
+ * returned. An empty set when the reflog cannot reach `base` (expired or
+ * unreadable): nothing is excluded, so the answer errs toward minting.
+ */
+function fastForwardedPaths(root, base) {
+  const r = spawnSync('git', ['reflog', 'show', '--format=%H%x09%gs', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) return new Set();
+  const entries = r.stdout.split('\n').filter(Boolean).map((l) => {
+    const [sha, subject = ''] = l.split('\t');
+    return { sha, subject };
+  });
+  const at = entries.findIndex((e) => e.sha === base);
+  if (at <= 0) return new Set();
+  const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
+  if (!moves.some((m) => m.ff)) return new Set();
+  const between = (m) => new Set(gitZ(root, ['diff', '--name-only', '-z', '--no-renames', '--relative', m.from, m.to]));
+  const own = new Set();
+  const pulled = new Set();
+  for (const m of moves) for (const p of between(m)) (m.ff ? pulled : own).add(p);
+  return new Set([...pulled].filter((p) => !own.has(p)));
+}
+
 // Sterling's own state (the store and its WAL/SHM, transient cells) changes on
 // every hook fire and is never work — excluded even where a project has not
 // gitignored .sterling/ (init normally does). Register entries are unaffected.
@@ -478,6 +506,13 @@ export function gitTouches(root, now) {
     if (mergeBase) {
       const sinceMergeBase = changedSince(root, mergeBase);
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
+    }
+    if (base && base !== EMPTY_TREE) {
+      const pulled = fastForwardedPaths(root, base);
+      if (pulled.size) {
+        const dirtyHead = changedSince(root, head);
+        fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
+      }
     }
     const pool = new Set([...fromBase, ...Object.keys(settled.dirty)]);
     const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));

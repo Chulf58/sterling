@@ -27214,6 +27214,23 @@ function changedSince(root, base2) {
     ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
   ]);
 }
+function fastForwardedPaths(root, base2) {
+  const r = spawnSync10("git", ["reflog", "show", "--format=%H%x09%gs", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) return /* @__PURE__ */ new Set();
+  const entries = r.stdout.split("\n").filter(Boolean).map((l) => {
+    const [sha, subject = ""] = l.split("	");
+    return { sha, subject };
+  });
+  const at = entries.findIndex((e) => e.sha === base2);
+  if (at <= 0) return /* @__PURE__ */ new Set();
+  const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
+  if (!moves.some((m) => m.ff)) return /* @__PURE__ */ new Set();
+  const between = (m) => new Set(gitZ(root, ["diff", "--name-only", "-z", "--no-renames", "--relative", m.from, m.to]));
+  const own = /* @__PURE__ */ new Set();
+  const pulled = /* @__PURE__ */ new Set();
+  for (const m of moves) for (const p of between(m)) (m.ff ? pulled : own).add(p);
+  return new Set([...pulled].filter((p) => !own.has(p)));
+}
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
@@ -27250,6 +27267,13 @@ function gitTouches(root, now) {
     if (mergeBase) {
       const sinceMergeBase = changedSince(root, mergeBase);
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
+    }
+    if (base2 && base2 !== EMPTY_TREE) {
+      const pulled = fastForwardedPaths(root, base2);
+      if (pulled.size) {
+        const dirtyHead = changedSince(root, head);
+        fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
+      }
     }
     const pool = /* @__PURE__ */ new Set([...fromBase, ...Object.keys(settled.dirty)]);
     const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
