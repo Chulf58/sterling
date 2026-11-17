@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HELPER = join(root, 'scripts', 'pr-review-wait.mjs');
@@ -63,9 +63,22 @@ import { join } from 'node:path';
 const state = process.env.FAKE_GH_STATE;
 const argv = process.argv.slice(2);
 appendFileSync(join(state, 'log.jsonl'), JSON.stringify(argv) + '\\n');
+// clock_jump_at holds "<kind>:<n>": serving call n (0-based) of that kind
+// creates clock_jumped, which the helper's clock preload reads (see clockArgs).
+function jumpClock(kind, n) {
+  const at = join(state, 'clock_jump_at');
+  if (existsSync(at) && readFileSync(at, 'utf8') === kind + ':' + n) writeFileSync(join(state, 'clock_jumped'), '');
+}
 if (argv[0] !== 'api') { console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3); }
 const VALUED = new Set(['--hostname', '--jq', '-f', '-F']);
 const path = argv.filter((a, i) => i > 0 && !a.startsWith('-') && !VALUED.has(argv[i - 1])).pop();
+if (path === 'rate_limit') {
+  if (existsSync(join(state, 'rate_limit_delay_ms'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(readFileSync(join(state, 'rate_limit_delay_ms'), 'utf8')));
+  const inFile = join(state, 'rate_limit_reset_in');
+  const reset = Math.ceil(Date.now() / 1000) + (existsSync(inFile) ? Number(readFileSync(inFile, 'utf8')) : 0);
+  process.stdout.write(JSON.stringify({ resources: { core: { limit: 5000, remaining: existsSync(inFile) ? 0 : 5000, reset } } }));
+  process.exit(0);
+}
 if (path === 'graphql') {
   const q = (argv.find((a) => a.startsWith('query=')) ?? '');
   if (q.includes('resolveReviewThread')) {
@@ -95,6 +108,7 @@ if (path === 'graphql') {
     const countFile = join(state, 'count_merge');
     const n = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
     writeFileSync(countFile, String(n + 1));
+    jumpClock('merge', n);
     const delays = existsSync(join(state, 'merge_delay.json')) ? JSON.parse(readFileSync(join(state, 'merge_delay.json'), 'utf8')) : [];
     if (delays.length) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[Math.min(n, delays.length - 1)]);
     const file = join(state, 'merge_pages.json');
@@ -105,6 +119,38 @@ if (path === 'graphql') {
   if (existsSync(join(state, 'fail_graphql'))) { console.error('gh: GraphQL: Could not resolve to a Bot (requestReviewsByLogin)'); process.exit(1); }
   const gql = join(state, 'graphql.json');
   process.stdout.write(existsSync(gql) ? readFileSync(gql, 'utf8') : '{"data":{"requestReviewsByLogin":{"pullRequest":{"id":"PR_node_7"}}}}');
+  process.exit(0);
+}
+// Merge evidence of a clean settle: <kind>.json answers (default: green
+// evidence), fail_<kind> exits 1 with its content on stderr. <kind>.<k>.json,
+// when present, answers once k earlier calls of that kind were made (the
+// highest such k wins), so a check can appear during the settle's wait.
+// <kind>_delay.json (an array of ms per call of that kind) delays an answer.
+const EVIDENCE = [
+  ['repos/acme/widget/rules/branches/', 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }] } }]],
+  ['repos/acme/widget/branches/', 'protection', null],
+  ['repos/acme/widget/compare/', 'compare', { status: 'ahead', ahead_by: 1, behind_by: 0 }],
+  ['repos/acme/widget/actions/runs?', 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: '${HEAD}' }] }],
+];
+let evidence = EVIDENCE.find(([prefix]) => path.startsWith(prefix));
+if (path.startsWith('repos/acme/widget/commits/')) evidence = path.includes('/check-runs') ? ['', 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }] }] : ['', 'statuses', { state: 'pending', total_count: 0, statuses: [] }];
+if (evidence) {
+  const [, kind, dflt] = evidence;
+  if (existsSync(join(state, 'fail_' + kind))) {
+    // gh api prints an HTTP error's JSON body on stdout and its message on stderr.
+    if (existsSync(join(state, 'fail_' + kind + '.body'))) process.stdout.write(readFileSync(join(state, 'fail_' + kind + '.body'), 'utf8'));
+    console.error(readFileSync(join(state, 'fail_' + kind), 'utf8')); process.exit(1);
+  }
+  const evCount = join(state, 'count_ev_' + kind);
+  const seenEv = existsSync(evCount) ? Number(readFileSync(evCount, 'utf8')) : 0;
+  writeFileSync(evCount, String(seenEv + 1));
+  jumpClock(kind, seenEv);
+  const evDelays = existsSync(join(state, kind + '_delay.json')) ? JSON.parse(readFileSync(join(state, kind + '_delay.json'), 'utf8')) : [];
+  if (evDelays[seenEv]) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, evDelays[seenEv]);
+  let file = join(state, kind + '.json');
+  for (let k = 0; k <= seenEv; k++) if (existsSync(join(state, kind + '.' + k + '.json'))) file = join(state, kind + '.' + k + '.json');
+  if (!existsSync(file) && dflt === null) { process.stdout.write('{"message":"Branch not protected","documentation_url":"https://docs.github.com/rest/branches/branch-protection","status":"404"}'); console.error('gh: Branch not protected (HTTP 404)'); process.exit(1); }
+  process.stdout.write(existsSync(file) ? readFileSync(file, 'utf8') : JSON.stringify(dflt));
   process.exit(0);
 }
 const one = path.match(/^repos\\/acme\\/widget\\/pulls\\/\\d+\\/reviews\\/(\\d+)$/);
@@ -119,6 +165,16 @@ const m = path.match(/^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)(?:\\/(reviews|
 if (!m) { console.error('fake gh: unexpected path ' + path); process.exit(3); }
 if (m[1] + '/' + m[2] !== 'acme/widget') { console.error('gh: Not Found (HTTP 404)'); process.exit(1); }
 const endpoint = m[4] ?? 'pull';
+// rate_limited_first holds N: the first N calls to the pull endpoint fail with GitHub's rate-limit message.
+const rlFile = join(state, 'rate_limited_first');
+if (endpoint === 'pull' && existsSync(rlFile)) {
+  const rlCount = join(state, 'count_rate_limited');
+  const seen = existsSync(rlCount) ? Number(readFileSync(rlCount, 'utf8')) : 0;
+  if (seen < Number(readFileSync(rlFile, 'utf8'))) {
+    writeFileSync(rlCount, String(seen + 1));
+    console.error('gh: API rate limit exceeded for user ID 1. (HTTP 403)'); process.exit(1);
+  }
+}
 if (existsSync(join(state, 'delay_ms'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(readFileSync(join(state, 'delay_ms'), 'utf8')));
 if (existsSync(join(state, 'fail_' + endpoint))) { console.error('gh: Server Error (HTTP 502)'); process.exit(1); }
 const countFile = join(state, 'count_' + endpoint);
@@ -154,13 +210,22 @@ function makeFixture({ originUrl = 'git@github.com:acme/widget.git' } = {}) {
   writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${impl}" "$@"\n`);
   chmodSync(shim, 0o755);
   const put = (endpoint, k, pages) => writeFileSync(join(state, `${endpoint}.${k}.json`), JSON.stringify(pages));
-  put('pull', 0, [{ number: 7, head: { sha: HEAD } }]);
+  put('pull', 0, [{ number: 7, head: { sha: HEAD }, base: { ref: 'main' } }]);
   return { base, dir, state, bin, put, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 
-function run(f, args, { timeout = 30_000 } = {}) {
+// A FROZEN clock for the helper (node --import): Date.now() is a constant
+// until clock_jumped exists, then exactly that constant plus jumpMs. With
+// --checks-timeout jumpMs/1000 the settle's clock lands EXACTLY on its deadline.
+function clockArgs(f, jumpMs) {
+  const preload = join(f.base, 'clock.mjs');
+  writeFileSync(preload, `import { existsSync } from 'node:fs';\nconst C0 = 1800000000000;\nDate.now = () => (existsSync(${JSON.stringify(join(f.state, 'clock_jumped'))}) ? C0 + ${jumpMs} : C0);\n`);
+  return ['--import', pathToFileURL(preload).href];
+}
+
+function run(f, args, { timeout = 30_000, nodeArgs = [] } = {}) {
   const started = Date.now();
-  const r = spawnSync(process.execPath, [HELPER, ...args], {
+  const r = spawnSync(process.execPath, [...nodeArgs, HELPER, ...args], {
     cwd: f.dir,
     encoding: 'utf8',
     timeout,
@@ -219,7 +284,45 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       body_findings_without_comments: false,
       copilot_request: null,
       copilot_review_pending: true,
+      stale_reviews: [], // added for GitHub #300; empty without --head
+      next_since_review: 101, // added by the Sol review of #300: the watermark the skill passes next
     });
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol review, HIGH 3 (#300 watermark): head reviews 101 and 102, then a late
+// review 103 of an old head. The first call returns 101 with 103 stale; the
+// highest id returned is 103, and jumping there would skip 102. next_since_review
+// is 101, so the next call returns 102.
+test('#300 watermark: with head reviews 101, 102 and a late old-head review 103, next_since_review never skips 102', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101), review(102), review(103, { commit: OLD_HEAD })]]);
+    const first = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    assert.equal(first.out?.status, 'review', oneLine(first.stdout + first.stderr));
+    assert.equal(first.out.review.id, 101);
+    assert.deepEqual(first.out.stale_reviews.map((x) => x.id), [103]);
+    assert.equal(first.out.next_since_review, 101, 'not 103: review 102 is not returned yet');
+    const second = run(f, ['7', '--since-review', String(first.out.next_since_review), '--head', HEAD, ...FAST]);
+    assert.equal(second.out?.review?.id, 102, oneLine(second.stdout + second.stderr));
+    assert.deepEqual(second.out.stale_reviews.map((x) => x.id), [103]);
+    assert.equal(second.out.next_since_review, 103, 'everything up to 103 is returned now');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#300 watermark: a timeout that lists only stale reviews advances past them; with nothing unconsumed it keeps --since-review', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101, { commit: OLD_HEAD })]]);
+    const r = run(f, ['7', '--since-review', '100', '--head', HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out?.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.next_since_review, 101);
+    const g = run(f, ['7', '--since-review', '101', '--head', HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(g.out.next_since_review, 101);
   } finally {
     f.cleanup();
   }
@@ -285,22 +388,71 @@ test('awaiting_head_review (GitHub issue #162): true only for a stale review whi
   }
 });
 
-test('issue #80: after a push, a review of the PREVIOUS head that lands late is returned before the new head is waited on; the new-head review comes once it is consumed', () => {
+test('issue #80 without --head: after a push, a review of the PREVIOUS head that lands late is returned before the new head is waited on; the new-head review comes once it is consumed', () => {
   const f = makeFixture();
   try {
     // 100 was consumed on OLD_HEAD; the fix pushed HEAD; 101 (started before
     // the push) lands on OLD_HEAD with findings; 102 later reviews HEAD.
     f.put('reviews', 0, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD }), review(102)]]);
     f.put('comments', 0, [[comment(1, 100), comment(2, 101), comment(3, 101), comment(4, 102)]]);
-    const late = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    const late = run(f, ['7', '--since-review', '100', ...FAST]);
     assert.equal(late.code, 0, oneLine(late.stdout + late.stderr));
     assert.equal(late.out.review.id, 101, 'the older-head review comes first, never skipped');
     assert.equal(late.out.stale_review, true);
     assert.deepEqual(late.out.comments.map((c) => c.id), [2, 3]);
-    const next = run(f, ['7', '--since-review', '101', '--head', HEAD, ...FAST]);
+    const next = run(f, ['7', '--since-review', '101', ...FAST]);
     assert.equal(next.out.review.id, 102);
     assert.equal(next.out.stale_review, false, 'a review of the current, expected head');
     assert.deepEqual(next.out.comments.map((c) => c.id), [4]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('GitHub #300/#296/#224: with --head, an unconsumed OLD-head review is held as stale and the wait returns the head review in ONE call, listing the stale one', () => {
+  const f = makeFixture();
+  try {
+    // 101 reviews OLD_HEAD and is unconsumed; 102 reviews HEAD and lands on the second poll.
+    f.put('reviews', 0, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD })]]);
+    f.put('reviews', 2, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD }), review(102)]]);
+    f.put('comments', 0, [[comment(2, 101), comment(3, 101), comment(4, 102)]]);
+    const r = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.review.id, 102, 'the head review, not the older-head one');
+    assert.equal(r.out.stale_review, false);
+    assert.deepEqual(r.out.comments.map((c) => c.id), [4]);
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [101], 'the stale review is reported, never skipped');
+    assert.equal(r.out.stale_reviews[0].commit_id, OLD_HEAD);
+    assert.deepEqual(r.out.stale_reviews[0].comments.map((c) => c.id), [2, 3]);
+    assert.ok(reviewReads(f) >= 2, 'it kept waiting past the stale review');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('GitHub #300: with --head and only an old-head review, a pending request keeps the wait going until the timeout, which still reports the stale review', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101, { commit: OLD_HEAD })]]);
+    const r = run(f, ['7', '--head', HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review, null);
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [101]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('GitHub #300: with --head, an old-head review and NO pending request ends no_review_requested (the head review will never come), listing the stale review', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+    f.put('reviews', 0, [[review(101, { commit: OLD_HEAD })]]);
+    const r = run(f, ['7', '--head', HEAD, '--recheck-delay', '0', ...FAST]);
+    assert.equal(r.code, 3, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'no_review_requested');
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [101]);
   } finally {
     f.cleanup();
   }
@@ -386,8 +538,11 @@ test('no_review_requested: a consumed current-head review with no request pendin
     assert.equal(consumed.out.status, 'no_review_requested');
     assert.match(consumed.out.error, /--since-review 500/);
     writeFileSync(join(f.state, 'fail_graphql'), '');
+    // A failed --request-copilot now ends the call as an error before any poll (GitHub #300):
+    // it no longer falls through to no_review_requested.
     const failed = run(f, ['7', '--since-review', '500', '--request-copilot', '--recheck-delay', '0', ...FAST]);
-    assert.equal(failed.code, 3, oneLine(failed.stdout + failed.stderr));
+    assert.equal(failed.code, 1, oneLine(failed.stdout + failed.stderr));
+    assert.equal(failed.out.status, 'error');
     assert.equal(failed.out.copilot_request.requested, false);
   } finally {
     f.cleanup();
@@ -487,14 +642,17 @@ test('--since-review: a Copilot review at or below the consumed id is not new; t
   }
 });
 
-test('--head: a review of the PR head is not taken as CURRENT while the PR head is not yet the expected pushed SHA; it comes back stale', () => {
+// Changed for GitHub #300 (hold for head): with --head, a review that is not of the
+// expected head is no longer RETURNED as the review; it is held in stale_reviews and
+// the wait goes on (here to its short timeout). The case without --head stays pinned above.
+test('--head: a review of the PR head is not taken as CURRENT while the PR head is not yet the expected pushed SHA; it is held as stale and the wait times out', () => {
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(600)]]);
-    const r = run(f, ['7', '--head', OLD_HEAD, ...FAST]);
-    assert.equal(r.out.status, 'review', oneLine(r.stdout + r.stderr));
-    assert.equal(r.out.review.id, 600);
-    assert.equal(r.out.stale_review, true, 'not a review of the expected head');
+    const r = run(f, ['7', '--head', OLD_HEAD, '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review, null);
+    assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [600], 'not a review of the expected head');
     assert.equal(r.out.head_sha, HEAD, 'head_sha reports what GitHub says the head is');
   } finally {
     f.cleanup();
@@ -674,6 +832,17 @@ function arm(f, over = {}) {
   return state;
 }
 
+// The REST reads of a clean settle's merge evidence for HEAD on base 'main', in order.
+const EVIDENCE_READS = [
+  'repos/acme/widget/pulls/7',
+  'repos/acme/widget/rules/branches/main',
+  'repos/acme/widget/branches/main/protection/required_status_checks',
+  `repos/acme/widget/commits/${HEAD}/check-runs?per_page=100`,
+  `repos/acme/widget/commits/${HEAD}/status?per_page=100`,
+  `repos/acme/widget/actions/runs?head_sha=${HEAD}&per_page=100`,
+  `repos/acme/widget/compare/main...${HEAD}`,
+];
+
 for (const outcome of ['clean', 'capped', 'escalated']) {
   test(`--settle ${outcome} --pr 7 writes status ${outcome} on the armed loop (exit 0; ${outcome === 'clean' ? 'one merge-state query' : 'no gh call'})`, () => {
     const f = makeFixture();
@@ -687,9 +856,12 @@ for (const outcome of ['clean', 'capped', 'escalated']) {
       for (const k of ['pr_url', 'pr_number', 'repo', 'head_sha', 'armed_at']) assert.equal(after[k], armed[k]);
       assert.equal(r.out.status, outcome);
       if (outcome === 'clean') {
-        assert.equal(calls(f).length, 2, 'clean asks GitHub for the merge state once, then reads the newest Copilot review body once (issue #204)');
+        // Since decision pr-auto-merge-requires-github-required-checks-as-the-expecte the
+        // clean settle also reads the merge evidence (7 REST reads) after those two.
+        assert.equal(calls(f).length, 2 + EVIDENCE_READS.length, 'clean asks GitHub for the merge state once, reads the newest Copilot review body once (issue #204), then the merge evidence');
         assert.ok(calls(f)[0].some((a) => a.startsWith('query=') && a.includes('mergeStateStatus')));
         assert.ok(calls(f)[1].some((a) => a.endsWith('/pulls/7/reviews/100')));
+        assert.deepEqual(calls(f).slice(2).map((a) => a[a.length - 1]), EVIDENCE_READS);
       } else assert.equal(calls(f).length, 0);
     } finally {
       f.cleanup();
@@ -819,15 +991,18 @@ test('issue #104: --settle settles the named PR\'s loop while other PRs\' loops 
 });
 
 // ------------------------------------------------- --head accepts a short sha
-test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not, so the review comes back stale', () => {
+// Changed for GitHub #300: a short sha that is not a prefix no longer returns the review
+// as stale; with --head it is held in stale_reviews and the wait times out.
+test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not, so the review is held as stale', () => {
   for (const [head, stale] of [[HEAD.slice(0, 7), false], [HEAD.slice(0, 12).toUpperCase(), false], [HEAD, false], ['aaaaaab', true]]) {
     const f = makeFixture();
     try {
       f.put('reviews', 0, [[review(600)]]);
       f.put('comments', 0, [[comment(1, 600)]]);
-      const r = run(f, ['7', '--head', head, ...FAST]);
-      assert.equal(r.out.status, 'review', `${head}: ${oneLine(r.stdout)}`);
-      assert.equal(r.out.stale_review, stale, `${head}: ${oneLine(r.stdout)}`);
+      const r = run(f, ['7', '--head', head, '--interval', '0.05', '--timeout', stale ? '1' : '60']);
+      assert.equal(r.out.status, stale ? 'timeout' : 'review', `${head}: ${oneLine(r.stdout)}`);
+      if (stale) assert.deepEqual(r.out.stale_reviews.map((x) => x.id), [600], head);
+      else assert.equal(r.out.stale_review, false, `${head}: ${oneLine(r.stdout)}`);
     } finally {
       f.cleanup();
     }
@@ -1200,36 +1375,42 @@ test('--request-copilot: without the flag no mutation is fired and copilot_reque
   }
 });
 
-test('--request-copilot: a failing mutation is reported loudly in the output and on stderr, and the wait still completes', () => {
+// Changed for GitHub #300: a failed --request-copilot used to be swallowed (the wait
+// went on and could return a stale review as if the request had worked). It now ends
+// the call at once with status error (exit 1) and polls nothing.
+test('--request-copilot: a failing mutation ends the call with status error (exit 1), on stderr too, before any poll', () => {
   const f = makeFixture();
   try {
     f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
     writeFileSync(join(f.state, 'fail_graphql'), '');
     f.put('reviews', 0, [[review(802)]]);
     const r = run(f, ['7', '--request-copilot', ...FAST]);
-    assert.equal(r.out.status, 'review', 'the wait is not aborted');
-    assert.equal(r.code, 0);
+    assert.equal(r.out.status, 'error', 'the failed request is loud');
+    assert.equal(r.code, 1);
+    assert.equal(r.out.review, null);
     assert.equal(r.out.copilot_request.requested, false);
     assert.match(r.out.copilot_request.error, /requestReviewsByLogin|Could not resolve/);
+    assert.match(r.out.error, /--request-copilot failed/);
     assert.match(r.stderr, /request-copilot/);
+    assert.equal(reviewReads(f), 0, 'no poll after the failed request');
   } finally {
     f.cleanup();
   }
 });
 
-test('--request-copilot: a missing node id (jq prints null) is a recorded failure, no mutation, wait continues; a GraphQL errors payload is a failure too', () => {
+test('--request-copilot: a missing node id (jq prints null) is a failure (status error), no mutation; a GraphQL errors payload is a failure too', () => {
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(803)]]);
     let r = run(f, ['7', '--request-copilot', ...FAST]);
-    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.status, 'error');
     assert.equal(r.out.copilot_request.requested, false);
     assert.match(r.out.copilot_request.error, /node_id/);
     assert.equal(mutationCalls(f).length, 0);
     f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
     writeFileSync(join(f.state, 'graphql.json'), JSON.stringify({ errors: [{ message: 'nope' }] }));
     r = run(f, ['7', '--request-copilot', ...FAST]);
-    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.status, 'error');
     assert.equal(r.out.copilot_request.requested, false);
     assert.match(r.out.copilot_request.error, /nope/);
   } finally {
@@ -1249,6 +1430,10 @@ const gqlReview = (id, commit = HEAD, { login = 'copilot-pull-request-reviewer',
 const PR_FIELDS = { state: 'OPEN', merged: false, headRefOid: HEAD, reviews: { nodes: [gqlReview(100)] } };
 const mergePage = (status, nodes = [], over = {}) => ({ ...PR_FIELDS, mergeStateStatus: status, reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
 const putMerge = (f, pages) => writeFileSync(join(f.state, 'merge_pages.json'), JSON.stringify(pages));
+// A head whose checks finished green. Since GitHub issue #273 a null rollup (no
+// checks on the head) withholds the merge, so a test that expects the merge to be
+// authorized gives its head this rollup.
+const GREEN_ROLLUP = { commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } };
 const mergeCalls = (f) => calls(f).filter((a) => a.some((x) => x.startsWith('query=') && x.includes('reviewThreads')));
 
 test('--settle clean with an unresolved review thread is NOT clean: status blocked, exit 1, the thread named, nothing written', () => {
@@ -1304,7 +1489,7 @@ test('--settle clean: auto_merge is true by default (no config, no key) on a mer
     try {
       if (cfg !== undefined) writeConfig(f, cfg);
       arm(f);
-      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })])]);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
       const r = run(f, ['--settle', 'clean', '--pr', '7']);
       assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
       assert.equal(r.out.auto_merge_on_clean, true, `switch on for ${JSON.stringify(cfg)}`);
@@ -1375,7 +1560,7 @@ test('issue #204 control: a newest Copilot review with an empty or overview-only
     const f = makeFixture();
     try {
       arm(f);
-      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })])]);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
       putReviewBody(f, 100, body);
       const r = run(f, ['--settle', 'clean', '--pr', '7']);
       assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
@@ -1755,7 +1940,9 @@ for (const [rollup, grants] of [['SUCCESS', true], [null, true], ['FAILURE', fal
 // GitHub issue #131: a check that is not required can fail while GitHub
 // reports UNSTABLE, which is mergeable, so the settle printed auto_merge true
 // for a PR with a failing test check.
-for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNSTABLE', 'PENDING', false], ['CLEAN', 'ERROR', false], ['CLEAN', 'EXPECTED', false], ['UNSTABLE', 'SUCCESS', true], ['CLEAN', null, true]]) {
+for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNSTABLE', 'PENDING', false], ['CLEAN', 'ERROR', false], ['CLEAN', 'EXPECTED', false], ['UNSTABLE', 'SUCCESS', true], ['CLEAN', null, false]]) {
+  // CLEAN with a null rollup authorized the merge until GitHub issue #273: a head
+  // whose checks are being re-created by a re-run also reads null, so null withholds now.
   test(`--settle clean (issue #131): ${status} with check rollup ${rollup} settles clean with auto_merge ${autoMerge}${autoMerge ? '' : ', naming the rollup'}`, () => {
     const f = makeFixture();
     try {
@@ -1769,13 +1956,383 @@ for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNS
       assert.equal(r.out.auto_merge_on_clean, true);
       assert.equal(r.out.auto_merge, autoMerge);
       if (autoMerge) assert.equal(r.out.auto_merge_withheld, null);
-      else assert.ok(r.out.auto_merge_withheld.includes(`check rollup is ${rollup}`), r.out.auto_merge_withheld);
+      else assert.ok(r.out.auto_merge_withheld.includes(rollup === null ? 'check rollup null' : `check rollup is ${rollup}`), r.out.auto_merge_withheld);
       assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
     } finally {
       f.cleanup();
     }
   });
 }
+
+// ------------------- merge authorization needs GitHub's required checks (#248, #273, #275)
+// Decision pr-auto-merge-requires-github-required-checks-as-the-expecte: the
+// clean settle authorizes the merge only when the base branch's required checks
+// are present and successful on the head, the head's workflow runs show no
+// failure or unfinished run, and the branch is not behind base. It never merges.
+const putEvidence = (f, kind, value) => writeFileSync(join(f.state, `${kind}.json`), JSON.stringify(value));
+const putEvidenceRaw = (f, kind, text) => writeFileSync(join(f.state, `${kind}.json`), text); // e.g. pages back to back, or not JSON
+const failEvidence = (f, kind, stderr) => writeFileSync(join(f.state, `fail_${kind}`), stderr);
+function settleWith(setup, { rollup = GREEN_ROLLUP } = {}) {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], rollup)]);
+    setup?.(f);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
+    return { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')) };
+  } finally {
+    f.cleanup();
+  }
+}
+function assertWithheld(r, pattern, label) {
+  assert.equal(r.code, 0, `${label}: ${oneLine(r.stdout + r.stderr)}`);
+  assert.equal(r.out.status, 'clean', `${label}: a withheld merge still settles clean`);
+  assert.equal(r.out.auto_merge, false, `${label}: auto_merge`);
+  assert.equal(r.out.merge_authorized, false, `${label}: merge_authorized`);
+  assert.ok(r.out.withheld_reasons.some((x) => pattern.test(x)), `${label}: ${JSON.stringify(r.out.withheld_reasons)}`);
+  assert.equal(r.out.auto_merge_withheld, r.out.withheld_reasons.join('; '), label);
+  assert.match(r.stderr, /merge withheld: /, label);
+  assert.doesNotMatch(r.stderr, /authorized to merge/, label);
+  assert.equal(r.loop.status, 'clean', label);
+}
+
+test('merge authorized: required check present and green on the head, workflow runs succeeded, not behind base — authorized, never "merged"', () => {
+  const r = settleWith(null);
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true);
+  assert.equal(r.out.auto_merge, true, 'auto_merge is kept, the same boolean');
+  assert.deepEqual(r.out.withheld_reasons, []);
+  assert.equal(r.out.auto_merge_withheld, null);
+  assert.deepEqual(r.out.merge_evidence, {
+    base_ref: 'main',
+    required_checks: ['ci'],
+    required_checks_missing: [],
+    required_checks_pending: [], // added with the evidence wait (user-ruled 2026-11-17)
+    required_checks_failing: [],
+    workflow_runs: [{ id: 11, name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1 }],
+    behind_by: 0,
+  });
+  assert.match(r.stderr, new RegExp(`authorized to merge ${HEAD}`));
+  assert.match(r.stderr, /this script does not merge/);
+  assert.doesNotMatch(r.stderr, /\bmerged\b/i, 'the output never reads as a merge that happened');
+});
+
+test('merge authorized: a classic branch-protection context satisfied by a commit status counts as a required check', () => {
+  const r = settleWith((f) => {
+    putEvidence(f, 'rules', []);
+    putEvidence(f, 'protection', { strict: false, contexts: ['ci/legacy'], checks: [{ context: 'ci/legacy', app_id: null }] });
+    putEvidence(f, 'check_runs', { total_count: 0, check_runs: [] });
+    putEvidence(f, 'statuses', { state: 'success', total_count: 1, statuses: [{ id: 21, context: 'ci/legacy', state: 'success' }] });
+  });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.deepEqual(r.out.merge_evidence.required_checks, ['ci/legacy']);
+});
+
+// User-ruled 2026-11-17, "Match GitHub, and wait": a required check passes on
+// success, skipped or neutral, as GitHub branch protection counts it; a required
+// check not reported yet or a workflow run still running is waited for inside
+// the bounded --checks-timeout wait, and withholds only when that wait runs out.
+for (const conclusion of ['skipped', 'neutral']) {
+  test(`a required check that concluded ${conclusion} counts as passing (as GitHub branch protection counts it): authorized`, () => {
+    const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion }] }));
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+    assert.deepEqual(r.out.withheld_reasons, []);
+  });
+}
+for (const conclusion of ['cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure']) {
+  test(`a required check that concluded ${conclusion} withholds the merge at once`, () => {
+    const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion }] }));
+    assertWithheld(r, new RegExp(`required check not successful on the head commit: ci \\(${conclusion}\\)`), conclusion);
+  });
+}
+
+function settleWaiting(setup, waitArgs) {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
+    setup(f);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', ...waitArgs]);
+    return { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')), checkRunReads: calls(f).filter((a) => a[a.length - 1].includes('/check-runs')).length, runReads: calls(f).filter((a) => a[a.length - 1].includes('/actions/runs')).length };
+  } finally {
+    f.cleanup();
+  }
+}
+const ONLY_COPILOT = { total_count: 1, check_runs: [{ id: 3, name: 'Copilot', status: 'completed', conclusion: 'success' }] };
+
+test('a required check that appears during the --checks-timeout wait is waited for: authorized once it passes', () => {
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'check_runs.0', ONLY_COPILOT);
+    putEvidence(f, 'check_runs.2', { total_count: 2, check_runs: [ONLY_COPILOT.check_runs[0], { id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] });
+  }, ['--checks-interval', '0.05', '--checks-timeout', '20']);
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.out.checks_timed_out, false);
+  assert.equal(r.checkRunReads, 3, 'read until the required check appeared');
+  assert.match(r.stderr, /required checks or workflow runs are not finished \(ci not reported\); waiting for the checks to finish/);
+  assert.match(r.stderr, /authorized to merge/);
+});
+
+// "Match GitHub" (user-ruled 2026-11-17): GitHub treats a neutral conclusion as
+// non-failing, so a workflow run that concluded neutral passes like success.
+test('a workflow run that concluded neutral counts as passing (as GitHub counts it): authorized', () => {
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'neutral', run_attempt: 1, head_sha: HEAD }] }));
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.deepEqual(r.out.withheld_reasons, []);
+});
+
+test('a workflow run still in progress is waited for: authorized once it completes green', () => {
+  const run0 = { id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD };
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'workflow_runs.0', { total_count: 1, workflow_runs: [run0] });
+    putEvidence(f, 'workflow_runs.1', { total_count: 1, workflow_runs: [{ ...run0, status: 'completed', conclusion: 'success' }] });
+  }, ['--checks-interval', '0.05', '--checks-timeout', '20']);
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.runReads, 2);
+});
+
+test('a required check still missing when --checks-timeout runs out withholds the merge, naming the check and the wait', () => {
+  // The first evidence read always completes, so a loaded machine cannot cut it
+  // short and turn "ci not reported" into "unreadable".
+  const r = settleWaiting((f) => putEvidence(f, 'check_runs', ONLY_COPILOT), ['--checks-interval', '0.2', '--checks-timeout', '4']);
+  assertWithheld(r, /required check ci not reported on the head commit/, 'missing after the wait');
+  assert.equal(r.out.checks_timed_out, true);
+  assert.ok(r.out.withheld_reasons.some((x) => /required checks or workflow runs were still not finished after waiting \d+s/.test(x)), JSON.stringify(r.out.withheld_reasons));
+  assert.ok(!r.out.withheld_reasons.some((x) => /check rollup reached/.test(x)), 'the rollup was not what timed out');
+  assert.ok(r.checkRunReads >= 2, `it read the checks again before giving up: ${r.checkRunReads}`);
+});
+
+test('an evidence read the --checks-timeout deadline cuts short does not replace the last complete one: still named as not finished, never as unreadable', () => {
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'check_runs', ONLY_COPILOT);
+    putEvidence(f, 'check_runs_delay', [0, 0, 10000]); // the third evidence read hangs past the deadline and is cut
+  }, ['--checks-interval', '0.05', '--checks-timeout', '4']);
+  assertWithheld(r, /required check ci not reported on the head commit/, 'cut read');
+  assert.equal(r.out.checks_timed_out, true);
+  assert.ok(!r.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+// Approved 2026-11-17: the first evidence read always completes (each gh call
+// keeps its own timeout); --checks-timeout bounds only the re-reads after it.
+test('a FIRST evidence read slower than --checks-timeout still completes: green evidence authorizes, missing evidence is named (never "unreadable")', () => {
+  const green = settleWaiting((f) => putEvidence(f, 'check_runs_delay', [2500]), ['--checks-interval', '0.05', '--checks-timeout', '1']);
+  assert.equal(green.code, 0, oneLine(green.stdout + green.stderr));
+  assert.equal(green.out.merge_authorized, true, JSON.stringify(green.out.withheld_reasons));
+  assert.equal(green.out.checks_timed_out, false);
+  const missing = settleWaiting((f) => {
+    putEvidence(f, 'check_runs', ONLY_COPILOT);
+    putEvidence(f, 'check_runs_delay', [2500]);
+  }, ['--checks-interval', '0.05', '--checks-timeout', '1']);
+  assertWithheld(missing, /required check ci not reported on the head commit/, 'slow first read, ci missing');
+  assert.equal(missing.out.checks_timed_out, true);
+  assert.ok(!missing.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable/.test(x)), JSON.stringify(missing.out.withheld_reasons));
+  assert.equal(missing.checkRunReads, 1, 'the deadline had passed: no re-read');
+});
+
+test('a failed required check is not waited for, even beside a missing one', () => {
+  const r = settleWaiting((f) => {
+    putEvidence(f, 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'publish' }] } }]);
+    putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'failure' }] });
+  }, ['--checks-interval', '5', '--checks-timeout', '60']);
+  assertWithheld(r, /ci \(failure\)/, 'failed beside missing');
+  assert.equal(r.checkRunReads, 1, 'no wait');
+  assert.ok(r.ms < 5000, `no wait: ${r.ms}ms`);
+});
+
+test('issue #273: a null check rollup (a failed check being re-run, no checks re-created yet) withholds the merge', () => {
+  const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 3, name: 'Copilot', status: 'completed', conclusion: 'success' }] }), { rollup: withRollup(null) });
+  assertWithheld(r, /check rollup null/, '#273 null rollup');
+  assert.ok(r.out.withheld_reasons.some((x) => /required check ci not reported on the head commit/.test(x)), 'the missing required check is named as well');
+});
+
+test('issue #273: a workflow run re-running on the head (in_progress) withholds the merge until it finishes', () => {
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD }] }));
+  assertWithheld(r, /workflow run for the head not finished: 'CI' \(run 11, in_progress\)/, '#273 re-run');
+});
+
+test('issue #275: a workflow run that concluded failure withholds the merge although the check rollup is SUCCESS', () => {
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { total_count: 3, workflow_runs: [
+    { id: 10, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: HEAD },
+    { id: 12, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: HEAD },
+    { id: 13, name: 'Lint', workflow_id: 6, event: 'pull_request', status: 'completed', conclusion: 'skipped', run_attempt: 1, head_sha: HEAD },
+  ] }));
+  assert.equal(r.out.check_rollup, 'SUCCESS');
+  assertWithheld(r, /workflow run for the head did not succeed: 'CI' \(run 12, failure\)/, '#275 failed run');
+  assert.ok(!r.out.withheld_reasons.some((x) => /Lint/.test(x)), 'a skipped run ran no job and hides no failure');
+});
+
+test('issue #275: a required job that never ran (no check run on the head) withholds the merge although the rollup is SUCCESS', () => {
+  const r = settleWith((f) => putEvidence(f, 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'publish' }] } }, { type: 'pull_request', parameters: {} }]));
+  assert.equal(r.out.check_rollup, 'SUCCESS');
+  assertWithheld(r, /required check publish not reported on the head commit/, '#275 missing job');
+  assert.deepEqual(r.out.merge_evidence.required_checks_missing, ['publish']);
+});
+
+test('a required check that ran and failed on the head (newest run of that name) withholds the merge', () => {
+  const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 2, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }, { id: 2, name: 'ci', status: 'completed', conclusion: 'failure' }] }));
+  assertWithheld(r, /required check not successful on the head commit: ci \(failure\)/, 'failed required check');
+});
+
+test('issue #248: a branch behind its base withholds the merge, naming the base', () => {
+  const r = settleWith((f) => putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 2 }));
+  assertWithheld(r, /the branch is behind base: 2 commits on main are not in the head/, '#248 behind base');
+  assert.equal(r.out.merge_evidence.behind_by, 2);
+});
+
+for (const [label, setup, pattern] of [
+  // A proven absence (an empty ruleset list, 404 "Branch not protected") is named as such.
+  ['no ruleset and no branch protection (404)', (f) => putEvidence(f, 'rules', []), /required checks not configured or unreadable for main \(no ruleset requires a status check, the branch is not protected\)/],
+  // Changed by the Sol review: a 403 is unreadable, no longer counted as "not configured".
+  ['rulesets forbidden (403), branch not protected', (f) => failEvidence(f, 'rules', 'gh: Resource not accessible by integration (HTTP 403)'), /required checks not configured or unreadable for main: rulesets: .*HTTP 403/],
+  ['the rulesets read fails with a server error, even with classic contexts', (f) => { failEvidence(f, 'rules', 'gh: Server Error (HTTP 502)'); putEvidence(f, 'protection', { contexts: ['ci'] }); }, /required checks not configured or unreadable for main: rulesets: .*HTTP 502/],
+  ['the base branch cannot be read', (f) => f.put('pull', 0, [{ number: 7, head: { sha: HEAD } }]), /base branch could not be read/],
+  ['the check runs cannot be read', (f) => failEvidence(f, 'check_runs', 'gh: Server Error (HTTP 500)'), /checks could not be read/],
+  ['the workflow runs cannot be read', (f) => failEvidence(f, 'workflow_runs', 'gh: Server Error (HTTP 500)'), /workflow runs could not be read/],
+  ['the compare cannot be read', (f) => failEvidence(f, 'compare', 'gh: Not Found (HTTP 404)'), /whether the branch is behind main could not be read/],
+  ['the GitHub rate limit is exhausted', (f) => { failEvidence(f, 'compare', 'gh: API rate limit exceeded for user ID 1. (HTTP 403)'); writeFileSync(join(f.state, 'rate_limit_reset_in'), '600'); }, /rate limit is exhausted \(resets at /],
+]) {
+  test(`required checks / evidence unreadable — ${label}: the merge is withheld, the settle still clean`, () => {
+    assertWithheld(settleWith(setup), pattern, label);
+  });
+}
+
+// Sol review, CRITICAL 1: only a PROVEN absence counts as "not configured"
+// (rulesets: a readable list; classic protection: 404 "Branch not protected").
+// A 403, a plain 404 or any other failure from EITHER source withholds, even
+// when the other source names checks that all passed.
+for (const [label, setup] of [
+  ['rulesets 403, classic protection names a passing ci', (f) => { failEvidence(f, 'rules', 'gh: Resource not accessible by integration (HTTP 403)'); putEvidence(f, 'protection', { contexts: ['ci'], checks: [{ context: 'ci', app_id: null }] }); }],
+  ['classic protection 403, rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: Resource not accessible by integration (HTTP 403)')],
+  ['classic protection plain 404 Not Found (no access), rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: Not Found (HTTP 404)')],
+  ['classic protection rate-limited, rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: API rate limit exceeded for user ID 1. (HTTP 403)')],
+  ['classic protection 502, rulesets name a passing ci', (f) => failEvidence(f, 'protection', 'gh: Server Error (HTTP 502)')],
+]) {
+  test(`Sol review: one required-check source unreadable (${label}) withholds the merge`, () => {
+    assertWithheld(settleWith(setup), /required checks not configured or unreadable for main: .*(rulesets|branch protection):/, label);
+  });
+}
+
+// Sol review, CRITICAL 2: an answer of the wrong shape, not JSON, or with
+// fewer items than its total_count is unreadable and withholds; it is never
+// read as an empty inventory.
+for (const [label, setup, pattern] of [
+  ['workflow runs answer {}', (f) => putEvidence(f, 'workflow_runs', {}), /workflow runs could not be read .*without a workflow_runs list/],
+  ['workflow runs answer {message}', (f) => putEvidence(f, 'workflow_runs', { message: 'unreadable' }), /workflow runs could not be read/],
+  ['workflow runs answer is not JSON', (f) => putEvidenceRaw(f, 'workflow_runs', 'not json'), /workflow runs could not be read .*unreadable JSON/],
+  ['workflow runs answer is empty', (f) => putEvidenceRaw(f, 'workflow_runs', ''), /workflow runs could not be read .*an empty answer/],
+  ['workflow runs pages incomplete (2 of 3)', (f) => putEvidence(f, 'workflow_runs', { total_count: 3, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD }, { id: 12, name: 'Lint', workflow_id: 6, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD }] }), /2 of the 3 workflow_runs it declares/],
+  ['rulesets answer an object, classic names a passing ci', (f) => { putEvidence(f, 'rules', { message: 'unreadable' }); putEvidence(f, 'protection', { contexts: ['ci'] }); }, /rulesets: .*unexpected shape/],
+  ['a required_status_checks rule without its list', (f) => putEvidence(f, 'rules', [{ type: 'required_status_checks', parameters: {} }]), /rulesets: .*unexpected shape/],
+  ['check runs answer {}', (f) => putEvidence(f, 'check_runs', {}), /checks could not be read .*without a check_runs list/],
+  ['combined status without statuses', (f) => putEvidence(f, 'statuses', { state: 'pending' }), /checks could not be read .*without a statuses list/],
+  ['compare answer is an array', (f) => putEvidence(f, 'compare', [{ behind_by: 0 }]), /behind main could not be read .*unexpected shape/],
+]) {
+  test(`Sol review: malformed evidence (${label}) withholds the merge`, () => {
+    assertWithheld(settleWith(setup), pattern, label);
+  });
+}
+
+test('Sol review control: check runs on two pages (gh --paginate prints them back to back) are read whole: authorized', () => {
+  const r = settleWith((f) => putEvidenceRaw(f, 'check_runs', JSON.stringify({ total_count: 2, check_runs: [{ id: 3, name: 'Copilot', status: 'completed', conclusion: 'success' }] }) + JSON.stringify({ total_count: 2, check_runs: [{ id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] })));
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+});
+
+// Sol re-check, CRITICAL 1: classic protection is "not configured" only when its
+// 404 JSON body's message, trimmed, is EXACTLY "Branch not protected". The
+// rulesets here name ci, so a wrong "not configured" would authorize.
+// gh prints the body's message on stderr as "gh: <message> (HTTP 404)".
+const failProtection = (f, body) => {
+  let message = 'Not Found';
+  try {
+    message = JSON.parse(body).message ?? message;
+  } catch {
+    message = body ?? message;
+  }
+  failEvidence(f, 'protection', `gh: ${message} (HTTP 404)`);
+  if (body !== null) writeFileSync(join(f.state, 'fail_protection.body'), body);
+};
+for (const [label, body] of [
+  ['message "Unable to determine whether Branch not protected"', JSON.stringify({ message: 'Unable to determine whether Branch not protected' })],
+  ['message "Branch not protected status could not be read"', JSON.stringify({ message: 'Branch not protected status could not be read' })],
+  ['no JSON body, only the stderr line naming Branch not protected', null],
+  ['a body that is not JSON', 'Branch not protected'],
+]) {
+  test(`Sol re-check: a classic-protection 404 with ${label} is not a proven absence: withheld`, () => {
+    const r = settleWith((f) => {
+      failProtection(f, body);
+      if (body === null) writeFileSync(join(f.state, 'fail_protection'), 'gh: Branch not protected (HTTP 404)');
+    });
+    assertWithheld(r, /required checks not configured or unreadable for main: branch protection:/, label);
+  });
+}
+test('Sol re-check control: a 404 body whose message is exactly "Branch not protected" (padded) is a proven absence: the ruleset checks decide, authorized', () => {
+  const r = settleWith((f) => failProtection(f, JSON.stringify({ message: '  Branch not protected ', status: '404' })));
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+});
+
+// Sol re-check, CRITICAL 2: total_count must be a non-negative integer, the same
+// on every page, and equal to the number of DISTINCT ids read.
+const runOf = (id, name = 'CI') => ({ id, name, workflow_id: id, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD });
+const pages = (...ps) => ps.map((p) => JSON.stringify(p)).join('');
+for (const [label, kind, text, pattern] of [
+  ['first page total 1, second page total 100, two items', 'workflow_runs', pages({ total_count: 1, workflow_runs: [runOf(11)] }, { total_count: 100, workflow_runs: [runOf(12, 'Lint')] }), /disagree on total_count \(1, 100\)/],
+  ['two pages declaring 2 that repeat the same run', 'workflow_runs', pages({ total_count: 2, workflow_runs: [runOf(11)] }, { total_count: 2, workflow_runs: [runOf(11)] }), /workflow_runs item 11 twice/],
+  ['total_count -1 with an empty list', 'workflow_runs', pages({ total_count: -1, workflow_runs: [] }), /non-negative total_count/],
+  ['a run without an id', 'workflow_runs', pages({ total_count: 1, workflow_runs: [{ ...runOf(11), id: undefined }] }), /item without an integer id/],
+  ['more distinct runs than declared', 'workflow_runs', pages({ total_count: 1, workflow_runs: [runOf(11), runOf(12, 'Lint')] }), /returned 2 of the 1 workflow_runs/],
+  ['a check run repeated across pages', 'check_runs', pages({ total_count: 2, check_runs: [{ id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] }, { total_count: 2, check_runs: [{ id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] }), /check_runs item 4 twice/],
+  ['a status without an id', 'statuses', pages({ state: 'success', total_count: 1, statuses: [{ context: 'ci', state: 'success' }] }), /statuses item without an integer id/],
+]) {
+  test(`Sol re-check: inconsistent pages (${label}) withhold the merge`, () => {
+    assertWithheld(settleWith((f) => putEvidenceRaw(f, kind, text)), pattern, label);
+  });
+}
+
+// Sol re-check, MEDIUM 3: a re-read whose clock lands EXACTLY on the deadline is
+// cut; the last complete evidence snapshot stands (frozen clock, see clockArgs).
+for (const [label, at] of [
+  ['the merge-state re-read ends with the clock exactly at the deadline', 'merge:1'],
+  ['an evidence re-read is cut with the clock exactly at the deadline', 'check_runs:1'],
+]) {
+  test(`Sol re-check: ${label}: the last complete snapshot stands, timed out, never "unreadable"`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
+      putEvidence(f, 'check_runs', ONLY_COPILOT);
+      writeFileSync(join(f.state, 'clock_jump_at'), at);
+      const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '0.05', '--checks-timeout', '5'], { nodeArgs: clockArgs(f, 5000) });
+      const out = { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')) };
+      assertWithheld(out, /required check ci not reported on the head commit/, label);
+      assert.equal(r.out.checks_timed_out, true, label);
+      assert.ok(!r.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable|ran out before/.test(x)), `${label}: ${JSON.stringify(r.out.withheld_reasons)}`);
+      assert.ok(existsSync(join(f.state, 'clock_jumped')), `${label}: the clock reached the deadline`);
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test('the merge evidence is not read when the settle is blocked (nothing would be authorized)', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('BLOCKED', [thread('PRRT_open1')], GREEN_ROLLUP)]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.merge_authorized, false);
+    assert.equal(r.out.merge_evidence, null);
+    assert.ok(!calls(f).some((a) => /\/(rules|compare|actions|commits)\//.test(a[a.length - 1])), 'no evidence read');
+  } finally {
+    f.cleanup();
+  }
+});
 
 // Sol review of the #131 fix: a missing or malformed commits subtree used to
 // collapse to the same null as "no checks", so CLEAN or UNSTABLE with a broken
@@ -1908,10 +2465,11 @@ test('issue #154: --settle clean prints the PR\'s CURRENT head (the one Copilot 
   try {
     writeConfig(f, { pr_review: { copilot_logins: [COPILOT] } }); // a pinned REST login ('[bot]') matches GraphQL's bare login
     arm(f); // armed at HEAD
-    putMerge(f, [mergePage('CLEAN', [], { headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } })]);
+    putMerge(f, [mergePage('CLEAN', [], { ...GREEN_ROLLUP, headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } })]);
     const r = run(f, ['--settle', 'clean', '--pr', '7']);
     assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
     assert.equal(r.out.head_sha, NEW_HEAD, 'the merge is pinned to the current, reviewed head');
+    assert.ok(calls(f).some((a) => a[a.length - 1] === `repos/acme/widget/compare/main...${NEW_HEAD}`), 'the merge evidence is read for the current head');
     assert.equal(r.out.reviewed_head_sha, NEW_HEAD);
     assert.equal(r.out.armed_head_sha, HEAD);
     assert.equal(r.out.auto_merge, true);
@@ -2264,7 +2822,7 @@ test('--settle clean from a linked worktree runs its merge-state query too', () 
     assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
     assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
     assert.equal(mergeCalls(f).length, 1, 'one merge-state query');
-    assert.equal(calls(f).length, 2, 'plus the one newest-review body read (issue #204)');
+    assert.equal(calls(f).length, 2 + EVIDENCE_READS.length, 'plus the one newest-review body read (issue #204) and the merge evidence reads');
   } finally {
     f.cleanup();
   }
@@ -2305,6 +2863,58 @@ test('a worktree that carries its own config while the main checkout has none ke
     const r = run(fromWorktree, ['7', ...FAST]);
     assert.equal(r.out.review.id, 901, oneLine(r.stdout));
     assert.equal(r.out.identity_confirmed, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('rate limit (GitHub issue #294): a rate-limited poll waits for the reset and then continues to the review', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'rate_limited_first'), '1');
+    writeFileSync(join(f.state, 'rate_limit_reset_in'), '1');
+    f.put('reviews', 0, [[{ id: 100, user: { login: COPILOT, type: 'Bot' }, state: 'COMMENTED', commit_id: HEAD, body: '' }]]);
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '60']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'review');
+    assert.ok(r.ms >= 1500, `waited for the reset (about 2s), took ${r.ms}ms`);
+    assert.ok(r.ms < 15_000, `did not wait for the 60s timeout, took ${r.ms}ms`);
+    const calls = readFileSync(join(f.state, 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(calls.filter((c) => c.includes('rate_limit')).length, 1, 'rate_limit is read once, after the failure only');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol review, MEDIUM 4: the rate-limit reset probe is capped to the --timeout
+// budget left; a probe that hangs never keeps the wait past --timeout.
+test('rate limit: a hanging rate_limit probe is cut at --timeout, never waited out (it had its own 30s timeout)', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'rate_limited_first'), '99');
+    writeFileSync(join(f.state, 'rate_limit_reset_in'), '3600');
+    writeFileSync(join(f.state, 'rate_limit_delay_ms'), '20000');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '3']);
+    assert.equal(r.code, 4, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'rate_limited');
+    assert.ok(r.ms < 8000, `the probe was cut at the 3s budget, not waited for 20s: took ${r.ms}ms`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('rate limit (GitHub issue #294): a reset beyond --timeout exits rate_limited (exit 4) with the reset time, not error or timeout', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'rate_limited_first'), '99');
+    writeFileSync(join(f.state, 'rate_limit_reset_in'), '3600');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '5']);
+    assert.equal(r.code, 4, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'rate_limited');
+    assert.equal(r.out.review, null);
+    assert.ok(Math.abs(Date.parse(r.out.rate_limit_reset) - (Date.now() + 3_600_000)) < 60_000, `reset time carried: ${r.out.rate_limit_reset}`);
+    assert.match(r.out.error, /rate limit is exhausted and resets at /);
+    assert.ok(r.ms < 4000, `ends at once, took ${r.ms}ms`);
   } finally {
     f.cleanup();
   }

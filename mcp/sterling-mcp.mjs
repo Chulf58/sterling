@@ -23908,9 +23908,7 @@ function refreshReferenceDeltaSuffix(catalogRecord) {
   if (entries.length === 0)
     return "";
   const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
-  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
-  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
-  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+  return ` \u2014 current entries: ${snapshot}. Re-verify the ids, labels and availability against current provider info (tier 'unknown' is valid unset metadata \u2014 leave it; the catalog location is a label, not a file); update catalog.entries[] on the linked record via knowledge_edit/knowledge_update only if something changed, and cite this item's id in resolves to close it.`;
 }
 function activityTitleOf(record2) {
   const r = record2;
@@ -26892,7 +26890,7 @@ var SterlingStore = class _SterlingStore {
    * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
    * "Refresh the KB models catalog" with no file_keys and a project-local catalog
    * gave a drain nothing to act on): every current entry's id/tier/status, with
-   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * what to re-verify (an 'unknown' tier is valid unset metadata, never a lookup). A drain closes
    * it by writing the looked-up values into catalog.entries[] on the linked
    * record (feature_link) and citing this item's id in `resolves`.
    */
@@ -33485,7 +33483,7 @@ var SterlingTools = class _SterlingTools {
     if (tree.unresolved)
       return tree;
     const name = record2.working_tree;
-    if (!name || !workingTrees?.[name] && !this.declaresForeignTree(name))
+    if (!name || !workingTrees?.[name] && !this.declaresForeignTree(name, workingTrees))
       return { root: this.repoRoot, unresolved: false };
     return tree;
   }
@@ -33507,7 +33505,7 @@ var SterlingTools = class _SterlingTools {
       return { root: this.checkoutRoot, unresolved: false };
     const mapped = workingTrees?.[name];
     if (!mapped) {
-      if (!this.declaresForeignTree(name))
+      if (!this.declaresForeignTree(name, workingTrees))
         return { root: this.checkoutRoot, unresolved: false };
       return { root: void 0, unresolved: true };
     }
@@ -33526,10 +33524,16 @@ var SterlingTools = class _SterlingTools {
    * ruling 2026-09-28 "Code: self-root = own"). Mirrors H10's isUnowned, which
    * asks the same question through the same shared sameLocationAnyHost.
    */
-  declaresForeignTree(workingTree) {
+  declaresForeignTree(workingTree, workingTrees = this.config.working_trees) {
     if (!workingTree)
       return false;
-    return !(this.repoRoot && sameLocationAnyHost(String(workingTree), this.repoRoot));
+    const name = String(workingTree);
+    const raw = workingTrees && Object.hasOwn(workingTrees, name) ? workingTrees[name] : void 0;
+    const mapped = typeof raw === "string" && raw ? raw : void 0;
+    const location = mapped === void 0 ? name : isAbsolutePathAnyHost(mapped) ? mapped : this.repoRoot ? join15(this.repoRoot, mapped) : void 0;
+    if (location === void 0)
+      return true;
+    return !(this.repoRoot && sameLocationAnyHost(location, this.repoRoot) || this.checkoutRoot && sameLocationAnyHost(location, this.checkoutRoot));
   }
   /**
    * Is `rel` registered as a generated projection (config.generated_projections)?
@@ -36539,9 +36543,10 @@ var SterlingTools = class _SterlingTools {
    * project rather than imagined:
    *
    * (1) "matched_filter: 179" against rank_terms:["garage","loadout"] was read
-   *     as "179 garage decisions". It is not — rank_terms ORDER the set through
-   *     bm25, they never narrow it (store query(): ORDER BY bm25, not WHERE), so
-   *     the count belongs to types/stack_tags/file_keys alone. Saying only
+   *     as "179 garage decisions". It is not — the count is rank-BLIND and
+   *     belongs to types/stack_tags/file_keys alone, while rank_terms both ORDER
+   *     the result through bm25 and RESTRICT it to full-text matches (store
+   *     axis.ts adds records_fts MATCH to WHERE; GitHub #231). Saying only
    *     "records matching this filter" was technically true and still misread,
    *     which makes it a bad message: it let a reader believe a capped window
    *     was a relevance ranking over a relevant set.
@@ -36553,7 +36558,7 @@ var SterlingTools = class _SterlingTools {
   cappedNote(returned, matchedFilter, ranked, projection) {
     const parts = [`cap reached \u2014 showing ${returned} of ${matchedFilter} records matching the FILTER (types/stack_tags/file_keys)`];
     if (ranked) {
-      parts.push(`rank_terms ORDERED those ${matchedFilter} and did not narrow them, so this count is NOT a measure of how many are relevant \u2014 and a capped window can never establish absence`);
+      parts.push(`rank_terms ORDERED and RESTRICTED the result to full-text matches among those ${matchedFilter}, so this filter-only count is an upper bound, NOT a measure of how many are relevant \u2014 and a capped window can never establish absence`);
     }
     parts.push(projection === "digest" ? `raise cap to see the rest \u2014 at this projection every record is one headline line` : `raise cap, narrow the filter, or re-run with projection:"digest" to see all ${matchedFilter} as one-line headlines (id + title/trigger, no bodies) and then knowledge_get the few you want`);
     return parts.join("; ");
@@ -39037,7 +39042,11 @@ ${JSON.stringify(entry)}
   }
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
   configSet(args2) {
-    return configSetImpl(this.repoRoot, args2?.path, args2?.value, args2?.expected_digest);
+    const result = configSetImpl(this.repoRoot, args2?.path, args2?.value, args2?.expected_digest);
+    if (result.path === "working_trees" || result.path.startsWith("working_trees.")) {
+      this.config = { ...this.config, working_trees: this.freshWorkingTrees() };
+    }
+    return result;
   }
   // enforcement_reconcile (the H17 (B) surface taint-latch front door) was
   // removed together with H17 itself (decision
@@ -39808,7 +39817,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw new Error(`board_update: ${unknown3.map((k) => `'${k}'`).join(", ")} ${unknown3.length === 1 ? "is" : "are"} not editable through board_update \u2014 only ${updatable.join("/")} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; status/id/created_at/type/superseded_by are server-owned. Updating never closes an item \u2014 board_remove, bound to the fulfilling artifact-write, remains the only exit. Valid fields: ${updatable.join(", ")}.`);
     }
     if (Object.keys(patch).length === 0) {
-      throw new Error(`board_update: no fields to update \u2014 pass at least one of ${updatable.join(", ")}`);
+      const renew = opts.session !== void 0 ? ` (session alone renews nothing: to renew a claim without an edit, call board_reaffirm with the generation board_get shows in claim_state)` : "";
+      throw new Error(`board_update: no fields to update \u2014 pass at least one of ${updatable.join(", ")}${renew}`);
     }
     if ("blocked_by" in patch) {
       if (old.source === "system")
@@ -39850,7 +39860,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         patch = { ...patch, measured_at_head: head };
     }
     const next = { ...old, ...patch, updated_at: this.now() };
-    if (next.objective === "standalone")
+    if (next.objective === "standalone" || next.objective === "")
       delete next.objective;
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0)
       delete next.blocked_by;
@@ -41991,7 +42001,18 @@ knowledgeCreateInput.safeParseAsync = async (data, params) => {
   }
   return knowledgeCreateParseSchema.safeParseAsync(resolved.args, params);
 };
-var strict = (shape) => external_exports.object(shape).strict();
+var strict = (shape, hints = {}) => {
+  const enforced = external_exports.object(shape).strict();
+  const advertised = external_exports.object(shape).passthrough();
+  advertised.safeParseAsync = async (data, params) => {
+    const result = await enforced.safeParseAsync(data, params);
+    if (result.success)
+      return result;
+    const extra = result.error.issues.flatMap((issue2) => issue2.code === "unrecognized_keys" ? issue2.keys.filter((key) => hints[key] !== void 0).map((key) => ({ code: "custom", path: [key], message: hints[key] })) : []);
+    return extra.length ? { success: false, error: new ZodError2([...result.error.issues, ...extra]) } : result;
+  };
+  return advertised;
+};
 function unreadableDomainWarning(d) {
   return `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`;
 }
@@ -42092,7 +42113,7 @@ function createSterlingServer(target, opts = {}) {
     return json(tools.writeProjected(tools.knowledgeCreate(recordType2, restFields), projection));
   });
   server.registerTool("knowledge_query", {
-    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
+    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms are not a filter-count term: they ORDER by bm25 AND restrict the result to records with a full-text match, so returned can be below matched_filter and a capped window is at most matched_filter records (a non-capped one says how many FTS matches remained). projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
     inputSchema: strict({
       types: external_exports.array(external_exports.string()).optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
@@ -42184,7 +42205,7 @@ function createSterlingServer(target, opts = {}) {
       // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
       body: external_exports.object({}).passthrough().optional().describe("the partial patch; exactly one of body or fields"),
       fields: external_exports.object({}).passthrough().optional().describe("alias of body, the name knowledge_create uses; exactly one of body or fields"),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe(`open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance`),
       expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
@@ -42204,7 +42225,7 @@ function createSterlingServer(target, opts = {}) {
       id: external_exports.string().describe(ID_LADDER),
       field: external_exports.string(),
       entries: external_exports.array(external_exports.unknown()),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe(`open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance`),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection)));
@@ -42287,7 +42308,7 @@ function createSterlingServer(target, opts = {}) {
       target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional(),
       readiness: external_exports.array(external_exports.enum(BOARD_READINESS_STATES)).min(1).describe("user items in these readiness states only, computed over the whole board before paging").optional(),
       handoff_to_item_id: external_exports.string().describe("the receiver's item id: finds this board's tracker for that handoff").optional()
-    })
+    }, { id: "board_query has no id filter: read one item, its claim_state included, with board_get(id)" })
   }, ({ target_project, ...args2 }) => json(target_project !== void 0 ? tools.foreignBoardQuery({ ...args2, target_project }) : tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
     description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). A user board task needs `outcome`: done (finished), dropped (will not be done), superseded (replaced by other work) or duplicate (the same as another task); a removal without one is refused. The outcome, with optional `evidence` and `note`, is written to the board removal journal in the same transaction as the removal, and the GitHub issue mirror reads it from there. A maintenance-queue item takes the id alone. A claimed user task is closed by the session that holds the claim: a close naming another session is refused (the task moved) and nothing is removed, with no handoff file written; the holder's own close succeeds even after its lease expired; a close naming no session succeeds and the result carries claim_notice naming the holder. There is no override. `session` is filled in by the OpenCode plugin. The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.evidence.json with the outcome and any evidence, then .sterling/handoffs/<transfer_id>.json, which carries the note; the sending project reads both and shows the item as done, or as closed with its other outcome. A failed write of either file refuses the removal.",
@@ -42304,24 +42325,24 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server.registerTool("board_update", {
-    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; "" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits ("" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" or "" removes the objective. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; "" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits ("" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required: a call naming only session is refused and renews nothing (renew a claim without an edit with board_reaffirm). The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),
       priority: external_exports.enum(["low", "normal", "high"]).optional(),
       file_keys: external_exports.array(external_exports.string()).optional(),
-      objective: external_exports.string().optional(),
+      objective: external_exports.string().describe(`(re)groups the task; "standalone" or '' removes the objective`).optional(),
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
       needs_reason: external_exports.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
-      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
+      session: external_exports.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease), but only alongside a real edit: a call with session and no field to change is refused and renews nothing, so renew without an edit through board_reaffirm. When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, session, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch, session !== void 0 ? { session } : {}), projection)));
   const CLAIM_LEASE = "config board_claims.lease_minutes (default 60)";
   server.registerTool("board_claim", {
-    description: `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_update calls that pass your session, and through board_reaffirm; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
+    description: `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_reaffirm, and through a board_update that changes a field and passes your session; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       session: external_exports.string().describe("your session id"),
@@ -42329,7 +42350,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, session, checkout }) => json(tools.boardClaim(id, session, checkout)));
   server.registerTool("board_reaffirm", {
-    description: `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
+    description: `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. This is the way to renew without an edit: a board_update naming only session is refused and renews nothing. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       session: external_exports.string().describe("your session id"),

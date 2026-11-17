@@ -278,6 +278,24 @@ test("board_update: 'objective' joins the updatable-fields allowlist — grouped
   }
 });
 
+test("board_update objective:'' removes the objective, as needs:'' and needs_reason:'' clear theirs (GitHub #272/#274, user-ruled 2026-11-17)", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record } = tools.boardAdd({ text: 'a message item', source: 'user', objective: 'Capability A' } as Parameters<SterlingTools['boardAdd']>[0]);
+    let cleared: Loose | undefined;
+    assert.doesNotThrow(() => {
+      cleared = updateRaw(tools, record.id, { objective: '' });
+    }, "objective:'' must clear the grouping, not fail validation");
+    assert.ok(!('objective' in cleared!), "'' removes the field from the echo");
+    const reread = boardItems(tools)[0];
+    assert.ok(!('objective' in reread), "'' removes the field from the stored item, never stores an empty objective");
+    assert.equal(reread.text, 'a message item', 'clearing the objective leaves the text alone');
+    assert.equal(tools.boardQuery({ source: 'user', objective: 'standalone' } as Parameters<SterlingTools['boardQuery']>[0]).length, 1, 'the item now reads as standalone');
+  } finally {
+    cleanup();
+  }
+});
+
 test("board_update: the unknown-field refusal message now LISTS 'objective' among the valid fields (decision foreign_a8d2ce6c slice 1)", () => {
   const { tools, cleanup } = harness();
   try {

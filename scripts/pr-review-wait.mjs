@@ -51,7 +51,8 @@
 // repos/<o>/<r>/pulls/<n> --jq .node_id`) and fires the GraphQL mutation
 // requestReviewsByLogin once. Success or failure is recorded in the output as
 // copilot_request {requested, error?}; a failure is also written to stderr and
-// never aborts the wait.
+// ends the call at once with status error (exit 1): the request is not on the
+// PR, so no review would arrive.
 //
 // UNVERIFIED until the S0 first use on a work machine: the Copilot reviewer's
 // login (a Bot matched by /copilot/i until pinned in pr_review.copilot_logins,
@@ -74,7 +75,7 @@
 //    body_findings_without_comments,
 //    copilot_request:null|{requested, error?}, copilot_review_pending,
 //    observed_copilot_login, stale_review, awaiting_head_review,
-//    identity_confirmed[, error]}
+//    identity_confirmed, next_since_review[, error]}
 // previously_missed is the findings under a "Previously missed" (or "N
 // previously missed issues") heading of the review body, as list items or as
 // nested <details> blocks ([] when absent);
@@ -86,9 +87,33 @@
 // copilot_review_pending is what the last poll read (null before any poll).
 // awaiting_head_review is true when the returned review is stale AND a Copilot
 // request is still pending: a review of the current head is still on its way
-// (a hint only; GitHub issue #162, behaviour unchanged).
-// Exit 0 = review, 2 = timeout, 3 = no_review_requested, 1 = error. None but
-// a review of the current head (stale_review false) is ever clean.
+// (a hint only; GitHub issue #162).
+// HOLD FOR THE HEAD (GitHub issues #300, #296, #224; user-ruled 2026-11-17
+// "Hold for head review"): WITH --head, only a review whose commit_id is the
+// expected head (and the PR head is that head) is returned as the review. An
+// unconsumed review of any other head is consumed-as-stale: it is listed in
+// stale_reviews ({id, commit_id, author, state, body, comments}; comments are
+// read when the head's review is returned, otherwise only the ids and bodies
+// show) and the wait goes on for the head's review until --timeout, or until
+// no request is pending (no_review_requested), as without it. The stale
+// reviews are never skipped: the next --since-review is next_since_review,
+// the highest id such that every unconsumed review up to it was returned (in
+// review or stale_reviews), never simply the highest id returned: a late stale
+// review can have a higher id than a head review not yet returned. A stale
+// review above the watermark is listed again on the next call. WITHOUT --head nothing changes (the #80 behaviour:
+// the oldest unconsumed review returns at once, stale_review true if not the
+// head).
+// A failed --request-copilot ends the call at once with status error (exit 1),
+// the error naming the failure, and copilot_request {requested:false, error}.
+// Exit 0 = review, 2 = timeout, 3 = no_review_requested, 4 = rate_limited,
+// 1 = error. None but a review of the current head (stale_review false) is
+// ever clean.
+// RATE LIMIT (GitHub issue #294): when a poll's gh call fails with GitHub's
+// rate-limit message, the helper reads `gh api rate_limit` once (only after
+// such a failure, never per poll), sleeps until the core budget resets and
+// polls again. If the reset falls after the --timeout deadline it ends at once
+// with status rate_limited (exit 4), rate_limit_reset (ISO time) and error
+// naming the reset; it never claims a review, and it is not a timeout.
 //
 // RESOLVE-THREADS: replying to a finding never resolves its review thread, and
 // an org ruleset (required_review_thread_resolution) blocks the merge until it
@@ -115,16 +140,37 @@
 // output carries merge_state_status, review_decision, check_rollup, mergeable_now
 // and awaiting_human_review. A gh failure refuses too.
 // A clean output also carries auto_merge_on_clean (config
-// pr_review.auto_merge_on_clean, absent = on) and auto_merge, which is true only
-// when the switch is on AND mergeable_now AND the head's check rollup is SUCCESS
-// or absent: the skill's cue to squash-merge the PR, pinned to head_sha (the
-// current, reviewed head) (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean).
-// UNSTABLE is mergeable to GitHub even when a check that is not required fails
-// (GitHub issue #131), so a FAILURE, PENDING or any other rollup withholds the
-// merge. auto_merge_withheld names every reason auto_merge is false (null when
-// it is true). The switch is
+// pr_review.auto_merge_on_clean, absent = on) and merge_authorized (auto_merge
+// is the same boolean, kept for compatibility). It means the merge is
+// AUTHORIZED, never that it happened: this script never merges. It is the
+// skill's cue to squash-merge the PR, pinned to head_sha (the current,
+// reviewed head) (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean),
+// and it is true only when the switch is on AND mergeable_now AND the head's
+// check rollup is SUCCESS AND the MERGE EVIDENCE (see mergeEvidence) holds:
+// every required check of the base branch (rulesets and classic branch
+// protection) is reported on the head and passed (success, skipped or
+// neutral, as GitHub branch protection counts it), the head's newest workflow
+// run per workflow and event is completed and succeeded (or was skipped or
+// neutral), and
+// the branch is not behind its base. A required check not reported or not
+// finished yet, or a workflow run still running, is waited for inside the
+// --checks-timeout wait below; it withholds only when that wait runs out
+// (user-ruled 2026-11-17, "Match GitHub, and wait") (decision
+// pr-auto-merge-requires-github-required-checks-as-the-expecte; GitHub issues
+// #248, #273, #275). Required checks that are not configured or not readable
+// withhold the merge. A null rollup (no checks on the head) withholds too
+// (#273). UNSTABLE is mergeable to GitHub even when a check that is not
+// required fails (GitHub issue #131), so a FAILURE, PENDING or any other rollup
+// withholds the merge. withheld_reasons lists every reason ([] when
+// authorized), auto_merge_withheld joins them (null when authorized), and
+// merge_evidence carries what was read (null when the settle is blocked). What
+// it does NOT guarantee: it trusts GitHub's published state at the time of the
+// read; a check that is not required and not run by a workflow is not judged,
+// and the head or base can move between this read and the merge. The switch is
 // read before anything is asked or written; a value that is not a boolean
-// refuses the clean settle, so a typo never decides a merge.
+// refuses the clean settle, so a typo never decides a merge. A clean settle
+// also writes one line to stderr: "authorized to merge <sha>" or "merge
+// withheld: <reasons>".
 // head_sha is the PR's CURRENT head (headRefOid), never the armed one (GitHub
 // issue #154: a review-fix push moves the head after arming); armed_head_sha
 // and reviewed_head_sha (the commit of Copilot's newest completed review) are
@@ -137,7 +183,12 @@
 // again every --checks-interval seconds (default 30) for up to
 // --checks-timeout seconds (default 540) until it finishes (decision
 // pr-settle-clean-waits-for-pending-checks-then-decides-merge, GitHub issue
-// #150); a timeout withholds the merge and says so (checks_timed_out).
+// #150); a timeout withholds the merge and says so (checks_timed_out). With a
+// SUCCESS or null rollup, merge evidence that is only still to finish (a
+// required check not reported or not completed, a workflow run not finished)
+// is read again the same way; evidence with a failure is not waited for. The
+// first evidence read always completes (each gh call keeps its own timeout);
+// --checks-timeout bounds only the evidence re-reads after it.
 // --checks-timeout is one absolute deadline over every read (the first one
 // too), page, retry and sleep, and a late SUCCESS is timed out too; a first
 // read that cannot finish by it refuses the settle; only --checks-timeout 0 is
@@ -151,6 +202,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
+import { describeReset, isRateLimitText, readCoreRateLimit } from './lib/gh-rate-limit.mjs';
 import { autoMergeOnCleanOf, DeadlineReachedError, fetchPrMergeState, fetchReviewBody, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
@@ -178,11 +230,11 @@ const PENDING_ROLLUPS = new Set(['PENDING', 'EXPECTED']); // checks still runnin
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null, stale_reviews: [] };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
-  process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : status === 'no_review_requested' ? 3 : 1);
+  process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : status === 'no_review_requested' ? 3 : status === 'rate_limited' ? 4 : 1);
 }
 const error = (message) => finish('error', { review: null, comments: [], error: message });
 
@@ -291,6 +343,270 @@ function lastCopilotReview(reviews, pinned) {
   return copilot.length ? copilot.reduce((a, b) => (b.id > a.id ? b : a)) : null;
 }
 
+// ------------------------------------------------------ merge authorization
+// MERGE EVIDENCE (decision pr-auto-merge-requires-github-required-checks-as-the-expecte,
+// user-ruled 2026-11-11, re-confirmed 2026-11-17; GitHub issues #248, #273,
+// #275). A clean settle authorizes the merge only on GitHub's published
+// evidence for the pinned head: the base branch's required checks (rulesets
+// and classic branch protection) are all present and successful on the head,
+// the head's newest workflow runs are all completed and none failed, and the
+// branch is not behind its base. Absent, unreadable or unmet evidence
+// withholds the merge with a named reason; it never refuses the settle.
+const RATE_LIMIT_PROBE_MS = 30_000; // the gh api rate_limit read after a rate-limited call, capped to any deadline left
+const EVIDENCE_MAX_BUFFER = 64 * 1024 * 1024; // compare and check-runs answers can be large
+// A workflow run passes on success, skipped (it ran no job, so it hides no
+// failure) or neutral, which GitHub treats as non-failing (user-ruled
+// 2026-11-17, "Match GitHub").
+const RUN_CONCLUSIONS_OK = new Set(['success', 'skipped', 'neutral']);
+// A required check passes as GitHub branch protection counts it (user-ruled
+// 2026-11-17, "Match GitHub, and wait"): success, skipped or neutral. failure,
+// cancelled, timed_out, action_required, stale and startup_failure withhold.
+const REQUIRED_CONCLUSIONS_OK = new Set(['success', 'skipped', 'neutral']);
+const httpStatusOf = (text) => Number(String(text).match(/\(HTTP (\d{3})\)/)?.[1] ?? 0) || null;
+
+/** The top-level JSON values of a gh answer (one per page under --paginate),
+ * NOT flattened. Strict, unlike parsePages: an empty answer, a top-level value
+ * that is not an object or an array, text outside the values, or a truncated
+ * value throws, so a malformed answer is never read as an empty inventory. */
+function strictPages(text) {
+  const values = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (depth === 0 && c !== '[' && c !== '{') {
+      if (/\s/.test(c)) continue;
+      throw new Error(`unexpected '${c}' outside a JSON object or array`);
+    }
+    if (c === '"') inString = true;
+    else if (c === '[' || c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) values.push(JSON.parse(text.slice(start, i + 1)));
+    }
+  }
+  if (depth !== 0 || inString) throw new Error('truncated JSON');
+  if (!values.length) throw new Error('an empty answer');
+  return values;
+}
+
+/** One REST read for the merge evidence: { ok, pages } or { ok: false,
+ * http, error }. pages are strictPages' values. A rate-limited read names the
+ * reset. Never throws on gh. With `deadline` (ms since the epoch) the call,
+ * and the rate-limit probe after it, end by it. */
+function evidenceRead(host, path, { paginate = false, deadline = null } = {}) {
+  const remaining = deadline === null ? GH_CALL_TIMEOUT_MS : deadline - Date.now();
+  if (remaining <= 0) return { ok: false, http: null, cut: true, error: `--checks-timeout ran out before gh api ${path} could be read` };
+  const args = ['api', '--hostname', host, ...(paginate ? ['--paginate'] : []), path];
+  const r = spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), maxBuffer: EVIDENCE_MAX_BUFFER, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const text = `${r.stderr ?? ''}\n${r.stdout ?? ''}`.trim();
+  if (!r.error && r.status !== 0 && isRateLimitText(text)) {
+    const probeMs = deadline === null ? RATE_LIMIT_PROBE_MS : Math.min(RATE_LIMIT_PROBE_MS, deadline - Date.now());
+    const limit = probeMs > 0 ? readCoreRateLimit((a) => spawnSync('gh', a, { cwd: target, encoding: 'utf8', timeout: probeMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), host) : null;
+    return { ok: false, http: 403, error: `GitHub's REST rate limit is exhausted${limit?.resetMs ? ` (resets ${describeReset(limit.resetMs)})` : ''}` };
+  }
+  // A call the deadline killed is cut, not an answer (the snapshot before it stands).
+  if (r.error?.code === 'ETIMEDOUT' && deadline !== null && Date.now() >= deadline) return { ok: false, http: null, cut: true, error: `--checks-timeout ran out while gh api ${path} was read` };
+  if (r.error || r.status !== 0) return { ok: false, http: httpStatusOf(text), body: r.stdout ?? '', error: `gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || '').trim()}` };
+  try {
+    return { ok: true, pages: strictPages(r.stdout) };
+  } catch (e) {
+    return { ok: false, http: null, error: `gh api ${path} returned unreadable JSON (${e.message})` };
+  }
+}
+
+/** The merge evidence for `headSha` of PR `number`: { reasons: [string],
+ * evidence, pending }. Every reason withholds the merge. pending is true when
+ * every reason is something still to finish (a required check not reported or
+ * not completed yet, a workflow run not finished), so the settle's bounded
+ * checks wait reads it again instead of withholding at once. */
+function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
+  const [host, owner, name] = originRepo.split('/');
+  const repoPath = `repos/${owner}/${name}`;
+  const reasons = [];
+  let finals = 0; // reasons that waiting cannot change
+  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
+  let cut = false; // a read the deadline cut short: this evidence is incomplete
+  const read = (path, opts = {}) => {
+    const res = evidenceRead(host, path, { ...opts, deadline });
+    if (res.cut) cut = true;
+    return res;
+  };
+  // The `message` of a JSON error body (gh api prints the body on stdout on an
+  // HTTP error), trimmed; null when the body is not such JSON.
+  const bodyMessage = (body) => {
+    try {
+      const v = JSON.parse(String(body ?? ''));
+      return v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.message === 'string' ? v.message.trim() : null;
+    } catch {
+      return null;
+    }
+  };
+  // ENVELOPES (Sol review): every answer must have its endpoint's shape, or it
+  // is unreadable and withholds; it never reads as an empty inventory. A paged
+  // list must hold every item its total_count declares.
+  const one = (res, path, check) => {
+    if (!res.ok) return res;
+    if (res.pages.length !== 1 || !check(res.pages[0])) return { ok: false, http: null, error: `gh api ${path} returned an answer of an unexpected shape: ${JSON.stringify(res.pages).slice(0, 200)}` };
+    return { ok: true, value: res.pages[0] };
+  };
+  // PAGES (Sol re-check): total_count must be a non-negative integer, the SAME
+  // on every page, and equal to the number of DISTINCT item ids read; an item
+  // without an integer id, or an id read twice, is unreadable too.
+  const paged = (res, path, key) => {
+    if (!res.ok) return res;
+    const bad = res.pages.find((p) => p === null || typeof p !== 'object' || Array.isArray(p) || !Array.isArray(p[key]) || !Number.isInteger(p.total_count) || p.total_count < 0);
+    if (bad !== undefined) return { ok: false, http: null, error: `gh api ${path} returned a page without a ${key} list and a non-negative total_count: ${JSON.stringify(bad).slice(0, 200)}` };
+    const total = res.pages[0].total_count;
+    if (res.pages.some((p) => p.total_count !== total)) return { ok: false, http: null, error: `gh api ${path} returned pages that disagree on total_count (${res.pages.map((p) => p.total_count).join(', ')})` };
+    const items = res.pages.flatMap((p) => p[key]);
+    const ids = new Set();
+    for (const item of items) {
+      if (!Number.isInteger(item?.id)) return { ok: false, http: null, error: `gh api ${path} returned a ${key} item without an integer id: ${JSON.stringify(item).slice(0, 200)}` };
+      if (ids.has(item.id)) return { ok: false, http: null, error: `gh api ${path} returned ${key} item ${item.id} twice (inconsistent pages)` };
+      ids.add(item.id);
+    }
+    if (ids.size !== total) return { ok: false, http: null, error: `gh api ${path} returned ${ids.size} of the ${total} ${key} it declares (incomplete pages)` };
+    return { ok: true, items };
+  };
+  const final = (reason) => {
+    reasons.push(reason);
+    finals++;
+  };
+
+  const pullPath = `${repoPath}/pulls/${number}`;
+  const pull = one(read(pullPath), pullPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.base?.ref === 'string' && v.base.ref !== '');
+  const baseRef = pull.ok ? pull.value.base.ref : undefined;
+  if (!pull.ok) {
+    final(`the PR's base branch could not be read (${pull.error}), so its required checks and the behind-base check cannot be read`);
+    return { reasons, evidence, pending: reasons.length > 0 && finals === 0, cut };
+  }
+  evidence.base_ref = baseRef;
+  const branch = encodeURIComponent(baseRef);
+
+  // Required checks: rulesets plus classic branch protection (Sol review). Only
+  // a PROVEN absence counts as not configured: rulesets answering a readable
+  // list (an empty one, or one without a required_status_checks rule), and
+  // classic protection answering HTTP 404 whose JSON body `message`, trimmed,
+  // is exactly "Branch not protected" (a message that only contains it does
+  // not count; Sol re-check). Anything else (a
+  // 403, a plain 404 Not Found, which is also what a token without access gets,
+  // a rate limit, a 5xx, an answer of the wrong shape) makes that source
+  // unreadable, and an unreadable source withholds even when the other one
+  // names passing checks: the unread source may require more.
+  const required = new Set();
+  const unreadable = [];
+  const notConfigured = [];
+  const rulesPath = `${repoPath}/rules/branches/${branch}`;
+  const rules = read(rulesPath, { paginate: true });
+  const ruleShapeOk = (r) => r !== null && typeof r === 'object' && !Array.isArray(r) && typeof r.type === 'string' && (r.type !== 'required_status_checks' || (Array.isArray(r.parameters?.required_status_checks) && r.parameters.required_status_checks.every((c) => typeof c?.context === 'string' && c.context !== '')));
+  if (!rules.ok) unreadable.push(`rulesets: ${rules.error}`);
+  else if (!rules.pages.every((p) => Array.isArray(p) && p.every(ruleShapeOk))) unreadable.push(`rulesets: gh api ${rulesPath} returned an answer of an unexpected shape: ${JSON.stringify(rules.pages).slice(0, 200)}`);
+  else {
+    const before = required.size;
+    for (const rule of rules.pages.flat()) if (rule.type === 'required_status_checks') for (const c of rule.parameters.required_status_checks) required.add(c.context);
+    if (required.size === before) notConfigured.push('no ruleset requires a status check');
+  }
+  const classicPath = `${repoPath}/branches/${branch}/protection/required_status_checks`;
+  const classicRead = read(classicPath);
+  // MEASURED by the conductor 2026-11-17 against GitHub: `gh api
+  // repos/<o>/<r>/branches/main/protection` answers HTTP 404 with the JSON body
+  // {"message":"Branch not protected",...} on stdout only for an ADMIN token; a
+  // non-admin token gets {"message":"Not Found",...} for the same branch.
+  // stderr carries `gh: <message> (HTTP 404)`. So a non-admin token can never
+  // prove the absence, and the settle withholds (user-ruled 2026-11-17, "(B)
+  // Sterling's switch, as built").
+  if (!classicRead.ok && classicRead.http === 404 && bodyMessage(classicRead.body) === 'Branch not protected') notConfigured.push('the branch is not protected');
+  else {
+    const classic = one(classicRead, classicPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Array.isArray(v.contexts) && v.contexts.every((c) => typeof c === 'string') && (v.checks === undefined || (Array.isArray(v.checks) && v.checks.every((c) => typeof c?.context === 'string'))));
+    if (!classic.ok) unreadable.push(`branch protection: ${classic.error}`);
+    else {
+      const contexts = [...classic.value.contexts, ...(classic.value.checks ?? []).map((c) => c.context)].filter((c) => c !== '');
+      for (const c of contexts) required.add(c);
+      if (!contexts.length) notConfigured.push('branch protection requires no status check');
+    }
+  }
+  evidence.required_checks = [...required].sort();
+  if (unreadable.length) {
+    final(`required checks not configured or unreadable for ${baseRef}: ${unreadable.join('; ')}: a source that cannot be read may require checks the other does not name, so the merge cannot be authorized`);
+  } else if (!required.size) {
+    final(`required checks not configured or unreadable for ${baseRef} (${notConfigured.join(', ')}): configure required status checks for ${baseRef} in a ruleset or branch protection so the merge can be authorized`);
+  } else {
+    // The newest check run per name, and the combined status's latest per context.
+    const runsPath = `${repoPath}/commits/${headSha}/check-runs?per_page=100`;
+    const statusPath = `${repoPath}/commits/${headSha}/status?per_page=100`;
+    const runs = paged(read(runsPath, { paginate: true }), runsPath, 'check_runs');
+    const statuses = paged(read(statusPath), statusPath, 'statuses');
+    if (!runs.ok || !statuses.ok) {
+      final(`the head commit's checks could not be read (${[runs, statuses].filter((x) => !x.ok).map((x) => x.error).join('; ')}), so the required checks cannot be confirmed`);
+    } else {
+      const latest = new Map();
+      for (const cr of runs.items) {
+        if (typeof cr?.name !== 'string') continue;
+        const seen = latest.get(cr.name);
+        if (!seen || (cr.id ?? 0) > (seen.id ?? 0)) latest.set(cr.name, cr);
+      }
+      const contexts = new Map(statuses.items.filter((s) => typeof s?.context === 'string').map((s) => [s.context, s]));
+      for (const name of evidence.required_checks) {
+        const cr = latest.get(name);
+        const st = contexts.get(name);
+        if (cr) {
+          if (cr.status !== 'completed') evidence.required_checks_pending.push(`${name} (${cr.status})`);
+          else if (!REQUIRED_CONCLUSIONS_OK.has(cr.conclusion)) evidence.required_checks_failing.push(`${name} (${cr.conclusion})`);
+        } else if (st) {
+          if (st.state === 'pending') evidence.required_checks_pending.push(`${name} (pending)`);
+          else if (st.state !== 'success') evidence.required_checks_failing.push(`${name} (${st.state})`);
+        } else evidence.required_checks_missing.push(name);
+      }
+      if (evidence.required_checks_missing.length) reasons.push(`required check${evidence.required_checks_missing.length > 1 ? 's' : ''} ${evidence.required_checks_missing.join(', ')} not reported on the head commit (never created, or not started yet): if it is still to run, run --settle clean again on this unchanged head once it has passed; otherwise re-run the workflow`);
+      if (evidence.required_checks_pending.length) reasons.push(`required check${evidence.required_checks_pending.length > 1 ? 's' : ''} not finished on the head commit: ${evidence.required_checks_pending.join(', ')}: run --settle clean again on this unchanged head once ${evidence.required_checks_pending.length > 1 ? 'they finish' : 'it finishes'}`);
+      if (evidence.required_checks_failing.length) final(`required check${evidence.required_checks_failing.length > 1 ? 's' : ''} not successful on the head commit: ${evidence.required_checks_failing.join(', ')}`);
+    }
+  }
+
+  // Workflow runs for the head: the newest run per workflow and event must be
+  // completed with no failure, whatever the check rollup says (#275, #273).
+  const wrPath = `${repoPath}/actions/runs?head_sha=${headSha}&per_page=100`;
+  const wr = paged(read(wrPath, { paginate: true }), wrPath, 'workflow_runs');
+  if (!wr.ok) final(`the head commit's workflow runs could not be read (${wr.error}), so a failed or unfinished run cannot be ruled out`);
+  else {
+    const newest = new Map();
+    for (const run of wr.items) {
+      if (run?.head_sha !== undefined && run.head_sha !== headSha) continue;
+      const key = `${run?.workflow_id ?? run?.name}:${run?.event ?? ''}`;
+      const seen = newest.get(key);
+      if (!seen || (run.id ?? 0) > (seen.id ?? 0)) newest.set(key, run);
+    }
+    evidence.workflow_runs = [...newest.values()].map((r) => ({ id: r.id ?? null, name: r.name ?? null, event: r.event ?? null, status: r.status ?? null, conclusion: r.conclusion ?? null, run_attempt: r.run_attempt ?? null }));
+    const unfinished = evidence.workflow_runs.filter((r) => r.status !== 'completed');
+    const failed = evidence.workflow_runs.filter((r) => r.status === 'completed' && !RUN_CONCLUSIONS_OK.has(r.conclusion));
+    const label = (r) => `'${r.name ?? r.id}' (run ${r.id}, ${r.status === 'completed' ? r.conclusion : r.status})`;
+    if (failed.length) final(`workflow run${failed.length > 1 ? 's' : ''} for the head did not succeed: ${failed.map(label).join(', ')}: fix or re-run, then settle again`);
+    if (unfinished.length) reasons.push(`workflow run${unfinished.length > 1 ? 's' : ''} for the head not finished: ${unfinished.map(label).join(', ')}: run --settle clean again on this unchanged head once ${unfinished.length > 1 ? 'they finish' : 'it finishes'}`);
+  }
+
+  // Behind base (#248): the head must contain the base branch's head.
+  const cmpPath = `${repoPath}/compare/${branch}...${headSha}`;
+  const cmp = one(read(cmpPath), cmpPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Number.isInteger(v.behind_by) && v.behind_by >= 0);
+  const behind = cmp.ok ? cmp.value.behind_by : undefined;
+  if (!cmp.ok) final(`whether the branch is behind ${baseRef} could not be read (${cmp.error})`);
+  else {
+    evidence.behind_by = behind;
+    if (behind > 0) final(`the branch is behind base: ${behind} commit${behind > 1 ? 's' : ''} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
+  }
+  return { reasons, evidence, pending: reasons.length > 0 && finals === 0, cut };
+}
+
 if (argv.includes('--settle')) {
   let merge = null;
   try {
@@ -325,6 +641,8 @@ if (argv.includes('--settle')) {
       const deadline = started + checksWait.timeoutMs;
       let pinnedAt = null;
       let bodyRead = null;
+      let reads = 0; // merge-state reads completed; lastEvidence.read names the one it was read for
+      let lastEvidence = null;
       for (;;) {
         const firstRead = pinnedAt === null;
         try {
@@ -337,6 +655,7 @@ if (argv.includes('--settle')) {
           timedOut = true; // the last complete read (state) stands
           break;
         }
+        reads++;
         if (state.merged || state.pr_state !== 'OPEN') break;
         // A merge-only re-settle is held to the head the clean settle vouched for.
         const settledHead = armed.settled_head_sha ?? armed.head_sha;
@@ -384,25 +703,51 @@ if (argv.includes('--settle')) {
             { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, previously_missed: missed.items, previously_missed_unparsed: missed.unparsed }
           );
         }
-        if (bounded && Date.now() > deadline) {
-          timedOut = true; // finished, but not within --checks-timeout
+        if (bounded && Date.now() >= deadline) {
+          timedOut = true; // finished, but not before --checks-timeout
+          // The last complete evidence read stands for this late merge-state read.
+          if (lastEvidence) lastEvidence = { ...lastEvidence, read: reads };
           break;
         }
         const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
-        if (!pending) break;
+        let waitingFor = pending ? `the head's check rollup is ${state.check_rollup}` : null;
+        // MERGE EVIDENCE WAIT (user-ruled 2026-11-17, "Match GitHub, and wait"): a
+        // required check not reported or not finished yet, or a workflow run still
+        // running, is waited for inside the same bounded wait. Only a rollup that
+        // could still authorize (SUCCESS or null) on an unblocked PR is worth it.
+        if (!pending && (state.check_rollup === 'SUCCESS' || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
+          // The FIRST evidence read always completes, bounded only by each gh
+          // call's own timeout (a read that errors still withholds); the
+          // deadline bounds only the re-reads of the wait after it.
+          const reRead = lastEvidence !== null;
+          const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded && reRead ? deadline : null }), read: reads };
+          if (reRead && bounded && (fresh.cut || Date.now() >= deadline)) {
+            // A re-read the deadline cut (explicitly, or ending at or after it)
+            // is no evidence, so the last complete one stands, as the last
+            // complete merge-state read does (Sol re-check: at clock ==
+            // deadline too).
+            timedOut = true;
+            lastEvidence = { ...lastEvidence, read: reads };
+            break;
+          }
+          lastEvidence = fresh;
+          if (lastEvidence.pending) waitingFor = `the head's required checks or workflow runs are not finished (${[...lastEvidence.evidence.required_checks_missing.map((n) => `${n} not reported`), ...lastEvidence.evidence.required_checks_pending, ...lastEvidence.evidence.workflow_runs.filter((r) => r.status !== 'completed').map((r) => `run ${r.id} ${r.status}`)].join(', ')})`;
+        }
+        if (!waitingFor) break;
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           timedOut = true;
           break;
         }
-        process.stderr.write(`pr-review-wait: the head's check rollup is ${state.check_rollup}; waiting for the checks to finish (up to ${Math.ceil(remaining / 1000)}s more)\n`);
+        process.stderr.write(`pr-review-wait: ${waitingFor}; waiting for the checks to finish (up to ${Math.ceil(remaining / 1000)}s more)\n`);
         sleep(Math.min(checksWait.intervalMs, remaining));
       }
       const checksWaitedS = Math.round((Date.now() - started) / 1000);
       // GitHub issue #152: a PR merged before the settle is clean with nothing
       // left to merge; GitHub keeps its merge state UNKNOWN for good.
       if (state.merged) {
-        merge = { pr_state: state.pr_state, already_merged: true, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: false, awaiting_human_review: false, auto_merge_on_clean: autoMergeOnClean, auto_merge: false, auto_merge_withheld: 'the PR is already merged: there is nothing left to merge', head_sha: state.head_sha, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
+        const reason = 'the PR is already merged: there is nothing left to merge';
+        merge = { pr_state: state.pr_state, already_merged: true, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: false, awaiting_human_review: false, auto_merge_on_clean: autoMergeOnClean, auto_merge: false, merge_authorized: false, withheld_reasons: [reason], auto_merge_withheld: reason, head_sha: state.head_sha, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
         return { head_sha: state.head_sha };
       }
       if (state.pr_state !== 'OPEN') {
@@ -418,9 +763,21 @@ if (argv.includes('--settle')) {
       if (verdict.awaiting_human_review) withheld.push('the PR awaits a required human review');
       else if (verdict.mergeable_now !== true) withheld.push('GitHub does not report the PR mergeable now');
       if (timedOut && PENDING_ROLLUPS.has(rollup)) withheld.push(`the head commit's check rollup is ${rollup}, still not SUCCESS after waiting ${checksWaitedS}s: once the checks finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
-      else if (timedOut) withheld.push(`the head commit's check rollup reached ${rollup} only after --checks-timeout ran out (${checksWaitedS}s): run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
-      else if (rollup !== null && rollup !== 'SUCCESS') withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing check, push, and run the loop again`);
-      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
+      else if (timedOut && !lastEvidence?.pending) withheld.push(`the head commit's check rollup reached ${rollup} only after --checks-timeout ran out (${checksWaitedS}s): run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      else if (rollup === null) withheld.push(`the head commit reports no checks (check rollup null): no checks ran, or they are being re-created by a re-run, so nothing shows the head passed: run --settle clean again on this unchanged head once its checks have run`);
+      else if (rollup !== 'SUCCESS') withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing check, push, and run the loop again`);
+      // The evidence is read only when the settle can succeed; a blocked settle
+      // authorizes nothing either way.
+      if (timedOut && lastEvidence?.pending && lastEvidence.read === reads) withheld.push(`the head's required checks or workflow runs were still not finished after waiting ${checksWaitedS}s (--checks-timeout): once they finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      let evidence = null;
+      if (!verdict.blockers.length) {
+        // The evidence read for this same merge-state read stands; otherwise read it now.
+        const found = lastEvidence?.read === reads ? lastEvidence : mergeEvidence(originRepo, armed.pr_number, state.head_sha);
+        withheld.push(...found.reasons);
+        evidence = found.evidence;
+      }
+      const authorized = withheld.length === 0;
+      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: authorized, merge_authorized: authorized, withheld_reasons: withheld, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, merge_evidence: evidence, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
       if (verdict.blockers.length) {
         throw blocked(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`, { blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads });
       }
@@ -437,6 +794,14 @@ if (argv.includes('--settle')) {
       return { head_sha: state.head_sha };
     };
     const s = settlePrLoop(storeRoot, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : outcome === 'closed' ? closedGuard : null });
+    // This script never merges: the line says what it authorized, nothing more.
+    if (outcome === 'clean' && merge) {
+      process.stderr.write(
+        merge.merge_authorized
+          ? `pr-review-wait: settled clean; authorized to merge ${merge.head_sha} (this script does not merge: the conductor runs the merge pinned to that head)\n`
+          : `pr-review-wait: settled clean; merge withheld: ${merge.withheld_reasons.join('; ')}\n`
+      );
+    }
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...(merge ?? {}) }) + '\n');
     process.exit(0);
   } catch (e) {
@@ -465,6 +830,7 @@ let intervalS = seconds('--interval', DEFAULT_INTERVAL_S);
 const sinceRaw = flag('--since-review');
 if (sinceRaw !== undefined && !/^\d+$/.test(sinceRaw)) error(`--since-review must be a review id, got '${sinceRaw}'`);
 const sinceReview = sinceRaw === undefined ? null : Number(sinceRaw);
+result.next_since_review = sinceReview;
 const headRaw = flag('--head');
 if (headRaw !== undefined && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
 const expectedHead = headRaw === undefined ? null : headRaw.toLowerCase();
@@ -500,12 +866,31 @@ const base = `repos/${owner}/${name}/pulls/${prNumber}`;
 // gh call, and each call's own timeout is capped to the budget left, so a
 // hanging gh ends the call at --timeout instead of after another full poll.
 class DeadlineReached extends Error {}
+/** A gh call failed on GitHub's rate limit; resetMs is the epoch ms the budget
+ * resets (null when it could not be read). */
+class RateLimited extends Error {
+  constructor(message, resetMs) {
+    super(message);
+    this.resetMs = resetMs;
+  }
+}
+const SECONDARY_BACKOFF_MS = 60_000; // a secondary limit or unreadable reset: no reset time to wait for
+function rateLimitReset() {
+  // The probe is capped to the --timeout budget left (Sol review): it never
+  // keeps the call running past --timeout. With no budget left it is skipped.
+  const probeMs = Math.min(RATE_LIMIT_PROBE_MS, deadline - Date.now());
+  const limit = probeMs > 0 ? readCoreRateLimit((args) => spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: probeMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }), origin.host) : null;
+  return limit?.exhausted && limit.resetMs ? limit.resetMs : Date.now() + SECONDARY_BACKOFF_MS;
+}
 function ghApi(path, { paginate = false, extra = [] } = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new DeadlineReached();
   const args = ['api', '--hostname', origin.host, ...(paginate ? ['--paginate'] : []), ...extra, path];
   const r = spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   if (r.error?.code === 'ETIMEDOUT' && Date.now() >= deadline) throw new DeadlineReached();
+  if (!r.error && r.status !== 0 && isRateLimitText(`${r.stderr}\n${r.stdout}`)) {
+    throw new RateLimited(`gh ${args.join(' ')} hit the GitHub rate limit: ${(r.stderr || r.stdout || '').trim()}`, rateLimitReset());
+  }
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(' ')} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || '').trim()}`);
   }
@@ -622,6 +1007,7 @@ function requestCopilotReview() {
     const message = e instanceof DeadlineReached ? 'the --timeout budget ran out before the request completed' : e.message;
     result.copilot_request = { requested: false, error: `requestReviewsByLogin failed: ${message}` };
     process.stderr.write(`pr-review-wait: --request-copilot failed — ${message}\n`);
+    error(`--request-copilot failed, so no review of the head will be requested: ${message}`);
   }
 }
 
@@ -679,7 +1065,28 @@ function poll(recheckAbsent = true) {
   const reviews = parsePages(ghApi(`${base}/reviews`, { paginate: true }));
   const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => (b.id > a.id ? b : a)).user.login;
-  const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
+  const unconsumed = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
+  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
+  // With --head only a review of the expected head is returned; the rest are
+  // consumed-as-stale and held for the result (see HOLD FOR THE HEAD).
+  const isHeadReview = (r) => headExpected && r.commit_id === head;
+  const fresh = expectedHead === null ? unconsumed : unconsumed.filter(isHeadReview);
+  const staleHeld = expectedHead === null ? [] : unconsumed.filter((r) => !isHeadReview(r)).sort((a, b) => a.id - b.id);
+  result.stale_reviews = staleHeld.map((r) => ({ id: r.id, commit_id: r.commit_id, author: r.user.login, state: r.state, body: r.body ?? '', comments: [] }));
+  // NEXT WATERMARK (Sol review of #300): the highest id such that every
+  // unconsumed review up to it was returned (as the review or in
+  // stale_reviews). The skill passes it as the next --since-review, so a head
+  // review with a lower id than a returned stale one is never skipped.
+  const ascending = [...unconsumed].sort((a, b) => a.id - b.id);
+  const watermark = (returnedIds) => {
+    let next = sinceReview;
+    for (const r of ascending) {
+      if (!returnedIds.has(r.id)) break;
+      next = r.id;
+    }
+    result.next_since_review = next;
+  };
+  watermark(new Set(staleHeld.map((r) => r.id)));
   if (!fresh.length) {
     if (pending) return null;
     if (!recheckAbsent) throw new NoReviewRequested();
@@ -695,11 +1102,13 @@ function poll(recheckAbsent = true) {
   // --since-review only after each returned review is fully dispositioned, so
   // the next call yields the next.
   const review = fresh.reduce((a, b) => (b.id < a.id ? b : a));
-  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
-  const stale = !(headExpected && review.commit_id === head);
-  const comments = parsePages(ghApi(`${base}/comments`, { paginate: true }))
-    .filter((c) => c?.pull_request_review_id === review.id)
+  const stale = !isHeadReview(review);
+  const allComments = parsePages(ghApi(`${base}/comments`, { paginate: true }));
+  const commentsOf = (id) => allComments
+    .filter((c) => c?.pull_request_review_id === id)
     .map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? '', in_reply_to: c.in_reply_to_id ?? null }));
+  const comments = commentsOf(review.id);
+  for (const held of result.stale_reviews) held.comments = commentsOf(held.id);
   if (!stale) {
     // HEAD RACE (Sol review): a push between the first head read and here
     // would make this a review of a superseded head. Re-read the head; return
@@ -711,6 +1120,7 @@ function poll(recheckAbsent = true) {
       return null;
     }
   }
+  watermark(new Set([review.id, ...staleHeld.map((r) => r.id)]));
   const body = review.body ?? '';
   const missed = parsePreviouslyMissed(body);
   return {
@@ -736,6 +1146,17 @@ for (;;) {
       const message = `no Copilot review is requested on PR #${prNumber} and no unconsumed Copilot review exists${sinceReview === null ? '' : ` after --since-review ${sinceReview}`}, so nothing will arrive: run the wait again with --request-copilot (always after a push)`;
       process.stderr.write(`pr-review-wait: ${message}\n`);
       finish('no_review_requested', { review: null, comments: [], error: message });
+    }
+    if (e instanceof RateLimited) {
+      // Wait out the reset (plus a second) and poll again, unless it lands after the deadline.
+      const resumeAt = e.resetMs + 1000;
+      if (resumeAt >= deadline) {
+        const message = `GitHub's REST rate limit is exhausted and resets ${describeReset(e.resetMs)}, after this wait's --timeout; run the wait again after the reset`;
+        process.stderr.write(`pr-review-wait: ${message}\n`);
+        finish('rate_limited', { review: null, comments: [], error: message, rate_limit_reset: new Date(e.resetMs).toISOString() });
+      }
+      sleep(Math.max(0, resumeAt - Date.now()));
+      continue;
     }
     error(e.message);
   }

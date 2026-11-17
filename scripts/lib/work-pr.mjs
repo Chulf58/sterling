@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveGhPath } from './gh-path.mjs';
+import { describeReset, isRateLimitText, readCoreRateLimit } from './gh-rate-limit.mjs';
 
 function gh(cwd, args, timeoutMs = 120_000) {
   return spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
@@ -122,6 +123,13 @@ export function workPreflight(cwd) {
   }
   const auth = gh(cwd, ['auth', 'status', '--hostname', origin.host]);
   if (auth.status !== 0) {
+    // An exhausted REST budget makes `gh auth status` report an invalid token
+    // (GitHub issue #278): ask the rate-limit endpoint before blaming the login.
+    const limit = readCoreRateLimit((args) => gh(cwd, args), origin.host);
+    if (limit?.exhausted || isRateLimitText(streams(auth))) {
+      const when = limit?.resetMs ? `It resets ${describeReset(limit.resetMs)}.` : 'The reset time could not be read; check `gh api rate_limit`.';
+      return { refusal: `direct-merge: work mode needs the GitHub API, and the GitHub REST rate limit for ${origin.host} is exhausted — this is not a login problem, do not run gh auth login. ${when} Rerun after the reset.` };
+    }
     return { refusal: `direct-merge: work mode needs gh authenticated for ${origin.host} — \`gh auth status --hostname ${origin.host}\` failed:\n${streams(auth)}\nRun: gh auth login --hostname ${origin.host}` };
   }
   return { repo: origin.repo };

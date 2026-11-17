@@ -67,6 +67,7 @@ import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { createDeliveryPolicy } from './delivery-policy.mjs';
 import { childSessionOf, createDispatchHandlers, liveChildInRegister, rootSessionGate, sessionKind, sweepStaleDispatches } from './dispatch.mjs';
+import { noteNamesItem } from './claim-handover.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
@@ -142,6 +143,37 @@ function sameDirectory(a, b) {
  * the post-update sync run once per project per process, whichever location reaches
  * the project first.
  */
+/**
+ * Times the named sections of one fenced call. time(name, fn) runs fn and records its
+ * duration (by `now`, a clock in ms, for tests), awaiting it when it returns a promise; slowest() is ' (slowest: a 1200 ms, ...)'
+ * for the sections that took 50 ms or more (top 3), or '' when none did.
+ */
+export function createSectionTimer(now = Date.now) {
+  const spans = [];
+  const record = (name, started) => spans.push({ name, ms: now() - started });
+  return {
+    time(name, fn) {
+      const started = now();
+      let result;
+      try {
+        result = fn();
+      } catch (e) {
+        record(name, started);
+        throw e;
+      }
+      if (!result || typeof result.then !== 'function') {
+        record(name, started);
+        return result;
+      }
+      return result.then((v) => (record(name, started), v), (e) => { record(name, started); throw e; });
+    },
+    slowest() {
+      const top = spans.filter((s) => s.ms >= 50).sort((x, y) => y.ms - x.ms).slice(0, 3);
+      return top.length ? ` (slowest: ${top.map((s) => `${s.name} ${s.ms} ms`).join(', ')})` : '';
+    },
+  };
+}
+
 /** `dbPath` with a linked worktree's <checkout>/.sterling/sterling.db mapped to the store root's. */
 function storeDbPath(dbPath) {
   if (typeof dbPath !== 'string' || basename(dbPath) !== 'sterling.db' || basename(dirname(dbPath)) !== '.sterling') return dbPath;
@@ -173,18 +205,19 @@ export function createSterlingServer(deps = {}) {
   async function fenced(name, root, fn) {
     const started = Date.now();
     let timer;
+    const timing = createSectionTimer();
     try {
       await Promise.race([
-        Promise.resolve().then(fn),
+        Promise.resolve().then(() => fn(timing)),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(`${name} exceeded its ${BUDGET_MS[name]} ms budget`)), BUDGET_MS[name]);
         }),
       ]);
       const took = Date.now() - started;
-      if (took > BUDGET_MS[name]) logLine(root, `${name}: over budget (${took} ms, synchronous)`);
+      if (took > BUDGET_MS[name]) logLine(root, `${name}: over budget (${took} ms, synchronous)${timing.slowest()}`);
     } catch (e) {
       try {
-        logLine(root, `${name} failed: ${errText(e)}`);
+        logLine(root, `${name} failed: ${errText(e)}${timing.slowest()}`);
         addNotice(root, `Sterling plugin: ${name} failed (${errText(e)}). See ${LOG_REL}.`, now());
       } catch (reportError) {
         // The log and notice files are unwritable: stderr is the last place left.
@@ -244,7 +277,7 @@ export function createSterlingServer(deps = {}) {
      * board cache is dropped whatever happened, so the next board block and the orphan
      * notice re-read who holds each claim.
      */
-    function adoptClaims(root, { from, to }) {
+    function adoptClaims(root, { from, to, note }) {
       try {
         const store = openStore(join(root, '.sterling', 'sterling.db'));
         try {
@@ -252,9 +285,31 @@ export function createSterlingServer(deps = {}) {
             const r = store.get(e.id);
             return { ...e, ...(r ? { label: boardDisplayLabel(r.text, r.slug) } : {}) };
           };
-          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label), released: (r.released ?? []).map(label), releaseFailed: (r.releaseFailed ?? []).map(label) });
+          // Only items the rotation note names stay adopted; the rest are released through
+          // the holder's own releaseClaim (never a force), a failure kept per item.
+          const releaseUnnamed = (r) => {
+            const keep = (e) => {
+              const rec = store.get(e.id);
+              return noteNamesItem(note, { id: e.id, slug: rec?.slug });
+            };
+            const released = [];
+            const releaseFailed = [];
+            for (const e of [...r.adopted, ...r.already]) {
+              if (keep(e)) continue;
+              try {
+                store.releaseClaim(e.id, { session: to, generation: e.generation, now: now() });
+                released.push(e);
+              } catch (err) {
+                releaseFailed.push({ ...e, error: errText(err) });
+              }
+            }
+            const gone = new Set(released.map((e) => e.id));
+            const stay = (list) => list.filter((e) => !gone.has(e.id));
+            return { adopted: stay(r.adopted), already: stay(r.already), refused: r.refused, released, releaseFailed };
+          };
           try {
-            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+            return labelled(releaseUnnamed(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() })));
           } catch (e) {
             if (e?.partial) e.partial = labelled(e.partial);
             throw e;

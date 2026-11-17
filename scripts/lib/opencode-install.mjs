@@ -899,8 +899,8 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
           unreadable(fwd(path), err);
           continue;
         }
-        // An unedited file Sterling rendered (the plan agent's edit rules deny "*" and
-        // allow only .sterling/plans/*) never allows the store, so it gets no row.
+        // An unedited file Sterling rendered (the plan agent is `edit: deny`; the conductor
+        // saves and binds plans) never allows the store, so it gets no row.
         if (!isUneditedSterlingFull(text) && agentFileLoosensGuard(text)) {
           problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
@@ -1128,7 +1128,11 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   const rel = PROJECT_CONFIG_REL;
   const path = join(projectDir, rel);
   if (tracked.includes(rel)) {
-    return [refusal(rel, `${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config)`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`)];
+    // Skipped, not refused: the untracked Sterling agent files are still written and the
+    // sync exits clean, so the post-update marker is written and the notice stops repeating
+    // (GitHub #288). Only this config write is withheld; the store guard and default_agent
+    // it would carry stay unset until the file is untracked.
+    return [{ item: rel, status: 'skipped', detail: `NOT written: ${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config); the Sterling agent files were still refreshed; to get the store guard and default_agent, untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update` }];
   }
   let config = {};
   let before = null;

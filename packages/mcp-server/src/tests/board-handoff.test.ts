@@ -735,8 +735,13 @@ test('board_query/board_get: the served tools register target_project under the 
     for (const name of ['board_query', 'board_get']) {
       const schema = listed.find((t) => t.name === name)?.inputSchema as { properties?: Record<string, { type?: string }>; additionalProperties?: unknown; required?: string[] };
       assert.equal(schema.properties?.target_project?.type, 'string', name);
-      assert.equal(schema.additionalProperties, false, name);
+      // GitHub #270: strictness is enforced at the parse, not advertised, because OpenCode's
+      // input repair deletes undeclared keys from a schema that says additionalProperties:false.
+      assert.notEqual(schema.additionalProperties, false, name);
       assert.equal((schema.required ?? []).includes('target_project'), false, name);
+      const unknown = (await client.callTool({ name, arguments: { id: 'x', target_projekt: 'p' } })) as { isError?: boolean; content: { text: string }[] };
+      assert.equal(unknown.isError, true, `${name} refuses an unknown key`);
+      assert.match(unknown.content[0].text, /target_projekt/, name);
     }
   } finally {
     await client.close();

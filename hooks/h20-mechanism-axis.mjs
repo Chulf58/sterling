@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync11 } from "node:fs";
-import { join as join16 } from "node:path";
+import { existsSync as existsSync12 } from "node:fs";
+import { join as join17 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
@@ -9329,9 +9329,7 @@ function refreshReferenceDeltaSuffix(catalogRecord) {
   if (entries.length === 0)
     return "";
   const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
-  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
-  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
-  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+  return ` \u2014 current entries: ${snapshot}. Re-verify the ids, labels and availability against current provider info (tier 'unknown' is valid unset metadata \u2014 leave it; the catalog location is a label, not a file); update catalog.entries[] on the linked record via knowledge_edit/knowledge_update only if something changed, and cite this item's id in resolves to close it.`;
 }
 function activityTitleOf(record) {
   const r = record;
@@ -12313,7 +12311,7 @@ var SterlingStore = class _SterlingStore {
    * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
    * "Refresh the KB models catalog" with no file_keys and a project-local catalog
    * gave a drain nothing to act on): every current entry's id/tier/status, with
-   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * what to re-verify (an 'unknown' tier is valid unset metadata, never a lookup). A drain closes
    * it by writing the looked-up values into catalog.entries[] on the linked
    * record (feature_link) and citing this item's id in `resolves`.
    */
@@ -15438,6 +15436,11 @@ function dispatchOverlapNotice(input2, { now = Date.now() } = {}) {
   }
 }
 
+// scripts/hooks/lib/axis-compose.mjs
+import { existsSync as existsSync11, readFileSync as readFileSync12 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join16 } from "node:path";
+
 // scripts/hooks/lib/retired-terms.mjs
 function retiredTermNotice(store, text) {
   if (!text) return "";
@@ -15527,6 +15530,218 @@ function codexModelPin(root, { opener, toolInput }) {
     `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
   );
   return { line: lines.join("\n"), model: configured };
+}
+var TomlSyntaxError = class extends Error {
+};
+var TOML_BARE_KEY = /[A-Za-z0-9_-]/;
+var TOML_SCALAR = /[A-Za-z0-9_+\-.:]/;
+var TOML_ESCAPES = { b: "\b", t: "	", n: "\n", f: "\f", r: "\r", e: "\x1B", '"': '"', "\\": "\\" };
+function tomlMcpServerNames(src) {
+  const n = src.length;
+  let i = src.charCodeAt(0) === 65279 ? 1 : 0;
+  const names = /* @__PURE__ */ new Set();
+  const fail = (what) => {
+    throw new TomlSyntaxError(`not valid TOML at line ${src.slice(0, i).split("\n").length}: ${what}`);
+  };
+  const ws = () => {
+    while (src[i] === " " || src[i] === "	") i++;
+  };
+  const newline = () => {
+    if (src[i] === "\n") i += 1;
+    else if (src[i] === "\r" && src[i + 1] === "\n") i += 2;
+    else return false;
+    return true;
+  };
+  const comment = () => {
+    if (src[i] === "#") while (i < n && src[i] !== "\n" && !(src[i] === "\r" && src[i + 1] === "\n")) i++;
+  };
+  const gap = () => {
+    for (; ; ) {
+      ws();
+      comment();
+      if (!newline()) return;
+    }
+  };
+  const endOfLine = () => {
+    ws();
+    comment();
+    if (i < n && !newline()) fail("expected the end of the line");
+  };
+  const escape = () => {
+    const c = src[i + 1];
+    if (c !== void 0 && Object.hasOwn(TOML_ESCAPES, c)) {
+      i += 2;
+      return TOML_ESCAPES[c];
+    }
+    const len = c === "u" ? 4 : c === "U" ? 8 : c === "x" ? 2 : 0;
+    const hex = src.slice(i + 2, i + 2 + len);
+    const code = len && hex.length === len && /^[0-9A-Fa-f]+$/.test(hex) ? parseInt(hex, 16) : -1;
+    if (code < 0 || code > 1114111 || code >= 55296 && code <= 57343) fail("an invalid escape in a string");
+    i += 2 + len;
+    return String.fromCodePoint(code);
+  };
+  const basic = () => {
+    let s2 = "";
+    for (i++; ; ) {
+      const c = src[i];
+      if (c === void 0 || c === "\n" || c === "\r") fail("an unterminated string");
+      if (c === '"') {
+        i++;
+        return s2;
+      }
+      if (c === "\\") s2 += escape();
+      else {
+        s2 += c;
+        i++;
+      }
+    }
+  };
+  const literal = () => {
+    const start = ++i;
+    while (i < n && src[i] !== "'" && src[i] !== "\n") i++;
+    if (src[i] !== "'") fail("an unterminated string");
+    return src.slice(start, i++);
+  };
+  const multiline = (q) => {
+    for (i += 3; ; ) {
+      if (i >= n) fail("an unterminated multiline string");
+      if (q === '"' && src[i] === "\\") i += 2;
+      else if (src[i] === q && src[i + 1] === q && src[i + 2] === q) {
+        let run = 3;
+        while (src[i + run] === q) run++;
+        if (run > 5) fail("too many quotes closing a multiline string");
+        i += run;
+        return;
+      } else i++;
+    }
+  };
+  const key = () => {
+    const parts = [];
+    for (; ; ) {
+      ws();
+      const c = src[i];
+      if (c === '"' || c === "'") {
+        if (src[i + 1] === c && src[i + 2] === c) fail("a multiline string used as a key");
+        parts.push(c === '"' ? basic() : literal());
+      } else {
+        const start = i;
+        while (i < n && TOML_BARE_KEY.test(src[i])) i++;
+        if (i === start) fail("expected a key");
+        parts.push(src.slice(start, i));
+      }
+      ws();
+      if (src[i] !== ".") return parts;
+      i++;
+    }
+  };
+  const value = () => {
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      if (src[i + 1] === c && src[i + 2] === c) multiline(c);
+      else if (c === '"') basic();
+      else literal();
+      return null;
+    }
+    if (c === "[") {
+      for (i++; ; ) {
+        gap();
+        if (src[i] === "]") break;
+        value();
+        gap();
+        if (src[i] === ",") i++;
+        else if (src[i] !== "]") fail("expected , or ] in an array");
+      }
+      i++;
+      return null;
+    }
+    if (c === "{") {
+      const keys = [];
+      for (i++; ; ) {
+        gap();
+        if (src[i] === "}") break;
+        keys.push(key()[0]);
+        if (src[i] !== "=") fail("expected = in an inline table");
+        i++;
+        ws();
+        value();
+        gap();
+        if (src[i] === ",") i++;
+        else if (src[i] !== "}") fail("expected , or } in an inline table");
+      }
+      i++;
+      return keys;
+    }
+    const start = i;
+    while (i < n && TOML_SCALAR.test(src[i])) i++;
+    if (i === start) fail("expected a value");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(src.slice(start, i)) && src[i] === " " && /\d/.test(src[i + 1] ?? "")) {
+      for (i++; i < n && TOML_SCALAR.test(src[i]); ) i++;
+    }
+    return null;
+  };
+  let table = [];
+  let inServerArray = false;
+  while (i < n) {
+    ws();
+    if (newline()) continue;
+    if (i >= n || src[i] === "#") {
+      endOfLine();
+      continue;
+    }
+    if (src[i] === "[") {
+      const array = src[i + 1] === "[";
+      i += array ? 2 : 1;
+      table = key();
+      if (src[i] !== "]" || array && src[i + 1] !== "]") fail("expected ] closing a table header");
+      i += array ? 2 : 1;
+      inServerArray = array && table.length === 1 && table[0] === "mcp_servers";
+      if (table[0] === "mcp_servers" && table.length >= 2) names.add(table[1]);
+      endOfLine();
+      continue;
+    }
+    const path = [...table, ...key()];
+    if (src[i] !== "=") fail("expected = after a key");
+    i++;
+    ws();
+    const inline = value();
+    if (path[0] === "mcp_servers" && !inServerArray) {
+      if (path.length >= 2) names.add(path[1]);
+      else if (inline) for (const k of inline) names.add(k);
+    }
+    endOfLine();
+  }
+  return [...names];
+}
+function codexUserMcpServers(env = process.env) {
+  const file = join16(env.CODEX_HOME || join16(homedir4(), ".codex"), "config.toml");
+  let text;
+  try {
+    text = readFileSync12(file, "utf8");
+  } catch (e) {
+    return e && e.code === "ENOENT" ? { names: [] } : { names: [], error: `${file}: ${e && e.message || e}` };
+  }
+  try {
+    return { names: tomlMcpServerNames(text) };
+  } catch (e) {
+    if (e instanceof TomlSyntaxError) return { names: [], error: `${file}: ${e.message}` };
+    throw e;
+  }
+}
+function codexMcpDisable(toolInput, env = process.env) {
+  const { names, error } = codexUserMcpServers(env);
+  if (error) {
+    return { line: `STERLING CODEX MCP SERVERS (H20) \u2014 the Codex config could not be read (${JSON.stringify(error).slice(0, 200)}), so no user MCP server was disabled on this call.` };
+  }
+  const base2 = toolInput && typeof toolInput.config === "object" && toolInput.config !== null && !Array.isArray(toolInput.config) ? toolInput.config : {};
+  const callerServers = base2.mcp_servers && typeof base2.mcp_servers === "object" && !Array.isArray(base2.mcp_servers) ? base2.mcp_servers : {};
+  const added = names.filter((n) => !Object.hasOwn(callerServers, n));
+  if (added.length === 0) return {};
+  const mcp_servers = { ...callerServers };
+  for (const n of added) mcp_servers[n] = { enabled: false };
+  return {
+    config: { ...base2, mcp_servers },
+    line: `STERLING CODEX MCP SERVERS (H20) \u2014 disabled ${added.length} user MCP server(s) from the Codex config on this call (${added.map((n) => JSON.stringify(n)).join(", ").slice(0, 200)}); a review or consult uses none of them.`
+  };
 }
 function citedInBrief(record, text) {
   const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -15756,11 +15971,14 @@ var input = readStdin();
 function buildModelPin(inp) {
   if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
   const root = inp.storeRoot ? String(inp.storeRoot) : "";
-  const sterling = join16(root, ".sterling");
-  if (!existsSync11(join16(sterling, "sterling.db")) && !existsSync11(join16(sterling, "config.json"))) return null;
+  const sterling = join17(root, ".sterling");
+  if (!existsSync12(join17(sterling, "sterling.db")) && !existsSync12(join17(sterling, "config.json"))) return null;
   const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
-  if (!pin.model) return { line: pin.line };
-  return { line: pin.line, updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: pin.model } };
+  const base2 = inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {};
+  const mcp = inp.tool_name === "mcp__codex__codex" ? codexMcpDisable(base2) : {};
+  const line = [pin.line, mcp.line].filter(Boolean).join("\n");
+  if (!pin.model && !mcp.config) return { line };
+  return { line, updatedInput: { ...base2, ...pin.model ? { model: pin.model } : {}, ...mcp.config ? { config: mcp.config } : {} } };
 }
 var pinMemo;
 function modelPin2() {

@@ -545,9 +545,8 @@ export function catalogStatus(
 /**
  * The concrete delta a refresh_reference item on the models catalog appends
  * to its text, so a drain has something to act on instead of a bare "refresh
- * the catalog" (Dome Farmer friction 2026-09-17, `sterling-issues.md`
- * 2026-09-17 entry): every current entry's id/tier/status, with any entry
- * whose tier is still 'unknown' called out by name as the thing to look up.
+ * the catalog" (Dome Farmer friction 2026-09-17): every current entry's
+ * id/tier/status, and what to re-verify. An 'unknown' tier is never called out.
  * No catalog record → no delta to append (bootstrap has not run yet).
  */
 function refreshReferenceDeltaSuffix(catalogRecord: Record<string, unknown> | undefined): string {
@@ -555,12 +554,10 @@ function refreshReferenceDeltaSuffix(catalogRecord: Record<string, unknown> | un
     ?.entries ?? [];
   if (entries.length === 0) return '';
   const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(', ');
-  const unknownTier = entries.filter((e) => e.tier === 'unknown').map((e) => e.id);
-  const lookup =
-    unknownTier.length > 0
-      ? `tier is still 'unknown' for: ${unknownTier.join(', ')} — look these up and `
-      : 're-verify these against current provider info and ';
-  return ` — current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+  // Tier 'unknown' is valid unset metadata (decision model-catalog-unknown-tier-is-valid-unset-metadata,
+  // user-ruled 2026-11-11 and 2026-11-17, GitHub #240 and #246): no tier vocabulary or lookup source exists,
+  // so the item never asks for tiers. It asks for what can be verified: ids, labels and availability.
+  return ` — current entries: ${snapshot}. Re-verify the ids, labels and availability against current provider info (tier 'unknown' is valid unset metadata — leave it; the catalog location is a label, not a file); update catalog.entries[] on the linked record via knowledge_edit/knowledge_update only if something changed, and cite this item's id in resolves to close it.`;
 }
 
 /**
@@ -5319,7 +5316,7 @@ export class SterlingStore {
    * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
    * "Refresh the KB models catalog" with no file_keys and a project-local catalog
    * gave a drain nothing to act on): every current entry's id/tier/status, with
-   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * what to re-verify (an 'unknown' tier is valid unset metadata, never a lookup). A drain closes
    * it by writing the looked-up values into catalog.entries[] on the linked
    * record (feature_link) and citing this item's id in `resolves`.
    */

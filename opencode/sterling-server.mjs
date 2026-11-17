@@ -10234,9 +10234,7 @@ function refreshReferenceDeltaSuffix(catalogRecord) {
   if (entries.length === 0)
     return "";
   const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
-  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
-  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
-  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+  return ` \u2014 current entries: ${snapshot}. Re-verify the ids, labels and availability against current provider info (tier 'unknown' is valid unset metadata \u2014 leave it; the catalog location is a label, not a file); update catalog.entries[] on the linked record via knowledge_edit/knowledge_update only if something changed, and cite this item's id in resolves to close it.`;
 }
 function activityTitleOf(record) {
   const r = record;
@@ -13378,7 +13376,7 @@ var init_dist2 = __esm({
        * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
        * "Refresh the KB models catalog" with no file_keys and a project-local catalog
        * gave a drain nothing to act on): every current entry's id/tier/status, with
-       * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+       * what to re-verify (an 'unknown' tier is valid unset metadata, never a lookup). A drain closes
        * it by writing the looked-up values into catalog.entries[] on the linked
        * record (feature_link) and citing this item's id in `resolves`.
        */
@@ -16573,7 +16571,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve18) => setTimeout(resolve18, ms));
+  return new Promise((resolve19) => setTimeout(resolve19, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -23371,8 +23369,8 @@ async function boundedModelList(listModels, ms) {
   let timer;
   try {
     const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
-    const late2 = new Promise((resolve18) => {
-      timer = setTimeout(() => resolve18({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    const late2 = new Promise((resolve19) => {
+      timer = setTimeout(() => resolve19({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
     });
     return await Promise.race([call, late2]);
   } catch (e) {
@@ -24860,7 +24858,7 @@ function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
-  return new Promise((resolve18) => {
+  return new Promise((resolve19) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -24868,7 +24866,7 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve18(stepResult(r));
+      resolve19(stepResult(r));
     };
     let child;
     try {
@@ -25791,7 +25789,7 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
   }
   const setOff = (sessionID) => (remember(off, sessionID, true), "off");
-  async function resolve18(root, sessionID, messages) {
+  async function resolve19(root, sessionID, messages) {
     if (off.has(sessionID)) return "off";
     if (roots.has(sessionID)) return "on";
     const kind = await sessionKind(getSession?.(), sessionID, parents);
@@ -25838,10 +25836,19 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     markDisclosed(sessionID, policy);
     return notice;
   }
-  return { resolve: resolve18, disclose, markDisclosed };
+  return { resolve: resolve19, disclose, markDisclosed };
 }
 
 // packages/opencode-plugin/src/claim-handover.mjs
+function noteNamesItem(note, { id, slug }) {
+  const texts = [note?.next_slice, ...Array.isArray(note?.lanes) ? note.lanes : []].filter((t) => typeof t === "string");
+  const keys = [id, typeof id === "string" ? id.slice(0, 8) : null, slug].filter((k) => typeof k === "string" && k);
+  const esc = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return keys.some((k) => {
+    const re = new RegExp(`(?<![\\w-])${esc(k)}(?![\\w-])`, "i");
+    return texts.some((t) => re.test(t));
+  });
+}
 function itemName(entry) {
   const id8 = String(entry.id).slice(0, 8);
   return entry.label ? `${entry.label} (${id8})` : id8;
@@ -25849,6 +25856,8 @@ function itemName(entry) {
 function adoptionText(result, from) {
   const parts = [];
   if (result.adopted.length) parts.push(`adopted ${result.adopted.length}: ${result.adopted.map(itemName).join(", ")}`);
+  if (result.released?.length) parts.push(`released ${result.released.length} (the rotation note does not name them as in flight, so they are free for any session to claim): ${result.released.map(itemName).join(", ")}`);
+  if (result.releaseFailed?.length) parts.push(`could NOT release ${result.releaseFailed.length} (the rotation note does not name them, but the release failed; board_release them if they are not yours to keep): ${result.releaseFailed.map((r) => `${itemName(r)}, ${r.error}`).join("; ")}`);
   if (result.already.length) parts.push(`already yours from an earlier hand-over: ${result.already.map(itemName).join(", ")}`);
   if (result.refused.length) {
     const why = (r) => r.reason === "other_checkout" ? `held in checkout '${r.checkout}', not this one (that session may be live there; board_takeover takes it)` : r.reason === "moved" ? `moved before the hand-over: session '${r.holder_session}' holds it at generation ${r.generation}` : "released before the hand-over";
@@ -26034,8 +26043,10 @@ var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
 var WORKER_ALERTS = /last worker run FAILED at [\s\S]*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
 var SYNTHETIC_TIMEOUT_MS = 3e3;
+var NO_TIMING = { time: (_name, fn) => fn() };
 function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = /* @__PURE__ */ new Map();
+  const domainMetaCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
   const maintenanceCache = /* @__PURE__ */ new Map();
   const frozenSystem = /* @__PURE__ */ new Map();
@@ -26049,6 +26060,34 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   function holdLine(key, line) {
     latestGeneration.set(key, (latestGeneration.get(key) ?? 0) + 1);
     heldLines.set(key, line);
+  }
+  function clearDomainMeta() {
+    domainMetaCache.clear();
+  }
+  function domainOpener(dbPath) {
+    return {
+      getMeta(key) {
+        const id = `${dbPath}\0${key}`;
+        let hit = domainMetaCache.get(id);
+        if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
+          try {
+            const store = openStore(dbPath);
+            try {
+              hit = { at: Date.now(), value: store.getMeta(key) };
+            } finally {
+              store.close();
+            }
+          } catch (e) {
+            hit = { at: Date.now(), error: e };
+          }
+          domainMetaCache.set(id, hit);
+        }
+        if (hit.error) throw hit.error;
+        return hit.value;
+      },
+      close() {
+      }
+    };
   }
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -26240,19 +26279,19 @@ ${opencodeHostTail(pluginRoot)}`;
       input.system.push({ type: "text", text });
     });
   }
-  async function volatileBlocks(root, sessionID, kind) {
+  async function volatileBlocks(root, sessionID, kind, t = NO_TIMING) {
     const { pluginRoot } = resolvePluginRoot();
-    const state = operatingStateLines(root, pluginRoot, { opener: openStore });
+    const state = t.time("operating-state", () => operatingStateLines(root, pluginRoot, { opener: domainOpener }));
     const out = [
-      { key: "status", text: statusLine(root) },
+      { key: "status", text: t.time("status", () => statusLine(root)) },
       { key: "operating-state", text: state.lines.join("\n\n") },
-      { key: "maintenance", ...maintenanceBlocks(root, state.config) }
+      { key: "maintenance", ...t.time("maintenance", () => maintenanceBlocks(root, state.config)) }
     ];
     if (kind === "root") {
       if (!inWorkerChild(env)) {
         let planLock;
         try {
-          planLock = planLockSection({ cwd: root, source: "opencode" }).context.trim();
+          planLock = t.time("plan-lock", () => planLockSection({ cwd: root, source: "opencode" })).context.trim();
         } catch (e) {
           logLine(root, `context: plan lock section failed: ${errText2(e)}`);
           planLock = `PLAN LOCK UNAVAILABLE (${errText2(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`;
@@ -26263,7 +26302,7 @@ ${opencodeHostTail(pluginRoot)}`;
         swept.add(root);
         let line;
         try {
-          line = await sweepStale(root);
+          line = await t.time("sweep", () => sweepStale(root));
         } catch (e) {
           line = `STERLING DISPATCH SWEEP FAILED (${errText2(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; run \`opencode reload\` to retry the sweep.`;
         }
@@ -26275,7 +26314,7 @@ ${opencodeHostTail(pluginRoot)}`;
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
         registrySeen.set(root, sessionID);
         try {
-          const refreshed = refreshRegistryRow(storeRootFor(root), { config: state.config, at: now() });
+          const refreshed = t.time("registry", () => refreshRegistryRow(storeRootFor(root), { config: state.config, at: now() }));
           if (refreshed?.notice) {
             holdLine(`${root}\0registry-name`, refreshed.notice);
             logLine(root, `context: ${refreshed.notice}`);
@@ -26285,15 +26324,15 @@ ${opencodeHostTail(pluginRoot)}`;
           logLine(root, `context: project registry refresh failed: ${errText2(e)}`);
         }
       }
-      out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
+      out.push({ key: "undeclared", text: t.time("undeclared", () => undeclaredBlock(root, state.config)), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
       if (!inWorkerChild(env)) {
-        out.push({ key: "board", ...boardBlock(root, state.config, sessionID, state.configUnreadable), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
-        out.push({ key: "lanes", text: laneLine(root, state.config, sessionID) });
+        out.push({ key: "board", ...t.time("board", () => boardBlock(root, state.config, sessionID, state.configUnreadable)), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+        out.push({ key: "lanes", text: t.time("lanes", () => laneLine(root, state.config, sessionID)) });
       }
     }
-    out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
+    out.push({ key: "restore", text: await t.time("restore", () => rotationRestore(root, sessionID)) });
     if (kind === "root" && !inWorkerChild(env)) {
-      out.push({ key: "claim-orphans", text: orphanBlock(root, state.config, sessionID, state.configUnreadable), cleared: "CLAIMS HELD BY AN EARLIER SESSION: none in this checkout now; the list shown earlier no longer applies." });
+      out.push({ key: "claim-orphans", text: t.time("claim-orphans", () => orphanBlock(root, state.config, sessionID, state.configUnreadable)), cleared: "CLAIMS HELD BY AN EARLIER SESSION: none in this checkout now; the list shown earlier no longer applies." });
     }
     if (kind === "root" && !inWorkerChild(env)) {
       for (const [key, text] of [...heldLines]) {
@@ -26307,10 +26346,10 @@ ${opencodeHostTail(pluginRoot)}`;
     }
     return out;
   }
-  async function dueText(root, sessionID, where) {
+  async function dueText(root, sessionID, where, t = NO_TIMING) {
     const kind = await sessionKind(getSession?.(), sessionID, parents);
     if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its ${where} (${kind.why}); only the lines every session gets are delivered`);
-    const blocks = await volatileBlocks(root, sessionID, kind.why ? "unknown" : kind.kind);
+    const blocks = await volatileBlocks(root, sessionID, kind.why ? "unknown" : kind.kind, t);
     const seen = delivered.get(sessionID) ?? /* @__PURE__ */ new Map();
     const marks = /* @__PURE__ */ new Map();
     const due = [];
@@ -26338,7 +26377,7 @@ ${opencodeHostTail(pluginRoot)}`;
     if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
       let notices;
       try {
-        claimedNotices = claimNotices(root, now());
+        claimedNotices = t.time("notices", () => claimNotices(root, now()));
         notices = claimedNotices.notices;
       } catch (e) {
         release();
@@ -26391,8 +26430,8 @@ ${due.join("\n\n")}` : "",
     let timer;
     try {
       const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} })).then(() => ({ sent: true }));
-      const late2 = new Promise((resolve18) => {
-        timer = setTimeout(() => resolve18({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      const late2 = new Promise((resolve19) => {
+        timer = setTimeout(() => resolve19({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
       });
       return await Promise.race([call, late2]);
     } catch (e) {
@@ -26465,10 +26504,10 @@ ${note}` : text);
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
-    await fenced("context", root, async () => {
+    await fenced("context", root, async (t) => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       await serialized(input.sessionID, async () => {
-        const due = await dueText(root, input.sessionID, "prompt");
+        const due = await dueText(root, input.sessionID, "prompt", t);
         await deliver(input.sessionID, due, { append: (text) => {
           input.prompt.text = `${input.prompt.text}
 
@@ -26481,11 +26520,11 @@ ${text}`;
     if (!isDeliveryTool(input?.tool) || input.status !== "completed") return;
     const root = rootOf();
     if (!root) return;
-    await fenced("context", root, async () => {
+    await fenced("context", root, async (t) => {
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
       await serialized(input.sessionID, async () => {
-        const due = await dueText(root, input.sessionID, "tool call");
+        const due = await dueText(root, input.sessionID, "tool call", t);
         await deliver(input.sessionID, due, { delivery: "steer", append: (text) => appendToResult(input.result, text) });
       });
     });
@@ -26494,7 +26533,7 @@ ${text}`;
     onContext,
     onPrompt,
     onToolResult,
-    resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
+    resetStatus: (root) => (statusCache.delete(root), clearDomainMeta(), maintenanceCache.delete(root), boardCache.delete(root)),
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
@@ -26611,7 +26650,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
     let handover = "";
     if (adoptClaims && typeof note.session_id === "string" && note.session_id) {
       try {
-        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
+        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID, note }), note.session_id);
       } catch (e) {
         logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText2(e)}`);
         handover = handoverFailedText(e, note.session_id);
@@ -27121,7 +27160,7 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 import { createHash as createHash9, randomUUID as randomUUID12 } from "node:crypto";
 import { readFileSync as readFileSync30, writeFileSync as writeFileSync15, mkdirSync as mkdirSync21, rmSync as rmSync14, statSync as statSync11, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { join as join49, dirname as dirname18 } from "node:path";
+import { join as join49, dirname as dirname18, resolve as resolve16 } from "node:path";
 init_dist2();
 function hashFile(root, rel) {
   try {
@@ -27214,6 +27253,44 @@ function changedSince(root, base2) {
     ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
   ]);
 }
+function readHeadReflog(root) {
+  const r = spawnSync10("git", ["rev-parse", "--git-path", "logs/HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  if (r.status !== 0) return null;
+  let raw;
+  try {
+    raw = readFileSync30(resolve16(root, r.stdout.trim()), "utf8");
+  } catch {
+    return null;
+  }
+  const entries = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    const m = /^([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) [^\t]* \d+ [+-]\d{4}(?:\t(.*))?$/.exec(line);
+    if (!m) return null;
+    entries.push({ old: m[1], new: m[2], msg: m[3] ?? "", line });
+  }
+  return entries;
+}
+var reflogLineHash = (line) => createHash9("sha256").update(line).digest("hex");
+function reflogAnchor(entries, head) {
+  const last = entries?.at(-1);
+  return last && last.new === head ? reflogLineHash(last.line) : null;
+}
+function fastForwardedPaths(root, settled, entries, head) {
+  if (typeof settled.reflog !== "string" || !entries) return /* @__PURE__ */ new Set();
+  const at = entries.findIndex((e) => e.new === settled.sha && reflogLineHash(e.line) === settled.reflog);
+  if (at < 0) return /* @__PURE__ */ new Set();
+  const range = entries.slice(at);
+  for (let i = 1; i < range.length; i++) if (range[i].old !== range[i - 1].new) return /* @__PURE__ */ new Set();
+  if (range.at(-1).new !== head) return /* @__PURE__ */ new Set();
+  const moves = range.slice(1).map((e) => ({ from: e.old, to: e.new, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.msg) }));
+  if (!moves.some((m) => m.ff)) return /* @__PURE__ */ new Set();
+  const between = (m) => new Set(gitZ(root, ["diff", "--name-only", "-z", "--no-renames", "--relative", m.from, m.to]));
+  const own = /* @__PURE__ */ new Set();
+  const pulled = /* @__PURE__ */ new Set();
+  for (const m of moves) for (const p of between(m)) (m.ff ? pulled : own).add(p);
+  return new Set([...pulled].filter((p) => !own.has(p)));
+}
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
@@ -27243,13 +27320,22 @@ function gitTouches(root, now) {
     }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
-    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    const reflog = head === EMPTY_TREE ? null : readHeadReflog(root);
+    const anchor = reflogAnchor(reflog, head);
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now, ...anchor ? { reflog: anchor } : {} };
     if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
     let fromBase = base2 ? changedSince(root, base2) : dirtyNow;
     if (mergeBase) {
       const sinceMergeBase = changedSince(root, mergeBase);
       fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
+    }
+    if (base2 && base2 !== EMPTY_TREE) {
+      const pulled = fastForwardedPaths(root, settled, reflog, head);
+      if (pulled.size) {
+        const dirtyHead = changedSince(root, head);
+        fromBase = [...fromBase].filter((p) => !pulled.has(p) || dirtyHead.has(p));
+      }
     }
     const pool = /* @__PURE__ */ new Set([...fromBase, ...Object.keys(settled.dirty)]);
     const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
@@ -28179,7 +28265,7 @@ function createProjectStores({ openRouted = (root) => openRoutedStores(root).sto
 // packages/opencode-plugin/src/session-move.mjs
 import { existsSync as existsSync31 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { isAbsolute as isAbsolute6, join as join51, resolve as resolve16 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join51, resolve as resolve17 } from "node:path";
 var MOVE_TOOLS = /* @__PURE__ */ new Set(["opencode_session_move", "session_move"]);
 function isSessionMove(tool) {
   return MOVE_TOOLS.has(tool);
@@ -28188,7 +28274,7 @@ function moveTarget(dir, base2, home = homedir9()) {
   let d = String(dir);
   if (d === "~") d = home;
   else if (d.startsWith("~/") || d.startsWith("~\\")) d = join51(home, d.slice(2));
-  return isAbsolute6(d) ? resolve16(d) : resolve16(base2, d);
+  return isAbsolute6(d) ? resolve17(d) : resolve17(base2, d);
 }
 var isAbsoluteMove = (dir) => dir === "~" || dir.startsWith("~/") || dir.startsWith("~\\") || isAbsolute6(dir);
 var sterlingAgent = (agent) => typeof agent === "string" && agentRole(agent) !== agent;
@@ -28277,7 +28363,7 @@ function mapResult({ error, signal, status, stdout, stderr }) {
 function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
   const { script, error } = mapScript(root);
   if (error) return Promise.resolve({ error });
-  return new Promise((resolve18) => {
+  return new Promise((resolve19) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -28285,7 +28371,7 @@ function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve18(mapResult(r));
+      resolve19(mapResult(r));
     };
     let child;
     try {
@@ -28626,7 +28712,7 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
 // packages/opencode-plugin/src/server.mjs
 init_dist();
 import { realpathSync as realpathSync12 } from "node:fs";
-import { basename as basename8, dirname as dirname23, join as join55, resolve as resolve17 } from "node:path";
+import { basename as basename8, dirname as dirname23, join as join55, resolve as resolve18 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
 var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update", "board_remove"]);
@@ -28678,11 +28764,39 @@ function sameDirectory(a, b) {
       return realpathSync12(p);
     } catch (e) {
       unresolved ||= `${p}: ${errText2(e)}`;
-      return resolve17(p);
+      return resolve18(p);
     }
   };
   const equal = real(a) === real(b);
   return { equal, unresolved };
+}
+function createSectionTimer(now = Date.now) {
+  const spans = [];
+  const record = (name, started) => spans.push({ name, ms: now() - started });
+  return {
+    time(name, fn) {
+      const started = now();
+      let result;
+      try {
+        result = fn();
+      } catch (e) {
+        record(name, started);
+        throw e;
+      }
+      if (!result || typeof result.then !== "function") {
+        record(name, started);
+        return result;
+      }
+      return result.then((v) => (record(name, started), v), (e) => {
+        record(name, started);
+        throw e;
+      });
+    },
+    slowest() {
+      const top = spans.filter((s2) => s2.ms >= 50).sort((x, y) => y.ms - x.ms).slice(0, 3);
+      return top.length ? ` (slowest: ${top.map((s2) => `${s2.name} ${s2.ms} ms`).join(", ")})` : "";
+    }
+  };
 }
 function storeDbPath(dbPath) {
   if (typeof dbPath !== "string" || basename8(dbPath) !== "sterling.db" || basename8(dirname23(dbPath)) !== ".sterling") return dbPath;
@@ -28703,18 +28817,19 @@ function createSterlingServer(deps = {}) {
   async function fenced(name, root, fn) {
     const started = Date.now();
     let timer;
+    const timing = createSectionTimer();
     try {
       await Promise.race([
-        Promise.resolve().then(fn),
+        Promise.resolve().then(() => fn(timing)),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(`${name} exceeded its ${BUDGET_MS[name]} ms budget`)), BUDGET_MS[name]);
         })
       ]);
       const took = Date.now() - started;
-      if (took > BUDGET_MS[name]) logLine(root, `${name}: over budget (${took} ms, synchronous)`);
+      if (took > BUDGET_MS[name]) logLine(root, `${name}: over budget (${took} ms, synchronous)${timing.slowest()}`);
     } catch (e) {
       try {
-        logLine(root, `${name} failed: ${errText2(e)}`);
+        logLine(root, `${name} failed: ${errText2(e)}${timing.slowest()}`);
         addNotice(root, `Sterling plugin: ${name} failed (${errText2(e)}). See ${LOG_REL}.`, now());
       } catch (reportError) {
         process.stderr.write(`[sterling] ${name} failed (${errText2(e)}) and could not be reported (${errText2(reportError)})
@@ -28750,7 +28865,7 @@ function createSterlingServer(deps = {}) {
       if (info?.id !== sessionID || typeof dir !== "string" || !dir) return { why: `session.get gave no location.directory for session ${sessionID}` };
       return { dir: remember(sessionDirs, sessionID, dir) };
     }
-    function adoptClaims(root, { from, to }) {
+    function adoptClaims(root, { from, to, note }) {
       try {
         const store = openStore(join55(root, ".sterling", "sterling.db"));
         try {
@@ -28758,9 +28873,29 @@ function createSterlingServer(deps = {}) {
             const r = store.get(e.id);
             return { ...e, ...r ? { label: boardDisplayLabel(r.text, r.slug) } : {} };
           };
-          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label), released: (r.released ?? []).map(label), releaseFailed: (r.releaseFailed ?? []).map(label) });
+          const releaseUnnamed = (r) => {
+            const keep = (e) => {
+              const rec = store.get(e.id);
+              return noteNamesItem(note, { id: e.id, slug: rec?.slug });
+            };
+            const released = [];
+            const releaseFailed = [];
+            for (const e of [...r.adopted, ...r.already]) {
+              if (keep(e)) continue;
+              try {
+                store.releaseClaim(e.id, { session: to, generation: e.generation, now: now() });
+                released.push(e);
+              } catch (err) {
+                releaseFailed.push({ ...e, error: errText2(err) });
+              }
+            }
+            const gone = new Set(released.map((e) => e.id));
+            const stay = (list) => list.filter((e) => !gone.has(e.id));
+            return { adopted: stay(r.adopted), already: stay(r.already), refused: r.refused, released, releaseFailed };
+          };
           try {
-            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+            return labelled(releaseUnnamed(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() })));
           } catch (e) {
             if (e?.partial) e.partial = labelled(e.partial);
             throw e;
@@ -28923,7 +29058,7 @@ ${notice}`;
       }
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       const evDir = ev.location?.directory;
-      if (evDir !== void 0 && resolve17(String(evDir)) !== resolve17(directory)) return;
+      if (evDir !== void 0 && resolve18(String(evDir)) !== resolve18(directory)) return;
       if (inWorkerChild(env)) return;
       const root = rootOf();
       if (!root) return;
@@ -29049,7 +29184,7 @@ ${notice}`;
         process.stderr.write("[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n");
         return void 0;
       }
-      const key = resolve17(directory);
+      const key = resolve18(directory);
       let loc = locations.get(key);
       if (!loc) {
         loc = createLocation(directory);
@@ -29069,6 +29204,7 @@ export {
   PLUGIN_ID,
   addNotice,
   createProjectStores,
+  createSectionTimer,
   createSterlingServer,
   server_default as default,
   defaultTemplatePath,

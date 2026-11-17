@@ -6855,9 +6855,7 @@ function refreshReferenceDeltaSuffix(catalogRecord) {
   if (entries.length === 0)
     return "";
   const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
-  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
-  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
-  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+  return ` \u2014 current entries: ${snapshot}. Re-verify the ids, labels and availability against current provider info (tier 'unknown' is valid unset metadata \u2014 leave it; the catalog location is a label, not a file); update catalog.entries[] on the linked record via knowledge_edit/knowledge_update only if something changed, and cite this item's id in resolves to close it.`;
 }
 function activityTitleOf(record) {
   const r = record;
@@ -9829,7 +9827,7 @@ var SterlingStore = class _SterlingStore {
    * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
    * "Refresh the KB models catalog" with no file_keys and a project-local catalog
    * gave a drain nothing to act on): every current entry's id/tier/status, with
-   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * what to re-verify (an 'unknown' tier is valid unset metadata, never a lookup). A drain closes
    * it by writing the looked-up values into catalog.entries[] on the linked
    * record (feature_link) and citing this item's id in `resolves`.
    */
@@ -12240,7 +12238,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId, r
         a = a.map((r) => ({ ...r, tag: r.tag === oldName ? newName : r.tag })).filter((r) => !seen.has(`${r.record_id}\0${r.tag}`) && seen.add(`${r.record_id}\0${r.tag}`));
       }
       if (name === "store_meta") {
-        a = a.filter((r2) => r2.key !== STORE_FENCE_KEY);
+        a = a.filter((r2) => r2.key !== STORE_FENCE_KEY && r2.key !== RENAME_RECEIPT_KEY);
         const r = b.find((x) => x.key === RENAME_RECEIPT_KEY);
         receipt = r ? JSON.parse(r.value) : null;
         b = b.filter((x) => x.key !== RENAME_RECEIPT_KEY);
@@ -12275,7 +12273,7 @@ function renameCopy(oldPath, newPath, oldName, newName, operationId, retag = fal
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
-      db.prepare("DELETE FROM store_meta WHERE key = ?").run(STORE_FENCE_KEY);
+      db.prepare("DELETE FROM store_meta WHERE key IN (?, ?)").run(STORE_FENCE_KEY, RENAME_RECEIPT_KEY);
       foreign = foreignScopes(db, `domain:${oldName}`);
       if (foreign.length === 0) {
         const update = db.prepare("UPDATE records SET scope = ?, body = ? WHERE id = ?");

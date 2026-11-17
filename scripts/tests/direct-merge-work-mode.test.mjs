@@ -61,6 +61,8 @@ function gitMaybe(cwd, args) {
 // on WSL lacks). `gh pr create` is never legitimate: the fake exits 4 on it and
 // the tests assert it was never called.
 //   auth_fail         present => `gh auth status` exits 1
+//   rate_limit_reset  holds an epoch second => `gh auth status` exits 1 with an
+//                     invalid-token message, and `gh api rate_limit` reports core remaining 0
 const FAKE_GH_IMPL = `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -75,6 +77,7 @@ const prs = existsSync(prsFile) ? JSON.parse(readFileSync(prsFile, 'utf8')) : []
 const [a, b] = argv;
 if (a === '--version') { console.log('gh version 9.9.9 (fake)'); process.exit(0); }
 if (a === 'auth' && b === 'status') {
+  if (existsSync(join(state, 'rate_limit_reset'))) { console.error('X Failed to log in to github.com account fake (keyring)\\n- The token in keyring is invalid.'); process.exit(1); }
   if (existsSync(join(state, 'auth_fail'))) { console.error('You are not logged into any GitHub hosts. To log in, run: gh auth login'); process.exit(1); }
   console.error('Logged in to github.com as fake'); process.exit(0);
 }
@@ -88,6 +91,11 @@ if (a === 'pr' && b === 'list') {
   process.exit(0);
 }
 if (a === 'pr' && b === 'create') { console.error('fake gh: gh pr create must never be called (work mode creates the PR through gh api)'); process.exit(4); }
+if (a === 'api' && argv.includes('rate_limit')) {
+  const resetFile = join(state, 'rate_limit_reset');
+  const remaining = existsSync(resetFile) ? 0 : 5000;
+  console.log(JSON.stringify({ resources: { core: { limit: 5000, remaining, reset: existsSync(resetFile) ? Number(readFileSync(resetFile, 'utf8')) : 0 } } })); process.exit(0);
+}
 if (a === 'api') {
   const m = (argv.find((x) => /^repos\\//.test(x)) ?? '').match(/^repos\\/([^/]+)\\/([^/]+)\\/pulls$/);
   const host = flag('--hostname');
@@ -1028,6 +1036,23 @@ test('work: gh ABSENT from PATH is refused with exit 2 naming gh auth login; not
   }
 });
 
+test('work: an exhausted REST rate limit is reported with its reset time, not as a login problem (GitHub issue #278)', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const reset = Math.floor(Date.now() / 1000) + 1800;
+    writeFileSync(join(p.gh.state, 'rate_limit_reset'), String(reset));
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 2, `exit 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /rate limit/i);
+    assert.match(r.stderr, new RegExp(new Date(reset * 1000).toISOString().replace(/\./g, '\\.')), 'names the reset time');
+    assert.doesNotMatch(r.stderr, /Run: gh auth login/);
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assertBaseUntouched(p, 'rate limited');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('work: gh present but UNAUTHENTICATED is refused with exit 2 naming gh auth login; no PR call, nothing pushed', () => {
   const p = makeProject({ mode: 'work' });
   try {
@@ -1035,7 +1060,7 @@ test('work: gh present but UNAUTHENTICATED is refused with exit 2 naming gh auth
     const r = runDirectMerge(p);
     assert.equal(r.status, 2, `unauthenticated gh exits 2 — stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /gh auth login/);
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, 'no pr or api call');
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || (c[0] === 'api' && !c.includes('rate_limit'))).length, 0, 'no pr or api call (the read-only rate_limit probe aside)');
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
     assertBaseUntouched(p, 'gh unauthenticated');
   } finally {
