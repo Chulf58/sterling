@@ -113,6 +113,24 @@ if (path === 'graphql') {
   process.stdout.write(existsSync(gql) ? readFileSync(gql, 'utf8') : '{"data":{"requestReviewsByLogin":{"pullRequest":{"id":"PR_node_7"}}}}');
   process.exit(0);
 }
+// Merge evidence of a clean settle: <kind>.json answers (default: green
+// evidence), fail_<kind> exits 1 with its content on stderr.
+const EVIDENCE = [
+  ['repos/acme/widget/rules/branches/', 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }] } }]],
+  ['repos/acme/widget/branches/', 'protection', null],
+  ['repos/acme/widget/compare/', 'compare', { status: 'ahead', ahead_by: 1, behind_by: 0 }],
+  ['repos/acme/widget/actions/runs?', 'workflow_runs', { total_count: 1, workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: '${HEAD}' }] }],
+];
+let evidence = EVIDENCE.find(([prefix]) => path.startsWith(prefix));
+if (path.startsWith('repos/acme/widget/commits/')) evidence = path.includes('/check-runs') ? ['', 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }] }] : ['', 'statuses', { state: 'pending', statuses: [] }];
+if (evidence) {
+  const [, kind, dflt] = evidence;
+  if (existsSync(join(state, 'fail_' + kind))) { console.error(readFileSync(join(state, 'fail_' + kind), 'utf8')); process.exit(1); }
+  const file = join(state, kind + '.json');
+  if (!existsSync(file) && dflt === null) { console.error('gh: Branch not protected (HTTP 404)'); process.exit(1); }
+  process.stdout.write(existsSync(file) ? readFileSync(file, 'utf8') : JSON.stringify(dflt));
+  process.exit(0);
+}
 const one = path.match(/^repos\\/acme\\/widget\\/pulls\\/\\d+\\/reviews\\/(\\d+)$/);
 if (one) {
   if (existsSync(join(state, 'fail_review_body'))) { console.error('gh: Server Error (HTTP 502) (review body)'); process.exit(1); }
@@ -170,7 +188,7 @@ function makeFixture({ originUrl = 'git@github.com:acme/widget.git' } = {}) {
   writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${impl}" "$@"\n`);
   chmodSync(shim, 0o755);
   const put = (endpoint, k, pages) => writeFileSync(join(state, `${endpoint}.${k}.json`), JSON.stringify(pages));
-  put('pull', 0, [{ number: 7, head: { sha: HEAD } }]);
+  put('pull', 0, [{ number: 7, head: { sha: HEAD }, base: { ref: 'main' } }]);
   return { base, dir, state, bin, put, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 
@@ -746,6 +764,17 @@ function arm(f, over = {}) {
   return state;
 }
 
+// The REST reads of a clean settle's merge evidence for HEAD on base 'main', in order.
+const EVIDENCE_READS = [
+  'repos/acme/widget/pulls/7',
+  'repos/acme/widget/rules/branches/main',
+  'repos/acme/widget/branches/main/protection/required_status_checks',
+  `repos/acme/widget/commits/${HEAD}/check-runs?per_page=100`,
+  `repos/acme/widget/commits/${HEAD}/status?per_page=100`,
+  `repos/acme/widget/actions/runs?head_sha=${HEAD}&per_page=100`,
+  `repos/acme/widget/compare/main...${HEAD}`,
+];
+
 for (const outcome of ['clean', 'capped', 'escalated']) {
   test(`--settle ${outcome} --pr 7 writes status ${outcome} on the armed loop (exit 0; ${outcome === 'clean' ? 'one merge-state query' : 'no gh call'})`, () => {
     const f = makeFixture();
@@ -759,9 +788,12 @@ for (const outcome of ['clean', 'capped', 'escalated']) {
       for (const k of ['pr_url', 'pr_number', 'repo', 'head_sha', 'armed_at']) assert.equal(after[k], armed[k]);
       assert.equal(r.out.status, outcome);
       if (outcome === 'clean') {
-        assert.equal(calls(f).length, 2, 'clean asks GitHub for the merge state once, then reads the newest Copilot review body once (issue #204)');
+        // Since decision pr-auto-merge-requires-github-required-checks-as-the-expecte the
+        // clean settle also reads the merge evidence (7 REST reads) after those two.
+        assert.equal(calls(f).length, 2 + EVIDENCE_READS.length, 'clean asks GitHub for the merge state once, reads the newest Copilot review body once (issue #204), then the merge evidence');
         assert.ok(calls(f)[0].some((a) => a.startsWith('query=') && a.includes('mergeStateStatus')));
         assert.ok(calls(f)[1].some((a) => a.endsWith('/pulls/7/reviews/100')));
+        assert.deepEqual(calls(f).slice(2).map((a) => a[a.length - 1]), EVIDENCE_READS);
       } else assert.equal(calls(f).length, 0);
     } finally {
       f.cleanup();
@@ -1330,6 +1362,10 @@ const gqlReview = (id, commit = HEAD, { login = 'copilot-pull-request-reviewer',
 const PR_FIELDS = { state: 'OPEN', merged: false, headRefOid: HEAD, reviews: { nodes: [gqlReview(100)] } };
 const mergePage = (status, nodes = [], over = {}) => ({ ...PR_FIELDS, mergeStateStatus: status, reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
 const putMerge = (f, pages) => writeFileSync(join(f.state, 'merge_pages.json'), JSON.stringify(pages));
+// A head whose checks finished green. Since GitHub issue #273 a null rollup (no
+// checks on the head) withholds the merge, so a test that expects the merge to be
+// authorized gives its head this rollup.
+const GREEN_ROLLUP = { commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } };
 const mergeCalls = (f) => calls(f).filter((a) => a.some((x) => x.startsWith('query=') && x.includes('reviewThreads')));
 
 test('--settle clean with an unresolved review thread is NOT clean: status blocked, exit 1, the thread named, nothing written', () => {
@@ -1385,7 +1421,7 @@ test('--settle clean: auto_merge is true by default (no config, no key) on a mer
     try {
       if (cfg !== undefined) writeConfig(f, cfg);
       arm(f);
-      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })])]);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
       const r = run(f, ['--settle', 'clean', '--pr', '7']);
       assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
       assert.equal(r.out.auto_merge_on_clean, true, `switch on for ${JSON.stringify(cfg)}`);
@@ -1456,7 +1492,7 @@ test('issue #204 control: a newest Copilot review with an empty or overview-only
     const f = makeFixture();
     try {
       arm(f);
-      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })])]);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
       putReviewBody(f, 100, body);
       const r = run(f, ['--settle', 'clean', '--pr', '7']);
       assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
@@ -1836,7 +1872,9 @@ for (const [rollup, grants] of [['SUCCESS', true], [null, true], ['FAILURE', fal
 // GitHub issue #131: a check that is not required can fail while GitHub
 // reports UNSTABLE, which is mergeable, so the settle printed auto_merge true
 // for a PR with a failing test check.
-for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNSTABLE', 'PENDING', false], ['CLEAN', 'ERROR', false], ['CLEAN', 'EXPECTED', false], ['UNSTABLE', 'SUCCESS', true], ['CLEAN', null, true]]) {
+for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNSTABLE', 'PENDING', false], ['CLEAN', 'ERROR', false], ['CLEAN', 'EXPECTED', false], ['UNSTABLE', 'SUCCESS', true], ['CLEAN', null, false]]) {
+  // CLEAN with a null rollup authorized the merge until GitHub issue #273: a head
+  // whose checks are being re-created by a re-run also reads null, so null withholds now.
   test(`--settle clean (issue #131): ${status} with check rollup ${rollup} settles clean with auto_merge ${autoMerge}${autoMerge ? '' : ', naming the rollup'}`, () => {
     const f = makeFixture();
     try {
@@ -1850,13 +1888,146 @@ for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNS
       assert.equal(r.out.auto_merge_on_clean, true);
       assert.equal(r.out.auto_merge, autoMerge);
       if (autoMerge) assert.equal(r.out.auto_merge_withheld, null);
-      else assert.ok(r.out.auto_merge_withheld.includes(`check rollup is ${rollup}`), r.out.auto_merge_withheld);
+      else assert.ok(r.out.auto_merge_withheld.includes(rollup === null ? 'check rollup null' : `check rollup is ${rollup}`), r.out.auto_merge_withheld);
       assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
     } finally {
       f.cleanup();
     }
   });
 }
+
+// ------------------- merge authorization needs GitHub's required checks (#248, #273, #275)
+// Decision pr-auto-merge-requires-github-required-checks-as-the-expecte: the
+// clean settle authorizes the merge only when the base branch's required checks
+// are present and successful on the head, the head's workflow runs show no
+// failure or unfinished run, and the branch is not behind base. It never merges.
+const putEvidence = (f, kind, value) => writeFileSync(join(f.state, `${kind}.json`), JSON.stringify(value));
+const failEvidence = (f, kind, stderr) => writeFileSync(join(f.state, `fail_${kind}`), stderr);
+function settleWith(setup, { rollup = GREEN_ROLLUP } = {}) {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], rollup)]);
+    setup?.(f);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
+    return { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')) };
+  } finally {
+    f.cleanup();
+  }
+}
+function assertWithheld(r, pattern, label) {
+  assert.equal(r.code, 0, `${label}: ${oneLine(r.stdout + r.stderr)}`);
+  assert.equal(r.out.status, 'clean', `${label}: a withheld merge still settles clean`);
+  assert.equal(r.out.auto_merge, false, `${label}: auto_merge`);
+  assert.equal(r.out.merge_authorized, false, `${label}: merge_authorized`);
+  assert.ok(r.out.withheld_reasons.some((x) => pattern.test(x)), `${label}: ${JSON.stringify(r.out.withheld_reasons)}`);
+  assert.equal(r.out.auto_merge_withheld, r.out.withheld_reasons.join('; '), label);
+  assert.match(r.stderr, /merge withheld: /, label);
+  assert.doesNotMatch(r.stderr, /authorized to merge/, label);
+  assert.equal(r.loop.status, 'clean', label);
+}
+
+test('merge authorized: required check present and green on the head, workflow runs succeeded, not behind base — authorized, never "merged"', () => {
+  const r = settleWith(null);
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true);
+  assert.equal(r.out.auto_merge, true, 'auto_merge is kept, the same boolean');
+  assert.deepEqual(r.out.withheld_reasons, []);
+  assert.equal(r.out.auto_merge_withheld, null);
+  assert.deepEqual(r.out.merge_evidence, {
+    base_ref: 'main',
+    required_checks: ['ci'],
+    required_checks_missing: [],
+    required_checks_failing: [],
+    workflow_runs: [{ id: 11, name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1 }],
+    behind_by: 0,
+  });
+  assert.match(r.stderr, new RegExp(`authorized to merge ${HEAD}`));
+  assert.match(r.stderr, /this script does not merge/);
+  assert.doesNotMatch(r.stderr, /\bmerged\b/i, 'the output never reads as a merge that happened');
+});
+
+test('merge authorized: a classic branch-protection context satisfied by a commit status counts as a required check', () => {
+  const r = settleWith((f) => {
+    putEvidence(f, 'rules', []);
+    putEvidence(f, 'protection', { strict: false, contexts: ['ci/legacy'], checks: [{ context: 'ci/legacy', app_id: null }] });
+    putEvidence(f, 'check_runs', { total_count: 0, check_runs: [] });
+    putEvidence(f, 'statuses', { state: 'success', statuses: [{ context: 'ci/legacy', state: 'success' }] });
+  });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.deepEqual(r.out.merge_evidence.required_checks, ['ci/legacy']);
+});
+
+test('issue #273: a null check rollup (a failed check being re-run, no checks re-created yet) withholds the merge', () => {
+  const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 3, name: 'Copilot', status: 'completed', conclusion: 'success' }] }), { rollup: withRollup(null) });
+  assertWithheld(r, /check rollup null/, '#273 null rollup');
+  assert.ok(r.out.withheld_reasons.some((x) => /required check ci not reported on the head commit/.test(x)), 'the missing required check is named as well');
+});
+
+test('issue #273: a workflow run re-running on the head (in_progress) withholds the merge until it finishes', () => {
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { workflow_runs: [{ id: 11, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'in_progress', conclusion: null, run_attempt: 2, head_sha: HEAD }] }));
+  assertWithheld(r, /workflow run for the head not finished: 'CI' \(run 11, in_progress\)/, '#273 re-run');
+});
+
+test('issue #275: a workflow run that concluded failure withholds the merge although the check rollup is SUCCESS', () => {
+  const r = settleWith((f) => putEvidence(f, 'workflow_runs', { workflow_runs: [
+    { id: 10, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: HEAD },
+    { id: 12, name: 'CI', workflow_id: 5, event: 'pull_request', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: HEAD },
+    { id: 13, name: 'Lint', workflow_id: 6, event: 'pull_request', status: 'completed', conclusion: 'skipped', run_attempt: 1, head_sha: HEAD },
+  ] }));
+  assert.equal(r.out.check_rollup, 'SUCCESS');
+  assertWithheld(r, /workflow run for the head did not succeed: 'CI' \(run 12, failure\)/, '#275 failed run');
+  assert.ok(!r.out.withheld_reasons.some((x) => /Lint/.test(x)), 'a skipped run ran no job and hides no failure');
+});
+
+test('issue #275: a required job that never ran (no check run on the head) withholds the merge although the rollup is SUCCESS', () => {
+  const r = settleWith((f) => putEvidence(f, 'rules', [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'publish' }] } }, { type: 'pull_request', parameters: {} }]));
+  assert.equal(r.out.check_rollup, 'SUCCESS');
+  assertWithheld(r, /required check publish not reported on the head commit/, '#275 missing job');
+  assert.deepEqual(r.out.merge_evidence.required_checks_missing, ['publish']);
+});
+
+test('a required check that ran and failed on the head (newest run of that name) withholds the merge', () => {
+  const r = settleWith((f) => putEvidence(f, 'check_runs', { total_count: 2, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }, { id: 2, name: 'ci', status: 'completed', conclusion: 'failure' }] }));
+  assertWithheld(r, /required check not successful on the head commit: ci \(failure\)/, 'failed required check');
+});
+
+test('issue #248: a branch behind its base withholds the merge, naming the base', () => {
+  const r = settleWith((f) => putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 2 }));
+  assertWithheld(r, /the branch is behind base: 2 commits on main are not in the head/, '#248 behind base');
+  assert.equal(r.out.merge_evidence.behind_by, 2);
+});
+
+for (const [label, setup, pattern] of [
+  ['no ruleset and no branch protection (404)', (f) => putEvidence(f, 'rules', []), /required checks not configured or unreadable for main \(branch protection: HTTP 404\)/],
+  ['rulesets and protection both forbidden (403/404)', (f) => failEvidence(f, 'rules', 'gh: Resource not accessible by integration (HTTP 403)'), /required checks not configured or unreadable for main \(rulesets: HTTP 403, branch protection: HTTP 404\)/],
+  ['the rulesets read fails with a server error, even with classic contexts', (f) => { failEvidence(f, 'rules', 'gh: Server Error (HTTP 502)'); putEvidence(f, 'protection', { contexts: ['ci'] }); }, /required checks not configured or unreadable for main: rulesets: .*HTTP 502/],
+  ['the base branch cannot be read', (f) => f.put('pull', 0, [{ number: 7, head: { sha: HEAD } }]), /base branch could not be read/],
+  ['the check runs cannot be read', (f) => failEvidence(f, 'check_runs', 'gh: Server Error (HTTP 500)'), /checks could not be read/],
+  ['the workflow runs cannot be read', (f) => failEvidence(f, 'workflow_runs', 'gh: Server Error (HTTP 500)'), /workflow runs could not be read/],
+  ['the compare cannot be read', (f) => failEvidence(f, 'compare', 'gh: Not Found (HTTP 404)'), /whether the branch is behind main could not be read/],
+  ['the GitHub rate limit is exhausted', (f) => { failEvidence(f, 'compare', 'gh: API rate limit exceeded for user ID 1. (HTTP 403)'); writeFileSync(join(f.state, 'rate_limit_reset_in'), '600'); }, /rate limit is exhausted \(resets at /],
+]) {
+  test(`required checks / evidence unreadable — ${label}: the merge is withheld, the settle still clean`, () => {
+    assertWithheld(settleWith(setup), pattern, label);
+  });
+}
+
+test('the merge evidence is not read when the settle is blocked (nothing would be authorized)', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('BLOCKED', [thread('PRRT_open1')], GREEN_ROLLUP)]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.merge_authorized, false);
+    assert.equal(r.out.merge_evidence, null);
+    assert.ok(!calls(f).some((a) => /\/(rules|compare|actions|commits)\//.test(a[a.length - 1])), 'no evidence read');
+  } finally {
+    f.cleanup();
+  }
+});
 
 // Sol review of the #131 fix: a missing or malformed commits subtree used to
 // collapse to the same null as "no checks", so CLEAN or UNSTABLE with a broken
@@ -1989,10 +2160,11 @@ test('issue #154: --settle clean prints the PR\'s CURRENT head (the one Copilot 
   try {
     writeConfig(f, { pr_review: { copilot_logins: [COPILOT] } }); // a pinned REST login ('[bot]') matches GraphQL's bare login
     arm(f); // armed at HEAD
-    putMerge(f, [mergePage('CLEAN', [], { headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } })]);
+    putMerge(f, [mergePage('CLEAN', [], { ...GREEN_ROLLUP, headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } })]);
     const r = run(f, ['--settle', 'clean', '--pr', '7']);
     assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
     assert.equal(r.out.head_sha, NEW_HEAD, 'the merge is pinned to the current, reviewed head');
+    assert.ok(calls(f).some((a) => a[a.length - 1] === `repos/acme/widget/compare/main...${NEW_HEAD}`), 'the merge evidence is read for the current head');
     assert.equal(r.out.reviewed_head_sha, NEW_HEAD);
     assert.equal(r.out.armed_head_sha, HEAD);
     assert.equal(r.out.auto_merge, true);
@@ -2345,7 +2517,7 @@ test('--settle clean from a linked worktree runs its merge-state query too', () 
     assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
     assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
     assert.equal(mergeCalls(f).length, 1, 'one merge-state query');
-    assert.equal(calls(f).length, 2, 'plus the one newest-review body read (issue #204)');
+    assert.equal(calls(f).length, 2 + EVIDENCE_READS.length, 'plus the one newest-review body read (issue #204) and the merge evidence reads');
   } finally {
     f.cleanup();
   }
