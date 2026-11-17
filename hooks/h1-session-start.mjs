@@ -16416,7 +16416,7 @@ function fastForwardedPaths(root, base2) {
     const [sha, subject = ""] = l.split("	");
     return { sha, subject };
   });
-  const at = entries.findIndex((e) => e.sha === base2);
+  const at = entries.findLastIndex((e) => e.sha === base2);
   if (at <= 0) return /* @__PURE__ */ new Set();
   const moves = entries.slice(0, at).map((e, i) => ({ from: entries[i + 1].sha, to: e.sha, ff: /^(merge|pull)\b.*: Fast-forward$/.test(e.subject) }));
   if (!moves.some((m) => m.ff)) return /* @__PURE__ */ new Set();
