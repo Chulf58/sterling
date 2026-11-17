@@ -397,6 +397,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'Activated by "agent":"conductor" in the project\'s .claude/settings.json (written by install-agents/sync-agents)',
     after: 'Activated by "agent":"conductor" in the project\'s Claude Code settings file (written by install-agents/sync-agents)',
   },
+  {
+    commit: 'GitHub #282',
+    date: '2026-11-17',
+    reason: 'board_update naming only session is refused and renews nothing; board_reaffirm renews (user-ruled 2026-11-17, "Fix the docs (Recommended)")',
+    before: "call `board_reaffirm` for every item this session holds; a `board_update` naming `session` also renews, at most once per quarter lease.",
+    after: "call `board_reaffirm` for every item this session holds, with the claim generation `board_get` shows in `claim_state`. A `board_update` naming `session` renews only alongside a real edit (at most once per quarter lease); naming only `session` is refused and renews nothing (GitHub #282).",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

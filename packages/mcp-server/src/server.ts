@@ -285,8 +285,38 @@ knowledgeCreateInput.safeParseAsync = async (data, params) => {
  * KNOWLEDGE_CREATE_FIELD_VARIANTS above for the one call site that relies on
  * this, and its handler below for why `type` is validated as part of `fields`
  * (the discriminator) yet still passed to `tools.knowledgeCreate` separately.
+ *
+ * ENFORCED STRICT, ADVERTISED OPEN (GitHub #270): the served JSON Schema no
+ * longer says additionalProperties:false. OpenCode's built-in tool-input repair
+ * (repairObject in packages/core/src/plugin/tool-input-repair.ts, anomalyco/
+ * opencode #57051 and #62130) rewrites a call's arguments against the served
+ * schema before sending it, and deletes every key outside `properties` when the
+ * schema says additionalProperties:false. Measured 2026-11-17 on OpenCode 2.2.5:
+ * board_query({id, cap:1}) and knowledge_query({query}) answered normally through
+ * the host, while the same installed bundle refused both over stdio naming the
+ * key. Advertising strictness was what made the host drop the key. So the object
+ * is advertised as passthrough and its parse runs the strict object, the same
+ * advertised-versus-enforced split knowledge_create uses below; the server still
+ * refuses every unknown key, now on every host. `hints` adds a line to the
+ * refusal for a known wrong key (board_query's `id`).
  */
-const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
+const strict = <T extends z.ZodRawShape>(shape: T, hints: Readonly<Record<string, string>> = {}) => {
+  const enforced = z.object(shape).strict();
+  const advertised = z.object(shape).passthrough();
+  advertised.safeParseAsync = async (data, params) => {
+    const result = await enforced.safeParseAsync(data, params);
+    if (result.success) return result as never;
+    const extra = result.error.issues.flatMap((issue) =>
+      issue.code === 'unrecognized_keys'
+        ? issue.keys.filter((key) => hints[key] !== undefined).map((key) => ({ code: 'custom' as const, path: [key], message: hints[key] }))
+        : []
+    );
+    return (extra.length ? { success: false, error: new ZodError([...result.error.issues, ...extra]) } : result) as never;
+  };
+  // Typed as the strict object: handlers receive only the declared keys, because
+  // the parse above refuses anything else.
+  return advertised as unknown as typeof enforced;
+};
 
 /** The one-line boot warning for a mounted domain whose store could not be
  *  read (a pre-v2 store, any other read failure), the sibling of the store's
@@ -849,7 +879,7 @@ export function createSterlingServer(
           .describe('user items in these readiness states only, computed over the whole board before paging')
           .optional(),
         handoff_to_item_id: z.string().describe("the receiver's item id: finds this board's tracker for that handoff").optional(),
-      }),
+      }, { id: 'board_query has no id filter: read one item, its claim_state included, with board_get(id)' }),
     },
     ({ target_project, ...args }) => json(target_project !== undefined ? tools.foreignBoardQuery({ ...args, target_project }) : tools.boardQueryResult(args))
   );
@@ -884,18 +914,18 @@ export function createSterlingServer(
     'board_update',
     {
       description:
-        "Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; \"standalone\" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; \"\" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits (\"\" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:\"full\" returns the stored record.",
+        "Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; \"standalone\" or \"\" removes the objective. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; \"\" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits (\"\" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required: a call naming only session is refused and renews nothing (renew a claim without an edit with board_reaffirm). The echo defaults to a digest; projection:\"full\" returns the stored record.",
       inputSchema: strict({
         id: z.string().describe(ID_LADDER),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         file_keys: z.array(z.string()).optional(),
-        objective: z.string().optional(),
+        objective: z.string().describe("(re)groups the task; \"standalone\" or '' removes the objective").optional(),
         measured_at_head: z.string().optional(),
         blocked_by: z.array(z.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
         needs: z.union([z.enum(BOARD_NEEDS), z.literal('')]).optional(),
         needs_reason: z.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
-        session: z.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease). When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
+        session: z.string().describe("your session id; when that session holds the item's claim, this edit also renews it (at most once per quarter of the lease), but only alongside a real edit: a call with session and no field to change is refused and renews nothing, so renew without an edit through board_reaffirm. When another session holds the claim, the edit is refused with nothing written and names the holder, checkout and generation (omit session to edit without renewing). It never sets or changes the claim").optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -910,7 +940,7 @@ export function createSterlingServer(
     'board_claim',
     {
       description:
-        `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_update calls that pass your session, and through board_reaffirm; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
+        `Claim a user board task for your session before starting work on it, so another session does not start it too. Records holder_session, checkout and a claim generation (returned in claim_state; keep it for board_reaffirm and board_release). Refused, with nothing written, when another session holds the item, whether its claim is held or expired (an expired claim shows as check owner: take it over with board_takeover). Claiming an item your session already holds keeps its generation, updates the checkout and renews it. The claim renews through board_reaffirm, and through a board_update that changes a field and passes your session; after ${CLAIM_LEASE} without either it shows as check owner and leaves READY. Maintenance-queue items are refused. Returns {id, slug?, label?, claim_state}.`,
       inputSchema: strict({
         id: z.string().describe(ID_LADDER),
         session: z.string().describe('your session id'),
@@ -924,7 +954,7 @@ export function createSterlingServer(
     'board_reaffirm',
     {
       description:
-        `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
+        `Renew your claim on a board task (renewed_at = now) when you still work on it but made no board_update on it within ${CLAIM_LEASE}. This is the way to renew without an edit: a board_update naming only session is refused and renews nothing. Refused, with nothing written, when the item is no longer held by your session at that generation: the refusal says the task moved and to which session and checkout, or that it has no claim. Returns {id, slug?, label?, claim_state}.`,
       inputSchema: strict({
         id: z.string().describe(ID_LADDER),
         session: z.string().describe('your session id'),

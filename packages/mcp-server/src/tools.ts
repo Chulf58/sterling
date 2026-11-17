@@ -11837,7 +11837,10 @@ export class SterlingTools {
       );
     }
     if (Object.keys(patch).length === 0) {
-      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
+      // GitHub #282 (user-ruled 2026-11-17, "Fix the docs"): session alone is not an edit,
+      // so it renews nothing; say where renewal without an edit lives.
+      const renew = opts.session !== undefined ? ` (session alone renews nothing: to renew a claim without an edit, call board_reaffirm with the generation board_get shows in claim_state)` : '';
+      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}${renew}`);
     }
     if ('blocked_by' in patch) {
       if ((old as unknown as { source?: string }).source === 'system') throw SterlingTools.blockedBySystemRefusal('board_update');
@@ -11902,7 +11905,8 @@ export class SterlingTools {
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
     // 'standalone' clears the grouping to absent (decision foreign_a8d2ce6c) — the same
     // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
-    if (next.objective === 'standalone') delete next.objective;
+    // '' clears it too, as needs:'' and needs_reason:'' do (GitHub #272/#274, user-ruled 2026-11-17).
+    if (next.objective === 'standalone' || next.objective === '') delete next.objective;
     // An empty blocked_by clears the field to absent, like 'standalone' above.
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
     // needs:'' clears the field to absent, the same way.
