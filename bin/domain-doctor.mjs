@@ -12240,7 +12240,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId, r
         a = a.map((r) => ({ ...r, tag: r.tag === oldName ? newName : r.tag })).filter((r) => !seen.has(`${r.record_id}\0${r.tag}`) && seen.add(`${r.record_id}\0${r.tag}`));
       }
       if (name === "store_meta") {
-        a = a.filter((r2) => r2.key !== STORE_FENCE_KEY);
+        a = a.filter((r2) => r2.key !== STORE_FENCE_KEY && r2.key !== RENAME_RECEIPT_KEY);
         const r = b.find((x) => x.key === RENAME_RECEIPT_KEY);
         receipt = r ? JSON.parse(r.value) : null;
         b = b.filter((x) => x.key !== RENAME_RECEIPT_KEY);
@@ -12275,7 +12275,7 @@ function renameCopy(oldPath, newPath, oldName, newName, operationId, retag = fal
   try {
     db.exec("BEGIN IMMEDIATE");
     try {
-      db.prepare("DELETE FROM store_meta WHERE key = ?").run(STORE_FENCE_KEY);
+      db.prepare("DELETE FROM store_meta WHERE key IN (?, ?)").run(STORE_FENCE_KEY, RENAME_RECEIPT_KEY);
       foreign = foreignScopes(db, `domain:${oldName}`);
       if (foreign.length === 0) {
         const update = db.prepare("UPDATE records SET scope = ?, body = ? WHERE id = ?");
