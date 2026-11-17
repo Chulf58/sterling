@@ -15533,6 +15533,187 @@ function codexModelPin(root, { opener, toolInput }) {
   );
   return { line: lines.join("\n"), model: configured };
 }
+var TomlSyntaxError = class extends Error {
+};
+var TOML_BARE_KEY = /[A-Za-z0-9_-]/;
+var TOML_SCALAR = /[A-Za-z0-9_+\-.:]/;
+var TOML_ESCAPES = { b: "\b", t: "	", n: "\n", f: "\f", r: "\r", e: "\x1B", '"': '"', "\\": "\\" };
+function tomlMcpServerNames(src) {
+  const n = src.length;
+  let i = src.charCodeAt(0) === 65279 ? 1 : 0;
+  const names = /* @__PURE__ */ new Set();
+  const fail = (what) => {
+    throw new TomlSyntaxError(`not valid TOML at line ${src.slice(0, i).split("\n").length}: ${what}`);
+  };
+  const ws = () => {
+    while (src[i] === " " || src[i] === "	") i++;
+  };
+  const newline = () => {
+    if (src[i] === "\n") i += 1;
+    else if (src[i] === "\r" && src[i + 1] === "\n") i += 2;
+    else return false;
+    return true;
+  };
+  const comment = () => {
+    if (src[i] === "#") while (i < n && src[i] !== "\n" && !(src[i] === "\r" && src[i + 1] === "\n")) i++;
+  };
+  const gap = () => {
+    for (; ; ) {
+      ws();
+      comment();
+      if (!newline()) return;
+    }
+  };
+  const endOfLine = () => {
+    ws();
+    comment();
+    if (i < n && !newline()) fail("expected the end of the line");
+  };
+  const escape = () => {
+    const c = src[i + 1];
+    if (c !== void 0 && Object.hasOwn(TOML_ESCAPES, c)) {
+      i += 2;
+      return TOML_ESCAPES[c];
+    }
+    const len = c === "u" ? 4 : c === "U" ? 8 : c === "x" ? 2 : 0;
+    const hex = src.slice(i + 2, i + 2 + len);
+    const code = len && hex.length === len && /^[0-9A-Fa-f]+$/.test(hex) ? parseInt(hex, 16) : -1;
+    if (code < 0 || code > 1114111 || code >= 55296 && code <= 57343) fail("an invalid escape in a string");
+    i += 2 + len;
+    return String.fromCodePoint(code);
+  };
+  const basic = () => {
+    let s2 = "";
+    for (i++; ; ) {
+      const c = src[i];
+      if (c === void 0 || c === "\n" || c === "\r") fail("an unterminated string");
+      if (c === '"') {
+        i++;
+        return s2;
+      }
+      if (c === "\\") s2 += escape();
+      else {
+        s2 += c;
+        i++;
+      }
+    }
+  };
+  const literal = () => {
+    const start = ++i;
+    while (i < n && src[i] !== "'" && src[i] !== "\n") i++;
+    if (src[i] !== "'") fail("an unterminated string");
+    return src.slice(start, i++);
+  };
+  const multiline = (q) => {
+    for (i += 3; ; ) {
+      if (i >= n) fail("an unterminated multiline string");
+      if (q === '"' && src[i] === "\\") i += 2;
+      else if (src[i] === q && src[i + 1] === q && src[i + 2] === q) {
+        let run = 3;
+        while (src[i + run] === q) run++;
+        if (run > 5) fail("too many quotes closing a multiline string");
+        i += run;
+        return;
+      } else i++;
+    }
+  };
+  const key = () => {
+    const parts = [];
+    for (; ; ) {
+      ws();
+      const c = src[i];
+      if (c === '"' || c === "'") {
+        if (src[i + 1] === c && src[i + 2] === c) fail("a multiline string used as a key");
+        parts.push(c === '"' ? basic() : literal());
+      } else {
+        const start = i;
+        while (i < n && TOML_BARE_KEY.test(src[i])) i++;
+        if (i === start) fail("expected a key");
+        parts.push(src.slice(start, i));
+      }
+      ws();
+      if (src[i] !== ".") return parts;
+      i++;
+    }
+  };
+  const value = () => {
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      if (src[i + 1] === c && src[i + 2] === c) multiline(c);
+      else if (c === '"') basic();
+      else literal();
+      return null;
+    }
+    if (c === "[") {
+      for (i++; ; ) {
+        gap();
+        if (src[i] === "]") break;
+        value();
+        gap();
+        if (src[i] === ",") i++;
+        else if (src[i] !== "]") fail("expected , or ] in an array");
+      }
+      i++;
+      return null;
+    }
+    if (c === "{") {
+      const keys = [];
+      for (i++; ; ) {
+        gap();
+        if (src[i] === "}") break;
+        keys.push(key()[0]);
+        if (src[i] !== "=") fail("expected = in an inline table");
+        i++;
+        ws();
+        value();
+        gap();
+        if (src[i] === ",") i++;
+        else if (src[i] !== "}") fail("expected , or } in an inline table");
+      }
+      i++;
+      return keys;
+    }
+    const start = i;
+    while (i < n && TOML_SCALAR.test(src[i])) i++;
+    if (i === start) fail("expected a value");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(src.slice(start, i)) && src[i] === " " && /\d/.test(src[i + 1] ?? "")) {
+      for (i++; i < n && TOML_SCALAR.test(src[i]); ) i++;
+    }
+    return null;
+  };
+  let table = [];
+  let inServerArray = false;
+  while (i < n) {
+    ws();
+    if (newline()) continue;
+    if (i >= n || src[i] === "#") {
+      endOfLine();
+      continue;
+    }
+    if (src[i] === "[") {
+      const array = src[i + 1] === "[";
+      i += array ? 2 : 1;
+      table = key();
+      if (src[i] !== "]" || array && src[i + 1] !== "]") fail("expected ] closing a table header");
+      i += array ? 2 : 1;
+      inServerArray = array && table.length === 1 && table[0] === "mcp_servers";
+      if (table[0] === "mcp_servers" && table.length >= 2) names.add(table[1]);
+      endOfLine();
+      continue;
+    }
+    const path = [...table, ...key()];
+    if (src[i] !== "=") fail("expected = after a key");
+    i++;
+    ws();
+    const inline = value();
+    if (path[0] === "mcp_servers" && !inServerArray) {
+      if (path.length >= 2) names.add(path[1]);
+      else if (inline) for (const k of inline) names.add(k);
+    }
+    endOfLine();
+  }
+  return [...names];
+}
 function codexUserMcpServers(env = process.env) {
   const file = join16(env.CODEX_HOME || join16(homedir4(), ".codex"), "config.toml");
   let text;
@@ -15541,34 +15722,12 @@ function codexUserMcpServers(env = process.env) {
   } catch (e) {
     return e && e.code === "ENOENT" ? { names: [] } : { names: [], error: `${file}: ${e && e.message || e}` };
   }
-  const names = /* @__PURE__ */ new Set();
-  const header = /^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/;
-  const DQ = '"'.repeat(3);
-  const SQ = "'".repeat(3);
-  let open2 = null;
-  for (const line of text.split(/\r?\n/)) {
-    if (open2 === null) {
-      const m = header.exec(line);
-      if (m) names.add(m[1] !== void 0 ? m[1].replace(/\\(["\\])/g, "$1") : m[2] ?? m[3]);
-    }
-    let rest = line;
-    for (; ; ) {
-      if (open2 === null) {
-        const dq = rest.indexOf(DQ);
-        const sq = rest.indexOf(SQ);
-        const at = dq === -1 ? sq : sq === -1 ? dq : Math.min(dq, sq);
-        if (at === -1) break;
-        open2 = at === dq ? DQ : SQ;
-        rest = rest.slice(at + 3);
-      } else {
-        const at = rest.indexOf(open2);
-        if (at === -1) break;
-        open2 = null;
-        rest = rest.slice(at + 3);
-      }
-    }
+  try {
+    return { names: tomlMcpServerNames(text) };
+  } catch (e) {
+    if (e instanceof TomlSyntaxError) return { names: [], error: `${file}: ${e.message}` };
+    throw e;
   }
-  return { names: [...names] };
 }
 function codexMcpDisable(toolInput, env = process.env) {
   const { names, error } = codexUserMcpServers(env);
