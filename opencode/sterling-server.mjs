@@ -22566,6 +22566,62 @@ function dispatchPin(res, args) {
     line: replaced ? `OVERPASS: this dispatch ran on ${lane}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null
   };
 }
+function readInventory({ list, error } = {}) {
+  if (error) return { state: "unknown", why: `OpenCode's model list could not be read (${error?.message ?? error})` };
+  if (!Array.isArray(list)) return { state: "unknown", why: "OpenCode's model list could not be read (it is not a list)" };
+  const providers = /* @__PURE__ */ new Map();
+  for (const m of list) {
+    if (typeof m?.providerID !== "string" || !m.providerID) continue;
+    const ids = [m.id, m.modelID].filter((v) => typeof v === "string" && v);
+    if (!ids.length) continue;
+    if (!providers.has(m.providerID)) providers.set(m.providerID, /* @__PURE__ */ new Set());
+    for (const id of ids) providers.get(m.providerID).add(id);
+  }
+  if (!providers.size) return { state: "unknown", why: "OpenCode's model list lists no model at all, so OpenCode has not filled it yet" };
+  return { state: "listed", providers };
+}
+function routeAvailability(inv, ref) {
+  if (inv?.state !== "listed") return { state: "unknown", why: inv?.why ?? "no model list was read" };
+  const slash = ref.indexOf("/");
+  const provider = ref.slice(0, slash);
+  const tier = ref.slice(slash + 1);
+  const ids = inv.providers.get(provider);
+  if (!ids) return { state: "missing", why: `OpenCode lists no model from the provider '${provider}' (it is not loaded, or its gateway rejected the credential and dropped its models)` };
+  if (!ids.has(tier)) return { state: "missing", why: `the provider '${provider}' is loaded, but OpenCode lists no tier '${tier}' on it (it lists ${[...ids].sort().join(", ")})` };
+  return { state: "available" };
+}
+function missingRouteRemedy(provider, { bypass = true } = {}) {
+  return `To fix: check the ${provider} credential (the gateway drops its models when it rejects the key), then run /reload in the TUI (or \`opencode reload\`) so OpenCode loads the provider again;` + (bypass ? ' or put a line "OVERPASS-BYPASS: <reason>" in the brief and name a loaded model on the call;' : "") + ' or turn Overpass off with "overpass": {"enabled": false} in .sterling/config.json (TUI System tab).';
+}
+function missingRouteRefusal(res, agent, model, why) {
+  return `Sterling refused this subagent dispatch: Overpass is ON but its route ${model} for ${agent || "this agent"} is not available: ${why}. Nothing was sent, and the dispatch is not moved to a direct provider. ${missingRouteRemedy(res.provider)} Then dispatch again.`;
+}
+function unknownRouteLine(model, why) {
+  return `OVERPASS: Overpass availability UNKNOWN: ${why}; this dispatch was sent to ${model} unchecked, and OpenCode reports it if that model is not loaded.`;
+}
+function overpassRoutes(res) {
+  const byModel = /* @__PURE__ */ new Map();
+  const add = (model, user) => {
+    if (!byModel.has(model)) byModel.set(model, []);
+    byModel.get(model).push(user);
+  };
+  if (res.conductorRouted) add(res.conductorModel, "the conductor");
+  for (const [role, route] of Object.entries(res.roles ?? {})) add(route.model, role === MAINTENANCE_WORKER_ROLE ? "the maintenance worker" : role);
+  add(res.laneModel, "Plan and other agents");
+  return [...byModel].map(([model, users]) => ({ model, users }));
+}
+function availabilityLine(res, inv) {
+  if (!res?.effective) return "";
+  if (inv?.state !== "listed") {
+    return `STERLING OVERPASS: Overpass ON, availability UNKNOWN: ${inv?.why ?? "no model list was read"}, so whether the routed tier models are loaded is not known. Dispatches still go to their tier models unchecked (OpenCode reports one that is not loaded); this is checked again at the next prompt and dispatch.`;
+  }
+  const missing = overpassRoutes(res).map((r) => ({ ...r, ...routeAvailability(inv, r.model) })).filter((r) => r.state === "missing");
+  if (!missing.length) return "";
+  return `STERLING OVERPASS: Overpass ON but not available: ${missing.map((r) => `${r.model} (${r.users.join(", ")}): ${r.why}`).join("; ")}. A subagent dispatch to a missing route is refused before it starts and the maintenance worker does not launch on one; nothing falls back to a direct provider. ${missingRouteRemedy(res.provider)}`;
+}
+function availableAgainLine(res) {
+  return `STERLING OVERPASS: Overpass is available again: every routed tier model is loaded (${overpassRoutes(res).map((r) => r.model).join(", ")}).`;
+}
 function laneRoute(res, agent) {
   const role = agentRole(agent);
   return typeof role === "string" && Object.hasOwn(res.roles ?? {}, role) && res.roles[role] || { model: res.laneModel };
@@ -23457,6 +23513,19 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
           reportOverpass(root, e.message);
           throw e;
         }
+        if (read.res.effective && pin.model) {
+          const route = routeAvailability(readInventory(await boundedModelList(listModels, modelListTimeoutMs)), pin.model);
+          if (route.state === "missing") {
+            const message = missingRouteRefusal(read.res, args.agent, pin.model, route.why);
+            reportOverpass(root, message);
+            throw new Error(message);
+          }
+          if (route.state === "unknown") {
+            const line = unknownRouteLine(pin.model, route.why);
+            reportOverpass(root, line);
+            pin = { ...pin, line: [pin.line, line].filter(Boolean).join(" ") };
+          }
+        }
         if (pin.resolved) {
           const { list, error } = await boundedModelList(listModels, modelListTimeoutMs);
           const checked = checkVariant(pin.model, list, error);
@@ -23740,9 +23809,11 @@ function createWorkerLaunch({
   launchWorker: launchWorker2 = maybeLaunchMaintenanceWorker,
   nodeOnPath = nodeOnPathDefault,
   execPath = process.execPath,
-  spawnImpl = spawn
+  spawnImpl = spawn,
+  inventoryFor = () => null
 }) {
   const skipReported = /* @__PURE__ */ new Set();
+  const missingReported = /* @__PURE__ */ new Map();
   function skipOnce(root, at, logText, noticeText) {
     if (skipReported.has(root)) return;
     skipReported.add(root);
@@ -23770,6 +23841,20 @@ function createWorkerLaunch({
     if (!ocBin && tierModel) {
       skipOnce(root, at, "maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through", OVERPASS_NO_RUNNER_TEXT);
       return;
+    }
+    if (tierModel) {
+      const route = routeAvailability(inventoryFor(root) ?? { state: "unknown", why: "no model list was read for this launch" }, tierModel);
+      if (route.state === "missing") {
+        const text = `Sterling: the maintenance worker did not run: Overpass is ON but its route ${tierModel} for the maintenance worker is not available: ${route.why}. It is not run on a direct provider instead. ${missingRouteRemedy(tierModel.slice(0, tierModel.indexOf("/")), { bypass: false })} The next settlement checks again.`;
+        if (missingReported.get(root) !== text) {
+          missingReported.set(root, text);
+          logLine(root, `maintenance worker skipped: Overpass route ${tierModel} is not available: ${route.why}`);
+          addNotice(root, text, at);
+        }
+        return;
+      }
+      missingReported.delete(root);
+      if (route.state === "unknown") logLine(root, `maintenance worker: Overpass availability UNKNOWN (${route.why}); launching on ${tierModel} unchecked`);
     }
     if (!ocBin && !claudeOnPath()) {
       skipOnce(root, at, "maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)", NO_RUNNER_TEXT);
@@ -28839,7 +28924,9 @@ function createSterlingServer(deps = {}) {
       clearTimeout(timer);
     }
   }
-  const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
+  const modelListTimeoutMs = deps.modelListTimeoutMs ?? MODEL_LIST_TIMEOUT_MS;
+  const workerInventory = /* @__PURE__ */ new Map();
+  const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker, opencodeBin: deps.opencodeBin, inventoryFor: (root) => workerInventory.get(root) ?? null });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
   const configure = deps.configure ?? createConfigHandler(deps);
@@ -28913,7 +29000,8 @@ function createSterlingServer(deps = {}) {
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     const listModels = async () => modelListItems(await models?.list?.());
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy, listModels, modelListTimeoutMs });
+    const readModelInventory = async () => readInventory(await boundedModelList(listModels, modelListTimeoutMs));
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     async function sessionInfo(sessionID) {
@@ -29000,6 +29088,40 @@ function createSterlingServer(deps = {}) {
       if (notice && typeof input?.prompt?.text === "string") input.prompt.text = `${input.prompt.text}
 
 ${notice}`;
+      let availability = "";
+      await fenced("overpass", root, async () => {
+        availability = await availabilityNotice(root, res, input?.sessionID);
+      });
+      if (availability && typeof input?.prompt?.text === "string") input.prompt.text = `${input.prompt.text}
+
+${availability}`;
+    }
+    const availabilityShown = /* @__PURE__ */ new Map();
+    let availabilityLogged = "";
+    async function availabilityNotice(root, res, sessionID) {
+      if (typeof sessionID !== "string" || !sessionID) return "";
+      if (!res?.effective) {
+        availabilityShown.delete(sessionID);
+        return "";
+      }
+      const line = availabilityLine(res, await readModelInventory());
+      if (line !== availabilityLogged) {
+        availabilityLogged = line;
+        logLine(root, `overpass: ${line || "every routed tier model is listed by OpenCode"}`);
+      }
+      const prev = availabilityShown.get(sessionID) ?? "";
+      if (line === prev) return "";
+      remember(availabilityShown, sessionID, line);
+      return line || availableAgainLine(res);
+    }
+    async function workerRouteInventory(root) {
+      let read;
+      try {
+        read = dispatchOverpass(root);
+      } catch {
+        return null;
+      }
+      return read.res?.effective ? readModelInventory() : null;
     }
     const laneDispatches = createLaneDispatches();
     const effortReported = /* @__PURE__ */ new Map();
@@ -29103,7 +29225,16 @@ ${notice}`;
       });
       if (!gate.settle || !succeeded) return;
       resetStatus(root);
-      await fenced("settle", root, () => settle(root));
+      const storeRoot = storeRootFor(root);
+      await fenced("settle", root, async () => {
+        const inventory = await workerRouteInventory(root);
+        if (inventory) workerInventory.set(storeRoot, inventory);
+      });
+      try {
+        await fenced("settle", root, () => settle(root));
+      } finally {
+        workerInventory.delete(storeRoot);
+      }
       await fenced("settle", root, () => prLoopNotice(root));
     }
     const handlers = { context: onSessionContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };

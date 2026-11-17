@@ -47,6 +47,10 @@ const readOc = (dir) => JSON.parse(readFileSync(join(dir, OC_REL), 'utf8'));
 const resOn = (extra = {}) => ({ configured: true, effective: true, conductorRouted: true, provider: 'overpass', conductorModel: 'overpass/agentic-conductor', laneModel: 'overpass/agentic-high', ...extra });
 const resOff = { configured: false, effective: false, conductorRouted: false, provider: 'overpass', conductorModel: 'overpass/agentic-conductor', laneModel: 'overpass/agentic-high' };
 
+const LISTED_TIERS = ['overpass', 'overpass-agentic'].flatMap((providerID) =>
+  ['agentic-auto', 'agentic-auto-roles', 'agentic-conductor', 'agentic-fast', 'agentic-high', 'agentic-max', 'agentic-premium', 'agentic-premium-max'].map((id) => ({ providerID, id, variants: [] }))
+);
+
 /** The plugin context surfaces the paths under test use: hooks, session.get, the event stream. */
 function stubCtx(directory) {
   const hooks = { session: {}, tool: {}, permission: {} };
@@ -65,7 +69,12 @@ function stubCtx(directory) {
     command: { transform },
     skill: { transform },
     mcp: { transform },
-    model: { list: async () => [] },
+    // Changed with the Overpass availability check (GitHub #257, #258, #281): this list was
+    // empty, which now reads as UNKNOWN and adds an UNKNOWN line to every routed dispatch, so
+    // it lists every tier these tests route to, on both providers they use, as OpenCode 2.1.2
+    // returns it ({ location, data }). The missing, UNKNOWN and recovery cases are pinned in
+    // opencode-overpass-availability.test.mjs.
+    model: { list: async () => ({ location: { directory }, data: LISTED_TIERS }) },
     event: {
       subscribe: ({ signal } = {}) => ({
         async *[Symbol.asyncIterator]() {

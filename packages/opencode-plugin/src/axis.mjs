@@ -11,7 +11,9 @@
 // On a subagent call, while Overpass is effective, the lane model replaces the call's
 // model (overpass.mjs dispatchPin; finding
 // opencode-2-0-23-how-session-and-subagent-models-are-chosen-and-overridden: the
-// mutated model reaches execution, and an unavailable one fails as a tool error).
+// mutated model reaches execution, and an unavailable one fails as a tool error). Before
+// that, a tier model missing from OpenCode's model list refuses the call with the fix steps
+// (overpass.mjs readInventory, GitHub #257, #258, #281).
 // A brief with an `OVERPASS-BYPASS: <reason>` line keeps the model the call names
 // (decision overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re).
 // While Overpass is not effective, a call that names no model gets one from
@@ -44,7 +46,7 @@ import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
-import { dispatchOverpass, dispatchPin, overpassRefusal, overpassUnknownLine } from './overpass.mjs';
+import { dispatchOverpass, dispatchPin, missingRouteRefusal, overpassRefusal, overpassUnknownLine, readInventory, routeAvailability, unknownRouteLine } from './overpass.mjs';
 import { checkVariant, dispatchModel } from './dispatch-model.mjs';
 import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
@@ -59,7 +61,7 @@ const PENDING_CAP = 200;
 export const MODEL_LIST_TIMEOUT_MS = 2000;
 
 /** listModels() raced against `ms`: { list } or { error }; never throws, never waits longer than `ms`. */
-async function boundedModelList(listModels, ms) {
+export async function boundedModelList(listModels, ms) {
   let timer;
   try {
     const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
@@ -188,6 +190,23 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
+        }
+        // The availability check (overpass.mjs readInventory): a tier route OpenCode does not
+        // list refuses the dispatch before it starts, with the fix steps; a list that cannot
+        // be read sends the dispatch to its tier unchecked, with an UNKNOWN line. A bypassed
+        // dispatch (pin.model null) keeps its own model and is not checked here.
+        if (read.res.effective && pin.model) {
+          const route = routeAvailability(readInventory(await boundedModelList(listModels, modelListTimeoutMs)), pin.model);
+          if (route.state === 'missing') {
+            const message = missingRouteRefusal(read.res, args.agent, pin.model, route.why);
+            reportOverpass(root, message);
+            throw new Error(message);
+          }
+          if (route.state === 'unknown') {
+            const line = unknownRouteLine(pin.model, route.why);
+            reportOverpass(root, line);
+            pin = { ...pin, line: [pin.line, line].filter(Boolean).join(' ') };
+          }
         }
         // A resolved model whose variant OpenCode does not list runs without it (checkVariant).
         if (pin.resolved) {
