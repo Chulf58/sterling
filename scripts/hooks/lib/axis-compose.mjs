@@ -12,7 +12,8 @@
 // Everything else renders byte-for-byte the same on both hosts.
 //
 // The comments below moved here with the code from the two hook files.
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_RANK_TERMS, allocateShares } from '@sterling/store';
 import { loadConfig } from './common.mjs';
@@ -220,6 +221,51 @@ export function codexModelPin(root, { opener, toolInput }) {
       `A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
   );
   return { line: lines.join('\n'), model: configured };
+}
+
+/**
+ * The user's own Codex MCP servers (GitHub #262): the names of the
+ * [mcp_servers.<name>] tables in $CODEX_HOME/config.toml (default ~/.codex).
+ * A header scan, no TOML parser: sub-tables such as [mcp_servers.x.env] reduce
+ * to their first segment. An absent file is `{ names: [] }`; any other read
+ * failure is `{ names: [], error }` so the caller can disclose it. Never throws.
+ */
+export function codexUserMcpServers(env = process.env) {
+  const file = join(env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml');
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    return e && e.code === 'ENOENT' ? { names: [] } : { names: [], error: `${file}: ${(e && e.message) || e}` };
+  }
+  const names = new Set();
+  for (const m of text.matchAll(/^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/gm)) {
+    names.add(m[1] !== undefined ? m[1].replace(/\\(["\\])/g, '$1') : (m[2] ?? m[3]));
+  }
+  return { names: [...names] };
+}
+
+/**
+ * The per-call config for an opener consult with every user-level Codex MCP
+ * server disabled, so a Sol review or Astra consult starts none of them. The
+ * caller's own `config` is kept and a caller-set mcp_servers entry wins.
+ * Returns `{ config?, line? }`; `config` is absent when nothing is to be added.
+ */
+export function codexMcpDisable(toolInput, env = process.env) {
+  const { names, error } = codexUserMcpServers(env);
+  if (error) {
+    return { line: `STERLING CODEX MCP SERVERS (H20) — the Codex config could not be read (${JSON.stringify(error).slice(0, 200)}), so no user MCP server was disabled on this call.` };
+  }
+  const base = toolInput && typeof toolInput.config === 'object' && toolInput.config !== null && !Array.isArray(toolInput.config) ? toolInput.config : {};
+  const callerServers = base.mcp_servers && typeof base.mcp_servers === 'object' && !Array.isArray(base.mcp_servers) ? base.mcp_servers : {};
+  const added = names.filter((n) => !Object.hasOwn(callerServers, n));
+  if (added.length === 0) return {};
+  const mcp_servers = { ...callerServers };
+  for (const n of added) mcp_servers[n] = { enabled: false };
+  return {
+    config: { ...base, mcp_servers },
+    line: `STERLING CODEX MCP SERVERS (H20) — disabled ${added.length} user MCP server(s) from the Codex config on this call (${added.map((n) => JSON.stringify(n)).join(', ').slice(0, 200)}); a review or consult uses none of them.`,
+  };
 }
 
 /** True when the outgoing brief already cites this record by full id, id8 or

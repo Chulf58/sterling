@@ -69,7 +69,7 @@ import {
   markDiscoveryDelivered,
 } from './lib/delivery.mjs';
 import { dispatchOverlapNotice } from './lib/dispatch-overlap.mjs';
-import { codexModelPin, composeMechanismAxis } from './lib/axis-compose.mjs';
+import { codexMcpDisable, codexModelPin, composeMechanismAxis } from './lib/axis-compose.mjs';
 
 // The injection ceilings, the question-shape test and the composition itself
 // live in lib/axis-compose.mjs (shared with the OpenCode plugin).
@@ -122,8 +122,13 @@ function buildModelPin(inp) {
   // NEVER ON codex-reply: that tool's schema has no `model` field at all, so the
   // opener test is the EXACT tool name, not the 'mcp__codex__' prefix.
   const pin = codexModelPin(root, { opener: inp.tool_name === 'mcp__codex__codex', toolInput: inp.tool_input });
-  if (!pin.model) return { line: pin.line };
-  return { line: pin.line, updatedInput: { ...(inp.tool_input && typeof inp.tool_input === 'object' ? inp.tool_input : {}), model: pin.model } };
+  const base = inp.tool_input && typeof inp.tool_input === 'object' ? inp.tool_input : {};
+  // The user's own Codex MCP servers are disabled per call (GitHub #262). Opener only:
+  // codex-reply has no config argument.
+  const mcp = inp.tool_name === 'mcp__codex__codex' ? codexMcpDisable(base) : {};
+  const line = [pin.line, mcp.line].filter(Boolean).join('\n');
+  if (!pin.model && !mcp.config) return { line };
+  return { line, updatedInput: { ...base, ...(pin.model ? { model: pin.model } : {}), ...(mcp.config ? { config: mcp.config } : {}) } };
 }
 
 /** Computed ONCE, on first use, and memoized — `let` + a resolver rather than a
