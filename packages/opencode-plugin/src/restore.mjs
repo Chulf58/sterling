@@ -85,7 +85,7 @@ export function createRotationRestore({ getSession, now, renderRestore = renderR
     let handover = '';
     if (adoptClaims && typeof note.session_id === 'string' && note.session_id) {
       try {
-        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
+        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID, note }), note.session_id);
       } catch (e) {
         logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText(e)}`);
         handover = handoverFailedText(e, note.session_id);

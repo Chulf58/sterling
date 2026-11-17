@@ -1718,8 +1718,8 @@ const claimedProject = async (holders) => {
   const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
   const ids = [];
   try {
-    for (const [text, session, where] of holders) {
-      const item = s.create({ ...envelope('todo'), text, source: 'user' });
+    for (const [text, session, where, slug] of holders) {
+      const item = s.create({ ...envelope('todo'), text, source: 'user', ...(slug ? { slug } : {}) });
       s.claimTodo(item.id, { session, checkout: where ?? checkout, now: NOW });
       ids.push(item.id);
     }
@@ -1740,7 +1740,7 @@ const claimedProject = async (holders) => {
 test('claim hand-over: the restore adopts the note session\'s claims in this checkout before consuming the note; no orphan notice follows', async () => {
   const { p, ids, holderOf } = await claimedProject([['Rotated task', 'ses_old'], ['Elsewhere task', 'ses_old', '/some/other/worktree']]);
   try {
-    writeNote(p.dir);
+    writeNote(p.dir, { next_slice: `ROTATION-SLICE-42 continue ${ids[0].slice(0, 8)}` });
     const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
     const text = await contextFor(ctx, 'ses_new');
     assert.match(text, /BOARD CLAIMS HANDED OVER from session 'ses_old' \(the rotation note's session\) to this session: adopted 1: Rotated task \(/);
@@ -1752,6 +1752,38 @@ test('claim hand-over: the restore adopts the note session\'s claims in this che
     await cleanup?.();
   } finally {
     p.cleanup();
+  }
+});
+
+test('claim hand-over: only items the note names (slug in next_slice, id8 in a lane) stay adopted; the rest are released with a note; a note naming none releases all', async () => {
+  const { p, ids, holderOf } = await claimedProject([['Task A', 'ses_old', undefined, 'task-a-slug'], ['Task B', 'ses_old'], ['Task C', 'ses_old']]);
+  try {
+    const slugA = 'task-a-slug';
+    writeNote(p.dir, { next_slice: `continue ${slugA} next`, lanes: [`implementor; territory x; ${ids[1].slice(0, 8)}; left: tests`] });
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /adopted 2: Task [AB] \([0-9a-f]{8}\), Task [AB] \(/);
+    assert.match(text, new RegExp(`released 1 \\(the rotation note does not name them as in flight[^)]*\\): Task C \\(${ids[2].slice(0, 8)}\\)`));
+    assert.equal(holderOf(ids[0]), 'ses_new');
+    assert.equal(holderOf(ids[1]), 'ses_new');
+    assert.equal(holderOf(ids[2]), undefined, 'the unnamed claim is released, not left with the old session');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+
+  const none = await claimedProject([['Task D', 'ses_old'], ['Task E', 'ses_old']]);
+  try {
+    writeNote(none.p.dir);
+    const { ctx, cleanup } = await setupPlugin(none.p.dir, {}, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.match(text, /released 2 /);
+    assert.doesNotMatch(text, /adopted \d/);
+    assert.equal(none.holderOf(none.ids[0]), undefined);
+    assert.equal(none.holderOf(none.ids[1]), undefined);
+    await cleanup?.();
+  } finally {
+    none.p.cleanup();
   }
 });
 
@@ -1775,7 +1807,7 @@ test('claim hand-over: a crash after the transfer (note still there) re-runs as 
     const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
     s.adoptClaims({ session: 'ses_new', checkout, from_session: 'ses_old', now: NOW });
     s.close();
-    writeNote(p.dir);
+    writeNote(p.dir, { next_slice: `ROTATION-SLICE-42 ${ids[0].slice(0, 8)}` });
     const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
     const text = await contextFor(ctx, 'ses_new');
     assert.match(text, /already yours from an earlier hand-over: Twice handed \(/);
