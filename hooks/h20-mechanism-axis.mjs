@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync11 } from "node:fs";
-import { join as join16 } from "node:path";
+import { existsSync as existsSync12 } from "node:fs";
+import { join as join17 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
@@ -15438,6 +15438,11 @@ function dispatchOverlapNotice(input2, { now = Date.now() } = {}) {
   }
 }
 
+// scripts/hooks/lib/axis-compose.mjs
+import { existsSync as existsSync11, readFileSync as readFileSync12 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join16 } from "node:path";
+
 // scripts/hooks/lib/retired-terms.mjs
 function retiredTermNotice(store, text) {
   if (!text) return "";
@@ -15527,6 +15532,36 @@ function codexModelPin(root, { opener, toolInput }) {
     `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
   );
   return { line: lines.join("\n"), model: configured };
+}
+function codexUserMcpServers(env = process.env) {
+  const file = join16(env.CODEX_HOME || join16(homedir4(), ".codex"), "config.toml");
+  let text;
+  try {
+    text = readFileSync12(file, "utf8");
+  } catch (e) {
+    return e && e.code === "ENOENT" ? { names: [] } : { names: [], error: `${file}: ${e && e.message || e}` };
+  }
+  const names = /* @__PURE__ */ new Set();
+  for (const m of text.matchAll(/^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/gm)) {
+    names.add(m[1] !== void 0 ? m[1].replace(/\\(["\\])/g, "$1") : m[2] ?? m[3]);
+  }
+  return { names: [...names] };
+}
+function codexMcpDisable(toolInput, env = process.env) {
+  const { names, error } = codexUserMcpServers(env);
+  if (error) {
+    return { line: `STERLING CODEX MCP SERVERS (H20) \u2014 the Codex config could not be read (${JSON.stringify(error).slice(0, 200)}), so no user MCP server was disabled on this call.` };
+  }
+  const base2 = toolInput && typeof toolInput.config === "object" && toolInput.config !== null && !Array.isArray(toolInput.config) ? toolInput.config : {};
+  const callerServers = base2.mcp_servers && typeof base2.mcp_servers === "object" && !Array.isArray(base2.mcp_servers) ? base2.mcp_servers : {};
+  const added = names.filter((n) => !Object.hasOwn(callerServers, n));
+  if (added.length === 0) return {};
+  const mcp_servers = { ...callerServers };
+  for (const n of added) mcp_servers[n] = { enabled: false };
+  return {
+    config: { ...base2, mcp_servers },
+    line: `STERLING CODEX MCP SERVERS (H20) \u2014 disabled ${added.length} user MCP server(s) from the Codex config on this call (${added.map((n) => JSON.stringify(n)).join(", ").slice(0, 200)}); a review or consult uses none of them.`
+  };
 }
 function citedInBrief(record, text) {
   const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -15756,11 +15791,14 @@ var input = readStdin();
 function buildModelPin(inp) {
   if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
   const root = inp.storeRoot ? String(inp.storeRoot) : "";
-  const sterling = join16(root, ".sterling");
-  if (!existsSync11(join16(sterling, "sterling.db")) && !existsSync11(join16(sterling, "config.json"))) return null;
+  const sterling = join17(root, ".sterling");
+  if (!existsSync12(join17(sterling, "sterling.db")) && !existsSync12(join17(sterling, "config.json"))) return null;
   const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
-  if (!pin.model) return { line: pin.line };
-  return { line: pin.line, updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: pin.model } };
+  const base2 = inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {};
+  const mcp = inp.tool_name === "mcp__codex__codex" ? codexMcpDisable(base2) : {};
+  const line = [pin.line, mcp.line].filter(Boolean).join("\n");
+  if (!pin.model && !mcp.config) return { line };
+  return { line, updatedInput: { ...base2, ...pin.model ? { model: pin.model } : {}, ...mcp.config ? { config: mcp.config } : {} } };
 }
 var pinMemo;
 function modelPin2() {
