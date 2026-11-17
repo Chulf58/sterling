@@ -2374,7 +2374,7 @@ export class SterlingTools {
     const tree = this.treeRootFor(record, workingTrees);
     if (tree.unresolved) return tree;
     const name = (record as { working_tree?: string }).working_tree;
-    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name))) return { root: this.repoRoot, unresolved: false };
+    if (!name || (!workingTrees?.[name] && !this.declaresForeignTree(name, workingTrees))) return { root: this.repoRoot, unresolved: false };
     return tree;
   }
 
@@ -2396,7 +2396,7 @@ export class SterlingTools {
     if (!name) return { root: this.checkoutRoot, unresolved: false };
     const mapped = workingTrees?.[name];
     if (!mapped) {
-      if (!this.declaresForeignTree(name)) return { root: this.checkoutRoot, unresolved: false };
+      if (!this.declaresForeignTree(name, workingTrees)) return { root: this.checkoutRoot, unresolved: false };
       return { root: undefined, unresolved: true };
     }
     // HOST-INDEPENDENT classification (decision windows-linux-parity):
@@ -2419,9 +2419,18 @@ export class SterlingTools {
    * ruling 2026-09-28 "Code: self-root = own"). Mirrors H10's isUnowned, which
    * asks the same question through the same shared sameLocationAnyHost.
    */
-  private declaresForeignTree(workingTree: unknown): boolean {
+  private declaresForeignTree(workingTree: unknown, workingTrees: SterlingConfig['working_trees'] = this.config.working_trees): boolean {
     if (!workingTree) return false;
-    return !(this.repoRoot && sameLocationAnyHost(String(workingTree), this.repoRoot));
+    // Same ownership as the hooks' isForeignTree (scripts/hooks/lib/working-tree.mjs): a
+    // mapped name compares by its resolved path (relative joined onto the store root,
+    // repoRoot), an unmapped one by its own spelling, and the tree is the project's own
+    // when that location is the store root OR this session's checkout (a linked worktree).
+    const name = String(workingTree);
+    const raw = workingTrees && Object.hasOwn(workingTrees, name) ? workingTrees[name] : undefined;
+    const mapped = typeof raw === 'string' && raw ? raw : undefined;
+    const location = mapped === undefined ? name : isAbsolutePathAnyHost(mapped) ? mapped : this.repoRoot ? join(this.repoRoot, mapped) : undefined;
+    if (location === undefined) return true;
+    return !((this.repoRoot && sameLocationAnyHost(location, this.repoRoot)) || (this.checkoutRoot && sameLocationAnyHost(location, this.checkoutRoot)));
   }
 
   /**
