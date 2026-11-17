@@ -517,7 +517,7 @@ function strictPages(text) {
 }
 function evidenceRead(host, path, { paginate = false, deadline: deadline2 = null } = {}) {
   const remaining = deadline2 === null ? GH_CALL_TIMEOUT_MS : deadline2 - Date.now();
-  if (remaining <= 0) return { ok: false, http: null, error: `--checks-timeout ran out before gh api ${path} could be read` };
+  if (remaining <= 0) return { ok: false, http: null, cut: true, error: `--checks-timeout ran out before gh api ${path} could be read` };
   const args = ["api", "--hostname", host, ...paginate ? ["--paginate"] : [], path];
   const r = spawnSync3("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), maxBuffer: EVIDENCE_MAX_BUFFER, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
   const text = `${r.stderr ?? ""}
@@ -527,7 +527,8 @@ ${r.stdout ?? ""}`.trim();
     const limit = probeMs > 0 ? readCoreRateLimit((a) => spawnSync3("gh", a, { cwd: target, encoding: "utf8", timeout: probeMs, env: { ...process.env, GH_PROMPT_DISABLED: "1" } }), host) : null;
     return { ok: false, http: 403, error: `GitHub's REST rate limit is exhausted${limit?.resetMs ? ` (resets ${describeReset(limit.resetMs)})` : ""}` };
   }
-  if (r.error || r.status !== 0) return { ok: false, http: httpStatusOf(text), error: `gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || "").trim()}` };
+  if (r.error?.code === "ETIMEDOUT" && deadline2 !== null && Date.now() >= deadline2) return { ok: false, http: null, cut: true, error: `--checks-timeout ran out while gh api ${path} was read` };
+  if (r.error || r.status !== 0) return { ok: false, http: httpStatusOf(text), body: r.stdout ?? "", error: `gh api ${path} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || "").trim()}` };
   try {
     return { ok: true, pages: strictPages(r.stdout) };
   } catch (e) {
@@ -540,7 +541,20 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
   const reasons = [];
   let finals = 0;
   const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
-  const read = (path, opts = {}) => evidenceRead(host, path, { ...opts, deadline: deadline2 });
+  let cut = false;
+  const read = (path, opts = {}) => {
+    const res = evidenceRead(host, path, { ...opts, deadline: deadline2 });
+    if (res.cut) cut = true;
+    return res;
+  };
+  const bodyMessage = (body) => {
+    try {
+      const v = JSON.parse(String(body ?? ""));
+      return v !== null && typeof v === "object" && !Array.isArray(v) && typeof v.message === "string" ? v.message.trim() : null;
+    } catch {
+      return null;
+    }
+  };
   const one = (res, path, check) => {
     if (!res.ok) return res;
     if (res.pages.length !== 1 || !check(res.pages[0])) return { ok: false, http: null, error: `gh api ${path} returned an answer of an unexpected shape: ${JSON.stringify(res.pages).slice(0, 200)}` };
@@ -548,11 +562,18 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
   };
   const paged = (res, path, key) => {
     if (!res.ok) return res;
-    const bad = res.pages.find((p) => p === null || typeof p !== "object" || Array.isArray(p) || !Array.isArray(p[key]) || !Number.isInteger(p.total_count));
-    if (bad !== void 0) return { ok: false, http: null, error: `gh api ${path} returned a page without a ${key} list and a total_count: ${JSON.stringify(bad).slice(0, 200)}` };
-    const items = res.pages.flatMap((p) => p[key]);
+    const bad = res.pages.find((p) => p === null || typeof p !== "object" || Array.isArray(p) || !Array.isArray(p[key]) || !Number.isInteger(p.total_count) || p.total_count < 0);
+    if (bad !== void 0) return { ok: false, http: null, error: `gh api ${path} returned a page without a ${key} list and a non-negative total_count: ${JSON.stringify(bad).slice(0, 200)}` };
     const total = res.pages[0].total_count;
-    if (items.length < total) return { ok: false, http: null, error: `gh api ${path} returned ${items.length} of the ${total} ${key} it declares (incomplete pages)` };
+    if (res.pages.some((p) => p.total_count !== total)) return { ok: false, http: null, error: `gh api ${path} returned pages that disagree on total_count (${res.pages.map((p) => p.total_count).join(", ")})` };
+    const items = res.pages.flatMap((p) => p[key]);
+    const ids = /* @__PURE__ */ new Set();
+    for (const item of items) {
+      if (!Number.isInteger(item?.id)) return { ok: false, http: null, error: `gh api ${path} returned a ${key} item without an integer id: ${JSON.stringify(item).slice(0, 200)}` };
+      if (ids.has(item.id)) return { ok: false, http: null, error: `gh api ${path} returned ${key} item ${item.id} twice (inconsistent pages)` };
+      ids.add(item.id);
+    }
+    if (ids.size !== total) return { ok: false, http: null, error: `gh api ${path} returned ${ids.size} of the ${total} ${key} it declares (incomplete pages)` };
     return { ok: true, items };
   };
   const final = (reason) => {
@@ -564,7 +585,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
   const baseRef = pull.ok ? pull.value.base.ref : void 0;
   if (!pull.ok) {
     final(`the PR's base branch could not be read (${pull.error}), so its required checks and the behind-base check cannot be read`);
-    return { reasons, evidence, pending: reasons.length > 0 && finals === 0 };
+    return { reasons, evidence, pending: reasons.length > 0 && finals === 0, cut };
   }
   evidence.base_ref = baseRef;
   const branch = encodeURIComponent(baseRef);
@@ -583,7 +604,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
   }
   const classicPath = `${repoPath}/branches/${branch}/protection/required_status_checks`;
   const classicRead = read(classicPath);
-  if (!classicRead.ok && classicRead.http === 404 && /Branch not protected/i.test(classicRead.error)) notConfigured.push("the branch is not protected");
+  if (!classicRead.ok && classicRead.http === 404 && bodyMessage(classicRead.body) === "Branch not protected") notConfigured.push("the branch is not protected");
   else {
     const classic = one(classicRead, classicPath, (v) => v !== null && typeof v === "object" && !Array.isArray(v) && Array.isArray(v.contexts) && v.contexts.every((c) => typeof c === "string") && (v.checks === void 0 || Array.isArray(v.checks) && v.checks.every((c) => typeof c?.context === "string")));
     if (!classic.ok) unreadable.push(`branch protection: ${classic.error}`);
@@ -655,7 +676,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
     evidence.behind_by = behind;
     if (behind > 0) final(`the branch is behind base: ${behind} commit${behind > 1 ? "s" : ""} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
   }
-  return { reasons, evidence, pending: reasons.length > 0 && finals === 0 };
+  return { reasons, evidence, pending: reasons.length > 0 && finals === 0, cut };
 }
 if (argv.includes("--settle")) {
   let merge = null;
@@ -731,7 +752,7 @@ if (argv.includes("--settle")) {
             { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, previously_missed: missed.items, previously_missed_unparsed: missed.unparsed }
           );
         }
-        if (bounded && Date.now() > deadline2) {
+        if (bounded && Date.now() >= deadline2) {
           timedOut = true;
           if (lastEvidence) lastEvidence = { ...lastEvidence, read: reads };
           break;
@@ -741,7 +762,7 @@ if (argv.includes("--settle")) {
         if (!pending && (state.check_rollup === "SUCCESS" || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
           const reRead = lastEvidence !== null;
           const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded && reRead ? deadline2 : null }), read: reads };
-          if (reRead && bounded && Date.now() > deadline2) {
+          if (reRead && bounded && (fresh.cut || Date.now() >= deadline2)) {
             timedOut = true;
             lastEvidence = { ...lastEvidence, read: reads };
             break;
