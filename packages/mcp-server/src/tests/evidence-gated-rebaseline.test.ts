@@ -525,3 +525,40 @@ test('[EG-15] knowledge_append that only PARTIALLY retires an article_missing it
     cleanup();
   }
 });
+
+// GitHub #226: the documented recipe for "verified change, no matching reconcile
+// item" — mint a reconcile_needed item through board_add for ONLY the verified
+// path, then write with resolves. No git: computeBaselines hashes the working tree.
+test('[EG-16] board_add source:system reconcile_needed for one path + a resolves write re-stamps only that path (non-git dir)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-evidence-recipe-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    writeFile(dir, 'src/a.ts', 'a-v1');
+    writeFile(dir, 'src/b.ts', 'b-v1');
+    const article = mkArticle(tools, 'eg-recipe', ['src/a.ts', 'src/b.ts']);
+    const id = article.id as string;
+    writeFile(dir, 'src/a.ts', 'a-v2');
+    writeFile(dir, 'src/b.ts', 'b-v2');
+
+    const minted = tools.boardAdd({
+      source: 'system',
+      system_reason: 'reconcile_needed',
+      feature_link: id,
+      file_keys: ['src/a.ts'],
+      text: 'verified src/a.ts against the article by hand; no worker item covered it',
+    } as unknown as Parameters<SterlingTools['boardAdd']>[0]) as unknown as { record: Loose };
+    const item = minted.record.id as string;
+
+    tools.knowledgeAppend(id, 'history', [{ date: NOW, event: 'verified a' }], [item]);
+
+    const b = baselinesOf(get(tools, id));
+    assert.equal(b['src/a.ts'], sha256('a-v2'), 'the minted item\'s path is re-stamped');
+    assert.equal(b['src/b.ts'], sha256('b-v1'), 'the other drifted path keeps its old baseline');
+    assert.deepEqual(queryDrift(tools, id), ['src/b.ts']);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

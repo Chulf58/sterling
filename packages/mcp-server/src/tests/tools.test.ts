@@ -856,11 +856,11 @@ test('a capped window says what matched_filter does NOT mean, and names the chea
 
     // Reported misreading: "matched_filter: 179" against rank_terms was read as
     // "179 records about my terms". rank_terms ORDER the filter set (ORDER BY
-    // bm25), they never narrow it — so a capped ranked window must say so.
+    // bm25) and restrict it to FTS matches (GitHub #231) — so a capped ranked window must say so.
     const ranked = tools.knowledgeQueryResult({ types: ['decision'], rank_terms: ['garage'], cap: 3 });
     assert.equal(ranked.capped, true);
     assert.equal(ranked.matched_filter, 8, 'the count belongs to the FILTER, not to the terms');
-    assert.match(ranked.note ?? '', /rank_terms ORDERED those 8 and did not narrow them/);
+    assert.match(ranked.note ?? '', /rank_terms ORDERED and RESTRICTED the result to full-text matches among those 8/);
     assert.match(ranked.note ?? '', /NOT a measure of how many are relevant/);
     assert.match(ranked.note ?? '', /can never establish absence/, 'the half of retrieval a capped result cannot serve');
     assert.match(ranked.note ?? '', /projection:"digest"/, 'and the route out of the window is named, not left to be discovered');
