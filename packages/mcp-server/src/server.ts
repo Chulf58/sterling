@@ -3,7 +3,7 @@
 // including spawned agents — see the message and self-correct (§5.2).
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { readFileSync, existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, lstatSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { z, ZodError } from 'zod';
 import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, BOARD_REMOVAL_OUTCOMES, handoffEvidenceSchema, RETIRED_REASONS } from '@sterling/schemas';
@@ -675,7 +675,7 @@ export function createSterlingServer(
         ran = runDraftOp(op);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        const done = applied.length ? `Ops 0-${index - 1} were written and stay written: ${JSON.stringify(applied)}. Re-running this file applies them again (an append duplicates its entries), so remove them from the file first.` : 'No earlier op was written.';
+        const done = applied.length ? `Ops 0-${index - 1} were written and stay written: ${JSON.stringify(applied)}. The drafts file was kept. Re-running it applies those ops again (an append duplicates its entries), so remove the applied ops from the file first.` : 'No earlier op was written. The drafts file was kept.';
         const rest = index + 1 < ops.length ? ` Ops ${index + 1}-${ops.length - 1} were not attempted.` : '';
         throw new Error(`knowledge_apply_drafts: op ${index} (${op.op} '${op.id}') in ${label} was refused by ${DRAFT_OPS[op.op].tool}: ${message} ${done}${rest}`);
       }
@@ -683,7 +683,15 @@ export function createSterlingServer(
       const written = Object.fromEntries(ran.fields.map((f) => [f, measureField(record[f])]));
       applied.push({ index, op: op.op, id: record.id, version: record.version, written, ...(ran.result.warnings.length ? { warnings: ran.result.warnings } : {}) });
     }
-    return { path: label, applied };
+    // Every op landed, so the drafts file has served its purpose and is removed
+    // (P4: transient state is removed by the event that ends its life). A failed
+    // removal is reported, never swallowed, and does not undo the writes.
+    try {
+      rmSync(file);
+    } catch (e) {
+      return { path: label, applied, file_removed: false, file_remove_error: `${e instanceof Error ? e.message : String(e)}; every op was written, so remove the file by hand before anything re-runs it` };
+    }
+    return { path: label, applied, file_removed: true };
   };
 
   const parseDraftOps = (text: string, label: string): DraftOp[] => {
@@ -975,7 +983,7 @@ export function createSterlingServer(
     'knowledge_apply_drafts',
     {
       description:
-        `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute); after symlinks are resolved it must still be a regular file inside that folder, which must be a real directory, else the call is refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written (the refusal lists them; re-running the file re-applies them, so remove them first). dry_run:true checks the file and resolves each op's record, writing nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}]}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
+        `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute); after symlinks are resolved it must still be a regular file inside that folder, which must be a real directory, else the call is refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written; the file is kept, and the refusal lists the written ops (re-running the file re-applies them, so remove them from it first). When every op applied, the file is deleted and the receipt says file_removed:true; a failed delete returns file_removed:false with file_remove_error, and the writes stand. dry_run:true checks the file and resolves each op's record, writing and deleting nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}], file_removed, file_remove_error?}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
       inputSchema: strict({
         path: z.string().min(1).describe(`the drafts file: relative to ${DRAFTS_DIR}/, or an absolute path inside it`),
         dry_run: z.boolean().optional().describe('check the file and resolve every record without writing'),

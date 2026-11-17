@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -79,8 +79,10 @@ test('a 5,000-character field value is applied byte-exact, with update, append a
     assert.equal(createHash('sha256').update(rec.rationale as string).digest('hex'), createHash('sha256').update(LONG).digest('hex'));
     assert.equal(rec.statement, 'the statement after');
     assert.deepEqual(rec.alternatives_rejected, [{ option: 'chunked drafts', reason: 'many round trips' }]);
-    const receipt = JSON.parse(text(res)) as { path: string; applied: Loose[] };
+    const receipt = JSON.parse(text(res)) as { path: string; applied: Loose[]; file_removed: boolean };
     assert.equal(receipt.path, '.sterling/drafts/long.json');
+    assert.equal(receipt.file_removed, true, 'a fully applied drafts file is removed, and the receipt says so');
+    assert.equal(existsSync(join(h.dir, '.sterling', 'drafts', 'long.json')), false, 'the drafts file is gone after a full apply');
     assert.deepEqual(
       receipt.applied.map((a) => [a.index, a.op, a.id, a.version]),
       [
@@ -157,6 +159,7 @@ test('a create op is refused and the whole file writes nothing, even the valid o
     assert.match(text(res), /nothing was written/);
     assert.equal(h.get(id).version, 1);
     assert.equal(h.get(id).rationale, 'short');
+    assert.equal(existsSync(join(h.dir, '.sterling', 'drafts', 'create.json')), true, 'a refused file is kept');
   } finally {
     await h.cleanup();
   }
@@ -202,6 +205,8 @@ test('an op knowledge_update refuses is refused with the same message; earlier o
     assert.match(text(res), /op 1 \(update '.*'\) in \.sterling\/drafts\/refused\.json was refused by knowledge_update/);
     assert.match(text(res), /Ops 0-0 were written and stay written/);
     assert.match(text(res), /Ops 2-2 were not attempted/);
+    assert.match(text(res), /The drafts file was kept\. Re-running it applies those ops again/);
+    assert.equal(existsSync(join(h.dir, '.sterling', 'drafts', 'refused.json')), true, 'a partial apply keeps the drafts file');
     assert.equal(h.get(other).rationale, 'first op lands');
     assert.equal(h.get(id).rationale, 'short');
     assert.equal(h.get(id).version, 1);
@@ -271,10 +276,31 @@ test('dry_run resolves every record and writes nothing; a missing file is refuse
     assert.notEqual(res.isError, true, text(res));
     assert.deepEqual(JSON.parse(text(res)), { path: '.sterling/drafts/dry.json', dry_run: true, ops: [{ index: 0, op: 'update', id, version: 1 }] });
     assert.equal(h.get(id).rationale, 'short');
+    assert.equal(existsSync(join(h.dir, '.sterling', 'drafts', 'dry.json')), true, 'dry_run never deletes the drafts file');
     const missing = await h.apply({ path: 'nope.json' });
     assert.equal(missing.isError, true);
     assert.match(text(missing), /'nope\.json' does not exist/);
   } finally {
+    await h.cleanup();
+  }
+});
+
+test('a delete that fails after a full apply is reported in the receipt, and the writes stand', { skip: process.platform === 'win32' || process.getuid?.() === 0 ? 'directory write permission is not enforced here' : false }, async () => {
+  const h = await harness();
+  const drafts = join(h.dir, '.sterling', 'drafts');
+  try {
+    const id = h.decision();
+    h.draft('locked.json', [{ op: 'update', id, body: { rationale: 'landed' } }]);
+    chmodSync(drafts, 0o555);
+    const res = await h.apply({ path: 'locked.json' });
+    assert.notEqual(res.isError, true, text(res));
+    const receipt = JSON.parse(text(res)) as Loose;
+    assert.equal(receipt.file_removed, false);
+    assert.match(String(receipt.file_remove_error), /EACCES|EPERM/);
+    assert.equal(h.get(id).rationale, 'landed', 'the write is not undone');
+    assert.equal(existsSync(join(drafts, 'locked.json')), true);
+  } finally {
+    chmodSync(drafts, 0o755);
     await h.cleanup();
   }
 });
