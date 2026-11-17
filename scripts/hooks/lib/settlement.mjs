@@ -475,11 +475,18 @@ function reflogAnchor(entries, head) {
  * a later return to it looks the same once the boundary line has expired. The
  * oldest matching line is taken, so an identical earlier line can only widen
  * the range, and every session move inside it stays counted. No clock is
- * involved. Not guaranteed: a run of expired entries that leaves and returns to
- * the same sha (A to X to A) leaves no gap, so it goes unseen, and commits
- * made outside this checkout's HEAD (another worktree, `git branch -f`) and
- * then fast-forwarded are excluded as #279 intends even when this user made
- * them.
+ * involved. Not guaranteed (accepted as residual risk, user-ruled 2026-11-17):
+ * a run of expired entries that leaves and returns to the same sha (A to X to
+ * A) leaves no gap, so it goes unseen; `git reflog expire --rewrite`, run by
+ * hand after a fast-forward and before settlement, deletes the session's
+ * entries AND rewrites each survivor's old sha to close the gap, so the
+ * session's own paths can be excluded; and if the anchor line expires while a
+ * byte-identical later copy survives (same old and new sha, committer, second
+ * and message), the range starts at the copy and drops the moves between them.
+ * The automatic `git gc` does not pass --rewrite, and it keeps unreachable
+ * entries for gc.reflogExpireUnreachable (30 days by default). Commits made
+ * outside this checkout's HEAD (another worktree, `git branch -f`) and then
+ * fast-forwarded are excluded as #279 intends, even when this user made them.
  */
 function fastForwardedPaths(root, settled, entries, head) {
   if (typeof settled.reflog !== 'string' || !entries) return new Set();
