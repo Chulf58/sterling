@@ -121,12 +121,13 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   assert.match(fm[0], /^description: Sterling's planning agent for OpenCode\. Plans only, never implements\./);
   // one line longer since implementor-hard joined the roster: the Plan agent denies it as it
   // denies the implementor (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-  assert.deepEqual(fm.slice(1, 26), [
+  // Plan no longer writes or binds: OpenCode's built-in plan plugin appends `edit * deny` then allows
+  // only its own plan folder, so Sterling's .sterling/plans allow was dead; the conductor saves and
+  // binds the plan (GitHub #227, user-ruled 2026-11-17).
+  assert.deepEqual(fm.slice(1, 21), [
     'mode: primary',
     'permission:',
-    '  edit:',
-    '    "*": deny',
-    `    "${P}/.sterling/plans/*": allow`,
+    '  edit: deny',
     '  task:',
     '    "*": deny',
     '    "sterling/scout": allow',
@@ -138,10 +139,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
     '    "sterling/implementor-hard": deny',
     '  bash:',
     '    "*": deny',
-    `    "node ${S}/bin/plan-lock.mjs --bind-pending": allow`,
-    `    "node ${S}/bin/plan-lock.mjs --bind-pending --force": allow`,
     `    "node ${S}/bin/plan-lock.mjs --show": allow`,
-    `    "mkdir -p ${P}/.sterling/plans": allow`,
     '    "git status": allow',
     '    "git diff --stat": allow',
     '    "git log --oneline -20": allow',
@@ -151,11 +149,9 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   assert.ok(fm.includes('  sterling_board_add: deny'));
   assert.ok(!fm.some((l) => /^model:/.test(l)), 'no model pin: the plan agent runs on the model the user picks');
   // the body runs exactly the commands the rules allow
-  assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --bind-pending\``));
-  assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --bind-pending --force\``));
-  assert.doesNotMatch(text, /plan-lock\.mjs --plan /, 'the body never tells the agent to pass a path');
+  assert.doesNotMatch(text, /plan-lock\.mjs --(plan|bind-pending) /, 'the body never tells the agent to bind');
   assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --show`));
-  assert.ok(text.includes(`mkdir -p ${P}/.sterling/plans`));
+  assert.match(text, /switch to `sterling\/conductor`/);
   assert.doesNotMatch(text, /\{\{[A-Z_]+\}\}/, 'no install token survives');
   assert.match(text, /^<!-- sterling-full renderer=opencode-full\/1 template=plan /m);
   // per-user: kept out of git in a project whose portable agents are committed

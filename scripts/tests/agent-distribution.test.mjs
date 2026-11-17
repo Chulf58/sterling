@@ -1777,5 +1777,7 @@ test('agent templates carry only the {{MODEL}}/{{EFFORT}} tokens — no baked ma
     for (const m of readFileSync(join(dir, f), 'utf8').matchAll(/\{\{([A-Z_]+)\}\}/g)) (opencodeOnly.has(f) ? opencodeTokens : tokens).add(m[1]);
   }
   assert.deepEqual([...tokens].sort(), ['EFFORT', 'MODEL']);
-  assert.deepEqual([...opencodeTokens].sort(), ['PROJECT_DIR', 'STERLING_ROOT']);
+  // plan.md no longer writes into the project (the conductor saves the plan, GitHub #227), so only
+  // the plan-lock --show path remains and PROJECT_DIR is gone from the template.
+  assert.deepEqual([...opencodeTokens].sort(), ['STERLING_ROOT']);
 });
