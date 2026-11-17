@@ -6874,9 +6874,10 @@ export class SterlingTools {
    * project rather than imagined:
    *
    * (1) "matched_filter: 179" against rank_terms:["garage","loadout"] was read
-   *     as "179 garage decisions". It is not — rank_terms ORDER the set through
-   *     bm25, they never narrow it (store query(): ORDER BY bm25, not WHERE), so
-   *     the count belongs to types/stack_tags/file_keys alone. Saying only
+   *     as "179 garage decisions". It is not — the count is rank-BLIND and
+   *     belongs to types/stack_tags/file_keys alone, while rank_terms both ORDER
+   *     the result through bm25 and RESTRICT it to full-text matches (store
+   *     axis.ts adds records_fts MATCH to WHERE; GitHub #231). Saying only
    *     "records matching this filter" was technically true and still misread,
    *     which makes it a bad message: it let a reader believe a capped window
    *     was a relevance ranking over a relevant set.
@@ -6889,7 +6890,7 @@ export class SterlingTools {
     const parts = [`cap reached — showing ${returned} of ${matchedFilter} records matching the FILTER (types/stack_tags/file_keys)`];
     if (ranked) {
       parts.push(
-        `rank_terms ORDERED those ${matchedFilter} and did not narrow them, so this count is NOT a measure of how many are relevant — and a capped window can never establish absence`
+        `rank_terms ORDERED and RESTRICTED the result to full-text matches among those ${matchedFilter}, so this filter-only count is an upper bound, NOT a measure of how many are relevant — and a capped window can never establish absence`
       );
     }
     parts.push(
