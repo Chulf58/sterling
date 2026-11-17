@@ -16,7 +16,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arg, fail as baseFail, openProject, resolveLinkedWorktree, resolveStoreRoot } from './lib/project.mjs';
-import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
+import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches, sweepMergedWorktrees } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness, loadGeneratedProjections } from './hooks/lib/settlement.mjs';
 import { VERSION_ONLY_CANDIDATES, isVersionOnlyBetweenCommits, readVersionAtCommit } from './lib/version-only.mjs';
@@ -842,6 +842,7 @@ if (shipsPr) {
 // gives the gate ONE failure shape instead of a stack trace after the battery.
 let merged;
 let swept;
+let worktreeSweep = { removed: [], kept: [] };
 try {
   merged = mergeBranchInto({ cwd: target, branch, into });
 } catch (e) {
@@ -928,7 +929,11 @@ try {
 // not be reported as "the merge failed". That misreading is what teaches an
 // operator to hand-merge, which is the whole point of board f37e1dae.
 try {
+  // Worktrees first: removing a clean merged one frees its branch for the sweep below (GitHub #223).
+  worktreeSweep = sweepMergedWorktrees({ cwd: target, into });
   swept = sweepMergedBranches({ cwd: target, into });
+  for (const w of worktreeSweep.removed) console.error(`direct-merge: removed merged clean worktree ${w.path} (${w.branch}).`);
+  for (const w of worktreeSweep.kept) console.error(`direct-merge: kept worktree ${w.path}${w.branch ? ` (${w.branch})` : ''}: ${w.reason}.`);
 } catch (e) {
   console.error(
     [
@@ -973,7 +978,7 @@ if (existsSync(bundleChecker)) {
         (rebuilt.stdout + rebuilt.stderr).trim(),
       ].join('\n')
     );
-    emit({ ...merged, branches_swept: swept, bundles_unverified: true }, 1);
+    emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, bundles_unverified: true }, 1);
   }
   const bundles = spawnSync(process.execPath, [bundleChecker], { cwd: target, encoding: 'utf8', timeout: 300_000 });
   if (bundles.status !== 0) {
@@ -989,7 +994,7 @@ if (existsSync(bundleChecker)) {
         (bundles.stdout + bundles.stderr).trim(),
       ].join('\n')
     );
-    emit({ ...merged, branches_swept: swept, bundles_stale: true }, 1);
+    emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, bundles_stale: true }, 1);
   }
 }
 
@@ -1074,7 +1079,7 @@ if (noOriginFallback) {
           (push.stderr || push.stdout || String(push.error?.message ?? '')).trim(),
         ].join('\n')
       );
-      emit({ ...merged, branches_swept: swept, pushed: false, opencode_release: 'skipped' }, 1);
+      emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, pushed: false, opencode_release: 'skipped' }, 1);
     }
   }
 }
@@ -1097,4 +1102,4 @@ if (mergedHead.status === 0) {
 
 // The fallback is said again at the END, after the merge output, where it is read.
 if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
-emit({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, opencodeRelease.status === 'failed' ? 1 : 0);
+emit({ ...merged, branches_swept: swept, worktrees_removed: worktreeSweep.removed, worktrees_kept: worktreeSweep.kept, pushed, opencode_release: opencodeRelease.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, opencodeRelease.status === 'failed' ? 1 : 0);

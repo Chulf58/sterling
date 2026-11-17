@@ -4,6 +4,7 @@
 // (mergeBranchInto, sweepMergedBranches, currentBranch, defaultBranch)
 // scripts/direct-merge.mjs drives.
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 
 // treeWrite: a step that rewrites the working tree (checkout, merge) gets NO
 // wall-clock timeout. spawnSync's timeout kills git with SIGTERM, and git killed
@@ -211,4 +212,55 @@ export function sweepMergedBranches({ cwd, into }) {
     deleted.push(b);
   }
   return deleted;
+}
+
+/** Remove each linked worktree whose branch is fully merged into `into` AND whose tree is clean, then
+ *  SAFE-delete the branch (GitHub #223; user-ruled 2026-11-17). Never --force: a modified or untracked
+ *  file keeps the worktree (porcelain omits ignored build output, which is the allowance). Never the main
+ *  worktree, the one `cwd` is in, a locked one, a detached HEAD, or the `into` branch. A failed removal is
+ *  reported and the sweep goes on. Returns { removed: [{path, branch}], kept: [{path, branch, reason}] }. */
+export function sweepMergedWorktrees({ cwd, into }) {
+  const here = realpathSync(git(cwd, ['rev-parse', '--show-toplevel']));
+  const blocks = git(cwd, ['worktree', 'list', '--porcelain'])
+    .split(/\n\s*\n/)
+    .map((b) => b.split('\n').filter(Boolean))
+    .filter((b) => b.length > 0);
+  const removed = [];
+  const kept = [];
+  blocks.forEach((lines, i) => {
+    if (i === 0) return; // the main worktree is always listed first
+    const path = lines.find((l) => l.startsWith('worktree '))?.slice('worktree '.length);
+    const ref = lines.find((l) => l.startsWith('branch '))?.slice('branch '.length);
+    const branch = ref?.replace(/^refs\/heads\//, '');
+    const keep = (reason) => kept.push({ path, branch: branch ?? null, reason });
+    if (!path) return;
+    if (lines.some((l) => l === 'locked' || l.startsWith('locked '))) return keep('locked');
+    if (lines.includes('bare')) return keep('bare');
+    if (!branch) return keep('detached HEAD');
+    if (branch === into) return keep(`checks out the base branch ${into}`);
+    let real = path;
+    try { real = realpathSync(path); } catch { /* missing dir: git worktree remove reports it below */ }
+    if (real === here) return keep('the worktree this command runs in');
+    const isAncestor = spawnSync('git', ['merge-base', '--is-ancestor', branch, into], { cwd }).status === 0;
+    if (!isAncestor) return keep(`${branch} is not fully merged into ${into}`);
+    let dirty;
+    try {
+      dirty = git(path, ['--no-optional-locks', 'status', '--porcelain']);
+    } catch (e) {
+      return keep(`could not read its status: ${e.message.split('\n')[0]}`);
+    }
+    if (dirty) return keep('has modified or untracked files');
+    try {
+      git(cwd, ['worktree', 'remove', path]);
+    } catch (e) {
+      return keep(`removal failed: ${e.message.split('\n')[0]}`);
+    }
+    try {
+      git(cwd, ['branch', '-d', branch]);
+    } catch (e) {
+      return keep(`worktree removed but branch delete failed: ${e.message.split('\n')[0]}`);
+    }
+    removed.push({ path, branch });
+  });
+  return { removed, kept };
 }
