@@ -411,6 +411,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "Promotion is a backstop for a record that was scoped wrong, not the normal path.",
     after: "Promotion is a backstop for a record that was scoped wrong, not the normal path.\n\nWhen the user brings in an outside party's answer (a colleague's reply, a vendor's email, another team's ruling), write it as a `decision` or `research_finding` in the same turn, so it never lives only in chat. Quote the source and name who said it, and mark it as the outside party's words, not the user's and not yours (the AGENTS.md rule \"Source attribution\"). GitHub #299 found such answers kept only in conversation; user-ruled 2026-11-17 through the question form, \"Add the rule (Recommended)\".",
   },
+  {
+    commit: 'conductor-on-target',
+    date: '2026-11-17',
+    reason: "new sentences: past the review cap, and findings reproducing only with hand-built inputs, go to the user / residual risk (user-ruled 2026-11-17, \"Tighter conductor rules\")",
+    before: " Work mode has its own shape below.",
+    after: " **Past that cap, the next review or fix round is put to the user through the question form and never started on your own judgment** (user-stated 2026-11-17 that a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\"; in this repo the cap is 3 reviewers, then one re-check). A review finding that reproduces only with hand-built inputs the real system has not been seen to produce is recorded as residual risk, not fixed, unless the user chooses otherwise through the question form (same ruling, 2026-11-17, \"Tighter conductor rules\"). Work mode has its own shape below.",
+  },
+  {
+    commit: 'conductor-on-target',
+    date: '2026-11-17',
+    reason: "new paragraph: no new mechanism without a user ruling (user-ruled 2026-11-17, \"Tighter conductor rules\")",
+    before: "\n\n## Brief quality is your product",
+    after: "\n\nNo new mechanism (a tool, hook, gate, script or schema) is added without a user ruling through the question form; a finding that seems to need one is boarded, not built (user-ruled 2026-11-17, \"Tighter conductor rules\", because a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\").\n\n## Brief quality is your product",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
