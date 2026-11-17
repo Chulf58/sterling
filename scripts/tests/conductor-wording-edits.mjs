@@ -418,6 +418,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "applies your drafted updates to existing records verbatim (element removals through `knowledge_array_remove` included)",
     after: "applies your drafted updates to existing records verbatim (element removals through `knowledge_array_remove` included; a long draft goes in a `.sterling/drafts/` file it applies with `knowledge_apply_drafts`, since a file reader cuts lines at 2,000 characters)",
   },
+  {
+    commit: 'conductor-on-target',
+    date: '2026-11-17',
+    reason: "new sentences: past the review cap, and findings reproducing only with hand-built inputs, go to the user / residual risk (user-ruled 2026-11-17, \"Tighter conductor rules\")",
+    before: " Work mode has its own shape below.",
+    after: " **Past that cap, the next review or fix round is put to the user through the question form and never started on your own judgment** (user-stated 2026-11-17 that a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\"). A review finding that reproduces only with hand-built inputs the real system has not been seen to produce is recorded as residual risk, not fixed, unless the user chooses otherwise through the question form (same ruling, 2026-11-17, \"Tighter conductor rules\"). Work mode has its own shape below.",
+  },
+  {
+    commit: 'conductor-on-target',
+    date: '2026-11-17',
+    reason: "new paragraph: no new mechanism without a user ruling (user-ruled 2026-11-17, \"Tighter conductor rules\")",
+    before: "\n\n## Brief quality is your product",
+    after: "\n\nNo new mechanism (a tool, hook, gate, script or schema) is added without a user ruling through the question form; a finding that seems to need one is boarded, not built (user-ruled 2026-11-17, \"Tighter conductor rules\", because a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\").\n\n## Brief quality is your product",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
