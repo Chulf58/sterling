@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HELPER = join(root, 'scripts', 'pr-review-wait.mjs');
@@ -63,6 +63,12 @@ import { join } from 'node:path';
 const state = process.env.FAKE_GH_STATE;
 const argv = process.argv.slice(2);
 appendFileSync(join(state, 'log.jsonl'), JSON.stringify(argv) + '\\n');
+// clock_jump_at holds "<kind>:<n>": serving call n (0-based) of that kind
+// creates clock_jumped, which the helper's clock preload reads (see clockArgs).
+function jumpClock(kind, n) {
+  const at = join(state, 'clock_jump_at');
+  if (existsSync(at) && readFileSync(at, 'utf8') === kind + ':' + n) writeFileSync(join(state, 'clock_jumped'), '');
+}
 if (argv[0] !== 'api') { console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3); }
 const VALUED = new Set(['--hostname', '--jq', '-f', '-F']);
 const path = argv.filter((a, i) => i > 0 && !a.startsWith('-') && !VALUED.has(argv[i - 1])).pop();
@@ -102,6 +108,7 @@ if (path === 'graphql') {
     const countFile = join(state, 'count_merge');
     const n = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
     writeFileSync(countFile, String(n + 1));
+    jumpClock('merge', n);
     const delays = existsSync(join(state, 'merge_delay.json')) ? JSON.parse(readFileSync(join(state, 'merge_delay.json'), 'utf8')) : [];
     if (delays.length) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[Math.min(n, delays.length - 1)]);
     const file = join(state, 'merge_pages.json');
@@ -129,15 +136,20 @@ let evidence = EVIDENCE.find(([prefix]) => path.startsWith(prefix));
 if (path.startsWith('repos/acme/widget/commits/')) evidence = path.includes('/check-runs') ? ['', 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success' }] }] : ['', 'statuses', { state: 'pending', total_count: 0, statuses: [] }];
 if (evidence) {
   const [, kind, dflt] = evidence;
-  if (existsSync(join(state, 'fail_' + kind))) { console.error(readFileSync(join(state, 'fail_' + kind), 'utf8')); process.exit(1); }
+  if (existsSync(join(state, 'fail_' + kind))) {
+    // gh api prints an HTTP error's JSON body on stdout and its message on stderr.
+    if (existsSync(join(state, 'fail_' + kind + '.body'))) process.stdout.write(readFileSync(join(state, 'fail_' + kind + '.body'), 'utf8'));
+    console.error(readFileSync(join(state, 'fail_' + kind), 'utf8')); process.exit(1);
+  }
   const evCount = join(state, 'count_ev_' + kind);
   const seenEv = existsSync(evCount) ? Number(readFileSync(evCount, 'utf8')) : 0;
   writeFileSync(evCount, String(seenEv + 1));
+  jumpClock(kind, seenEv);
   const evDelays = existsSync(join(state, kind + '_delay.json')) ? JSON.parse(readFileSync(join(state, kind + '_delay.json'), 'utf8')) : [];
   if (evDelays[seenEv]) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, evDelays[seenEv]);
   let file = join(state, kind + '.json');
   for (let k = 0; k <= seenEv; k++) if (existsSync(join(state, kind + '.' + k + '.json'))) file = join(state, kind + '.' + k + '.json');
-  if (!existsSync(file) && dflt === null) { console.error('gh: Branch not protected (HTTP 404)'); process.exit(1); }
+  if (!existsSync(file) && dflt === null) { process.stdout.write('{"message":"Branch not protected","documentation_url":"https://docs.github.com/rest/branches/branch-protection","status":"404"}'); console.error('gh: Branch not protected (HTTP 404)'); process.exit(1); }
   process.stdout.write(existsSync(file) ? readFileSync(file, 'utf8') : JSON.stringify(dflt));
   process.exit(0);
 }
@@ -202,9 +214,18 @@ function makeFixture({ originUrl = 'git@github.com:acme/widget.git' } = {}) {
   return { base, dir, state, bin, put, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 
-function run(f, args, { timeout = 30_000 } = {}) {
+// A FROZEN clock for the helper (node --import): Date.now() is a constant
+// until clock_jumped exists, then exactly that constant plus jumpMs. With
+// --checks-timeout jumpMs/1000 the settle's clock lands EXACTLY on its deadline.
+function clockArgs(f, jumpMs) {
+  const preload = join(f.base, 'clock.mjs');
+  writeFileSync(preload, `import { existsSync } from 'node:fs';\nconst C0 = 1800000000000;\nDate.now = () => (existsSync(${JSON.stringify(join(f.state, 'clock_jumped'))}) ? C0 + ${jumpMs} : C0);\n`);
+  return ['--import', pathToFileURL(preload).href];
+}
+
+function run(f, args, { timeout = 30_000, nodeArgs = [] } = {}) {
   const started = Date.now();
-  const r = spawnSync(process.execPath, [HELPER, ...args], {
+  const r = spawnSync(process.execPath, [...nodeArgs, HELPER, ...args], {
     cwd: f.dir,
     encoding: 'utf8',
     timeout,
@@ -2001,7 +2022,7 @@ test('merge authorized: a classic branch-protection context satisfied by a commi
     putEvidence(f, 'rules', []);
     putEvidence(f, 'protection', { strict: false, contexts: ['ci/legacy'], checks: [{ context: 'ci/legacy', app_id: null }] });
     putEvidence(f, 'check_runs', { total_count: 0, check_runs: [] });
-    putEvidence(f, 'statuses', { state: 'success', total_count: 1, statuses: [{ context: 'ci/legacy', state: 'success' }] });
+    putEvidence(f, 'statuses', { state: 'success', total_count: 1, statuses: [{ id: 21, context: 'ci/legacy', state: 'success' }] });
   });
   assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
   assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
@@ -2220,6 +2241,83 @@ test('Sol review control: check runs on two pages (gh --paginate prints them bac
   assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
   assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
 });
+
+// Sol re-check, CRITICAL 1: classic protection is "not configured" only when its
+// 404 JSON body's message, trimmed, is EXACTLY "Branch not protected". The
+// rulesets here name ci, so a wrong "not configured" would authorize.
+// gh prints the body's message on stderr as "gh: <message> (HTTP 404)".
+const failProtection = (f, body) => {
+  let message = 'Not Found';
+  try {
+    message = JSON.parse(body).message ?? message;
+  } catch {
+    message = body ?? message;
+  }
+  failEvidence(f, 'protection', `gh: ${message} (HTTP 404)`);
+  if (body !== null) writeFileSync(join(f.state, 'fail_protection.body'), body);
+};
+for (const [label, body] of [
+  ['message "Unable to determine whether Branch not protected"', JSON.stringify({ message: 'Unable to determine whether Branch not protected' })],
+  ['message "Branch not protected status could not be read"', JSON.stringify({ message: 'Branch not protected status could not be read' })],
+  ['no JSON body, only the stderr line naming Branch not protected', null],
+  ['a body that is not JSON', 'Branch not protected'],
+]) {
+  test(`Sol re-check: a classic-protection 404 with ${label} is not a proven absence: withheld`, () => {
+    const r = settleWith((f) => {
+      failProtection(f, body);
+      if (body === null) writeFileSync(join(f.state, 'fail_protection'), 'gh: Branch not protected (HTTP 404)');
+    });
+    assertWithheld(r, /required checks not configured or unreadable for main: branch protection:/, label);
+  });
+}
+test('Sol re-check control: a 404 body whose message is exactly "Branch not protected" (padded) is a proven absence: the ruleset checks decide, authorized', () => {
+  const r = settleWith((f) => failProtection(f, JSON.stringify({ message: '  Branch not protected ', status: '404' })));
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+});
+
+// Sol re-check, CRITICAL 2: total_count must be a non-negative integer, the same
+// on every page, and equal to the number of DISTINCT ids read.
+const runOf = (id, name = 'CI') => ({ id, name, workflow_id: id, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD });
+const pages = (...ps) => ps.map((p) => JSON.stringify(p)).join('');
+for (const [label, kind, text, pattern] of [
+  ['first page total 1, second page total 100, two items', 'workflow_runs', pages({ total_count: 1, workflow_runs: [runOf(11)] }, { total_count: 100, workflow_runs: [runOf(12, 'Lint')] }), /disagree on total_count \(1, 100\)/],
+  ['two pages declaring 2 that repeat the same run', 'workflow_runs', pages({ total_count: 2, workflow_runs: [runOf(11)] }, { total_count: 2, workflow_runs: [runOf(11)] }), /workflow_runs item 11 twice/],
+  ['total_count -1 with an empty list', 'workflow_runs', pages({ total_count: -1, workflow_runs: [] }), /non-negative total_count/],
+  ['a run without an id', 'workflow_runs', pages({ total_count: 1, workflow_runs: [{ ...runOf(11), id: undefined }] }), /item without an integer id/],
+  ['more distinct runs than declared', 'workflow_runs', pages({ total_count: 1, workflow_runs: [runOf(11), runOf(12, 'Lint')] }), /returned 2 of the 1 workflow_runs/],
+  ['a check run repeated across pages', 'check_runs', pages({ total_count: 2, check_runs: [{ id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] }, { total_count: 2, check_runs: [{ id: 4, name: 'ci', status: 'completed', conclusion: 'success' }] }), /check_runs item 4 twice/],
+  ['a status without an id', 'statuses', pages({ state: 'success', total_count: 1, statuses: [{ context: 'ci', state: 'success' }] }), /statuses item without an integer id/],
+]) {
+  test(`Sol re-check: inconsistent pages (${label}) withhold the merge`, () => {
+    assertWithheld(settleWith((f) => putEvidenceRaw(f, kind, text)), pattern, label);
+  });
+}
+
+// Sol re-check, MEDIUM 3: a re-read whose clock lands EXACTLY on the deadline is
+// cut; the last complete evidence snapshot stands (frozen clock, see clockArgs).
+for (const [label, at] of [
+  ['the merge-state re-read ends with the clock exactly at the deadline', 'merge:1'],
+  ['an evidence re-read is cut with the clock exactly at the deadline', 'check_runs:1'],
+]) {
+  test(`Sol re-check: ${label}: the last complete snapshot stands, timed out, never "unreadable"`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })], GREEN_ROLLUP)]);
+      putEvidence(f, 'check_runs', ONLY_COPILOT);
+      writeFileSync(join(f.state, 'clock_jump_at'), at);
+      const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '0.05', '--checks-timeout', '5'], { nodeArgs: clockArgs(f, 5000) });
+      const out = { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')) };
+      assertWithheld(out, /required check ci not reported on the head commit/, label);
+      assert.equal(r.out.checks_timed_out, true, label);
+      assert.ok(!r.out.withheld_reasons.some((x) => /could not be read|not configured or unreadable|ran out before/.test(x)), `${label}: ${JSON.stringify(r.out.withheld_reasons)}`);
+      assert.ok(existsSync(join(f.state, 'clock_jumped')), `${label}: the clock reached the deadline`);
+    } finally {
+      f.cleanup();
+    }
+  });
+}
 
 test('the merge evidence is not read when the settle is blocked (nothing would be authorized)', () => {
   const f = makeFixture();
