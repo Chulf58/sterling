@@ -25840,6 +25840,15 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
 }
 
 // packages/opencode-plugin/src/claim-handover.mjs
+function noteNamesItem(note, { id, slug }) {
+  const texts = [note?.next_slice, ...Array.isArray(note?.lanes) ? note.lanes : []].filter((t) => typeof t === "string");
+  const keys = [id, typeof id === "string" ? id.slice(0, 8) : null, slug].filter((k) => typeof k === "string" && k);
+  const esc = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return keys.some((k) => {
+    const re = new RegExp(`(?<![\\w-])${esc(k)}(?![\\w-])`, "i");
+    return texts.some((t) => re.test(t));
+  });
+}
 function itemName(entry) {
   const id8 = String(entry.id).slice(0, 8);
   return entry.label ? `${entry.label} (${id8})` : id8;
@@ -25847,6 +25856,8 @@ function itemName(entry) {
 function adoptionText(result, from) {
   const parts = [];
   if (result.adopted.length) parts.push(`adopted ${result.adopted.length}: ${result.adopted.map(itemName).join(", ")}`);
+  if (result.released?.length) parts.push(`released ${result.released.length} (the rotation note does not name them as in flight, so they are free for any session to claim): ${result.released.map(itemName).join(", ")}`);
+  if (result.releaseFailed?.length) parts.push(`could NOT release ${result.releaseFailed.length} (the rotation note does not name them, but the release failed; board_release them if they are not yours to keep): ${result.releaseFailed.map((r) => `${itemName(r)}, ${r.error}`).join("; ")}`);
   if (result.already.length) parts.push(`already yours from an earlier hand-over: ${result.already.map(itemName).join(", ")}`);
   if (result.refused.length) {
     const why = (r) => r.reason === "other_checkout" ? `held in checkout '${r.checkout}', not this one (that session may be live there; board_takeover takes it)` : r.reason === "moved" ? `moved before the hand-over: session '${r.holder_session}' holds it at generation ${r.generation}` : "released before the hand-over";
@@ -26639,7 +26650,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
     let handover = "";
     if (adoptClaims && typeof note.session_id === "string" && note.session_id) {
       try {
-        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID }), note.session_id);
+        handover = adoptionText(await adoptClaims(root, { from: note.session_id, to: sessionID, note }), note.session_id);
       } catch (e) {
         logLine(root, `rotation restore: claim hand-over from ${note.session_id} failed: ${errText2(e)}`);
         handover = handoverFailedText(e, note.session_id);
@@ -28854,7 +28865,7 @@ function createSterlingServer(deps = {}) {
       if (info?.id !== sessionID || typeof dir !== "string" || !dir) return { why: `session.get gave no location.directory for session ${sessionID}` };
       return { dir: remember(sessionDirs, sessionID, dir) };
     }
-    function adoptClaims(root, { from, to }) {
+    function adoptClaims(root, { from, to, note }) {
       try {
         const store = openStore(join55(root, ".sterling", "sterling.db"));
         try {
@@ -28862,9 +28873,29 @@ function createSterlingServer(deps = {}) {
             const r = store.get(e.id);
             return { ...e, ...r ? { label: boardDisplayLabel(r.text, r.slug) } : {} };
           };
-          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label), released: (r.released ?? []).map(label), releaseFailed: (r.releaseFailed ?? []).map(label) });
+          const releaseUnnamed = (r) => {
+            const keep = (e) => {
+              const rec = store.get(e.id);
+              return noteNamesItem(note, { id: e.id, slug: rec?.slug });
+            };
+            const released = [];
+            const releaseFailed = [];
+            for (const e of [...r.adopted, ...r.already]) {
+              if (keep(e)) continue;
+              try {
+                store.releaseClaim(e.id, { session: to, generation: e.generation, now: now() });
+                released.push(e);
+              } catch (err) {
+                releaseFailed.push({ ...e, error: errText2(err) });
+              }
+            }
+            const gone = new Set(released.map((e) => e.id));
+            const stay = (list) => list.filter((e) => !gone.has(e.id));
+            return { adopted: stay(r.adopted), already: stay(r.already), refused: r.refused, released, releaseFailed };
+          };
           try {
-            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+            return labelled(releaseUnnamed(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() })));
           } catch (e) {
             if (e?.partial) e.partial = labelled(e.partial);
             throw e;

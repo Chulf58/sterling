@@ -67,6 +67,7 @@ import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { createDeliveryPolicy } from './delivery-policy.mjs';
 import { childSessionOf, createDispatchHandlers, liveChildInRegister, rootSessionGate, sessionKind, sweepStaleDispatches } from './dispatch.mjs';
+import { noteNamesItem } from './claim-handover.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
@@ -276,7 +277,7 @@ export function createSterlingServer(deps = {}) {
      * board cache is dropped whatever happened, so the next board block and the orphan
      * notice re-read who holds each claim.
      */
-    function adoptClaims(root, { from, to }) {
+    function adoptClaims(root, { from, to, note }) {
       try {
         const store = openStore(join(root, '.sterling', 'sterling.db'));
         try {
@@ -284,9 +285,31 @@ export function createSterlingServer(deps = {}) {
             const r = store.get(e.id);
             return { ...e, ...(r ? { label: boardDisplayLabel(r.text, r.slug) } : {}) };
           };
-          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label) });
+          const labelled = (r) => ({ adopted: r.adopted.map(label), already: r.already.map(label), refused: r.refused.map(label), released: (r.released ?? []).map(label), releaseFailed: (r.releaseFailed ?? []).map(label) });
+          // Only items the rotation note names stay adopted; the rest are released through
+          // the holder's own releaseClaim (never a force), a failure kept per item.
+          const releaseUnnamed = (r) => {
+            const keep = (e) => {
+              const rec = store.get(e.id);
+              return noteNamesItem(note, { id: e.id, slug: rec?.slug });
+            };
+            const released = [];
+            const releaseFailed = [];
+            for (const e of [...r.adopted, ...r.already]) {
+              if (keep(e)) continue;
+              try {
+                store.releaseClaim(e.id, { session: to, generation: e.generation, now: now() });
+                released.push(e);
+              } catch (err) {
+                releaseFailed.push({ ...e, error: errText(err) });
+              }
+            }
+            const gone = new Set(released.map((e) => e.id));
+            const stay = (list) => list.filter((e) => !gone.has(e.id));
+            return { adopted: stay(r.adopted), already: stay(r.already), refused: r.refused, released, releaseFailed };
+          };
           try {
-            return labelled(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() }));
+            return labelled(releaseUnnamed(store.adoptClaims({ session: to, checkout: root, from_session: from, now: now() })));
           } catch (e) {
             if (e?.partial) e.partial = labelled(e.partial);
             throw e;

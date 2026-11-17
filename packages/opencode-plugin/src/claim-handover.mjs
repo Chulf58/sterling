@@ -9,6 +9,23 @@
 // on the note: a root session's context lists every claim in its checkout held by
 // another session, naming board_adopt, and nothing is adopted by guess.
 
+/**
+ * Whether the rotation note names a board item as in flight (GitHub #230, user-ruled
+ * 2026-11-17 "Adopt only named lanes"). The rule: the item counts as named when its full
+ * id, its 8-char id prefix or its slug appears as a whole token in `next_slice` or in any
+ * `lanes` text; an id or slug inside a longer word or slug does not count. Only named
+ * items stay adopted; the rest are released at adoption.
+ */
+export function noteNamesItem(note, { id, slug }) {
+  const texts = [note?.next_slice, ...(Array.isArray(note?.lanes) ? note.lanes : [])].filter((t) => typeof t === 'string');
+  const keys = [id, typeof id === 'string' ? id.slice(0, 8) : null, slug].filter((k) => typeof k === 'string' && k);
+  const esc = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return keys.some((k) => {
+    const re = new RegExp(`(?<![\\w-])${esc(k)}(?![\\w-])`, 'i');
+    return texts.some((t) => re.test(t));
+  });
+}
+
 /** `name (id8)` for one adopted or refused item, from the store row's label. */
 export function itemName(entry) {
   const id8 = String(entry.id).slice(0, 8);
@@ -22,6 +39,8 @@ export function itemName(entry) {
 export function adoptionText(result, from) {
   const parts = [];
   if (result.adopted.length) parts.push(`adopted ${result.adopted.length}: ${result.adopted.map(itemName).join(', ')}`);
+  if (result.released?.length) parts.push(`released ${result.released.length} (the rotation note does not name them as in flight, so they are free for any session to claim): ${result.released.map(itemName).join(', ')}`);
+  if (result.releaseFailed?.length) parts.push(`could NOT release ${result.releaseFailed.length} (the rotation note does not name them, but the release failed; board_release them if they are not yours to keep): ${result.releaseFailed.map((r) => `${itemName(r)}, ${r.error}`).join('; ')}`);
   if (result.already.length) parts.push(`already yours from an earlier hand-over: ${result.already.map(itemName).join(', ')}`);
   if (result.refused.length) {
     const why = (r) =>
