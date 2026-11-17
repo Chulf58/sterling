@@ -1854,3 +1854,35 @@ test('claim hand-over: a store failing after the first transfer reports the part
     p.cleanup();
   }
 });
+
+// GitHub #221: an over-budget context delivery names the sections that cost the time.
+test('context fence: an over-budget delivery logs its slowest sections with ms', async () => {
+  const p = makeProject();
+  const saved = server.BUDGET_MS.context;
+  server.BUDGET_MS.context = 20;
+  const busy = (ms) => { const end = Date.now() + ms; while (Date.now() < end); };
+  const { ctx, cleanup } = await setupPlugin(p.dir, { openStore: (path) => (busy(60), new SterlingStore(path)) });
+  try {
+    await ctx.hooks.session.prompt(promptInput('go'));
+    const log = readFileSync(join(p.dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8');
+    assert.match(log, /context: over budget \(\d+ ms, synchronous\) \(slowest: [^)]*\bstatus \d+ ms/);
+  } finally {
+    server.BUDGET_MS.context = saved;
+    await cleanup?.();
+    p.cleanup();
+  }
+});
+
+test('createSectionTimer: times sync and async sections, lists the slowest three at 50 ms or more', async () => {
+  const t = server.createSectionTimer();
+  assert.equal(t.slowest(), '');
+  const busy = (ms) => { const end = Date.now() + ms; while (Date.now() < end); };
+  assert.equal(t.time('a', () => (busy(60), 7)), 7);
+  await t.time('b', async () => busy(90));
+  t.time('c', () => busy(70));
+  t.time('d', () => busy(55));
+  t.time('fast', () => 1);
+  assert.throws(() => t.time('boom', () => { busy(80); throw new Error('x'); }), /x/);
+  const out = t.slowest();
+  assert.match(out, /^ \(slowest: b \d+ ms, boom \d+ ms, c \d+ ms\)$/);
+});
