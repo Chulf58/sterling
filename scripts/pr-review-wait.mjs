@@ -519,6 +519,13 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
   }
   const classicPath = `${repoPath}/branches/${branch}/protection/required_status_checks`;
   const classicRead = read(classicPath);
+  // MEASURED by the conductor 2026-11-17 against GitHub: `gh api
+  // repos/<o>/<r>/branches/main/protection` answers HTTP 404 with the JSON body
+  // {"message":"Branch not protected",...} on stdout only for an ADMIN token; a
+  // non-admin token gets {"message":"Not Found",...} for the same branch.
+  // stderr carries `gh: <message> (HTTP 404)`. So a non-admin token can never
+  // prove the absence, and the settle withholds (user-ruled 2026-11-17, "(B)
+  // Sterling's switch, as built").
   if (!classicRead.ok && classicRead.http === 404 && bodyMessage(classicRead.body) === 'Branch not protected') notConfigured.push('the branch is not protected');
   else {
     const classic = one(classicRead, classicPath, (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Array.isArray(v.contexts) && v.contexts.every((c) => typeof c === 'string') && (v.checks === undefined || (Array.isArray(v.checks) && v.checks.every((c) => typeof c?.context === 'string'))));
