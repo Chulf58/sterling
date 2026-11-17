@@ -527,3 +527,23 @@ test('--retag resume: the rerun must use the same flag as the copy it finds, and
   assert.equal(other.code, 2);
   assert.match(other.stderr, /was made without --retag, so rerun without --retag/);
 });
+
+test('a second whole-domain rename (chulf -> customerhub -> hubby) replaces the inherited receipt and verifies (GitHub #225, #228)', () => {
+  const m = machine();
+  const first = doctor(m, ['rename', 'chulf', 'customerhub', '--apply']);
+  assert.equal(first.code, 0, first.stderr);
+
+  const second = doctor(m, ['rename', 'customerhub', 'hubby', '--apply']);
+  assert.equal(second.code, 0, second.stderr);
+  assert.match(second.stdout, /RENAMED 'customerhub' to 'hubby'/);
+
+  const hubbyPath = m.newPath.replace('/customerhub/', '/hubby/');
+  const receipts = readRows(hubbyPath, "SELECT value FROM store_meta WHERE key = 'rename_receipt'");
+  assert.equal(receipts.length, 1, 'the copy carries exactly one receipt');
+  const receipt = JSON.parse(receipts[0].value);
+  assert.equal(receipt.from_domain, 'customerhub');
+  assert.equal(receipt.to_domain, 'hubby');
+  assert.equal(readRows(hubbyPath, "SELECT value FROM store_meta WHERE key = 'move_fence'").length, 0, 'the copy carries no fence');
+  assert.ok(fenceOf(m.newPath), 'the middle store is fenced');
+  assert.equal(readRows(hubbyPath, 'SELECT COUNT(*) AS n FROM records')[0].n, m.ids.length);
+});
