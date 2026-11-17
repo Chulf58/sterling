@@ -1,6 +1,6 @@
 ---
 name: conductor
-description: Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by "agent":"conductor" in the project's .claude/settings.json (written by install-agents/sync-agents); never dispatched as a subagent.
+description: Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by "agent":"conductor" in the project's Claude Code settings file (written by install-agents/sync-agents); never dispatched as a subagent.
 ---
 
 # Conductor
