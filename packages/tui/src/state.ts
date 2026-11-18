@@ -207,6 +207,11 @@ export interface AgentRosterSnapshot {
   /** Governed agent names installed in the OpenCode or agy folders but not the Claude one
    *  (a governed role is listed when installed in any host folder). */
   hostInstalled?: string[];
+  /** Governed agent names installed in the OpenCode folder (.opencode/agents/sterling): an OpenCode
+   *  override is accepted only for a role in this list. */
+  opencodeInstalled?: string[];
+  /** Governed agent names installed in agy's folder: an agy override is accepted only for a role in this list. */
+  agyInstalled?: string[];
   /** Custom agents from the project's agent folders: shown read-only, never edited. */
   customAgents?: CustomAgentView[];
   /** Antigravity CLI is installed: the model picker then offers the agy-only ids. */
@@ -457,7 +462,7 @@ function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string
 function systemKeys(snap: AgentRosterSnapshot): string[] {
   // a governed role with no installed agent file in any host folder is not listed
   // (user ruling 2026-11-18, GitHub issue #307)
-  const installed = new Set([...snap.agents.map((a) => a.name), ...(snap.hostInstalled ?? [])]);
+  const installed = new Set([...snap.agents.map((a) => a.name), ...(snap.hostInstalled ?? []), ...(snap.opencodeInstalled ?? []), ...(snap.agyInstalled ?? [])]);
   const isInstalled = (k: string): boolean => [...installed].some((n) => AGENT_MODEL_KEY[n] === k);
   return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), MAINTENANCE_WORKER_ROLE];
 }
@@ -2547,7 +2552,7 @@ function reduceNodes(
               // be silently refused — surface a notice instead. The worker may
               // still clear a model it has, so only its entry-less, model-less
               // picker is empty.
-              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : roster.catalog.entries.length === 0) {
+              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : modelOptions(roster.catalog.entries, roster.configModels[key], roster.agy).length === 0) {
                 return { ui: { ...ui, cursor, notice: 'model catalog empty or invalid — nothing to pick; refresh the catalog first' }, effects };
               }
               // open the MODEL picker on the key under the cursor (highlight 0)
@@ -2564,20 +2569,21 @@ function reduceNodes(
               // carries the effort in the id, and the Claude pin is left as it is
               if (option?.kind === 'agy' || option?.kind === 'agy_clear') {
                 if (!keyConfig) return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no config entry` }, effects };
-                if (!roster.agents.some((a) => AGENT_MODEL_KEY[a.name] === sel.key)) {
-                  return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no agent, so an Antigravity model would govern nothing` }, effects };
+                if (option.kind === 'agy' && !(roster.agyInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === sel.key)) {
+                  return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no agy agent installed, so an Antigravity model would govern nothing` }, effects };
                 }
                 effects.push({ type: 'agy_model', key: sel.key, from: keyConfig.agy_model, to: option.kind === 'agy' ? option.id : undefined, model: keyConfig.model, effort: keyConfig.effort });
                 return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
               }
               if (option && keyConfig && (option.kind === 'clear' || isOpenCodeOnlyEntry(option.entry))) {
-                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                // the OpenCode agent files this role governs: the ones installed in the OpenCode folder
+                const agents = (roster.opencodeInstalled ?? []).filter((n) => AGENT_MODEL_KEY[n] === sel.key);
                 const to = option.kind === 'clear' ? undefined : `${option.entry.vendor}/${option.entry.id}`;
                 if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
                   return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
                 }
                 if (to !== undefined && agents.length === 0) {
-                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${sel.key}' has no OpenCode agent installed, so an OpenCode model would govern nothing` }, effects };
                 }
                 effects.push({ type: 'opencode_model', key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
                 return { ui: { ...ui, selector: undefined, notice: undefined }, effects };

@@ -3,7 +3,7 @@
 // (main.ts) and the OpenCode plugin (packages/opencode-plugin/src/tui.tsx)
 // both drive it, so a board edit or a config toggle runs the same code in
 // either host. Nothing here touches a terminal.
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -22,8 +22,8 @@ import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
-import { discoverCustomAgents } from './custom-agents.js';
-import { AGY_AGENTS_DIR, probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
+import { discoverCustomAgents, installedGovernedAgents } from './custom-agents.js';
+import { AGY_AGENTS_DIR, AGY_ROSTER, probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -55,6 +55,8 @@ export interface DashboardOptions {
   /** The file operations the OpenCode-override config.json write uses; tests
    *  use it to make that write fail part-way. */
   configWriteFs?: ConfigWriteSeams;
+  /** The agy project setup an agy_model effect runs after writing config.json; tests inject a hermetic one. */
+  agySetup?: (args: { projectDir: string; pluginRoot: string }) => ReturnType<typeof setupAgy>;
   /** Which host opened the dashboard. 'opencode' offers the Overpass rows (in
    *  work mode). The in-OpenCode dashboard (opencode/sterling-tui/tui.tsx)
    *  passes 'opencode'; the tmux side pane (main.ts) passes it from
@@ -361,20 +363,6 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
 
   /** Read a governed agent's INSTALLED model:/effort: from its frontmatter (the
    *  copy that governs dispatch). Missing/unparsable → blanks (surfaces as drift). */
-  /** A governed agent's file in the OpenCode folder (.opencode/agents, subfolders included,
-   *  where Sterling writes .opencode/agents/sterling/<name>.md) or agy's folder. */
-  function hostAgentFileExists(name: string): boolean {
-    if (existsSync(join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md'))) return true;
-    const walk = (dir: string): boolean => {
-      try {
-        return readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name === `${name}.md`));
-      } catch {
-        return false;
-      }
-    };
-    return walk(join(projectRoot, '.opencode', 'agents'));
-  }
-
   function readInstalledModelEffort(name: string): { model: string; effort: string } {
     try {
       const content = readFileSync(join(agentsDir, `${name}.md`), 'utf8');
@@ -585,7 +573,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     // governed roles installed in the OpenCode or agy folders count as installed too, and
     // the custom agents of every host folder are listed read-only (issue #307); discovery
     // never throws, so a bad agent file cannot fail the tab
-    const hostInstalled = Object.keys(AGENT_MODEL_KEY).filter((name) => !agents.some((a) => a.name === name) && hostAgentFileExists(name));
+    const installedAt = installedGovernedAgents(projectRoot);
+    const hostInstalled = [...new Set([...installedAt.opencode, ...installedAt.agy])].filter((name) => !agents.some((a) => a.name === name));
     const customAgents = discoverCustomAgents(projectRoot);
 
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
@@ -607,7 +596,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, hostInstalled, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+    return { agents, hostInstalled, opencodeInstalled: installedAt.opencode, agyInstalled: installedAt.agy, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
   }
 
   /** maintenance_worker.opencode_model for the Maintenance worker row, from the RAW
@@ -855,7 +844,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
    *  it changed since it was read); a failed agy render puts config.json back. The Claude
    *  and OpenCode agent files are not touched. */
   function applyAgyModel(e: AgyModelEffect): void {
-    const fail = (msg: string) => { ui = { ...ui, notice: `Antigravity model for '${e.key}' not changed — ${msg}; config.json is as it was` }; };
+    const fail = (msg: string) => { ui = { ...ui, notice: `Antigravity model for '${e.key}' not changed — ${msg}; config.json and the agy agent files are as they were` }; };
     let configBefore: Buffer;
     let configAfter: string;
     try {
@@ -877,13 +866,30 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
       return;
     }
+    // setupAgy writes the agent files one by one and reports a refused one as a row, so a refusal
+    // leaves the files before it rewritten: snapshot every file the render may touch first, and put
+    // them back with config.json when the render does not converge
+    const agentPaths = AGY_ROSTER.map((name) => join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md'));
+    const agentsBefore = agentPaths.map((path) => ({ path, bytes: existsSync(path) ? readFileSync(path) : null }));
+    const restoreAgents = (): void => {
+      for (const { path, bytes } of agentsBefore) {
+        if (bytes === null) rmSync(path, { force: true });
+        else if (!existsSync(path) || !readFileSync(path).equals(bytes)) writeFileSync(path, bytes);
+      }
+    };
     let outcome: string;
     try {
-      const r = setupAgy({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() }) as { skipped?: string; rows?: Array<{ refused?: boolean; detail?: string }> };
+      const r = (options.agySetup ?? setupAgy)({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() }) as { skipped?: string; rows?: Array<{ refused?: boolean; detail?: string }> };
       const refused = (r.rows ?? []).filter((x) => x.refused);
       if (refused.length) throw new Error(`agy agent file(s) refused: ${refused.map((x) => x.detail).join('; ')}`);
       outcome = r.skipped ?? 'the agy agent files were re-rendered';
     } catch (err) {
+      try {
+        restoreAgents();
+      } catch (agentErr) {
+        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${(err as Error).message}) and the agy agent files were not restored: ${(agentErr as Error).message}; config.json was left as written` };
+        return;
+      }
       try {
         replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
       } catch (restoreErr) {

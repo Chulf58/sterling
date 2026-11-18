@@ -579,3 +579,53 @@ for (const path of ['set', 'clear'] as const) {
     }
   });
 }
+
+// ---- agy_model (issue #306) --------------------------------------------------
+// Hermetic agy setup: the real setupAgy with agy reported installed, a scratch home and the repo's own
+// plugin root, so nothing is written outside the fixture directory.
+async function agyFixture() {
+  const { setupAgy } = await import('../../../../scripts/lib/agy-setup.mjs');
+  const f = fixture({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } });
+  spawnSync('git', ['init', '-q'], { cwd: f.dir });
+  const home = mkdtempSync(join(tmpdir(), 'sterling-agy-home-'));
+  const agySetup = (args: { projectDir: string; pluginRoot: string }) =>
+    setupAgy({ ...args, env: { STERLING_AGY_PROBE: 'ok' }, home, installed: false, nodePath: process.execPath });
+  const agent = (name: string) => join(f.dir, '.agents', 'agents', name, 'agent.md');
+  return { f, home, agySetup, agent, cleanup: () => { rmSync(f.dir, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); } };
+}
+
+test('controller: an agy_model set writes config.models.<key>.agy_model and the agy agent file pins it', async () => {
+  const a = await agyFixture();
+  const ctl = openDashboard(a.f.storePath, { agySetup: a.agySetup });
+  try {
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    assert.equal(JSON.parse(readFileSync(a.f.configPath, 'utf8')).models.implementor.agy_model, 'claude-opus-5-5-high');
+    assert.match(readFileSync(a.agent('implementor'), 'utf8'), /^model: claude-opus-5-5-high$/m);
+    assert.match(ctl.ui().notice ?? '', /Antigravity model for 'implementor' set to claude-opus-5-5-high/);
+  } finally {
+    ctl.close();
+    a.cleanup();
+  }
+});
+
+test('controller: an agy render that refuses a sibling agent puts the already rewritten agent files and config.json back', async () => {
+  const a = await agyFixture();
+  const ctl = openDashboard(a.f.storePath, { agySetup: a.agySetup });
+  try {
+    // baseline render: every agy agent file exists, written with model: inherit
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'gemini-4-argon-low', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', from: 'gemini-4-argon-low', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    const implementorBefore = readFileSync(a.agent('implementor'));
+    assert.match(implementorBefore.toString('utf8'), /^model: inherit$/m);
+    // a locally edited sibling that comes after the implementor in the roster: setupAgy refuses it
+    writeFileSync(a.agent('researcher'), readFileSync(a.agent('researcher'), 'utf8') + '\nmy own edit\n');
+    const configBefore = readFileSync(a.f.configPath);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    assert.ok(readFileSync(a.agent('implementor')).equals(implementorBefore), 'the implementor agent file is back to its old bytes');
+    assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is back to its old bytes');
+    assert.match(ctl.ui().notice ?? '', /not changed — .*edited after Sterling wrote it.*config\.json and the agy agent files are as they were/);
+  } finally {
+    ctl.close();
+    a.cleanup();
+  }
+});

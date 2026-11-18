@@ -75,9 +75,15 @@ test('threshold: the default needs two matched terms, minTerms raises or lowers 
   assert.deepEqual(fitDomains(twoWords, domains, { minTerms: 3 }), []);
 });
 
-test('threshold scales down for a short description so it can still fit', () => {
+// Changed 2026-11-18 (review of #305): this test pinned a one-term exception, where a description with a
+// single subject term fit on one match. User ruling, decision
+// domain-fit-ignores-generic-words-promotion-review-needs-subject-terms (888e48df): a domain fits on at
+// least 2 subject-specific matched terms, so the threshold no longer scales down.
+test('a description with fewer subject terms than the threshold never fits; one matched term is not enough', () => {
   const terse = { name: 'genesys', description: 'Genesys' };
-  assert.deepEqual(fitDomains('Genesys outage during the weekend.', [terse]).map((f) => f.name), ['genesys']);
+  assert.deepEqual(fitDomains('Genesys outage during the weekend.', [terse]), []);
+  const python = { name: 'python', description: 'Python language and standard library' };
+  assert.deepEqual(fitDomains('Python snake habitat', [python]), [], 'one shared subject word is coincidence');
 });
 
 test('terms match across inflections by prefix, in either direction', () => {

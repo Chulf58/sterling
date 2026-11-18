@@ -73,8 +73,9 @@ function subjectTerms(text: string): string[] {
 /** The domains whose description fits `recordText`, best first: score
  *  descending, then matched count descending, then name ascending, so the order
  *  never depends on the input order. A domain fits when at least
- *  min(minTerms, its distinct description terms) of those terms appear in the
- *  record. Throws TypeError for non-string text, a non-array domain list, a
+ *  minTerms (default 2, decision
+ *  domain-fit-ignores-generic-words-promotion-review-needs-subject-terms) of those terms
+ *  appear in the record, so a description with fewer subject terms than that never fits. Throws TypeError for non-string text, a non-array domain list, a
  *  malformed entry or a non-string exclude; RangeError for a bad minTerms;
  *  Error for a duplicate domain name (case-insensitive). */
 export function fitDomains(
@@ -113,7 +114,7 @@ export function fitDomains(
     const descTerms = subjectTerms(d.description);
     if (!descTerms.length) continue;
     const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
-    if (matched.length < Math.min(minTerms, descTerms.length)) continue;
+    if (matched.length < minTerms) continue;
     fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
   }
   return fits.sort(
