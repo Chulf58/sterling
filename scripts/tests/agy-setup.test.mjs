@@ -23,7 +23,9 @@ import {
   ensureAgyExcluded,
   ensureGeminiMd,
   geminiRootAlias,
+  geminiRootFor,
   formatAgyRows,
+  probeMcpServer,
   probeAgy,
   renderAgyAgent,
   renderGeminiMd,
@@ -460,4 +462,99 @@ test('post-update sync on agy: an agy-only project runs sync-agents and stamp-co
     for (const k of keys) if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
+});
+
+// ---------- review fixes: mixed versions, the GEMINI.md root link ----------
+
+// A server from before read-only mode, as its entry point behaves: --capabilities is not a flag it
+// knows, so it fails the --project/--store usage check with exit 2 (packages/mcp-server/src/main.ts
+// before 96054356). A server with read-only mode prints its capability line.
+const OLD_SERVER = "const a = process.argv.slice(2);\nif (!a.includes('--project') && !a.includes('--store')) { console.error('usage: sterling-mcp --project <project root>'); process.exit(2); }\n";
+const NEW_SERVER = "if (process.argv.includes('--capabilities')) { console.log(JSON.stringify({ sterling_mcp: { read_only: true } })); process.exit(0); }\nprocess.exit(2);\n";
+
+test('mixed versions: agy\'s older installed copy cannot enforce --read-only, so no agent file is written and the remedy names agy plugin install; a current copy gets them', () => {
+  const home = tmp('sterling-agy-mixed-');
+  const copy = copyAt(agyCopy(home), '0.19.150');
+  writeFileSync(join(copy, 'mcp', 'sterling-mcp.mjs'), OLD_SERVER);
+  const dir = gitProject();
+  const old = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, home, installed: true, nodePath: NODE });
+  assert.equal(old.root, copy, "agy's copy is the selected root");
+  const refused = old.rows.find((r) => r.item === '.agents/agents/');
+  assert.equal(refused?.status, 'refused', JSON.stringify(old.rows));
+  assert.match(refused.detail, /cannot enforce --read-only .*exited 2, so that server predates read-only mode/);
+  assert.match(refused.instruction, new RegExp(`agy plugin install ${repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.equal(existsSync(join(dir, '.agents')), false, 'no agent file, so no sterling-ro entry points at a server that ignores --read-only');
+  assert.equal(old.rows.find((r) => r.item === 'GEMINI.md')?.status, 'created', 'GEMINI.md does not depend on the server');
+
+  writeFileSync(join(copy, 'mcp', 'sterling-mcp.mjs'), NEW_SERVER);
+  const current = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, home, installed: true, nodePath: NODE });
+  assert.equal(current.rows.filter((r) => r.status === 'refused').length, 0, JSON.stringify(current.rows));
+  const reviewer = frontmatter(readFileSync(join(dir, '.agents', 'agents', 'reviewer', 'agent.md'), 'utf8')).fm;
+  assert.deepEqual(reviewer.mcpServers, [{ name: 'sterling-ro', command: NODE, args: [`${copy}/mcp/sterling-mcp.mjs`, '--project', '.', '--read-only'] }]);
+});
+
+test('probeMcpServer: this checkout\'s server reports read-only mode; an old, a silent and a missing server do not', () => {
+  assert.deepEqual(probeMcpServer({ root: repo }), { readOnly: true });
+  const root = tmp('sterling-agy-probe-');
+  mkdirSync(join(root, 'mcp'));
+  const server = join(root, 'mcp', 'sterling-mcp.mjs');
+  writeFileSync(server, OLD_SERVER);
+  assert.match(probeMcpServer({ root }).reason, /exited 2/);
+  writeFileSync(server, '');
+  assert.match(probeMcpServer({ root }).reason, /does not report read_only/);
+  rmSync(server);
+  assert.equal(probeMcpServer({ root }).readOnly, false);
+});
+
+test('stamp-contract: a fresh GEMINI.md written through the short root link is in sync, not HAND_TUNED', async () => {
+  const { proj, regDb } = await agyOnlyProject();
+  const home = tmp('sterling-agy-stamp-home-');
+  const alias = geminiRootAlias(home);
+  writeFileSync(join(proj, 'GEMINI.md'), renderGeminiMd({ pluginRoot: repo, root: alias, projectName: 'p' }));
+  assert.equal(geminiRootFor(readFileSync(join(proj, 'GEMINI.md'), 'utf8'), { root: repo, home }), alias);
+  const r = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home, STERLING_REGISTRY_DB: regDb } });
+  const out = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 0, out);
+  assert.doesNotMatch(out, /HAND_TUNED/);
+  assert.match(out, /1 already in sync/);
+});
+
+test('GEMINI.md root link upkeep: an edited doc, a changed template and a long-to-short root move all repoint the link; the doc is never rewritten; a non-link is refused', () => {
+  const home = tmp('sterling-agy-upkeep-');
+  const alias = geminiRootAlias(home);
+  const longRoot = copyAt(join(tmp('sterling-agy-up-long-'), 'a'.repeat(100), 'b'.repeat(100)), '1.0.0');
+  const versionAtLink = () => JSON.parse(readFileSync(join(alias, 'package.json'), 'utf8')).version;
+  const dir = gitProject();
+  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: longRoot, home }).status, 'created');
+  const path = join(dir, 'GEMINI.md');
+  const edited = `${readFileSync(path, 'utf8')}\nmy own line\n`;
+  writeFileSync(path, edited);
+
+  const moved = copyAt(join(tmp('sterling-agy-up-moved-'), 'c'.repeat(200)), '2.0.0');
+  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: moved, home }).status, 'differs');
+  assert.equal(versionAtLink(), '2.0.0', 'an edited doc still gets its link repointed');
+
+  const templateRoot = tmp('sterling-agy-up-tpl-');
+  mkdirSync(join(templateRoot, 'templates'));
+  writeFileSync(join(templateRoot, 'templates', 'target-claude-md.md'), `${readFileSync(join(repo, 'templates', 'target-claude-md.md'), 'utf8')}\nA new template line.\n`);
+  const third = copyAt(join(tmp('sterling-agy-up-third-'), 'd'.repeat(200)), '3.0.0');
+  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: templateRoot, root: third, home }).status, 'differs');
+  assert.equal(versionAtLink(), '3.0.0', 'a changed template still repoints the link');
+
+  const short = copyAt(tmp('sterling-agy-up-s-'), '4.0.0');
+  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: short, home }).status, 'differs');
+  assert.equal(versionAtLink(), '4.0.0', 'a move to a short root keeps the link the doc names');
+  assert.equal(readFileSync(path, 'utf8'), edited, 'GEMINI.md is never rewritten');
+
+  // An untouched aliased doc stays 'matches' after a long-to-short move: setup compares it in the link form.
+  const fresh = gitProject();
+  assert.equal(ensureGeminiMd({ projectDir: fresh, pluginRoot: repo, root: longRoot, home }).status, 'created');
+  assert.equal(ensureGeminiMd({ projectDir: fresh, pluginRoot: repo, root: short, home }).status, 'matches');
+
+  rmSync(alias);
+  mkdirSync(alias);
+  const row = ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: short, home });
+  assert.equal(row.status, 'refused');
+  assert.match(row.detail, /is not a link Sterling made/);
+  assert.equal(readFileSync(path, 'utf8'), edited);
 });

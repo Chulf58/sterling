@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -151,6 +151,26 @@ test('the stdio entry: --read-only boots from this checkout and serves no write;
     const empty = boot();
     assert.equal(empty.status, 2, empty.stderr);
     assert.match(empty.stderr, /names no mcp__sterling__ tool/);
+    // A listed tool the server does not register is a refused boot too: exit 2, not 1.
+    writeFileSync(join(fake, 'agent-templates', 'implementor.md'), '---\nname: implementor\ndisallowedTools: mcp__sterling__knowledge_create, mcp__sterling__knowledge_no_such_tool\n---\nbody\n');
+    const unmatched = boot();
+    assert.equal(unmatched.status, 2, unmatched.stderr);
+    assert.match(unmatched.stderr, /ReadOnlyBootError: --read-only: the store-write tool list names knowledge_no_such_tool, which this server does not register/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--capabilities prints one JSON line naming read-only mode and exits 0 before opening anything, from the entry and from the bundle', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-capabilities-'));
+  try {
+    const want = { sterling_mcp: { read_only: true } };
+    for (const entry of [MAIN, join(repoRoot, 'mcp', 'sterling-mcp.mjs')]) {
+      const r = spawnSync(process.execPath, [entry, '--capabilities'], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+      assert.equal(r.status, 0, `${entry}: ${r.stderr}`);
+      assert.deepEqual(JSON.parse(r.stdout), want, entry);
+    }
+    assert.deepEqual(readdirSync(dir), [], 'nothing was written');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

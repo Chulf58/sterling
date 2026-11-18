@@ -11,7 +11,7 @@ import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, 
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
 import { WorkerGuard, guardWorkerTools, rootField, type WorkerPolicyArgs } from './worker-policy.js';
-import { guardReadOnlyTools } from './read-only.js';
+import { guardReadOnlyTools, ReadOnlyBootError } from './read-only.js';
 import { SterlingTools, busyRefusal, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface, BOARD_READINESS_STATES } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -549,7 +549,7 @@ export function createSterlingServer(
   opts: { workerPolicy?: WorkerPolicyArgs; readOnly?: { writeTools: readonly string[] } } = {}
 ): { server: McpServer; store: MountedStores; tools: SterlingTools; toolWrappers: readonly string[] } {
   if (opts.readOnly && opts.readOnly.writeTools.length === 0) {
-    throw new Error('--read-only needs a non-empty store-write tool list; refusing to serve a read-only role an unguarded server');
+    throw new ReadOnlyBootError('--read-only needs a non-empty store-write tool list; refusing to serve a read-only role an unguarded server');
   }
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
   if (typeof target === 'string') {
@@ -1498,7 +1498,7 @@ export function createSterlingServer(
   // server disagree (a renamed tool would then go unrefused under its new name).
   const unmatched = readOnlyWrites ? [...readOnlyWrites].filter((n) => !readOnlySeen?.has(n)) : [];
   if (unmatched.length) {
-    throw new Error(`--read-only: the store-write tool list names ${unmatched.join(', ')}, which this server does not register; the list and the server disagree`);
+    throw new ReadOnlyBootError(`--read-only: the store-write tool list names ${unmatched.join(', ')}, which this server does not register; the list and the server disagree`);
   }
 
   return { server, store, tools, toolWrappers };

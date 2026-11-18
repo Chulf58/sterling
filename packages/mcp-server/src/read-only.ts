@@ -13,6 +13,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { readStoreWriteToolNames } from '../../../scripts/lib/store-write-tools.mjs';
 
+/** What `--capabilities` prints: one JSON line, read by agy setup (scripts/lib/agy-setup.mjs probeMcpServer). */
+export const MCP_CAPABILITIES = { sterling_mcp: { read_only: true } } as const;
+
+/** A read-only boot refusal: main.ts exits 2 on it, like every other refused argument. */
+export class ReadOnlyBootError extends Error {}
+
 /**
  * The store-write tool names a read-only server refuses. `pluginRoot` is the
  * Sterling root holding agent-templates/ (null when none was found). Throws,
@@ -20,14 +26,14 @@ import { readStoreWriteToolNames } from '../../../scripts/lib/store-write-tools.
  * it names no store-write tool.
  */
 export function readOnlyWriteTools(pluginRoot: string | null): string[] {
-  if (!pluginRoot) throw new Error('--read-only: no Sterling root (.claude-plugin/plugin.json) above the server, so the store-write tool list cannot be read');
+  if (!pluginRoot) throw new ReadOnlyBootError('--read-only: no Sterling root (.claude-plugin/plugin.json) above the server, so the store-write tool list cannot be read');
   let names: string[];
   try {
     names = readStoreWriteToolNames(pluginRoot);
   } catch (e) {
-    throw new Error(`--read-only: the store-write tool list could not be read from ${pluginRoot}/agent-templates/implementor.md (${(e as Error)?.message ?? String(e)})`);
+    throw new ReadOnlyBootError(`--read-only: the store-write tool list could not be read from ${pluginRoot}/agent-templates/implementor.md (${(e as Error)?.message ?? String(e)})`);
   }
-  if (names.length === 0) throw new Error(`--read-only: ${pluginRoot}/agent-templates/implementor.md names no mcp__sterling__ tool in disallowedTools, so there is nothing to refuse`);
+  if (names.length === 0) throw new ReadOnlyBootError(`--read-only: ${pluginRoot}/agent-templates/implementor.md names no mcp__sterling__ tool in disallowedTools, so there is nothing to refuse`);
   return names;
 }
 

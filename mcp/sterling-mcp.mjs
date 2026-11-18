@@ -31999,17 +31999,20 @@ function readStoreWriteToolNames(pluginRoot) {
 }
 
 // packages/mcp-server/dist/read-only.js
+var MCP_CAPABILITIES = { sterling_mcp: { read_only: true } };
+var ReadOnlyBootError = class extends Error {
+};
 function readOnlyWriteTools(pluginRoot) {
   if (!pluginRoot)
-    throw new Error("--read-only: no Sterling root (.claude-plugin/plugin.json) above the server, so the store-write tool list cannot be read");
+    throw new ReadOnlyBootError("--read-only: no Sterling root (.claude-plugin/plugin.json) above the server, so the store-write tool list cannot be read");
   let names;
   try {
     names = readStoreWriteToolNames(pluginRoot);
   } catch (e) {
-    throw new Error(`--read-only: the store-write tool list could not be read from ${pluginRoot}/agent-templates/implementor.md (${e?.message ?? String(e)})`);
+    throw new ReadOnlyBootError(`--read-only: the store-write tool list could not be read from ${pluginRoot}/agent-templates/implementor.md (${e?.message ?? String(e)})`);
   }
   if (names.length === 0)
-    throw new Error(`--read-only: ${pluginRoot}/agent-templates/implementor.md names no mcp__sterling__ tool in disallowedTools, so there is nothing to refuse`);
+    throw new ReadOnlyBootError(`--read-only: ${pluginRoot}/agent-templates/implementor.md names no mcp__sterling__ tool in disallowedTools, so there is nothing to refuse`);
   return names;
 }
 function readOnlyRefusal(name) {
@@ -42196,7 +42199,7 @@ function openStoreArg(storePath2) {
 }
 function createSterlingServer(target, opts = {}) {
   if (opts.readOnly && opts.readOnly.writeTools.length === 0) {
-    throw new Error("--read-only needs a non-empty store-write tool list; refusing to serve a read-only role an unguarded server");
+    throw new ReadOnlyBootError("--read-only needs a non-empty store-write tool list; refusing to serve a read-only role an unguarded server");
   }
   let opened;
   if (typeof target === "string") {
@@ -42752,7 +42755,7 @@ function createSterlingServer(target, opts = {}) {
   }, (args2) => json(tools.maintenanceQueryResult(args2)));
   const unmatched = readOnlyWrites ? [...readOnlyWrites].filter((n) => !readOnlySeen?.has(n)) : [];
   if (unmatched.length) {
-    throw new Error(`--read-only: the store-write tool list names ${unmatched.join(", ")}, which this server does not register; the list and the server disagree`);
+    throw new ReadOnlyBootError(`--read-only: the store-write tool list names ${unmatched.join(", ")}, which this server does not register; the list and the server disagree`);
   }
   return { server, store, tools, toolWrappers };
 }
@@ -43063,7 +43066,13 @@ function walkUpPluginRoot(moduleUrl) {
 }
 
 // packages/mcp-server/dist/main.js
+import { writeSync } from "node:fs";
 var args = process.argv.slice(2);
+if (args.includes("--capabilities")) {
+  writeSync(1, `${JSON.stringify(MCP_CAPABILITIES)}
+`);
+  process.exit(0);
+}
 var valueOf = (flag) => {
   const i = args.indexOf(flag);
   return i === -1 ? void 0 : args[i + 1] ?? "";
@@ -43116,7 +43125,7 @@ try {
 } catch (e) {
   const err = e;
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
-  process.exit(1);
+  process.exit(e instanceof ReadOnlyBootError ? 2 : 1);
 }
 recordRuntimeMarker(storePath, dirname14(fileURLToPath2(import.meta.url)));
 await created.server.connect(new StdioServerTransport());

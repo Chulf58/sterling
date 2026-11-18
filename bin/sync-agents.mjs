@@ -9792,6 +9792,20 @@ function agyMcpRoot({ pluginRoot: pluginRoot2, env = process.env, home = homedir
   if (existsSync10(join15(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
   return { root: resolve8(pluginRoot2), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd4(agyCopy)})` };
 }
+function probeMcpServer({ root, env = process.env }) {
+  const server = join15(root, "mcp", "sterling-mcp.mjs");
+  const r = spawnSync5(process.execPath, [server, "--capabilities"], { encoding: "utf8", env, timeout: 3e4 });
+  if (r.error) return { readOnly: false, reason: `${fwd4(server)} --capabilities could not run (${r.error.message})` };
+  if (r.status !== 0) return { readOnly: false, reason: `${fwd4(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
+  let caps = null;
+  try {
+    caps = JSON.parse(r.stdout.trim().split("\n").pop() ?? "");
+  } catch {
+    caps = null;
+  }
+  if (caps?.sterling_mcp?.read_only !== true) return { readOnly: false, reason: `${fwd4(server)} --capabilities does not report read_only: ${r.stdout.trim().slice(0, 200) || "(no output)"}` };
+  return { readOnly: true };
+}
 var yamlString = (s) => JSON.stringify(s);
 function templateDescription(frontmatter, label) {
   const line = frontmatter.match(/^description:\s*(.+)$/m)?.[1];
@@ -9935,34 +9949,48 @@ function ensureRootAlias(alias, root) {
   mkdirSync4(dirname4(alias), { recursive: true });
   symlinkSync(root, alias, "junction");
 }
+function geminiUsesRootAlias(text, home = homedir4()) {
+  return String(text).includes(`${fwd4(geminiRootAlias(home))}/`);
+}
 function ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root, home = homedir4() }) {
   const path = join15(projectDir, GEMINI_MD);
+  const alias = geminiRootAlias(home);
+  const existing = existsSync10(path) ? normalize4(readFileSync11(path, "utf8")) : null;
+  const keepAlias = () => {
+    try {
+      ensureRootAlias(alias, root);
+      return null;
+    } catch (err) {
+      return refusal2(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd4(alias)}, which could not be pointed at ${fwd4(root)}: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+    }
+  };
+  if (existing !== null && geminiUsesRootAlias(existing, home)) {
+    const refused2 = keepAlias();
+    if (refused2) return refused2;
+  }
   const projectName = projectNameOf(projectDir);
   let want;
-  let aliased = false;
+  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
   try {
     try {
-      want = renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName });
+      want = renderGeminiMd({ pluginRoot: pluginRoot2, root: aliased ? alias : root, projectName });
     } catch (err) {
-      if (!err.overCap) throw err;
-      want = renderGeminiMd({ pluginRoot: pluginRoot2, root: geminiRootAlias(home), projectName });
+      if (!err.overCap || aliased) throw err;
+      want = renderGeminiMd({ pluginRoot: pluginRoot2, root: alias, projectName });
       aliased = true;
     }
   } catch (err) {
     return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
   }
-  if (aliased && !existsSync10(path) || aliased && normalize4(readFileSync11(path, "utf8")) === want) {
-    try {
-      ensureRootAlias(geminiRootAlias(home), root);
-    } catch (err) {
-      return refusal2(GEMINI_MD, `${GEMINI_MD} needs the short root link ${fwd4(geminiRootAlias(home))} because the Sterling root is too long: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+  if (existing === null) {
+    if (aliased) {
+      const refused2 = keepAlias();
+      if (refused2) return refused2;
     }
-  }
-  if (!existsSync10(path)) {
     writeFileAtomic(path, want);
     return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
   }
-  if (normalize4(readFileSync11(path, "utf8")) === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
+  if (existing === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
   return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
 }
 function ensureAgyExcluded({ projectDir, gemini }) {
@@ -9988,7 +10016,7 @@ function ensureAgyExcluded({ projectDir, gemini }) {
 `);
   return { item: label, status: "created", detail: lines.join(" ") };
 }
-function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, nodePath = process.execPath, runGit = git2 }) {
+function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, probeServer = probeMcpServer, nodePath = process.execPath, runGit = git2 }) {
   if (!isAbsolute2(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
   const found = probe({ env, home });
@@ -10001,7 +10029,13 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
     return { root, rows };
   }
   const { tracked } = inventory;
-  rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
+  const server = probeServer({ root, env });
+  if (server.readOnly) {
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
+  } else {
+    const remedy = resolve8(root) !== resolve8(pluginRoot2) ? `install this Sterling into agy (agy plugin install ${fwd4(resolve8(pluginRoot2))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd4(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
+  }
   const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root, home });
   rows.push(gemini);
   const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";

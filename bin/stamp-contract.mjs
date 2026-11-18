@@ -6597,6 +6597,15 @@ function agyMcpRoot({ pluginRoot, env = process.env, home = homedir5(), installe
   if (existsSync4(join8(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
   return { root: resolve4(pluginRoot), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd(agyCopy)})` };
 }
+function geminiRootAlias(home) {
+  return join8(home, ".gemini", "sterling-root");
+}
+function geminiUsesRootAlias(text, home = homedir5()) {
+  return String(text).includes(`${fwd(geminiRootAlias(home))}/`);
+}
+function geminiRootFor(text, { root, home = homedir5() }) {
+  return geminiUsesRootAlias(text, home) ? fwd(geminiRootAlias(home)) : fwd(root);
+}
 
 // scripts/lib/contract-bullets.mjs
 import { readFileSync as readFileSync4 } from "node:fs";
@@ -6922,11 +6931,17 @@ var variants = historicalVariants({
   extractBlock: extractTemplateBlock,
   currentBlocks: current
 });
-var agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root.replace(/\\/g, "/");
-var agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll("{{STERLING_ROOT}}", () => agyRoot);
-var agyCurrent = new Map(
-  TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL).map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block]).filter(([, block]) => block !== void 0)
-);
+var agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root;
+var agyBlocksByRoot = /* @__PURE__ */ new Map();
+function agyCurrentFor(rootText) {
+  if (!agyBlocksByRoot.has(rootText)) {
+    const agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll("{{STERLING_ROOT}}", () => rootText);
+    agyBlocksByRoot.set(rootText, new Map(
+      TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL).map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block]).filter(([, block]) => block !== void 0)
+    ));
+  }
+  return agyBlocksByRoot.get(rootText);
+}
 var registry = new ProjectRegistry(registryPath());
 var projects;
 try {
@@ -7132,6 +7147,7 @@ for (const { p, dir: repo } of work) {
     pass: actions
   });
   if (gemini) {
+    const agyCurrent = agyCurrentFor(geminiRootFor(gemini.original, { root: agyRoot }));
     const geminiPass = [];
     stampLeads({
       files: /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, gemini]]),

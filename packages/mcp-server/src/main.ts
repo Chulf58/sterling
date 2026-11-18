@@ -9,9 +9,18 @@ import { recordRuntimeMarker } from './runtime.js';
 import { startHookBroker } from './broker.js';
 import { hookRoots } from '../../../scripts/hooks/lib/hook-roots.mjs';
 import { walkUpPluginRoot } from '../../../scripts/hooks/lib/plugin-root-walk.mjs';
-import { readOnlyWriteTools } from './read-only.js';
+import { writeSync } from 'node:fs';
+import { MCP_CAPABILITIES, ReadOnlyBootError, readOnlyWriteTools } from './read-only.js';
 
 const args = process.argv.slice(2);
+// --capabilities: one JSON line naming what this server supports, then exit 0, before
+// anything opens. agy setup asks it before writing a 'sterling-ro' entry, because a server
+// from before --read-only would ignore that flag (it fails its usage check on this one).
+// writeSync, so the line is out before process.exit on every platform.
+if (args.includes('--capabilities')) {
+  writeSync(1, `${JSON.stringify(MCP_CAPABILITIES)}\n`);
+  process.exit(0);
+}
 const valueOf = (flag: string): string | undefined => {
   const i = args.indexOf(flag);
   return i === -1 ? undefined : (args[i + 1] ?? '');
@@ -116,7 +125,8 @@ export const storePath = projectRoot !== undefined ? join(projectRoot, '.sterlin
 // The stores open first, so a refused boot (a Postgres store that is missing
 // or unreachable, a --store path in a project whose storage is 'postgres')
 // writes nothing, not even
-// the runtime marker. The error is printed by name and the process exits 1.
+// the runtime marker. The error is printed by name and the process exits 1;
+// a read-only refusal (ReadOnlyBootError) is a refused argument and exits 2.
 let created: ReturnType<typeof createSterlingServer>;
 try {
   created = createSterlingServer(projectRoot !== undefined ? { projectRoot, checkoutRoot } : storePath, { workerPolicy, readOnly });
@@ -124,7 +134,7 @@ try {
   // The class name: ProjectModeError and ProjectIdentityError keep name 'Error'.
   const err = e as Error;
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? 'Error'}: ${err?.message ?? String(e)}`);
-  process.exit(1);
+  process.exit(e instanceof ReadOnlyBootError ? 2 : 1);
 }
 
 // stale-server guard (P5/P7): record the build this process is running so H1 can
