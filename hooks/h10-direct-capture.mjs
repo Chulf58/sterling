@@ -6,13 +6,13 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID7, createHash as createHash6 } from "node:crypto";
+import { randomUUID as randomUUID8, createHash as createHash6 } from "node:crypto";
 import { spawn, spawnSync as spawnSync8 } from "node:child_process";
-import { readFileSync as readFileSync16, writeFileSync as writeFileSync9, writeSync as writeSync3, rmSync as rmSync7, existsSync as existsSync13, mkdirSync as mkdirSync12, renameSync as renameSync8 } from "node:fs";
+import { readFileSync as readFileSync17, writeFileSync as writeFileSync10, writeSync as writeSync3, rmSync as rmSync8, existsSync as existsSync14, mkdirSync as mkdirSync12, renameSync as renameSync9 } from "node:fs";
 import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
@@ -13114,9 +13114,25 @@ function hookRoots(from) {
   return root ? { storeRoot: root, checkoutRoot: root } : null;
 }
 
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { existsSync as existsSync5, readFileSync as readFileSync6, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID4()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync4(tmp, { force: true });
+    throw err;
+  }
+}
+
 // scripts/hooks/lib/common.mjs
 function readStdin(options = {}) {
-  let input2 = JSON.parse(readFileSync6(0, "utf8"));
+  let input2 = JSON.parse(readFileSync7(0, "utf8"));
   const agyRaw = isAgyInput(input2) ? input2 : null;
   if (agyRaw) input2 = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input2.cwd);
@@ -13233,7 +13249,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 });
 function loadConfig(cwd) {
   const p = join10(storeRootFor(cwd), ".sterling", "config.json");
-  return existsSync5(p) ? JSON.parse(readFileSync6(p, "utf8")) : null;
+  return existsSync6(p) ? JSON.parse(readFileSync7(p, "utf8")) : null;
 }
 function gitIgnored(paths, cwd) {
   const list = (paths ?? []).filter(Boolean);
@@ -13271,7 +13287,7 @@ function openStore(dir) {
     if (route?.storage === "postgres") return openRoutedForHook(cwd).store;
   }
   const p = join10(cwd, ".sterling", "sterling.db");
-  return existsSync5(p) ? new SterlingStore(p) : null;
+  return existsSync6(p) ? new SterlingStore(p) : null;
 }
 function namedError(e) {
   const name = e?.constructor?.name && e.constructor.name !== "Object" ? e.constructor.name : e?.name ?? "Error";
@@ -13425,9 +13441,7 @@ function agyStateDir(checkout) {
 }
 function writeJsonAtomic(path, value) {
   mkdirSync5(dirname7(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync3(tmp, JSON.stringify(value));
-  renameSync2(tmp, path);
+  writeFileAtomic(path, JSON.stringify(value));
 }
 function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join10(checkout, ".sterling", "transient", "notices");
@@ -13435,8 +13449,8 @@ function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const target = join10(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
   const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
-  writeFileSync3(tmp, JSON.stringify(body), { flag: "wx" });
-  renameSync2(tmp, target);
+  writeFileSync4(tmp, JSON.stringify(body), { flag: "wx" });
+  renameSync3(tmp, target);
   return target;
 }
 function flushAgyQueue() {
@@ -13522,7 +13536,7 @@ function settleAgyInput(raw, input2, inProject) {
   if (agy.event === "Stop" && agy.checkout) {
     let turn = "unknown";
     try {
-      turn = JSON.parse(readFileSync6(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+      turn = JSON.parse(readFileSync7(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
     } catch (e) {
       if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
 `);
@@ -13530,7 +13544,7 @@ function settleAgyInput(raw, input2, inProject) {
     agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync6(agy.stopFile, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync7(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -13555,7 +13569,7 @@ function recordAgyStopContinue() {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync5, rmdirSync, renameSync as renameSync4, existsSync as existsSync7, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
 import { join as join11, resolve as resolve5, dirname as dirname8, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -13706,10 +13720,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync6(p)) return { availability: "absent", arr: [] };
+  if (!existsSync7(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync7(p, "utf8");
+    raw = readFileSync8(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -13793,7 +13807,7 @@ function isPidAlive(pid) {
 }
 function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync7(join11(legacy, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync8(join11(legacy, "owner.json"), "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
     throw e;
@@ -13929,8 +13943,8 @@ var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/settlement.mjs
-import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, rmSync as rmSync5, statSync as statSync5, renameSync as renameSync4 } from "node:fs";
+import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7, rmSync as rmSync6, statSync as statSync5, renameSync as renameSync5 } from "node:fs";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { join as join15, dirname as dirname10, resolve as resolve7 } from "node:path";
 
@@ -13956,7 +13970,7 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
 
 // scripts/hooks/lib/reconcile-origins.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { lstatSync as lstatSync5, readFileSync as readFileSync8, readlinkSync, realpathSync as realpathSync6 } from "node:fs";
+import { lstatSync as lstatSync5, readFileSync as readFileSync9, readlinkSync, realpathSync as realpathSync6 } from "node:fs";
 import { basename as basename3, join as join13, resolve as resolve6 } from "node:path";
 var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 function git(root, args, input2) {
@@ -14007,7 +14021,7 @@ function workingState(root, rel) {
       filters = false;
     } else if (st.isFile()) {
       mode = st.mode & 73 ? "100755" : "100644";
-      bytes = readFileSync8(join13(root, rel));
+      bytes = readFileSync9(join13(root, rel));
     } else return { kind: "unreadable" };
   } catch {
     return { kind: "unreadable" };
@@ -14160,7 +14174,7 @@ function parseTouchesContent(raw) {
 }
 function hashFile(root, rel) {
   try {
-    return createHash4("sha256").update(readFileSync9(join15(root, rel))).digest("hex");
+    return createHash4("sha256").update(readFileSync10(join15(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -14174,7 +14188,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync9(join15(storeRootFor(root), ".sterling", "config.json"), "utf8");
+    const raw = readFileSync10(join15(storeRootFor(root), ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -14184,7 +14198,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now, observations) {
   return {
-    id: randomUUID4(),
+    id: randomUUID5(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -14227,7 +14241,7 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
     const fresh = new Set((seen?.observations ?? []).map(observationKey));
     const supersede = seen?.checkout.kind === "store" ? storeEvidence.filter((o) => observed.includes(o.path) && !fresh.has(observationKey(o))).map(observationKey) : [];
     const { record } = store2.enqueueSystemTodo(buildReconcileItem(article, observed, now, seen?.observations), {
-      operation_id: randomUUID4(),
+      operation_id: randomUUID5(),
       ...supersede.length ? { supersede_observations: supersede } : {}
     });
     minted.push({ article_id: article.id, paths: record.file_keys ?? observed });
@@ -14254,7 +14268,7 @@ function readHeadReflog(root) {
   if (r.status !== 0) return null;
   let raw;
   try {
-    raw = readFileSync9(resolve7(root, r.stdout.trim()), "utf8");
+    raw = readFileSync10(resolve7(root, r.stdout.trim()), "utf8");
   } catch {
     return null;
   }
@@ -14290,7 +14304,7 @@ function fastForwardedPaths(root, settled, entries, head) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync9(join15(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync10(join15(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -14353,19 +14367,19 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   mkdirSync7(dirname10(p), { recursive: true });
   if (ifAbsent) {
     try {
-      writeFileSync5(p, JSON.stringify(snapshot), { flag: "wx" });
+      writeFileSync6(p, JSON.stringify(snapshot), { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
       throw e;
     }
   }
-  const tmp = `${p}.${process.pid}.${randomUUID4()}.tmp`;
+  const tmp = `${p}.${process.pid}.${randomUUID5()}.tmp`;
   try {
-    writeFileSync5(tmp, JSON.stringify(snapshot));
-    renameSync4(tmp, p);
+    writeFileSync6(tmp, JSON.stringify(snapshot));
+    renameSync5(tmp, p);
   } catch (e) {
-    rmSync5(tmp, { force: true });
+    rmSync6(tmp, { force: true });
     throw e;
   }
   return true;
@@ -14382,7 +14396,7 @@ function gitTrackedSubset(root, paths) {
 
 // scripts/lib/version-only.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { lstatSync as lstatSync6, readFileSync as readFileSync10 } from "node:fs";
+import { lstatSync as lstatSync6, readFileSync as readFileSync11 } from "node:fs";
 import { join as join16 } from "node:path";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
@@ -14472,7 +14486,7 @@ function isVersionOnlyInWorkingTree(root, baseSha, path) {
   let current;
   try {
     if (!lstatSync6(join16(root, path)).isFile()) return false;
-    current = strictUtf8(readFileSync10(join16(root, path)));
+    current = strictUtf8(readFileSync11(join16(root, path)));
   } catch {
     return false;
   }
@@ -14480,10 +14494,10 @@ function isVersionOnlyInWorkingTree(root, baseSha, path) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync as fstatSync2, existsSync as existsSync7, statSync as statSync6, readdirSync as readdirSync3 } from "node:fs";
+import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync as fstatSync2, existsSync as existsSync8, statSync as statSync6, readdirSync as readdirSync3 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync7(path)) return null;
+  if (!existsSync8(path)) return null;
   const fd = openSync4(path, "r");
   try {
     const size = fstatSync2(fd).size;
@@ -14526,7 +14540,7 @@ function fillPct(usage, windowSize) {
 }
 
 // scripts/hooks/lib/plugin-root-walk.mjs
-import { existsSync as existsSync8 } from "node:fs";
+import { existsSync as existsSync9 } from "node:fs";
 import { dirname as dirname11, join as join17 } from "node:path";
 import { fileURLToPath } from "node:url";
 function pluginRoot(moduleUrl) {
@@ -14537,7 +14551,7 @@ function pluginRoot(moduleUrl) {
 function walkUpPluginRoot(moduleUrl) {
   let dir = dirname11(fileURLToPath(moduleUrl));
   for (let i = 0; i < 4; i++) {
-    if (existsSync8(join17(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync9(join17(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname11(dir);
   }
   return null;
@@ -14652,7 +14666,7 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync11, writeFileSync as writeFileSync6, mkdirSync as mkdirSync8, existsSync as existsSync9, renameSync as renameSync5, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync7, mkdirSync as mkdirSync8, existsSync as existsSync10, renameSync as renameSync6, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
 import { join as join18, dirname as dirname12 } from "node:path";
 function noticesDir(cwd) {
   return join18(cwd, ".sterling", "transient", "notices");
@@ -14664,15 +14678,15 @@ function publishNotice(cwd, text, { sessionId } = {}) {
   const target = join18(dir, name);
   const tmp = `${target}.tmp`;
   const body = typeof sessionId === "string" && sessionId ? { text: String(text), session_id: sessionId } : { text: String(text) };
-  writeFileSync6(tmp, JSON.stringify(body), { flag: "wx" });
-  renameSync5(tmp, target);
+  writeFileSync7(tmp, JSON.stringify(body), { flag: "wx" });
+  renameSync6(tmp, target);
   return target;
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync6, writeSync as writeSync2, closeSync as closeSync6, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync6, writeSync as writeSync2, closeSync as closeSync6, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -14685,7 +14699,7 @@ var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_patte
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync10, linkSync as linkSync2, mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync13, renameSync as renameSync6, unlinkSync as unlinkSync2, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync11, linkSync as linkSync2, mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync14, renameSync as renameSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname13, join as join19 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
@@ -14703,7 +14717,7 @@ function parsePrLoopFile(file, rel) {
 function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
-    s2 = JSON.parse(readFileSync13(file, "utf8"));
+    s2 = JSON.parse(readFileSync14(file, "utf8"));
   } catch (e) {
     throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
@@ -14720,7 +14734,7 @@ function parsePrLoopFileOrThrow(file, rel) {
 function readPrLoopEntries(root) {
   const entries = [];
   const dir = join19(root, PR_LOOPS_DIR_REL);
-  if (existsSync10(dir)) {
+  if (existsSync11(dir)) {
     for (const name of readdirSync5(dir).sort()) {
       const m = name.match(/^(\d+)\.json$/);
       if (!m) continue;
@@ -14730,7 +14744,7 @@ function readPrLoopEntries(root) {
       entries.push({ state, file: join19(dir, name), rel });
     }
   }
-  if (existsSync10(prLoopPath(root))) {
+  if (existsSync11(prLoopPath(root))) {
     const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
     if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
   }
@@ -14740,9 +14754,9 @@ function readPrLoops(root) {
   return readPrLoopEntries(root).map((e) => e.state).sort((a, b) => a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number);
 }
 function prLoopStateExists(root) {
-  if (existsSync10(prLoopPath(root))) return true;
+  if (existsSync11(prLoopPath(root))) return true;
   const dir = join19(root, PR_LOOPS_DIR_REL);
-  return existsSync10(dir) && readdirSync5(dir).some((n) => /^\d+\.json$/.test(n));
+  return existsSync11(dir) && readdirSync5(dir).some((n) => /^\d+\.json$/.test(n));
 }
 
 // scripts/hooks/lib/pr-loop-duty.mjs
@@ -14782,9 +14796,9 @@ var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): P
 var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync7, existsSync as existsSync11, mkdirSync as mkdirSync11, openSync as openSync7, readFileSync as readFileSync14, renameSync as renameSync7, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync8, appendFileSync } from "node:fs";
+import { closeSync as closeSync7, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync7, readFileSync as readFileSync15, renameSync as renameSync8, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
 import { dirname as dirname14, isAbsolute as isAbsolute3, join as join20, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -14862,14 +14876,14 @@ function workerPaths(root) {
 function pluginRootFrom(moduleUrl = import.meta.url) {
   let dir = dirname14(fileURLToPath2(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync11(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync12(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname14(dir);
   }
   return null;
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync14(path, "utf8"));
+    return JSON.parse(readFileSync15(path, "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     return { unreadable: String(e?.message ?? e) };
@@ -14877,7 +14891,7 @@ function readJson(path) {
 }
 function rotateIfLarge(path, limit = ROTATE_BYTES) {
   try {
-    if (statSync7(path).size > limit) renameSync7(path, `${path}.1`);
+    if (statSync7(path).size > limit) renameSync8(path, `${path}.1`);
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
@@ -14889,7 +14903,7 @@ function journalLines(root, files = null) {
   for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
-      text = readFileSync14(path, "utf8");
+      text = readFileSync15(path, "utf8");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
       throw e;
@@ -15019,11 +15033,11 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
   return isAlive(lock.pid) ? "live" : "stale";
 }
 function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
-  const token = randomUUID5();
+  const token = randomUUID6();
   const body = JSON.stringify({ ...content, token });
   const tryCreate = () => {
     try {
-      writeFileSync8(paths.lock, body, { flag: "wx" });
+      writeFileSync9(paths.lock, body, { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
@@ -15046,7 +15060,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
     }
     try {
       if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
-      rmSync6(paths.lock, { force: true });
+      rmSync7(paths.lock, { force: true });
       if (!tryCreate()) return null;
     } finally {
       rmdirSync2(paths.takeover);
@@ -15061,7 +15075,7 @@ function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
   const path = join20(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync14(path, "utf8"));
+    parsed = JSON.parse(readFileSync15(path, "utf8"));
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
@@ -15076,7 +15090,7 @@ function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
 function readWorkerPrompt(pluginRoot2) {
   const path = join20(pluginRoot2, "templates", "maintenance-worker-prompt.md");
   try {
-    return readFileSync14(path, "utf8");
+    return readFileSync15(path, "utf8");
   } catch (e) {
     throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
   }
@@ -15088,7 +15102,7 @@ function readState(root) {
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
   mkdirSync11(dirname14(state), { recursive: true });
-  writeFileSync8(state, JSON.stringify({ last_run: lastRun }));
+  writeFileSync9(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
@@ -15273,7 +15287,7 @@ function launchWorker(opts) {
     resolveMcpConfig(pluginRoot2, opts.root);
     readWorkerPrompt(pluginRoot2);
     const runner = join20(pluginRoot2, "bin", "maintenance-worker-run.mjs");
-    if (!existsSync11(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
+    if (!existsSync12(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync11(dirname14(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
@@ -15282,7 +15296,7 @@ function launchWorker(opts) {
     let stage = "write the launch files";
     let logFd;
     try {
-      writeFileSync8(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+      writeFileSync9(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
       const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : {} } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
@@ -15301,7 +15315,7 @@ function launchWorker(opts) {
         return { ...Number.isInteger(t.version) ? { item_version: t.version } : {}, ...Number.isInteger(target?.version) ? { target_version: target.version } : {} };
       };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
-      writeFileSync8(
+      writeFileSync9(
         paths.eligible,
         JSON.stringify({
           token,
@@ -15311,7 +15325,7 @@ function launchWorker(opts) {
           // or historical address is never handed to it as a target.
           items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, slug: articleSlug(t), ...versionsOf(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
-          run_id: randomUUID5(),
+          run_id: randomUUID6(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: (t.feature_link ? debtOwnerRecord(opts.store, t)?.id : null) ?? t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
           queue_snapshot: eligible.map((t) => ({
             id: t.id,
@@ -15343,7 +15357,7 @@ function launchWorker(opts) {
       child.unref?.();
       launched = true;
       stage = "record the running lock";
-      writeFileSync8(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
+      writeFileSync9(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
       return { launched: true, reason: "launched", pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
@@ -15356,7 +15370,7 @@ function launchWorker(opts) {
   }
 }
 function releaseLock(paths, token) {
-  if (readJson(paths.lock)?.token === token) rmSync6(paths.lock, { force: true });
+  if (readJson(paths.lock)?.token === token) rmSync7(paths.lock, { force: true });
 }
 function ageText(iso, nowMs = Date.now()) {
   const ms = nowMs - Date.parse(iso ?? "");
@@ -15374,8 +15388,8 @@ var TOOLS_MISSING_RE = new RegExp(
 );
 
 // scripts/hooks/lib/session-duties.mjs
-import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync12, readFileSync as readFileSync15, readdirSync as readdirSync6 } from "node:fs";
+import { randomUUID as randomUUID7 } from "node:crypto";
+import { existsSync as existsSync13, readFileSync as readFileSync16, readdirSync as readdirSync6 } from "node:fs";
 import { join as join21 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
@@ -15428,7 +15442,7 @@ function openDutyRecords(store2, config, { opener = (dbPath) => new SterlingStor
         return domains;
       }
       for (const m of resolveDomainMounts(config)) {
-        if (!existsSync12(m.dbPath)) continue;
+        if (!existsSync13(m.dbPath)) continue;
         try {
           domains.push({ name: m.name, store: opener(m.dbPath) });
         } catch (e) {
@@ -15520,7 +15534,7 @@ function readKnowledgeWrites(root) {
     const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
     let text;
     try {
-      text = readFileSync15(join21(root, file), "utf8");
+      text = readFileSync16(join21(root, file), "utf8");
     } catch (e) {
       if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText2(e) });
       continue;
@@ -15615,7 +15629,7 @@ var researchOwedText = (queryTexts) => `research owed: session research not capt
 var captureOwedText = (count, clipped) => `capture owed: direct-mode session touched ${count} file(s) and ended without capture${clipped}`;
 function systemTodo(now, fields) {
   return {
-    id: randomUUID6(),
+    id: randomUUID7(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -15660,7 +15674,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   const recentTouches = [];
   for (const f of [touchesFile, `${touchesFile}.claim`]) {
     try {
-      if (existsSync13(f)) recentTouches.push(...parseTouchesContent(readFileSync16(f, "utf8")));
+      if (existsSync14(f)) recentTouches.push(...parseTouchesContent(readFileSync17(f, "utf8")));
     } catch {
     }
   }
@@ -15698,8 +15712,8 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
           const transient = join22(cwd, ".sterling", "transient");
           mkdirSync12(transient, { recursive: true });
           const tmpPath = join22(transient, `${basename4(registerPath2)}.tmp-${process.pid}`);
-          writeFileSync9(tmpPath, JSON.stringify(fresh));
-          renameSync8(tmpPath, registerPath2);
+          writeFileSync10(tmpPath, JSON.stringify(fresh));
+          renameSync9(tmpPath, registerPath2);
         },
         { retryMs: 1e3, timeoutMs: 1e4 }
       );
@@ -15774,7 +15788,7 @@ try {
     try {
       const pluginDir = pluginRoot(import.meta.url);
       if (!pluginDir) return { error: "the Sterling plugin root was not found" };
-      const raw = JSON.parse(readFileSync16(join22(pluginDir, "templates", "context-windows.json"), "utf8"));
+      const raw = JSON.parse(readFileSync17(join22(pluginDir, "templates", "context-windows.json"), "utf8"));
       if (!raw || typeof raw.windows !== "object" || raw.windows === null || Array.isArray(raw.windows)) {
         return { error: 'templates/context-windows.json has no "windows" object' };
       }
@@ -15834,7 +15848,7 @@ try {
         }
       }
       mkdirSync12(join22(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync9(join22(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      writeFileSync10(join22(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -15866,32 +15880,32 @@ try {
   const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${defaultWindowNote()}${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync16(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync17(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
-  const spendPressureMarker = (level) => writeFileSync9(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const spendPressureMarker = (level) => writeFileSync10(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
   const gaugeMarker = join22(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync16(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync17(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const spendGaugeMarker = () => writeFileSync9(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const spendGaugeMarker = () => writeFileSync10(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in the shared window table or context_watch.windows \u2014 context fill is UNRELIABLE and is not reported. Add "${pressure.unmapped_model}": <window tokens> to templates/context-windows.json in the Sterling plugin (one edit serves every project). (once per session)`;
   const sharedWarnMarker = join22(input.cwd, ".sterling", "transient", "shared-windows-warned.json");
   const sharedWarnSpent = () => {
     try {
-      return JSON.parse(readFileSync16(sharedWarnMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync17(sharedWarnMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const spendSharedWarn = () => writeFileSync9(sharedWarnMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const spendSharedWarn = () => writeFileSync10(sharedWarnMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const sharedWarnPart = () => `H10 window table: shared context-window table unavailable: ${pressure.shared_unavailable} \u2014 falling back to the project's context_watch.windows. (once per session)`;
   const writeThenSpend = (text, spends) => {
     let delivered = false;
@@ -15972,22 +15986,22 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync13(touchesClaimPath)) {
+      if (existsSync14(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync16(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync17(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
       }
       let freshTouches = [];
       try {
-        renameSync8(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync16(touchesClaimPath, "utf8"));
+        renameSync9(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync17(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
       touches = [...orphanedTouches, ...freshTouches];
-      if (orphanedTouches.length) writeFileSync9(touchesClaimPath, JSON.stringify(touches));
+      if (orphanedTouches.length) writeFileSync10(touchesClaimPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
   );
@@ -16013,7 +16027,7 @@ try {
   const discardTouchesClaim = () => {
     withFileLock(
       touchesPath,
-      () => rmSync7(touchesClaimPath, { force: true }),
+      () => rmSync8(touchesClaimPath, { force: true }),
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
   };
@@ -16021,7 +16035,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync13(touchesClaimPath) && !existsSync13(touchesPath)) renameSync8(touchesClaimPath, touchesPath);
+        if (existsSync14(touchesClaimPath) && !existsSync14(touchesPath)) renameSync9(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -16029,15 +16043,15 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync13(eventsPath)) {
-      const raw = JSON.parse(readFileSync16(eventsPath, "utf8"));
+    if (existsSync14(eventsPath)) {
+      const raw = JSON.parse(readFileSync17(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync13(join22(input.cwd, p))
+    (p) => existsSync14(join22(input.cwd, p))
   );
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
@@ -16149,7 +16163,7 @@ try {
   const deferralNoted = (() => {
     if (!deferralKey || !hasSession) return false;
     try {
-      const raw = JSON.parse(readFileSync16(deferralNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync17(deferralNotedPath, "utf8"));
       return raw.session_id === input.session_id && raw.key === deferralKey;
     } catch {
       return false;
@@ -16158,7 +16172,7 @@ try {
   const spendDeferralNoted = () => {
     if (!deferralKey || !hasSession) return;
     try {
-      writeFileSync9(deferralNotedPath, JSON.stringify({ session_id: input.session_id, key: deferralKey }));
+      writeFileSync10(deferralNotedPath, JSON.stringify({ session_id: input.session_id, key: deferralKey }));
     } catch {
     }
   };
@@ -16173,7 +16187,7 @@ try {
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
-      const raw = JSON.parse(readFileSync16(dispatchUnknownNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync17(dispatchUnknownNotedPath, "utf8"));
       if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
       if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
       return new Set(raw.keys);
@@ -16203,7 +16217,7 @@ try {
     try {
       const merged = new Set(dispatchUnknownNotedKeys);
       for (const k of pendingDispatchUnknownKeys) merged.add(k);
-      writeFileSync9(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
+      writeFileSync10(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
     } catch {
     }
   };
@@ -16225,7 +16239,7 @@ try {
     if (!state) return null;
     const spent = (() => {
       try {
-        const m = JSON.parse(readFileSync16(prLoopNaggedPath, "utf8"));
+        const m = JSON.parse(readFileSync17(prLoopNaggedPath, "utf8"));
         return hasSession && m.session_id === input.session_id && m.armed_at === state.armed_at;
       } catch {
         return false;
@@ -16243,7 +16257,7 @@ try {
       text: prLoopOwedText(state, next),
       reminder: prLoopReminderText(state),
       spend: () => {
-        writeFileSync9(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
+        writeFileSync10(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
       }
     };
   })();
@@ -16258,12 +16272,12 @@ try {
       const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
       const survivors = [...pendingDeclarations, ...retainedCaptureEvents ?? [], ...outstandingResearchEvents];
       if (survivors.length) {
-        writeFileSync9(eventsPath, JSON.stringify(survivors));
+        writeFileSync10(eventsPath, JSON.stringify(survivors));
       } else {
-        rmSync7(eventsPath, { force: true });
+        rmSync8(eventsPath, { force: true });
       }
     }
-    rmSync7(nagMarker, { force: true });
+    rmSync8(nagMarker, { force: true });
   };
   const runSettlement = () => {
     try {
@@ -16271,7 +16285,7 @@ try {
       if (git2.ok && git2.base_lost) {
         const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git2.settled.sha} is unreachable from HEAD ${git2.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
-        if (!exists) store.enqueueSystemTodo({ id: randomUUID7(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] }, { operation_id: randomUUID7() });
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID8(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] }, { operation_id: randomUUID8() });
       }
       if (git2.ok && !deferredPaths.length) writeGitSettled(input.cwd, git2.next);
     } catch (e) {
@@ -16308,9 +16322,9 @@ try {
   const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0 || namedLapsedDispatches.length > 0);
   const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
   const graceSpentIds = (() => {
-    if (!existsSync13(nagMarker)) return /* @__PURE__ */ new Set();
+    if (!existsSync14(nagMarker)) return /* @__PURE__ */ new Set();
     try {
-      const m = JSON.parse(readFileSync16(nagMarker, "utf8"));
+      const m = JSON.parse(readFileSync17(nagMarker, "utf8"));
       return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
     } catch {
       return null;
@@ -16318,14 +16332,14 @@ try {
   })();
   const pendingInGrace = graceSpentIds === null ? [] : capturePendingEvents.filter((e) => !graceSpentIds.has(pendingDeclId(e)));
   const pendingLapsed = capturePendingEvents.filter((e) => !pendingInGrace.includes(e));
-  const spendPendingGrace = () => writeFileSync9(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
+  const spendPendingGrace = () => writeFileSync10(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const generatedProjections = loadGeneratedProjections(input.cwd);
   const releaseBase = git2.ok && git2.settled && !git2.base_lost ? git2.merge_base ?? git2.settled.sha : null;
   const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git2.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync13(join22(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync14(join22(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const dispatchEventReturnAt = (e) => {
     const laneRows = taggedWebLaneRows(e);
@@ -16374,7 +16388,7 @@ try {
       const targetPrefix = `${target} \u2014 `;
       const reason = detail.startsWith(targetPrefix) && detail.length > targetPrefix.length ? detail.slice(targetPrefix.length).trim() : "";
       store.enqueueSystemTodo({
-        id: randomUUID7(),
+        id: randomUUID8(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -16388,7 +16402,7 @@ try {
         source: "system",
         system_reason: "capture_owed",
         file_keys: owedKeys
-      }, { operation_id: randomUUID7() });
+      }, { operation_id: randomUUID8() });
     }
   };
   const hasResearchDuty = activeResearchEvents.length > 0;
@@ -16468,7 +16482,7 @@ try {
     const checkoutJudges = (p) => !checkoutLocal || unowned.includes(p);
     const prunable = new Set(
       carriedAll.filter(
-        (p) => exemptFromDemand(p) || checkoutJudges(p) && ((carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync13(join22(input.cwd, p)) || unclaimableDirectory(p))
+        (p) => exemptFromDemand(p) || checkoutJudges(p) && ((carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync14(join22(input.cwd, p)) || unclaimableDirectory(p))
       )
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
@@ -16566,7 +16580,7 @@ try {
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     if (pendingHeld) {
-      rmSync7(nagMarker, { force: true });
+      rmSync8(nagMarker, { force: true });
       releaseTouchesClaim();
       releaseWithPressure();
     }
@@ -16591,7 +16605,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync13(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync14(nagMarker)) {
     const parts = [deferralLine(3), ...degradationParts].filter(Boolean);
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
@@ -16629,7 +16643,7 @@ try {
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
-        const raw = JSON.parse(readFileSync16(dutyNaggedMarker, "utf8"));
+        const raw = JSON.parse(readFileSync17(dutyNaggedMarker, "utf8"));
         if (raw.session_id !== input.session_id) return null;
         if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
         return raw;
@@ -16701,13 +16715,13 @@ ${parts.join("\n\n")}`;
     writeThenSpend(dutyText, [
       // A nag Stop on which declarations deferred the capture duty (not a hold)
       // IS their grace Stop, so it records them as spent (pendingInGrace).
-      () => hasCaptureDuty && !captured && pendingDetail && !pendingHeld ? spendPendingGrace() : writeFileSync9(nagMarker, JSON.stringify({ at: now })),
+      () => hasCaptureDuty && !captured && pendingDetail && !pendingHeld ? spendPendingGrace() : writeFileSync10(nagMarker, JSON.stringify({ at: now })),
       // FIX 2: never persist a sessionless duty-nagged marker — the reader
       // above (priorDutyNag) already refuses to compact without a session;
       // this is the matching guard on the WRITE side.
       () => {
         if (!hasSession) return;
-        writeFileSync9(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
+        writeFileSync10(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys,
       // The nag showed the conductor this deferral set, so the release that
@@ -16722,13 +16736,13 @@ ${parts.join("\n\n")}`;
     if (!pendingHeld) enqueuePendingDebt(pendingDefersCapture ? pendingLapsed : capturePendingEvents);
   } else if (hasCaptureDuty && !captured) {
     if (!hasOpenSystemTodo(store, "capture_owed")) {
-      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: "capture_owed", file_keys: owedKeys }), { operation_id: randomUUID7() });
+      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: "capture_owed", file_keys: owedKeys }), { operation_id: randomUUID8() });
     }
   }
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => (!checkoutLocal || unowned.includes(p)) && !existsSync13(join22(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => (!checkoutLocal || unowned.includes(p)) && !existsSync14(join22(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);
@@ -16736,18 +16750,18 @@ ${parts.join("\n\n")}`;
       else demandKeys = demandKeysRaw.filter((p) => !vanished.includes(p) || known.has(p));
     }
     if (demandKeys.length) {
-      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: "article_missing", file_keys: demandKeys }), { operation_id: randomUUID7() });
+      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: "article_missing", file_keys: demandKeys }), { operation_id: randomUUID8() });
     }
   }
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
-      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: "concept_article_missing" }), { operation_id: randomUUID7() });
+      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: "concept_article_missing" }), { operation_id: randomUUID8() });
     }
   }
   if (hasResearchDuty && !researchSatisfied) {
     if (!hasOpenSystemTodo(store, "research_owed")) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
-      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: "research_owed" }), { operation_id: randomUUID7() });
+      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: "research_owed" }), { operation_id: randomUUID8() });
     }
   }
   if (!pendingDefersCapture) runSettlement();

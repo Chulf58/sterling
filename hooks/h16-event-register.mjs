@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -13021,9 +13021,25 @@ function hookRoots(from) {
   return root ? { storeRoot: root, checkoutRoot: root } : null;
 }
 
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { existsSync as existsSync5, readFileSync as readFileSync6, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID4()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync4(tmp, { force: true });
+    throw err;
+  }
+}
+
 // scripts/hooks/lib/common.mjs
 function readStdin(options = {}) {
-  let input2 = JSON.parse(readFileSync6(0, "utf8"));
+  let input2 = JSON.parse(readFileSync7(0, "utf8"));
   const agyRaw = isAgyInput(input2) ? input2 : null;
   if (agyRaw) input2 = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input2.cwd);
@@ -13148,7 +13164,7 @@ function openStore(dir) {
     if (route?.storage === "postgres") return openRoutedForHook(cwd).store;
   }
   const p = join10(cwd, ".sterling", "sterling.db");
-  return existsSync5(p) ? new SterlingStore(p) : null;
+  return existsSync6(p) ? new SterlingStore(p) : null;
 }
 function namedError(e) {
   const name = e?.constructor?.name && e.constructor.name !== "Object" ? e.constructor.name : e?.name ?? "Error";
@@ -13315,9 +13331,7 @@ function agyStateDir(checkout) {
 }
 function writeJsonAtomic(path, value) {
   mkdirSync5(dirname7(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync3(tmp, JSON.stringify(value));
-  renameSync2(tmp, path);
+  writeFileAtomic(path, JSON.stringify(value));
 }
 function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join10(checkout, ".sterling", "transient", "notices");
@@ -13325,8 +13339,8 @@ function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const target = join10(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
   const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
-  writeFileSync3(tmp, JSON.stringify(body), { flag: "wx" });
-  renameSync2(tmp, target);
+  writeFileSync4(tmp, JSON.stringify(body), { flag: "wx" });
+  renameSync3(tmp, target);
   return target;
 }
 function flushAgyQueue() {
@@ -13412,7 +13426,7 @@ function settleAgyInput(raw, input2, inProject) {
   if (agy.event === "Stop" && agy.checkout) {
     let turn = "unknown";
     try {
-      turn = JSON.parse(readFileSync6(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+      turn = JSON.parse(readFileSync7(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
     } catch (e) {
       if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
 `);
@@ -13420,7 +13434,7 @@ function settleAgyInput(raw, input2, inProject) {
     agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync6(agy.stopFile, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync7(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -13445,7 +13459,7 @@ function recordAgyStopContinue() {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync8, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync5 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { dirname as dirname8, join as join11 } from "node:path";
 var SESSION_EVENTS_REL = join11(".sterling", "transient", "session-events.json");
@@ -13462,12 +13476,12 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   withSessionEventsLock(
     eventsPath,
     () => {
-      const events = existsSync6(eventsPath) ? JSON.parse(readFileSync7(eventsPath, "utf8")) : [];
+      const events = existsSync7(eventsPath) ? JSON.parse(readFileSync8(eventsPath, "utf8")) : [];
       events.push(...newEvents);
       const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
-      writeFileSync4(tmp, JSON.stringify(events), { flag: "wx" });
+      writeFileSync5(tmp, JSON.stringify(events), { flag: "wx" });
       try {
-        renameSync3(tmp, eventsPath);
+        renameSync4(tmp, eventsPath);
       } catch (e) {
         try {
           unlinkSync(tmp);

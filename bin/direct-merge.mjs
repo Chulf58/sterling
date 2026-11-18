@@ -12483,6 +12483,12 @@ var init_dist2 = __esm({
   }
 });
 
+// scripts/lib/atomic-write.mjs
+var init_atomic_write = __esm({
+  "scripts/lib/atomic-write.mjs"() {
+  }
+});
+
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync7 } from "node:fs";
@@ -13717,6 +13723,7 @@ init_dist2();
 init_dist();
 
 // scripts/hooks/lib/common.mjs
+init_atomic_write();
 function projectRoot(from) {
   return resolveProjectRoots(from, isSterlingRoot)?.storeRoot ?? null;
 }

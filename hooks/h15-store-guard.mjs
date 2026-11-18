@@ -9,7 +9,7 @@ var __export = (target, all) => {
 import { basename as basename2, isAbsolute as isAbsolute2, resolve as resolve3, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -5853,9 +5853,25 @@ function hookRoots(from) {
   return root ? { storeRoot: root, checkoutRoot: root } : null;
 }
 
+// scripts/lib/atomic-write.mjs
+import { randomUUID } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 // scripts/hooks/lib/common.mjs
 function readStdin(options = {}) {
-  let input2 = JSON.parse(readFileSync2(0, "utf8"));
+  let input2 = JSON.parse(readFileSync3(0, "utf8"));
   const agyRaw = isAgyInput(input2) ? input2 : null;
   if (agyRaw) input2 = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input2.cwd);
@@ -6121,9 +6137,7 @@ function agyStateDir(checkout) {
 }
 function writeJsonAtomic(path, value) {
   mkdirSync(dirname3(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(value));
-  renameSync(tmp, path);
+  writeFileAtomic(path, JSON.stringify(value));
 }
 function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join4(checkout, ".sterling", "transient", "notices");
@@ -6131,8 +6145,8 @@ function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
   const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
-  writeFileSync(tmp, JSON.stringify(body), { flag: "wx" });
-  renameSync(tmp, target);
+  writeFileSync2(tmp, JSON.stringify(body), { flag: "wx" });
+  renameSync2(tmp, target);
   return target;
 }
 function flushAgyQueue() {
@@ -6243,7 +6257,7 @@ function settleAgyInput(raw, input2, inProject) {
   if (agy.event === "Stop" && agy.checkout) {
     let turn = "unknown";
     try {
-      turn = JSON.parse(readFileSync2(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+      turn = JSON.parse(readFileSync3(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
     } catch (e) {
       if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
 `);
@@ -6251,7 +6265,7 @@ function settleAgyInput(raw, input2, inProject) {
     agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync2(agy.stopFile, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync3(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -6276,18 +6290,18 @@ function recordAgyStopContinue() {
 }
 
 // scripts/hooks/lib/agy-role-guard.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync4 } from "node:fs";
+import { readFileSync as readFileSync5, existsSync as existsSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join6 } from "node:path";
 
 // scripts/lib/store-write-tools.mjs
-import { readFileSync as readFileSync3 } from "node:fs";
+import { readFileSync as readFileSync4 } from "node:fs";
 import { join as join5 } from "node:path";
 function implementorTemplatePath(pluginRoot) {
   return join5(pluginRoot, "agent-templates", "implementor.md");
 }
 function readStoreWriteToolNames(pluginRoot) {
-  const text = readFileSync3(implementorTemplatePath(pluginRoot), "utf8").replace(/\r\n/g, "\n");
+  const text = readFileSync4(implementorTemplatePath(pluginRoot), "utf8").replace(/\r\n/g, "\n");
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   return [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))];
@@ -6341,8 +6355,8 @@ function agyRoleVerdict({ toolName, conversationId, dir = conversationsDir(), wr
   const db = join6(dir, `${conversationId}.db`);
   const roles = [];
   try {
-    roles.push(...rolesInConversationBytes(readFileSync4(db)));
-    if (existsSync4(`${db}-wal`)) roles.push(...rolesInConversationBytes(readFileSync4(`${db}-wal`)));
+    roles.push(...rolesInConversationBytes(readFileSync5(db)));
+    if (existsSync5(`${db}-wal`)) roles.push(...rolesInConversationBytes(readFileSync5(`${db}-wal`)));
   } catch (e) {
     return { action: "warn", cause: `the conversation file ${db} could not be read (${e && e.code || e && e.message || e})` };
   }
@@ -6362,13 +6376,13 @@ function unenforcedWarning(cause) {
 }
 
 // scripts/hooks/lib/plugin-root-walk.mjs
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 import { dirname as dirname4, join as join7 } from "node:path";
 import { fileURLToPath } from "node:url";
 function walkUpPluginRoot(moduleUrl) {
   let dir = dirname4(fileURLToPath(moduleUrl));
   for (let i = 0; i < 4; i++) {
-    if (existsSync5(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync6(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname4(dir);
   }
   return null;

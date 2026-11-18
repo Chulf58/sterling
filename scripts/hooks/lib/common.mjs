@@ -10,6 +10,7 @@ import { openRoutedForHook } from './broker-client.mjs';
 import { isSterlingRoot, storeBackend } from './store-backend.mjs';
 import { resolveProjectRoots, storeRootFor } from '../../lib/worktree-root.mjs';
 import { hookRoots } from './hook-roots.mjs';
+import { writeFileAtomic } from '../../lib/atomic-write.mjs';
 
 export { storeBackend } from './store-backend.mjs';
 
@@ -720,12 +721,10 @@ export function agyStateDir(checkout) {
 /** The events whose context agy cannot take from the hook itself, so it is queued for the next PreInvocation. */
 const AGY_QUEUE_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'Stop']);
 
-/** Write `value` as JSON to `path` by temp file and rename, creating the directory. */
+/** Write `value` as JSON to `path` atomically (lib/atomic-write.mjs, which removes its temp file on failure), creating the directory. */
 function writeJsonAtomic(path, value) {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(value));
-  renameSync(tmp, path);
+  writeFileAtomic(path, JSON.stringify(value));
 }
 
 /**

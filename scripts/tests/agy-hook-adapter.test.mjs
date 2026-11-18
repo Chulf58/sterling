@@ -291,6 +291,28 @@ test('queued delivery: context is queued, NOT marked delivered until the drain h
   }
 });
 
+test('the drain injects an agy text queued twice (Pre and Post of one tool call) once, and merges both entries\' guard marks', () => {
+  const dir = project();
+  try {
+    const notices = join(dir, '.sterling', 'transient', 'notices');
+    mkdirSync(notices, { recursive: true });
+    const guardFile = join(dir, '.sterling', 'transient', 'delivery', CONV, 'guard-conductor.json');
+    const snapshot = (id) => ({ version: 2, substance: [{ id, revision: 1 }], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] });
+    writeFileSync(join(notices, `agy-${CONV}-1.json`), JSON.stringify({ text: 'SAME-DELIVERY', session_id: CONV, guards: [{ path: guardFile, guard: snapshot('rec-pre') }] }));
+    writeFileSync(join(notices, `agy-${CONV}-2.json`), JSON.stringify({ text: 'SAME-DELIVERY', session_id: CONV, guards: [{ path: guardFile, guard: snapshot('rec-post') }] }));
+    writeFileSync(join(notices, `agy-${CONV}-3.json`), JSON.stringify({ text: 'OTHER-DELIVERY', session_id: CONV }));
+    const r = run(join(HOOKS, 'h19-delivery-drain.mjs'), agy('PreInvocation', dir, { invocationNum: 2 }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const injected = JSON.parse(r.stdout).injectSteps.map((x) => x.systemMessage.systemMessage).join('\n\n');
+    assert.equal(injected.split('SAME-DELIVERY').length - 1, 1, 'the duplicate text is injected once');
+    assert.match(injected, /OTHER-DELIVERY/);
+    assert.deepEqual(JSON.parse(readFileSync(guardFile, 'utf8')).substance.map((e) => e.id).sort(), ['rec-post', 'rec-pre'], 'both entries\' marks are merged');
+    assert.deepEqual(agyNotices(dir), [], 'both duplicate entries are drained');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a Claude Code prompt in the same checkout keeps a live agy conversation\'s queue and drops only a day-old one', () => {
   const dir = project();
   try {
@@ -327,8 +349,12 @@ test('Stop: one continue per user turn, where a turn starts at invocationNum 0; 
     const drain = join(HOOKS, 'h19-delivery-drain.mjs');
     const prompt = 'fix the failing test';
     const turn = (initialNumSteps) => assert.equal(run(drain, agy('PreInvocation', dir, { invocationNum: 0, initialNumSteps, lastUserInput: prompt }), dir).code, 0);
-    const stop = (hook, extra) =>
-      JSON.parse(run(hook, agy('Stop', dir, { executionNum: 1, terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false, lastUserInput: prompt, ...extra }), dir).stdout);
+    const stop = (hook, extra) => {
+      const r = run(hook, agy('Stop', dir, { executionNum: 1, terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false, lastUserInput: prompt, ...extra }), dir);
+      // agy ignores a non-zero exit, so a Stop envelope only counts with exit 0.
+      assert.equal(r.code, 0, `Stop must exit 0 on agy: ${r.stderr}`);
+      return JSON.parse(r.stdout);
+    };
     const CONTINUE = { decision: 'continue', reason: 'STERLING: capture duties are owed.' };
 
     turn(1);

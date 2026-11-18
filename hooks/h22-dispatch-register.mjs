@@ -6,11 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync5, statSync as statSync3 } from "node:fs";
 import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -5884,9 +5884,25 @@ function hookRoots(from) {
   return root ? { storeRoot: root, checkoutRoot: root } : null;
 }
 
+// scripts/lib/atomic-write.mjs
+import { randomUUID } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 // scripts/hooks/lib/common.mjs
 function readStdin(options = {}) {
-  let input2 = JSON.parse(readFileSync2(0, "utf8"));
+  let input2 = JSON.parse(readFileSync3(0, "utf8"));
   const agyRaw = isAgyInput(input2) ? input2 : null;
   if (agyRaw) input2 = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input2.cwd);
@@ -6003,7 +6019,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 });
 function loadConfig(cwd) {
   const p = join4(storeRootFor(cwd), ".sterling", "config.json");
-  return existsSync3(p) ? JSON.parse(readFileSync2(p, "utf8")) : null;
+  return existsSync4(p) ? JSON.parse(readFileSync3(p, "utf8")) : null;
 }
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -6166,9 +6182,7 @@ function agyStateDir(checkout) {
 }
 function writeJsonAtomic(path, value) {
   mkdirSync(dirname3(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(value));
-  renameSync(tmp, path);
+  writeFileAtomic(path, JSON.stringify(value));
 }
 function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join4(checkout, ".sterling", "transient", "notices");
@@ -6176,8 +6190,8 @@ function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
   const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
-  writeFileSync(tmp, JSON.stringify(body), { flag: "wx" });
-  renameSync(tmp, target);
+  writeFileSync2(tmp, JSON.stringify(body), { flag: "wx" });
+  renameSync2(tmp, target);
   return target;
 }
 function flushAgyQueue() {
@@ -6263,7 +6277,7 @@ function settleAgyInput(raw, input2, inProject) {
   if (agy.event === "Stop" && agy.checkout) {
     let turn = "unknown";
     try {
-      turn = JSON.parse(readFileSync2(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+      turn = JSON.parse(readFileSync3(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
     } catch (e) {
       if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
 `);
@@ -6271,7 +6285,7 @@ function settleAgyInput(raw, input2, inProject) {
     agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync2(agy.stopFile, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync3(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -6362,17 +6376,17 @@ function parseSterlingDelivery(text) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync4, statSync as statSync2, readdirSync } from "node:fs";
+import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync5, statSync as statSync2, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync4(flat)) return flat;
+  if (existsSync5(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync4(candidate)) return candidate;
+      if (existsSync5(candidate)) return candidate;
     }
   } catch {
   }
@@ -6563,7 +6577,7 @@ function claimedResources(promptText, configuredNames) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync, readdirSync as readdirSync2, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync3, rmSync as rmSync2, rmdirSync, renameSync as renameSync3, existsSync as existsSync6, lstatSync, readdirSync as readdirSync2, realpathSync as realpathSync2, chmodSync } from "node:fs";
 import { join as join5, resolve as resolve3, dirname as dirname4, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -6711,10 +6725,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync5(p)) return { availability: "absent", arr: [] };
+  if (!existsSync6(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync3(p, "utf8");
+    raw = readFileSync4(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -6732,8 +6746,8 @@ function writeRawArrayAtomic(root, arr) {
   mkdirSync2(dir, { recursive: true });
   const p = registerPath(root);
   const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
-  writeFileSync2(tmp, JSON.stringify(arr));
-  renameSync2(tmp, p);
+  writeFileSync3(tmp, JSON.stringify(arr));
+  renameSync3(tmp, p);
 }
 function readRegister(root) {
   const { availability, arr } = readRawArray(root);
@@ -6806,7 +6820,7 @@ function isPidAlive(pid) {
 }
 function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync3(join5(legacy, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync4(join5(legacy, "owner.json"), "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
     throw e;
@@ -7069,7 +7083,7 @@ function classifyRecordFile(file) {
   if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
   let buf;
   try {
-    buf = readFileSync3(file);
+    buf = readFileSync4(file);
   } catch {
     return { exists: true, poisoned: true, reason: "unreadable" };
   }
@@ -7113,8 +7127,8 @@ function writeRecordAtomic(root, fileName, record) {
   }
   const file = join5(dir, fileName);
   const tmp = join5(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
-  writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
-  renameSync2(tmp, file);
+  writeFileSync3(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
+  renameSync3(tmp, file);
 }
 function writeLiveRecord(root, key, record) {
   if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
@@ -7136,7 +7150,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join5(dir, from), join5(dir, to));
+    renameSync3(join5(dir, from), join5(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -7878,10 +7892,10 @@ function postTerritory(prompt, cwd) {
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync6(sidecarPath)) return { ok: false };
+  if (!existsSync7(sidecarPath)) return { ok: false };
   let meta;
   try {
-    meta = JSON.parse(readFileSync4(sidecarPath, "utf8"));
+    meta = JSON.parse(readFileSync5(sidecarPath, "utf8"));
   } catch {
     return { ok: false };
   }
@@ -7960,7 +7974,7 @@ async function endTaskStoppedDispatch(input2, lines) {
 }
 var input = readStdin();
 try {
-  if (!existsSync6(join6(input.storeRoot, ".sterling", "config.json"))) allow();
+  if (!existsSync7(join6(input.storeRoot, ".sterling", "config.json"))) allow();
   mkdirSync3(join6(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;

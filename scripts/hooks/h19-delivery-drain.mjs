@@ -31,6 +31,7 @@ try {
   const files = [];
   const texts = [];
   const guards = [];
+  const agyTexts = new Set();
   const hasSession = typeof input.session_id === 'string' && input.session_id.length > 0;
   for (const name of names) {
     const file = join(dir, name);
@@ -48,6 +49,13 @@ try {
       files.push(file);
       if (Array.isArray(notice.guards)) guards.push(...notice.guards);
       const text = notice.text;
+      // Two agy hooks on one tool call (H19 on PreToolUse and PostToolUse) can
+      // queue the same text in separate entries: inject it once, but drain both
+      // entries and merge both entries' guard marks.
+      if (name.startsWith('agy-') && typeof text === 'string' && text) {
+        if (agyTexts.has(text)) continue;
+        agyTexts.add(text);
+      }
       if (typeof text === 'string' && text) texts.push(text);
       else texts.push('ⓘ STERLING: removed malformed immutable notice; its contents were unreadable.');
     } catch (e) {
