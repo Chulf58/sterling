@@ -5382,6 +5382,9 @@ var init_project = __esm({
 });
 
 // packages/schemas/dist/config.js
+function isCustomAgentKey(key) {
+  return CUSTOM_AGENT_KEY_RE.test(key);
+}
 function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
@@ -5578,7 +5581,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, MAINTENANCE_WORKER_CLAUDE_MODEL, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, MAINTENANCE_WORKER_CLAUDE_MODEL, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5599,6 +5602,8 @@ var init_config = __esm({
       opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
       agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
     }).strict();
+    CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+    customAgentEntry = agentModelEntry.partial();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
       anthropic: modelPin.optional()
@@ -5809,7 +5814,17 @@ var init_config = __esm({
         // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
         // lookup, so a cheap model at low effort like the scout.
         preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
-      }).catchall(agentModelEntry).default({}),
+      }).catchall(customAgentEntry).superRefine((models, ctx) => {
+        for (const [key, entry] of Object.entries(models)) {
+          if (isCustomAgentKey(key))
+            continue;
+          const e = entry;
+          for (const field of ["model", "effort"]) {
+            if (e[field] === void 0)
+              ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, field], message: "Required" });
+          }
+        }
+      }).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
       // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -6165,6 +6180,21 @@ var init_config = __esm({
   }
 });
 
+// packages/schemas/dist/custom-agents.js
+var CLAUDE_EFFORT_LEVELS, AGENT_HOST_CAPABILITIES;
+var init_custom_agents = __esm({
+  "packages/schemas/dist/custom-agents.js"() {
+    "use strict";
+    init_config();
+    CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+    AGENT_HOST_CAPABILITIES = Object.freeze({
+      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
+      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
+      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+    });
+  }
+});
+
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema;
 var init_registry = __esm({
@@ -6329,6 +6359,8 @@ var init_dist = __esm({
     init_transient();
     init_transient();
     init_config();
+    init_config();
+    init_custom_agents();
     init_registry();
     init_staleness();
     init_project();
@@ -15317,10 +15349,10 @@ function validateOpenCodeEntry(entry, where) {
   if (block.permission === void 0) return;
   validatePermissionMap(block.permission, `${where}.permission`);
 }
-var AGENT_HOSTS = ["claude", "opencode"];
+var AGENT_HOSTS2 = ["claude", "opencode"];
 var OPENCODE_FULL_MODES = ["primary", "subagent"];
 function agentHosts(entry) {
-  return entry.hosts ?? AGENT_HOSTS;
+  return entry.hosts ?? AGENT_HOSTS2;
 }
 function claudeAgentEntries(registry2) {
   return registry2.agents.filter((entry) => agentHosts(entry).includes("claude"));
@@ -15328,8 +15360,8 @@ function claudeAgentEntries(registry2) {
 function validateHosts(entry, where) {
   if (entry.hosts !== void 0) {
     const hosts = entry.hosts;
-    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS.includes(h)) || new Set(hosts).size !== hosts.length) {
-      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS.join(", ")}`);
+    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS2.includes(h)) || new Set(hosts).size !== hosts.length) {
+      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS2.join(", ")}`);
     }
   }
   const full = entry.opencode_full;

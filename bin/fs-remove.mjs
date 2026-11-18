@@ -5171,6 +5171,11 @@ var agentModelEntry = external_exports.object({
   opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
   agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
+var CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+function isCustomAgentKey(key) {
+  return CUSTOM_AGENT_KEY_RE.test(key);
+}
+var customAgentEntry = agentModelEntry.partial();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
   anthropic: modelPin.optional()
@@ -5380,7 +5385,17 @@ var configSchema = external_exports.object({
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
     preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
-  }).catchall(agentModelEntry).default({}),
+  }).catchall(customAgentEntry).superRefine((models, ctx) => {
+    for (const [key, entry] of Object.entries(models)) {
+      if (isCustomAgentKey(key))
+        continue;
+      const e = entry;
+      for (const field of ["model", "effort"]) {
+        if (e[field] === void 0)
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, field], message: "Required" });
+      }
+    }
+  }).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -5764,6 +5779,14 @@ function migrateStaleAgyModels(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
+
+// packages/schemas/dist/custom-agents.js
+var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGENT_HOST_CAPABILITIES = Object.freeze({
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+});
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
