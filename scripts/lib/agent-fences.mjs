@@ -100,10 +100,38 @@ function counterpartViolations(text, lines, label) {
   return out;
 }
 
-export function validateFences(text, label) {
+// A run is host blocks separated only by blank lines. Every run accounts for all three hosts:
+// each host either has a block in the run or is named by a no-counterpart marker in one of them,
+// so a host-specific instruction never reaches one host's render and silently misses another's.
+function unaccountedHosts(hostBlocks, lines, label) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const covered = new Set(run.flatMap((b) => [b.host, ...b.noCounterpart]));
+    const missing = COUNTERPART_HOSTS.filter((h) => !covered.has(h));
+    if (missing.length) {
+      out.push({ kind: 'fence_host_unaccounted', detail: `${label}:${run[0].start}: this host block has no counterpart for ${missing.join(', ')}; add a ${missing.map((h) => `${h}-only`).join(' / ')} block, or '<!-- no-counterpart: ${missing.join(', ')} -->' as the first line inside one of the run's blocks` });
+    }
+    run = [];
+  };
+  for (const block of hostBlocks) {
+    const prev = run[run.length - 1];
+    if (prev && !lines.slice(prev.end, block.start - 1).every((l) => l.trim() === '')) flush();
+    run.push(block);
+  }
+  flush();
+  return out;
+}
+
+// options.allHosts turns on the host-accounting rule above. It is opt-in because the fences also
+// reach files this repo does not own (a consumer project's CLAUDE.md) and files not yet ported to
+// agy (commands, skills); the agent templates and the target-CLAUDE.md template pass it.
+export function validateFences(text, label, { allHosts = false } = {}) {
   const violations = malformedMarkers(text.replace(/\r\n/g, '\n'), label);
   violations.push(...counterpartViolations(text.replace(/\r\n/g, '\n'), splitLines(text), label));
   let openFence = null;
+  const hostBlocks = [];
   const lines = splitLines(text);
   lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
@@ -129,6 +157,7 @@ export function validateFences(text, label) {
         if (!body.some((l) => l.trim() !== '')) {
           violations.push({ kind: 'fence_empty_block', detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
         }
+        hostBlocks.push({ host, start: openFence.line, end: index + 1, noCounterpart: noCounterpartHosts(lines[openFence.line]) ?? [] });
         lines.slice(openFence.line, index).forEach((l, i) => {
           const hosts = noCounterpartHosts(l);
           if (!hosts) return;
@@ -152,6 +181,7 @@ export function validateFences(text, label) {
   if (openFence) {
     violations.push({ kind: 'fence_unclosed', detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
   }
+  if (allHosts) violations.push(...unaccountedHosts(hostBlocks, lines, label));
   return violations;
 }
 
