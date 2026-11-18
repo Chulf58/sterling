@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, buildSystemTab, reduce, SYSTEM_TAB, type AgentRosterSnapshot, type OverpassView, type UiState, type UiEvent } from '../state.js';
+import { at } from './system-nav.js';
 import { applyOverpassRole } from '../config-writeback.js';
 import { openDashboard } from '../controller.js';
 
@@ -168,7 +169,7 @@ test("tier and effort edit: 'default' commits no effort, and a custom current ti
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ overpass: on({ scout: { tier: 'agentic-lite', effort: 'low' } }) });
-    const open = reduce(store, st({ cursor: 1 }), key('ENTER'), undefined, undefined, snap);
+    const open = reduce(store, st({ cursor: at(snap, 'sys:scout') }), key('ENTER'), undefined, undefined, snap);
     assert.deepEqual(open.ui.selector, { key: 'scout', stage: 'tier', highlight: 6 }, 'agentic-lite is offered, after the six named tiers, and preselected');
     const efforts = reduce(store, open.ui, key('ENTER'), undefined, undefined, snap);
     assert.equal(efforts.ui.selector?.highlight, 1, 'the effort picker opens on the current effort');
@@ -232,7 +233,7 @@ test('Overpass off: ENTER on a role row opens the model picker and the swap walk
 test('Maintenance worker row: ENTER opens its tier picker with Overpass on and its model picker with Overpass off', () => {
   const { store, cleanup } = storeFixture();
   try {
-    const workerCursor = Object.keys(snapshot().configModels).length;
+    const workerCursor = at(snapshot(), 'sys:maintenance-worker');
     const on1 = reduce(store, st({ cursor: workerCursor }), key('ENTER'), undefined, undefined, snapshot({ overpass: on() }));
     assert.deepEqual(on1.ui.selector, { key: 'maintenance-worker', stage: 'tier', highlight: 3 }, 'agentic-auto is the fourth listed tier');
     const off1 = reduce(store, st({ cursor: workerCursor }), key('ENTER'), undefined, undefined, snapshot());
@@ -454,7 +455,8 @@ test('implementor-hard row: model and effort with Overpass off, its own tier wit
   assert.equal(rowTexts(hardSnap({ overpass: on() }))[0], '› Implementor: agentic-auto (Overpass) medium (default)', 'the implementor default is agentic-auto at medium');
   const { store, cleanup } = storeFixture();
   try {
-    const r = reduce(store, st({ cursor: 1 }), key('ENTER'), undefined, undefined, hardSnap({ overpass: on() }));
+    const hard = hardSnap({ overpass: on() });
+    const r = reduce(store, st({ cursor: at(hard, 'sys:implementor-hard') }), key('ENTER'), undefined, undefined, hard);
     assert.deepEqual(r.ui.selector, { key: 'implementor-hard', stage: 'tier', highlight: 4 }, 'the tier picker opens on agentic-premium');
   } finally {
     cleanup();

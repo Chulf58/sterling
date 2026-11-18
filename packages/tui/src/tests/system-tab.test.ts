@@ -8,6 +8,7 @@ import { SterlingStore } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { buildDashboardState, initialUi, TABS, type UiState, type DashboardState } from '../state.js';
 import * as stateMod from '../state.js';
+import { at } from './system-nav.js';
 import * as viewmodel from '../viewmodel.js';
 
 // ===========================================================================
@@ -592,7 +593,7 @@ test('selector effort rule: a registered agent key offers efforts EXCLUDING xhig
   try {
     const snap = baseSnapshot();
     // ENTER opens model picker, ENTER confirms model → advances to the EFFORT picker.
-    const atEffort = drive(store, st({ tab: SYS_TAB, cursor: 1 }), [key('ENTER'), key('ENTER')], snap);
+    const atEffort = drive(store, st({ tab: SYS_TAB, cursor: at(snap, 'sys:researcher') }), [key('ENTER'), key('ENTER')], snap);
     const view = buildSystemTab!(snap, atEffort.ui, 80);
     const text = allText(view);
     assert.match(text, /minimal|\blow\b|medium|\bhigh\b/i, 'the effort picker offers allowed efforts');
@@ -650,7 +651,7 @@ test('AC5 commit (agentless key): a swap on a key whose agent is installed only 
     // open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
     const res = drive(
       store,
-      st({ tab: SYS_TAB, cursor: 3 }),
+      st({ tab: SYS_TAB, cursor: at(snap, 'sys:librarian') }),
       [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
       snap,
     );
@@ -671,7 +672,7 @@ test('selector cancel: ESCAPE after opening dismisses the picker and emits NO sw
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    const ui0 = st({ tab: SYS_TAB, cursor: 1 });
+    const ui0 = st({ tab: SYS_TAB, cursor: at(snap, 'sys:researcher') });
     // open, then confirm the picker is showing the unused catalog entry
     const opened = drive(store, ui0, [key('ENTER')], snap);
     assert.match(allText(buildSystemTab!(snap, opened.ui, 80)), /claude-opus-4-1|Opus 4\.1/, 'the picker is open after ENTER');
@@ -744,7 +745,7 @@ test('33-col floor: an OPEN selector still renders within the 33-column pane', (
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    const opened = drive(store, st({ tab: SYS_TAB, cursor: 1 }), [key('ENTER')], snap);
+    const opened = drive(store, st({ tab: SYS_TAB, cursor: at(snap, 'sys:researcher') }), [key('ENTER')], snap);
     const view = buildSystemTab!(snap, opened.ui, 33);
     for (const row of view.rows) {
       for (const line of row.lines) {

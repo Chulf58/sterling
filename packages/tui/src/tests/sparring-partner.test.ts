@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import * as stateMod from '../state.js';
 import * as viewmodel from '../viewmodel.js';
 
@@ -275,13 +276,12 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    const numKeys = Object.keys(snap.configModels).length + 1;
 
-    let r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys - 1 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(r.ui.cursor, numKeys, 'DOWN from the last config-key row lands on the toggle row');
+    let r = SR.reduce(store, st({ tab: SYS_TAB, cursor: lastAgentCursor(snap) }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(r.ui.cursor, at(snap, SYS.sparringEnabled), 'DOWN from the last config-key row lands on the toggle row');
 
     r = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(r.ui.cursor, numKeys + 1, 'DOWN again lands on the model row');
+    assert.equal(r.ui.cursor, at(snap, SYS.sparringModel), 'DOWN again lands on the model row');
 
     // The model row is no longer the tab's last row: decision foreign_752caf98 added
     // the tdd row below it (traversal onto/through that row is pinned by
@@ -298,14 +298,14 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
     // below that, and the PR auto-merge row (decision
     // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) below that, so the
     // PR auto-merge row is now the true bottom.
-    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 5 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 5, "DOWN clamps at the tab's true last row (the PR auto-merge row), not the model row");
+    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.autoMerge) }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(clamped.ui.cursor, at(snap, SYS.autoMerge), "DOWN clamps at the tab's true last row (the PR auto-merge row), not the model row");
 
     let up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, numKeys, 'UP from the model row returns to the toggle row');
+    assert.equal(up.ui.cursor, at(snap, SYS.sparringEnabled), 'UP from the model row returns to the toggle row');
 
     up = SR.reduce(store, up.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, numKeys - 1, 'UP from the toggle row returns to the last config-key row');
+    assert.equal(up.ui.cursor, lastAgentCursor(snap), 'UP from the toggle row returns to the last config-key row');
   } finally {
     cleanup();
   }
@@ -320,8 +320,7 @@ test('sparring 5: ENTER on the toggle row emits sparring_toggle with the FLIPPED
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: undefined } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys }), key('ENTER'), undefined, undefined, snap);
+    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringEnabled) }), key('ENTER'), undefined, undefined, snap);
     const toggle = findToggle(r.effects);
     assert.ok(toggle, 'ENTER on the toggle row emits a sparring_toggle effect');
     assert.equal(toggle!.enabled, false, 'the effect carries the flipped value (was true)');
@@ -335,8 +334,7 @@ test('sparring 5: SPACE on the toggle row emits sparring_toggle with the flipped
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: false, model: undefined } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys }), key('SPACE'), undefined, undefined, snap);
+    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringEnabled) }), key('SPACE'), undefined, undefined, snap);
     const toggle = findToggle(r.effects);
     assert.ok(toggle, 'SPACE on the toggle row emits a sparring_toggle effect');
     assert.equal(toggle!.enabled, true, 'the effect carries the flipped value (was false)');
@@ -355,8 +353,7 @@ test('sparring 6: ENTER opens free-text edit; letters/digits/space/"q" all feed 
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: undefined } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const ui0 = st({ tab: SYS_TAB, cursor: numKeys + 1 });
+    const ui0 = st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) });
     const events = [
       key('ENTER'),
       charEv('g'), charEv('p'), charEv('t'), charEv('-'), charEv('5'), charEv(' '), charEv('q'),
@@ -377,8 +374,7 @@ test('sparring 6: ESCAPE cancels the model edit with no sparring_model effect; t
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: 'original-model' } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const ui0 = st({ tab: SYS_TAB, cursor: numKeys + 1 });
+    const ui0 = st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) });
     const res = drive(store, ui0, [key('ENTER'), charEv('z'), charEv('z'), key('ESCAPE')], snap);
     assert.equal(findModelCommit(res.effects), undefined, 'ESCAPE emits no sparring_model effect');
     const view = buildSystemTab!(snap, res.ui, 80);
@@ -392,8 +388,7 @@ test('sparring 6: backspacing the prefilled value to empty and committing emits 
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: 'some-model' } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const ui0 = st({ tab: SYS_TAB, cursor: numKeys + 1 });
+    const ui0 = st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) });
     // The edit PREFILLS the current value ('some-model', 10 chars): an untouched
     // ENTER re-commits it unchanged (safe no-op), never silently clears.
     const untouched = drive(store, ui0, [key('ENTER'), key('ENTER')], snap);
@@ -437,8 +432,7 @@ test('sparring 8: switching tabs mid-edit discards the in-progress model edit', 
   try {
     assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: undefined } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const ui0 = st({ tab: SYS_TAB, cursor: numKeys + 1 });
+    const ui0 = st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) });
 
     const editing = drive(store, ui0, [key('ENTER'), charEv('z'), charEv('z'), charEv('z')], snap);
     const awayThenBack = drive(store, editing.ui, [{ kind: 'tab', index: 0 }, { kind: 'tab', index: SYS_TAB }], snap);

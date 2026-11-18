@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SYSTEM_TAB, buildSystemTab, initialUi, reduce, type AgentRosterSnapshot, type UiState } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import { SterlingStore } from '@sterling/store';
 import { openDashboard } from '../controller.js';
 
@@ -69,14 +70,13 @@ test('Storage row: an unreadable config reads UNKNOWN, never the SQLite default'
 
 test('Storage row is read-only: never selected, no cursor index, no effect, hidden under a model picker', () => {
   const snap = snapshot({ storage: 'postgres' });
-  const keys = Object.keys(snap.configModels).length + 1;
   // The cursor clamp still ends at the handoff row (keys + 4); the storage row adds no stop.
-  const down = reduce({} as SterlingStore, st({ tab: 4, cursor: keys + 4 }), { type: 'key', key: 'DOWN' } as never, undefined, undefined, snap);
-  assert.equal(down.ui.cursor, keys + 4);
-  for (let c = 0; c <= keys + 5; c++) {
+  const down = reduce({} as SterlingStore, st({ tab: 4, cursor: at(snap, SYS.handoff) }), { type: 'key', key: 'DOWN' } as never, undefined, undefined, snap);
+  assert.equal(down.ui.cursor, at(snap, SYS.handoff));
+  for (let c = 0; c <= at(snap, SYS.autoMerge); c++) {
     assert.notEqual(buildSystemTab(snap, st({ cursor: c }), 200).storageRows[0].lines[0].selected, true);
   }
-  const enter = reduce({} as SterlingStore, st({ tab: 4, cursor: keys + 4 }), { type: 'key', key: 'ENTER' } as never, undefined, undefined, snap);
+  const enter = reduce({} as SterlingStore, st({ tab: 4, cursor: at(snap, SYS.handoff) }), { type: 'key', key: 'ENTER' } as never, undefined, undefined, snap);
   assert.deepEqual(enter.effects.filter((e) => /storage/.test(JSON.stringify(e))), []);
   const picker = buildSystemTab(snap, st({ selector: { key: 'implementor', stage: 'model', highlight: 0 } }), 200);
   assert.deepEqual(picker.storageRows, []);

@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import * as stateMod from '../state.js';
 
 // ===========================================================================
@@ -127,16 +128,15 @@ test('handoff row: DOWN from the project mode row lands on it; DOWN again moves 
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ handoff: false });
-    const n = Object.keys(snap.configModels).length + 1;
-    const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(down.ui.cursor, n + 4);
+    const down = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.mode) }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(down.ui.cursor, at(snap, SYS.handoff));
     // the PR auto-merge row (decision
     // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) follows it and is
     // now the tab's last row; auto-merge-toggle.test.ts pins the clamp there.
     const next = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(next.ui.cursor, n + 5);
+    assert.equal(next.ui.cursor, at(snap, SYS.autoMerge));
     const up = reduce(store, down.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, n + 3);
+    assert.equal(up.ui.cursor, at(snap, SYS.mode));
     const view = buildSystemTab!(snap, down.ui, 80);
     assert.equal(view.handoffRows![0].lines[0].selected, true, 'the row is marked selected under the cursor');
     assert.notEqual(view.modeRows![0].lines[0].selected, true, 'the mode row is not');
@@ -157,8 +157,7 @@ test('handoff row: ENTER and SPACE emit handoff_toggle with the NEW value (offâ†
     for (const mode of ['hobby', 'work']) {
       for (const [handoff, k, next] of cases) {
         const snap = snapshot({ mode, ...(handoff === undefined ? {} : { handoff }) });
-        const n = Object.keys(snap.configModels).length + 1;
-        const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 4 }), key(k), undefined, undefined, snap);
+        const r = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.handoff) }), key(k), undefined, undefined, snap);
         const effect = r.effects.find((e) => e.type === 'handoff_toggle');
         assert.ok(effect, `${k} on the handoff row emits handoff_toggle (from ${String(handoff)}, ${mode})`);
         assert.equal(effect!.enabled, next, `from ${String(handoff)} the new value is ${next}`);
@@ -175,8 +174,7 @@ test('mode row: toggling the mode emits no handoff_toggle', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby', handoff: false });
-    const n = Object.keys(snap.configModels).length + 1;
-    const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key('ENTER'), undefined, undefined, snap);
+    const r = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.mode) }), key('ENTER'), undefined, undefined, snap);
     assert.deepEqual(r.effects.map((e) => e.type), ['mode_toggle']);
   } finally {
     cleanup();

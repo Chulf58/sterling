@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import * as stateMod from '../state.js';
 
 // ===========================================================================
@@ -112,13 +113,12 @@ test('mode row: DOWN from the tdd row lands on it; DOWN again moves to the hando
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby' });
-    const n = Object.keys(snap.configModels).length + 1;
-    const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 2 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(down.ui.cursor, n + 3);
+    const down = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.tdd) }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(down.ui.cursor, at(snap, SYS.mode));
     const next = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(next.ui.cursor, n + 4);
+    assert.equal(next.ui.cursor, at(snap, SYS.handoff));
     const up = reduce(store, down.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, n + 2);
+    assert.equal(up.ui.cursor, at(snap, SYS.tdd));
     const selected = buildSystemTab!(snap, down.ui, 80).modeRows![0].lines[0];
     assert.equal(selected.selected, true, 'the row is marked selected under the cursor');
   } finally {
@@ -137,8 +137,7 @@ test('mode row: ENTER and SPACE emit mode_toggle with the NEW mode (hobby→work
     ];
     for (const [mode, k, next] of cases) {
       const snap = snapshot(mode === undefined ? {} : { mode });
-      const n = Object.keys(snap.configModels).length + 1;
-      const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key(k), undefined, undefined, snap);
+      const r = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.mode) }), key(k), undefined, undefined, snap);
       const effect = r.effects.find((e) => e.type === 'mode_toggle');
       assert.ok(effect, `${k} on the mode row emits mode_toggle (from ${mode})`);
       assert.equal(effect!.mode, next, `from ${String(mode)} the new mode is ${next}`);

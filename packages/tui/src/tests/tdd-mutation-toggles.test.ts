@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import * as stateMod from '../state.js';
 import * as viewmodel from '../viewmodel.js';
 
@@ -254,12 +255,11 @@ test('toggles 3: UP/DOWN traverse past sparringRows onto the tdd row, and clamp 
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    const numKeys = Object.keys(snap.configModels).length + 1;
     // numKeys = sparring toggle row, numKeys+1 = sparring model row (both frozen
     // by sparring-partner.test.ts) — this slice's row continues from there.
 
-    let r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 1 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(r.ui.cursor, numKeys + 2, 'DOWN from the sparring model row lands on the tdd toggle row');
+    let r = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(r.ui.cursor, at(snap, SYS.tdd), 'DOWN from the sparring model row lands on the tdd toggle row');
 
     // The tdd row is no longer the tab's last row: the project mode row
     // (decision project-mode-hobby-work-toggle-decides-flow) sits below it at
@@ -270,16 +270,16 @@ test('toggles 3: UP/DOWN traverse past sparringRows onto the tdd row, and clamp 
     // numKeys + 5, which owns the bottom clamp (pinned in
     // auto-merge-toggle.test.ts).
     const below = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(below.ui.cursor, numKeys + 3, 'DOWN past the tdd row lands on the project mode row');
+    assert.equal(below.ui.cursor, at(snap, SYS.mode), 'DOWN past the tdd row lands on the project mode row');
     const handoff = SR.reduce(store, below.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(handoff.ui.cursor, numKeys + 4, 'DOWN past the project mode row lands on the handoff files row');
+    assert.equal(handoff.ui.cursor, at(snap, SYS.handoff), 'DOWN past the project mode row lands on the handoff files row');
     const last = SR.reduce(store, handoff.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(last.ui.cursor, numKeys + 5, 'DOWN past the handoff files row lands on the PR auto-merge row');
+    assert.equal(last.ui.cursor, at(snap, SYS.autoMerge), 'DOWN past the handoff files row lands on the PR auto-merge row');
     const clamped = SR.reduce(store, last.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 5, "DOWN clamps at the tab's true last row (the PR auto-merge row)");
+    assert.equal(clamped.ui.cursor, at(snap, SYS.autoMerge), "DOWN clamps at the tab's true last row (the PR auto-merge row)");
 
     const up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, numKeys + 1, 'UP from the tdd row returns to the sparring model row');
+    assert.equal(up.ui.cursor, at(snap, SYS.sparringModel), 'UP from the tdd row returns to the sparring model row');
   } finally {
     cleanup();
   }
@@ -294,8 +294,7 @@ test('toggles 4: ENTER on the tdd row emits tdd_toggle with the FLIPPED value; n
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ tdd: { enabled: true } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 2 }), key('ENTER'), undefined, undefined, snap);
+    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.tdd) }), key('ENTER'), undefined, undefined, snap);
     const toggle = findTddToggle(r.effects);
     assert.ok(toggle, 'ENTER on the tdd row emits a tdd_toggle effect');
     assert.equal(toggle!.enabled, false, 'the effect carries the flipped value (was true)');
@@ -309,8 +308,7 @@ test('toggles 4: SPACE on the tdd row emits tdd_toggle with the flipped value (f
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ tdd: { enabled: false } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 2 }), key('SPACE'), undefined, undefined, snap);
+    const r = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.tdd) }), key('SPACE'), undefined, undefined, snap);
     const toggle = findTddToggle(r.effects);
     assert.ok(toggle, 'SPACE on the tdd row emits a tdd_toggle effect');
     assert.equal(toggle!.enabled, true, 'the effect carries the flipped value (was false)');
@@ -364,7 +362,6 @@ test('toggles 6: buildDashboardState honors ui.scroll on the System tab — the 
   try {
     assert.strictEqual(typeof stateMod.buildDashboardState, 'function', 'buildDashboardState must be exported');
     const snap = baseSnapshot();
-    const numKeys = Object.keys(snap.configModels).length + 1;
     const maxBodyLines = 2; // total SYS_TAB rows (numKeys config rows + 2 sparring + 1 tdd) exceed this
     const vp = { maxBodyLines, width: 80 };
 
@@ -374,13 +371,13 @@ test('toggles 6: buildDashboardState honors ui.scroll on the System tab — the 
     // mechanism state.test.ts pins for the card tabs.
     let cur = st({ tab: SYS_TAB, cursor: 0, scroll: 0 });
     let lastEffects: { type: string }[] = [];
-    for (let i = 0; i < numKeys + 2; i++) {
+    for (let i = 0; i < at(snap, SYS.tdd); i++) {
       const r = SR.reduce(store, cur, key('DOWN'), vp, undefined, snap);
       cur = r.ui;
       lastEffects = r.effects;
     }
     void lastEffects;
-    assert.equal(cur.cursor, numKeys + 2, 'DOWN-walked all the way onto the tdd row');
+    assert.equal(cur.cursor, at(snap, SYS.tdd), 'DOWN-walked all the way onto the tdd row');
     assert.ok((cur.scroll ?? 0) > 0, 'precondition: the reducer already pushes ui.scroll forward to keep the cursor in view');
 
     // The bug under test: buildDashboardState's SYS_TAB branch is reported to
@@ -446,12 +443,12 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     assert.strictEqual(typeof stateMod.buildDashboardState, 'function', 'buildDashboardState must be exported');
     assert.strictEqual(typeof stateMod.screenLineToRow, 'function', 'screenLineToRow must be exported');
 
-    const numKeys = Object.keys(baseSnapshot().configModels).length + 1;
+    const baseSnap = baseSnapshot();
     // Every non-banner row on the tab, so bannerRowCount below can subtract them: config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) + 1 PR auto-merge (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean) + 1 read-only storage row (board 6ca1a3c5), which is drawn but takes no cursor stop.
-    const totalSelectableRows = numKeys + 7;
+    const totalSelectableRows = (stateMod.buildSystemTab as unknown as (s: AgentRosterSnapshot, u: UiState) => { entries: unknown[] })(baseSnap, st()).entries.length;
     const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport
     const vp = { maxBodyLines, width: 80 };
-    const lastRowCursor = numKeys + 5; // the PR auto-merge row — the last selectable row on the tab
+    const lastRowCursor = at(baseSnap, SYS.autoMerge); // the PR auto-merge row — the last selectable row on the tab
 
     interface DashRow { selected?: boolean }
     interface Dash { rows: DashRow[]; bodyTop: number; scroll?: number }

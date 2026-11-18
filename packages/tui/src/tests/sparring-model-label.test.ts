@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import * as stateMod from '../state.js';
 import * as viewmodel from '../viewmodel.js';
 
@@ -236,8 +237,7 @@ test('label 3: committing a model sets a ui.notice saying explicit calls overrid
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: undefined } });
-    const numKeys = Object.keys(snap.configModels).length + 1;
-    const ui0 = st({ tab: SYS_TAB, cursor: numKeys + 1 });
+    const ui0 = st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) });
 
     // CONTROL FIRST (must pass for the OPPOSITE reason): an ESCAPEd edit commits
     // nothing, so it must NOT produce the override notice. Without this arm a

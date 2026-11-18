@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, buildSystemTab, buildDashboardState, reduce, type AgentRosterSnapshot, type UiState, type UiEvent, type Effect } from '../state.js';
+import { at, lastAgentCursor, SYS } from './system-nav.js';
 import { applyAutoMergeToggle } from '../config-writeback.js';
 
 // ===========================================================================
@@ -91,13 +92,12 @@ test('auto-merge row: DOWN from the handoff row lands on it; it is the last row 
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot();
-    const n = Object.keys(snap.configModels).length + 1;
-    const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 4 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(down.ui.cursor, n + 5);
+    const down = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.handoff) }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(down.ui.cursor, at(snap, SYS.autoMerge));
     const clamped = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, n + 5);
+    assert.equal(clamped.ui.cursor, at(snap, SYS.autoMerge));
     const up = reduce(store, clamped.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, n + 4);
+    assert.equal(up.ui.cursor, at(snap, SYS.handoff));
     const view = buildSystemTab(snap, down.ui, 80);
     assert.equal(view.autoMergeRows[0].lines[0].selected, true);
     assert.notEqual(view.handoffRows[0].lines[0].selected, true);
@@ -118,8 +118,7 @@ test('auto-merge row: ENTER and SPACE emit auto_merge_toggle with the NEW value 
     ];
     for (const [value, k, next] of cases) {
       const snap = snapshot(value === undefined ? {} : { autoMergeOnClean: value });
-      const n = Object.keys(snap.configModels).length + 1;
-      const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 5 }), key(k), undefined, undefined, snap);
+      const r = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.autoMerge) }), key(k), undefined, undefined, snap);
       const types = r.effects.map((e: Effect) => e.type);
       assert.deepEqual(types, ['auto_merge_toggle'], `${k} from ${String(value)}: exactly one auto_merge_toggle`);
       assert.equal((r.effects[0] as { enabled: boolean }).enabled, next, `from ${String(value)} the new value is ${next}`);

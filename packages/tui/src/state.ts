@@ -352,50 +352,54 @@ export interface SystemRow {
   agents?: string[];
   lines: SystemLine[];
 }
+/** Which block of the tab an entry belongs to: the agent roster (governed roles, the maintenance
+ *  worker, custom agents) or the settings (toggles, the sparring model, Overpass, storage). */
+export type SystemSection = 'agents' | 'settings';
+/** What ENTER or SPACE does on an entry, as data (no callbacks, no IO): the reducer applies it.
+ *  agent: the role's model/effort/tier picker state machine; toggle: push `effect`;
+ *  edit: open a text field by patching the UI state. */
+export type SystemAction =
+  | { kind: 'agent'; key: string }
+  | { kind: 'toggle'; effect: Effect }
+  | { kind: 'edit'; uiPatch: Partial<UiState> };
+/** One entry of the System tab's single ordered list. Cursor, clamp, draw order and the
+ *  click hit-test all derive from this list: a cursorable entry takes the next cursor index
+ *  in list order, a read-only one takes none. Adding a row means adding one entry. */
+export interface SystemEntry {
+  id: string;
+  section: SystemSection;
+  cursorable: boolean;
+  /** the rendered lines (and the row's key, drift and agents, for agent rows) */
+  row: SystemRow;
+  /** ENTER/SPACE; absent on a read-only entry */
+  action?: SystemAction;
+}
+/** The ids the older parallel lists carried, so a consumer can still ask for "the tdd row". */
+const LEGACY_VIEW_LISTS = {
+  sparringRows: ['sys:sparring_enabled', 'sys:sparring_model'],
+  tddRows: ['sys:tdd_enabled'],
+  modeRows: ['sys:project_mode'],
+  handoffRows: ['sys:handoff_files'],
+  autoMergeRows: ['sys:pr_auto_merge'],
+  overpassRows: ['sys:overpass', 'sys:overpass_provider', 'sys:overpass_bypass'],
+  storageRows: ['sys:storage'],
+} as const;
 export interface SystemTabView {
-  rows: SystemRow[];
+  /** every visible entry, in draw and cursor order */
+  entries: SystemEntry[];
   banner: string[];
-  /** Sparring-partner rows (board a0714d0b, slice 2): a SEPARATE list from
-   *  `rows` — `rows` stays exactly one entry per config.models key (the
-   *  phase-4 frozen contract), so the toggle + model rows never join it.
-   *  Two rows, ids 'sys:sparring_enabled' / 'sys:sparring_model', in that
-   *  order; hidden while a config.models picker (ui.selector) is open, same
-   *  focus rule as the roster rows. */
+  /** The groupings below are derived from `entries` by id (never maintained apart from it), kept so
+   *  existing consumers keep their shape: `rows` is the agent rows of the roster (one per config.models
+   *  key, then the Maintenance worker), the others hold the settings rows of that name. */
+  rows: SystemRow[];
   sparringRows: SystemRow[];
-  /** tdd toggle row (decision foreign_752caf98): a single-entry list, mirroring
-   *  sparringRows[0]'s toggle-only shape (the field carries no model, so
-   *  there is no second row). Appended after sparringRows in cursor order;
-   *  hidden while a config.models picker is open, same focus rule as
-   *  sparringRows/rows. The sibling mutationRows list this used to sit
-   *  beside was REMOVED entirely (decision
-   *  cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
-   *  2026-09-22). */
   tddRows: SystemRow[];
-  /** project mode toggle row (decision project-mode-hobby-work-toggle-decides-flow):
-   *  a single-entry list, same toggle-only shape as tddRows, appended after it in
-   *  cursor order; hidden while a config.models picker is open. */
   modeRows: SystemRow[];
-  /** handoff files toggle row (decision
-   *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-   *  a single-entry list, same toggle-only shape as modeRows, appended after it in
-   *  cursor order; hidden while a config.models picker is open. */
   handoffRows: SystemRow[];
-  /** PR auto-merge toggle row (decision
-   *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean): a single-entry list,
-   *  same toggle-only shape as handoffRows, appended after it in cursor order;
-   *  hidden while a config.models picker is open. */
   autoMergeRows: SystemRow[];
-  /** Overpass rows (decision overpass-toggle-work-mode-only-routes-every-lane-through-tiers):
-   *  'sys:overpass', 'sys:overpass_provider', 'sys:overpass_bypass', in that order,
-   *  after the auto-merge row in cursor order (keys.length + 6 .. + 8). Empty
-   *  unless the mode is work and the host is OpenCode; hidden while a
-   *  config.models picker is open. */
   overpassRows: SystemRow[];
-  /** storage row (board 6ca1a3c5): a single-entry READ-ONLY list drawn after the
-   *  PR auto-merge row. It owns no cursor index (the cursor clamp does not count it) and
-   *  no effect, because only the move-store skill writes config.storage. */
   storageRows: SystemRow[];
-  /** Read-only custom-agent rows (issue #307): no cursor index, never selectable. */
+  /** read-only custom-agent rows (issue #307) */
   customRows: SystemRow[];
 }
 
@@ -1057,7 +1061,7 @@ export const clipEllipsis = (s: string, width: number): string =>
  * entries at the model stage; effort options at the effort stage). Every
  * line is clipped to `width` so the 33-col floor holds.
  */
-export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
+function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number): { entries: SystemEntry[]; banner: string[] } {
   const snap = snapshot ?? EMPTY_ROSTER;
   const keys = systemKeys(snap);
   const selector = ui.selector;
@@ -1184,36 +1188,71 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     return { id: `sys:${key}`, key, drift, agents: agentNames, lines };
   });
 
-  // While a selector is open the view FOCUSES on the key under edit — the other
-  // rows (and their config values) are hidden so the open picker's offered set
-  // is the only model/effort text on screen.
-  const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
   // transient notice as a ⚠ banner line (audit findings 24/43, 41/43): a refusal
   // or a catalog/roster failure is visible above the roster, not lost.
   const catBanner = catalogBanner(snap.catalog, width);
   const banner = ui.notice ? [clip(`⚠ ${ui.notice}`), ...catBanner] : catBanner;
-  // Sparring-partner rows sit AFTER the config.models keys in cursor order
-  // (cursorBase = keys.length); hidden while a config.models picker focuses the
-  // view, same rule as the roster rows above.
-  const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
-  // the tdd row continues past the two sparring rows (keys.length,
-  // keys.length + 1) at keys.length + 2.
-  const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
-  // the project mode row follows the tdd row, at keys.length + 3.
-  const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
-  // the handoff files row follows the project mode row, at keys.length + 4.
-  const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
-  // the PR auto-merge row follows the handoff files row, at keys.length + 5.
-  const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
-  // the Overpass rows follow the auto-merge row at keys.length + 6 .. + 8, drawn
-  // before the read-only storage row so draw order stays cursor order; offered
-  // in work mode on OpenCode only.
-  const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
-  // the storage row is read-only: it takes no cursor index.
-  const storageRows = selector ? [] : [storageRow(snap, width)];
-  // custom agents are read-only and take no cursor index, like the storage row
-  const customRows = selector ? [] : customAgentRows(snap, width);
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows, customRows };
+  // THE ordered list. Cursor indexes are assigned in this order to the cursorable entries only:
+  // the agent rows, then the settings, then the read-only storage and custom-agent rows.
+  const entries: SystemEntry[] = rows.map((row) => ({ id: row.id, section: 'agents', cursorable: true, row, action: { kind: 'agent', key: row.key! } }));
+  const next = (): number => entries.filter((e) => e.cursorable).length;
+  const setting = (row: SystemRow, action: SystemAction): void => {
+    entries.push({ id: row.id, section: 'settings', cursorable: true, row, action });
+  };
+  const sparring = sparringPartnerRows(snap, ui, width, next());
+  setting(sparring[0], { kind: 'toggle', effect: { type: 'sparring_toggle', enabled: !(snap.sparringPartner?.enabled ?? true) } });
+  setting(sparring[1], { kind: 'edit', uiPatch: { sparringModelEdit: snap.sparringPartner?.model ?? '' } });
+  setting(tddToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'tdd_toggle', enabled: !(snap.tdd?.enabled ?? true) } });
+  // project mode: an invalid value flips to hobby, the default flow — a visible, deliberate write, never a guess
+  setting(modeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'mode_toggle', mode: (snap.mode ?? 'hobby') === 'hobby' ? 'work' : 'hobby' } });
+  // handoff files: an invalid value flips to off, the default
+  setting(handoffToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'handoff_toggle', enabled: (snap.handoff ?? false) === false } });
+  // PR auto-merge: an invalid or unknown value flips to OFF, the side that never merges
+  setting(autoMergeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'auto_merge_toggle', enabled: (snap.autoMergeOnClean ?? true) === false } });
+  // the Overpass rows, offered in work mode on OpenCode only; anything that is not a plain OFF flips to OFF, never to routing
+  if (overpassOffered(snap)) {
+    const [op, provider, bypass] = overpassToggleRows(snap, ui, width, next());
+    const current = overpassView.provider !== null && OVERPASS_PROVIDER_RE.test(overpassView.provider) ? overpassView.provider : '';
+    setting(op, { kind: 'toggle', effect: { type: 'overpass_toggle', enabled: overpassView.enabled === false } });
+    setting(provider, { kind: 'edit', uiPatch: { overpassProviderEdit: current } });
+    setting(bypass, { kind: 'toggle', effect: { type: 'overpass_bypass_toggle', enabled: overpassView.conductorBypass === false } });
+  }
+  // read-only entries: they take no cursor index and no action
+  entries.push({ id: 'sys:storage', section: 'settings', cursorable: false, row: storageRow(snap, width) });
+  for (const row of customAgentRows(snap, width)) entries.push({ id: row.id, section: 'agents', cursorable: false, row });
+  return { entries, banner };
+}
+
+/** The entries that hold a cursor index, in cursor order (the reducer's and the reveal's view of the list). */
+function cursorEntries(snap: AgentRosterSnapshot, ui: UiState): SystemEntry[] {
+  return systemEntries(snap, ui, Infinity).entries.filter((e) => e.cursorable);
+}
+
+/** The cursor index of the entry with this id, or -1: for navigation by id rather than by hand-counted offset. */
+export function systemCursorOf(snapshot: AgentRosterSnapshot, ui: UiState, id: string): number {
+  return cursorEntries(snapshot ?? EMPTY_ROSTER, ui).findIndex((e) => e.id === id);
+}
+
+export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
+  const { entries: all, banner } = systemEntries(snapshot, ui, width);
+  const selector = ui.selector;
+  // While a selector is open the view FOCUSES on the key under edit — the other rows (and their
+  // config values) are hidden so the open picker's offered set is the only model/effort text on screen.
+  const entries = selector ? all.filter((e) => e.action?.kind === 'agent' && e.row.key === selector.key) : all;
+  const byIds = (ids: readonly string[]): SystemRow[] => entries.filter((e) => ids.includes(e.id)).map((e) => e.row);
+  return {
+    entries,
+    banner,
+    rows: entries.filter((e) => e.action?.kind === 'agent').map((e) => e.row),
+    sparringRows: byIds(LEGACY_VIEW_LISTS.sparringRows),
+    tddRows: byIds(LEGACY_VIEW_LISTS.tddRows),
+    modeRows: byIds(LEGACY_VIEW_LISTS.modeRows),
+    handoffRows: byIds(LEGACY_VIEW_LISTS.handoffRows),
+    autoMergeRows: byIds(LEGACY_VIEW_LISTS.autoMergeRows),
+    overpassRows: byIds(LEGACY_VIEW_LISTS.overpassRows),
+    storageRows: byIds(LEGACY_VIEW_LISTS.storageRows),
+    customRows: entries.filter((e) => e.section === 'agents' && e.action === undefined).map((e) => e.row),
+  };
 }
 
 /** Read-only rows for the project's custom agents: name, host folder and the model from the
@@ -1241,8 +1280,8 @@ function catalogBanner(catalog: CatalogStatusView, width: number): string[] {
  * Sparring-partner rows (board a0714d0b, slice 2 — article sparring-partner
  * interactions h/i): two rows appended after the config.models roster —
  * `cursorBase` is the toggle row's cursor index (cursorBase+1 = the model
- * row), so cursor addressing composes with the existing sysKeys.length scheme
- * in reduce() without touching it.
+ * row), so cursor addressing composes with the one ordered entry list
+ * (systemEntries) without touching it.
  *
  * TOGGLE ROW: shows ON/OFF from sparringPartner.enabled. When codexWired is
  * false, ALWAYS appends '(not wired on this machine)' — a machine-capability
@@ -1755,31 +1794,8 @@ function systemDashboardState(
     rows.push({ id: `sysbanner:${screenRow}`, type: 'system-banner', selected: false, expanded: false, lines: [{ text, kind: 'meta' }], screenRow });
     screenRow += 1;
   }
-  for (const sr of view.rows) {
-    const lines: RowLine[] = sr.lines.map((l) => ({
-      text: l.text,
-      kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
-    }));
-    rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
-    screenRow += lines.length;
-  }
-  // sparring-partner rows (board a0714d0b): drawn after the config.models
-  // roster, same row shape — a SEPARATE list from view.rows (phase-4 frozen
-  // contract), never merged into it.
-  for (const sr of view.sparringRows) {
-    const lines: RowLine[] = sr.lines.map((l) => ({
-      text: l.text,
-      kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
-    }));
-    rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
-    screenRow += lines.length;
-  }
-  // tdd toggle row (decision foreign_752caf98): drawn after the sparring-partner
-  // rows, same row shape — a separate list, never merged.
-  // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
-  // after the tdd row, same row shape. The handoff files row follows it, then
-  // the PR auto-merge row.
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows, ...view.customRows]) {
+  // every entry of the one ordered list, in draw order (roster, settings, then the read-only rows)
+  for (const { row: sr } of view.entries) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -2158,8 +2174,10 @@ function reduceNodes(
     // notice/catalog banner rows (view.banner) ahead of them in st.rows, so on
     // the System tab the cursor's row sits `bannerOffset` positions later than
     // its own index. Non-system tabs carry no such leading rows (offset 0).
+    // On the System tab the row under the cursor is found by the id of the cursor's entry.
+    const sysCursorId = ui.tab === SYSTEM_TAB && roster ? cursorEntries(roster, ui)[cursor]?.id : undefined;
     const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === 'system-banner').length : 0;
-    const row = st.rows[cursor + bannerOffset];
+    const row = ui.tab === SYSTEM_TAB ? st.rows.find((r) => r.id === sysCursorId) : st.rows[cursor + bannerOffset];
     if (row) {
       const top = row.screenRow;
       const bottom = row.screenRow + row.lines.length;
@@ -2217,7 +2235,9 @@ function reduceNodes(
    *  model field is being typed do nothing. */
   const clickSystem = (state: DashboardState, index: number, line1: number): { ui: UiState; effects: Effect[] } => {
     const row = state.rows[index]!;
-    if (row.type !== 'system' || row.id === 'sys:storage' || row.id.startsWith('sys:custom:') || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
+    // a read-only row (storage, custom agents) holds no cursor index, so a click on it does nothing
+    const clickable = roster ? cursorEntries(roster, ui) : [];
+    if (row.type !== 'system' || !clickable.some((e) => e.id === row.id) || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
     const enter: UiEvent = { kind: 'key', name: 'ENTER' };
     const sel = ui.selector;
     if (sel) {
@@ -2226,7 +2246,7 @@ function reduceNodes(
       if (row.id !== `sys:${sel.key}` || k < 0 || k >= options) return { ui, effects };
       return reduceNodes(store, { ...ui, selector: { ...sel, highlight: k } }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
     }
-    const cursor = state.rows.filter((r) => r.type === 'system').indexOf(row);
+    const cursor = clickable.findIndex((e) => e.id === row.id);
     return reduceNodes(store, { ...ui, cursor }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
   };
 
@@ -2358,31 +2378,11 @@ function reduceNodes(
       // Handles roster navigation + open/navigate/confirm/commit/cancel; the
       // tab-switch / quit keys fall through to the generic handler below.
       if (ui.tab === SYSTEM_TAB && roster) {
-        // LOW-3 (second Opus re-check round): filtered the SAME way buildSystemTab
-        // filters `keys` — a relic key never occupies a cursor slot here either,
-        // so the two stay in lockstep (a stray key in roster.configModels would
-        // otherwise misalign every row/toggle index below it).
-        const sysKeys = systemKeys(roster);
-        // + 3: the sparring-partner toggle row (index sysKeys.length) and its
-        // model row (sysKeys.length + 1), appended after the config.models
-        // roster (board a0714d0b) — then the tdd toggle row (sysKeys.length + 2),
-        // decision foreign_752caf98 — cursor addressing composes over all three.
-        // The sibling mutation_verification toggle row that used to sit at
-        // sysKeys.length + 3 was REMOVED entirely (decision
-        // cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
-        // 2026-09-22).
-        // + 4 since the project mode row (sysKeys.length + 3, decision
-        // project-mode-hobby-work-toggle-decides-flow) joined after the tdd row.
-        // + 5 since the handoff files row (sysKeys.length + 4, decision
-        // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
-        // joined after the project mode row.
-        // + 6 since the PR auto-merge row (sysKeys.length + 5, decision
-        // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) joined after the
-        // handoff files row.
-        // + 3 more while the Overpass rows are offered (work mode on OpenCode):
-        // they take sysKeys.length + 6 .. + 8, after every existing row.
+        // The cursor addresses the cursorable entries of the one ordered list buildSystemTab draws
+        // (systemEntries), so draw, cursor and clamp cannot drift apart.
+        const sysEntries = cursorEntries(roster, ui);
         const overpassOn = roster !== undefined && overpassOffered(roster);
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 + (overpassOn ? 3 : 0) - 1)));
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysEntries.length - 1)));
         const sel = ui.selector;
         const providerEditing = ui.overpassProviderEdit !== undefined;
         const editing = ui.sparringModelEdit !== undefined || providerEditing;
@@ -2404,8 +2404,9 @@ function reduceNodes(
             if (editing) return { ui, effects }; // navigation keys are no-ops while typing the model field
             if (name === 'UP' || name === 'DOWN') return { ui: revealAt(sysClamp(ui.cursor + (name === 'UP' ? -1 : 1))), effects };
             if (name === 'HOME' || name === 'END') return { ui: revealAt(sysClamp(name === 'HOME' ? 0 : Infinity)), effects };
-            // a page: over the selectable rows (the catalog banner and the read-only storage row hold no cursor)
-            const selectable = buildSelf(ui).rows.filter((r) => r.type === 'system' && r.id !== 'sys:storage');
+            // a page: over the cursorable rows (the catalog banner and the read-only rows hold no cursor)
+            const cursorIds = new Set(sysEntries.map((e) => e.id));
+            const selectable = buildSelf(ui).rows.filter((r) => r.type === 'system' && cursorIds.has(r.id));
             return { ui: revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === 'PAGE_UP' ? -1 : 1, maxBodyLines))), effects };
           }
           case 'ESCAPE':
@@ -2448,57 +2449,13 @@ function reduceNodes(
                 : `Default Codex model cleared — consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
               return { ui: { ...ui, sparringModelEdit: undefined, notice: sparringNotice }, effects };
             }
-            if (cursor === sysKeys.length) {
-              // sparring-partner toggle row: an immediate flip, no picker
-              effects.push({ type: 'sparring_toggle', enabled: !(roster.sparringPartner?.enabled ?? true) });
-              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            const entry = sysEntries[cursor];
+            if (entry?.action && entry.action.kind !== 'agent') {
+              // a setting: an immediate flip (effect) or the opening of a text field (uiPatch), all data from the entry
+              if (entry.action.kind === 'toggle') effects.push(entry.action.effect);
+              return { ui: { ...ui, cursor, notice: undefined, ...(entry.action.kind === 'edit' ? entry.action.uiPatch : {}) }, effects };
             }
-            if (cursor === sysKeys.length + 1) {
-              // sparring-partner model row: open the free-text edit
-              return { ui: { ...ui, cursor, sparringModelEdit: roster.sparringPartner?.model ?? '', notice: undefined }, effects };
-            }
-            if (cursor === sysKeys.length + 2) {
-              // tdd toggle row (decision foreign_752caf98): an immediate flip, no picker
-              effects.push({ type: 'tdd_toggle', enabled: !(roster.tdd?.enabled ?? true) });
-              return { ui: { ...ui, cursor, notice: undefined }, effects };
-            }
-            if (cursor === sysKeys.length + 3) {
-              // project mode row: an immediate flip. An invalid value flips to
-              // hobby, the default flow — a visible, deliberate write, never a guess.
-              effects.push({ type: 'mode_toggle', mode: (roster.mode ?? 'hobby') === 'hobby' ? 'work' : 'hobby' });
-              return { ui: { ...ui, cursor, notice: undefined }, effects };
-            }
-            if (cursor === sysKeys.length + 4) {
-              // handoff files row: an immediate flip. An invalid value flips to
-              // off, the default — a visible, deliberate write, never a guess.
-              effects.push({ type: 'handoff_toggle', enabled: (roster.handoff ?? false) === false });
-              return { ui: { ...ui, cursor, notice: undefined }, effects };
-            }
-            if (cursor === sysKeys.length + 5) {
-              // PR auto-merge row: an immediate flip. An invalid or unknown value
-              // flips to OFF, the side that never merges — a visible, deliberate
-              // write, never a guess.
-              effects.push({ type: 'auto_merge_toggle', enabled: (roster.autoMergeOnClean ?? true) === false });
-              return { ui: { ...ui, cursor, notice: undefined }, effects };
-            }
-            if (overpassOn && cursor >= sysKeys.length + 6) {
-              const view = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
-              if (cursor === sysKeys.length + 6) {
-                // Overpass row: an immediate flip. Anything that is not a plain
-                // OFF (invalid, unknown) flips to OFF, never to routing.
-                effects.push({ type: 'overpass_toggle', enabled: view.enabled === false });
-                return { ui: { ...ui, cursor, notice: undefined }, effects };
-              }
-              if (cursor === sysKeys.length + 7) {
-                // provider row: open the text edit, prefilled with a valid current id
-                const current = view.provider !== null && OVERPASS_PROVIDER_RE.test(view.provider) ? view.provider : '';
-                return { ui: { ...ui, cursor, overpassProviderEdit: current, notice: undefined }, effects };
-              }
-              // conductor bypass row: an immediate flip; invalid or unknown flips to OFF (the default)
-              effects.push({ type: 'overpass_bypass_toggle', enabled: view.conductorBypass === false });
-              return { ui: { ...ui, cursor, notice: undefined }, effects };
-            }
-            const key = sysKeys[cursor];
+            const key = entry?.action?.kind === 'agent' ? entry.action.key : undefined;
             if (!key) return { ui, effects };
             // While Overpass is effective an agent role runs on its tier, so the
             // saved Claude model and OpenCode override are not editable: a model
