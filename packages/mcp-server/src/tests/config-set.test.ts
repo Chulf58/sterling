@@ -1376,3 +1376,60 @@ test('CS-30: maintenance_worker.opencode_model (read by the OpenCode maintenance
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// agy_model (GitHub #310, review round): agy accepts only inherit, flash_lite, flash and pro. Loading strips a
+// stale exact id from a v0.19.155 config, so a bad value must be caught at WRITE time, in every write shape.
+// ---------------------------------------------------------------------------
+const AGY_SEED_MODELS = {
+  implementor: { model: 'claude-sonnet-5-5', effort: 'medium' },
+  sparring: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' },
+};
+const agySeed = (): string => JSON.stringify({ ...seedDoc(), models: AGY_SEED_MODELS }, null, 2);
+
+test('CS-agy: a leaf write of models.<role>.agy_model refuses a bad value and lands a good one', () => {
+  const h = harness(agySeed());
+  try {
+    const call = handler(h.tools);
+    for (const bad of ['claude-opus-5-5-high', 'bogus', 42]) {
+      const before = h.read();
+      assert.match(refusalMessage(call, { path: 'models.implementor.agy_model', value: bad }), /agy_model: must be one of inherit, flash_lite, flash, pro/);
+      assert.equal(h.read(), before, 'nothing written');
+    }
+    call({ path: 'models.implementor.agy_model', value: 'flash' });
+    assert.equal(JSON.parse(h.read()).models.implementor.agy_model, 'flash');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('CS-agy: a role-object write and a whole models write refuse a bad agy_model and land a good one', () => {
+  const h = harness(agySeed());
+  try {
+    const call = handler(h.tools);
+    const entry = (agy: unknown) => ({ model: 'claude-sonnet-5-5', effort: 'medium', agy_model: agy });
+    assert.match(refusalMessage(call, { path: 'models.implementor', value: entry('gemini-4-hydrogen-high') }), /models\.implementor\.agy_model: must be one of/);
+    assert.match(refusalMessage(call, { path: 'models', value: { ...AGY_SEED_MODELS, implementor: entry('bogus') } }), /models\.implementor\.agy_model: must be one of/);
+    call({ path: 'models.implementor', value: entry('pro') });
+    assert.equal(JSON.parse(h.read()).models.implementor.agy_model, 'pro');
+    call({ path: 'models', value: { ...AGY_SEED_MODELS, implementor: entry('flash_lite') } });
+    assert.equal(JSON.parse(h.read()).models.implementor.agy_model, 'flash_lite');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('CS-agy: a stale value already on disk is tolerated when unchanged: an unrelated write succeeds, and so does a whole models write that keeps it', () => {
+  const h = harness(agySeed());
+  try {
+    const call = handler(h.tools);
+    call({ path: 'tdd.enabled', value: false });
+    assert.equal(JSON.parse(h.read()).models.sparring.agy_model, 'claude-opus-5-5-high', 'the stale value is left as it was');
+    call({ path: 'models', value: { ...AGY_SEED_MODELS, implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } });
+    assert.equal(JSON.parse(h.read()).models.implementor.effort, 'high');
+    // changing the stale value to another bad one is a new bad value
+    assert.match(refusalMessage(call, { path: 'models.sparring.agy_model', value: 'claude-opus-5-5-low' }), /must be one of/);
+  } finally {
+    h.cleanup();
+  }
+});

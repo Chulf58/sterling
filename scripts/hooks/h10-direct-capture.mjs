@@ -33,7 +33,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { readStdin, deny, allow, exitAfterWrite, openStore, storeBackend, namedError, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
+import { readStdin, deny, allow, exitAfterWrite, openStore, storeBackend, namedError, loadConfig, warnNonBlocking, gitIgnored, withRetry, agyBlockReason } from './lib/common.mjs';
 import { onBrokerFailure } from './lib/broker-client.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, formatAge, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
@@ -587,6 +587,9 @@ try {
     } catch {
       // nothing is spent — the next Stop repeats the same text, louder, never silent
     }
+    // writeSync(2) bypasses the agy adapter's stderr capture, so hand it the same text: without
+    // this agy shows 'blocked without giving a reason' (GitHub #311)
+    agyBlockReason(text);
     if (delivered) {
       for (const spend of spends) {
         try {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, normalizeRawConfig, migrateRetiredModelKeys, moveImplementorHardTask, IMPLEMENTOR_HARD_MIGRATION_ID, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
+import { parseConfig, normalizeRawConfig, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, IMPLEMENTOR_HARD_MIGRATION_ID, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
@@ -821,11 +821,29 @@ test('issue_mirror (mirror ceiling): permissive and WITHOUT a default, so an abs
   assert.deepEqual(unreadConfigKeys({ issue_mirror: { ceiling: 1500 } }), [], 'issue_mirror is a key the schema reads');
 });
 
-test('models.<role>.agy_model: accepts a listed agy id, refuses an unlisted one, absent by default (issue #306)', () => {
-  const set = parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gemini-4-hydrogen-xhigh' } } });
-  assert.equal(set.models.implementor.agy_model, 'gemini-4-hydrogen-xhigh');
-  assert.equal(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' } } }).models.implementor.agy_model, 'claude-opus-5-5-high');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gemini-9-made-up' } } }));
+// Changed 2026-11-18 (GitHub #310, user ruling "Accept agy's 4 values"): agy 1.5.11 drops a subagent whose model:
+// is not inherit, flash_lite, flash or pro, so those four replace the 22 exact ids of #306. A config written
+// by v0.19.155 may still hold an exact id; it must load (ignored, rendered as inherit), never throw.
+test('models.<role>.agy_model: only agy\'s four values; the schema refuses any other; absent by default', () => {
+  for (const v of ['inherit', 'flash_lite', 'flash', 'pro']) {
+    assert.equal(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: v } } }).models.implementor.agy_model, v);
+  }
+  assert.throws(() => configSchema.parse({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' } } }));
   assert.equal(parseConfig({}).models.implementor.agy_model, undefined, 'absent by default');
+  assert.equal(parseConfig({}).models.sparring.agy_model, undefined, 'the sparring default no longer pins an agy model');
   assert.equal(parseConfig({}).models.reviewer.opencode_model, 'openai/gpt-6.1-sol', 'the opencode defaults are untouched');
+});
+
+test('an old exact agy_model id from v0.19.155 loads: parseConfig ignores it, and migrateStaleAgyModels reports it', () => {
+  const raw = { models: { sparring: { model: 'claude-opus-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' }, scout: { model: 'claude-sonnet-5-5', effort: 'low', agy_model: 'pro' } } };
+  const parsed = parseConfig(raw);
+  assert.equal(parsed.models.sparring.agy_model, undefined);
+  assert.equal(parsed.models.scout.agy_model, 'pro', 'a valid value is kept');
+  const m = migrateStaleAgyModels(raw);
+  assert.equal(m.changed, true);
+  assert.deepEqual(m.dropped, [{ role: 'sparring', value: 'claude-opus-5-5-high' }]);
+  assert.equal((m.config as typeof raw).models.sparring.hasOwnProperty('agy_model'), false);
+  const clean = migrateStaleAgyModels({ models: { scout: { model: 'm', effort: 'low', agy_model: 'flash' } } });
+  assert.equal(clean.changed, false);
+  assert.deepEqual(clean.dropped, []);
 });

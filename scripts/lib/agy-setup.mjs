@@ -35,6 +35,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { AGY_MODEL_IDS } from '@sterling/schemas';
 import { renderAgyText } from './agent-fences.mjs';
 import { findDeadTerms } from './agent-distribution.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -185,7 +186,7 @@ export function renderAgyAgent(templateContent, label, name, { root, nodePath = 
     '---',
     `name: ${name}`,
     `description: ${yamlString(description)}`,
-    `model: ${agyModel ?? 'inherit'}`,
+    `model: ${AGY_MODEL_IDS.includes(agyModel) ? agyModel : 'inherit'}`,
     `mainAgent: ${conductor}`,
     `subagent: ${!conductor}`,
     'tools:',
@@ -282,23 +283,30 @@ export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePat
 }
 
 /**
- * config.models.<role>.agy_model for each role that sets one: { <role>: <agy model id> }.
- * The config schema (AGY_MODEL_IDS) refuses an unlisted id when the config is written, so
- * here a value that is not a plain model id throws (P5) rather than reaching a frontmatter line.
+ * config.models.<role>.agy_model for each role that sets one: { pins: { <role>: <value> }, ignored:
+ * [{ role, value }] }. agy 1.5.11 drops a subagent whose `model:` is not one of AGY_MODEL_IDS
+ * (GitHub #310), so a value outside them (an exact id a v0.19.155 config may hold) is never
+ * written: it is reported in `ignored`, and the role renders `model: inherit`.
  */
-export function agyModelsOf(projectDir) {
+export function readAgyModels(projectDir) {
+  const pins = {};
+  const ignored = [];
   const configPath = join(storeRootFor(projectDir), '.sterling', 'config.json');
-  if (!existsSync(configPath)) return {};
+  if (!existsSync(configPath)) return { pins, ignored };
   const models = JSON.parse(readFileSync(configPath, 'utf8')).models;
-  const out = {};
-  if (models === null || typeof models !== 'object') return out;
+  if (models === null || typeof models !== 'object') return { pins, ignored };
   for (const [role, entry] of Object.entries(models)) {
-    const id = entry?.agy_model;
-    if (id === undefined) continue;
-    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
-    out[role] = id;
+    const value = entry?.agy_model;
+    if (value === undefined) continue;
+    if (AGY_MODEL_IDS.includes(value)) pins[role] = value;
+    else ignored.push({ role, value });
   }
-  return out;
+  return { pins, ignored };
+}
+
+/** The roles that pin a valid agy model: { <role>: <value> }. */
+export function agyModelsOf(projectDir) {
+  return readAgyModels(projectDir).pins;
 }
 
 /** The project name GEMINI.md's heading carries: config.project_name, else the folder name. */
@@ -463,7 +471,11 @@ export function setupAgy({ projectDir, pluginRoot, env = process.env, home = hom
   // block do not depend on the server and still run.
   const server = probeServer({ root, env });
   if (server.readOnly) {
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: agyModelsOf(projectDir) }));
+    const { pins, ignored } = readAgyModels(projectDir);
+    for (const { role, value } of ignored) {
+      rows.push({ item: `models.${role}.agy_model`, status: 'ignored', detail: `${JSON.stringify(value)} is not one of ${AGY_MODEL_IDS.join(', ')}, which agy accepts; the ${role} agent renders model: inherit (run /sterling:update to drop the stale value)` });
+    }
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: pins }));
   } else {
     const remedy = resolve(root) !== resolve(pluginRoot)
       ? `install this Sterling into agy (agy plugin install ${fwd(resolve(pluginRoot))}), then rerun /sterling:update`

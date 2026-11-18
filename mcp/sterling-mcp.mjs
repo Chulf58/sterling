@@ -18987,30 +18987,7 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
-var AGY_MODEL_IDS = [
-  "claude-opus-5-5-low",
-  "claude-opus-5-5-medium",
-  "claude-opus-5-5-high",
-  "claude-sonnet-5-5-low",
-  "claude-sonnet-5-5-medium",
-  "claude-sonnet-5-5-high",
-  "gemini-3.8-flash-low",
-  "gemini-3.8-flash-medium",
-  "gemini-3.8-flash-high",
-  "gemini-4-argon-low",
-  "gemini-4-argon-medium",
-  "gemini-4-argon-high",
-  "gemini-4-carbon-low",
-  "gemini-4-carbon-medium",
-  "gemini-4-carbon-high",
-  "gemini-4-hydrogen-low",
-  "gemini-4-hydrogen-medium",
-  "gemini-4-hydrogen-high",
-  "gemini-4-hydrogen-xhigh",
-  "gemini-pro-orchestrator",
-  "gemini-pro-orchestrator-argon",
-  "gpt-oss-120b-medium"
-];
+var AGY_MODEL_IDS = ["inherit", "flash_lite", "flash", "pro"];
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
@@ -19222,7 +19199,7 @@ var configSchema = external_exports.object({
     // read-only grant as the reviewer, so the same install-time default. Every
     // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra", agy_model: "claude-opus-5-5-high" }),
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
     // preflight is the sterling/preflight agent (decision
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
@@ -19589,7 +19566,24 @@ function normalizeRawConfig(raw) {
   if (isPlainObject2(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
   }
+  out = migrateStaleAgyModels(out).config;
   return out;
+}
+function migrateStaleAgyModels(raw) {
+  if (!isPlainObject2(raw) || !isPlainObject2(raw.models))
+    return { config: raw, changed: false, dropped: [] };
+  const dropped = [];
+  const models = {};
+  for (const [role, entry] of Object.entries(raw.models)) {
+    if (isPlainObject2(entry) && Object.prototype.hasOwnProperty.call(entry, "agy_model") && !AGY_MODEL_IDS.includes(entry.agy_model)) {
+      const { agy_model, ...rest } = entry;
+      dropped.push({ role, value: agy_model });
+      models[role] = rest;
+    } else {
+      models[role] = entry;
+    }
+  }
+  return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
@@ -33233,6 +33227,11 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
         throw new Error(`config_set: '${path}' walks into '${walked}', which exists and is ${Array.isArray(existing) ? "an array" : `a ${typeof existing}`}, not an object \u2014 refusing to replace it. Set '${walked}' itself if that is what you intend. Nothing was written.`);
       }
     }
+  }
+  const staleBefore = new Set(migrateStaleAgyModels(raw).dropped.map((d) => `${d.role}\0${JSON.stringify(d.value)}`));
+  const introduced = migrateStaleAgyModels(mutated).dropped.find((d) => !staleBefore.has(`${d.role}\0${JSON.stringify(d.value)}`));
+  if (introduced) {
+    throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 models.${introduced.role}.agy_model: must be one of ${AGY_MODEL_IDS.join(", ")} (agy drops a subagent with any other model), got ${JSON.stringify(introduced.value)}. Nothing was written.`);
   }
   const validation = configSchema.safeParse(normalizeRawConfig(mutated));
   if (!validation.success) {

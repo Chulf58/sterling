@@ -21,6 +21,7 @@ import {
   GEMINI_MD_MAX_BYTES,
   agyMcpRoot,
   agyModelsOf,
+  readAgyModels,
   ensureAgyExcluded,
   ensureGeminiMd,
   geminiRootAlias,
@@ -579,37 +580,61 @@ test('probeMcpServer: a server that ignores SIGTERM and never answers is killed 
 
 test('renderAgyAgent writes the pinned agy model, and model: inherit when none is set', () => {
   const tpl = readFileSync(join(repo, 'agent-templates', 'implementor.md'), 'utf8');
-  const pinned = renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE, agyModel: 'claude-opus-5-5-high' });
-  assert.match(pinned, /^model: claude-opus-5-5-high$/m);
+  const pinned = renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE, agyModel: 'pro' });
+  assert.match(pinned, /^model: pro$/m);
   assert.doesNotMatch(pinned, /^model: inherit$/m);
   const unset = renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE });
   assert.match(unset, /^model: inherit$/m);
 });
 
-test('agyModelsOf reads config.models.<role>.agy_model and ignores roles without one; a malformed id throws', () => {
+test('agyModelsOf reads config.models.<role>.agy_model and ignores roles without one; a value outside agy\'s four is ignored, never thrown', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-models-'));
   try {
     assert.deepEqual(agyModelsOf(dir), {}, 'no config: nothing pinned');
     mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { implementor: { model: 'm', effort: 'high', agy_model: 'gpt-oss-120b-medium' }, scout: { model: 'm', effort: 'low' } } }));
-    assert.deepEqual(agyModelsOf(dir), { implementor: 'gpt-oss-120b-medium' });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { scout: { agy_model: 'bad\nid' } } }));
-    assert.throws(() => agyModelsOf(dir), /not an agy model id/);
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { implementor: { model: 'm', effort: 'high', agy_model: 'flash' }, scout: { model: 'm', effort: 'low' } } }));
+    assert.deepEqual(agyModelsOf(dir), { implementor: 'flash' });
+    // Changed 2026-11-18 (GitHub #310): this used to throw on a malformed id. A v0.19.155 config may hold an exact id,
+    // and loading must not fail, so the value is reported in `ignored` and the role renders inherit.
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { scout: { agy_model: 'claude-opus-5-5-high' }, implementor: { agy_model: 'pro' } } }));
+    assert.deepEqual(readAgyModels(dir), { pins: { implementor: 'pro' }, ignored: [{ role: 'scout', value: 'claude-opus-5-5-high' }] });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('the shipped default config pins only the sparring agy agent to Opus 5.5 (cross-vendor with the Gemini conductor); every other role stays model: inherit (issue #309)', () => {
+test('each of agy\'s four model values renders verbatim, and an unlisted value renders inherit', () => {
+  const tpl = readFileSync(join(repo, 'agent-templates', 'implementor.md'), 'utf8');
+  for (const v of ['inherit', 'flash_lite', 'flash', 'pro']) {
+    assert.match(renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE, agyModel: v }), new RegExp(`^model: ${v}$`, 'm'));
+  }
+  assert.match(renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE, agyModel: 'claude-opus-5-5-high' }), /^model: inherit$/m);
+});
+
+test('setupAgy with a stale exact agy_model in config writes model: inherit and names the role and the ignored value', () => {
+  const dir = gitProject();
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { sparring: { model: 'claude-opus-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' } } }));
+  const r = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false, nodePath: NODE });
+  const row = r.rows.find((x) => x.item === 'models.sparring.agy_model');
+  assert.ok(row, JSON.stringify(r.rows));
+  assert.equal(row.status, 'ignored');
+  assert.match(row.detail, /"claude-opus-5-5-high" is not one of inherit, flash_lite, flash, pro/);
+  assert.match(readFileSync(join(dir, '.agents', 'agents', 'sparring', 'agent.md'), 'utf8'), /^model: inherit$/m);
+});
+
+// Changed 2026-11-18 (GitHub #310, user ruling "Accept agy's 4 values"): #309 pinned the shipped sparring agy agent to
+// claude-opus-5-5-high, but agy 1.5.11 drops a subagent with a model outside its four values, so the shipped
+// default pins nothing and every agy agent renders model: inherit.
+test('the shipped default config pins no agy model: every agy agent renders model: inherit (issue #310)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-default-pin-'));
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'config.json'), readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
-    const pins = agyModelsOf(dir);
-    assert.deepEqual(pins, { sparring: 'claude-opus-5-5-high' });
+    assert.deepEqual(agyModelsOf(dir), {});
     for (const name of AGY_ROSTER) {
-      const text = renderAgyAgent(readFileSync(join(repo, 'agent-templates', `${name}.md`), 'utf8'), 't', name, { root: repo, nodePath: NODE, agyModel: pins[name] });
-      assert.match(text, name === 'sparring' ? /^model: claude-opus-5-5-high$/m : /^model: inherit$/m, name);
+      const text = renderAgyAgent(readFileSync(join(repo, 'agent-templates', `${name}.md`), 'utf8'), 't', name, { root: repo, nodePath: NODE });
+      assert.match(text, /^model: inherit$/m, name);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

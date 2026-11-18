@@ -422,3 +422,34 @@ test('version parity: package.json and both plugin manifests agree, and a diverg
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── H10's Stop reason reaches the agy envelope (GitHub #311) ────────────────
+test('a hook that writes its block reason with writeSync(2) still shows it in the agy Stop envelope once it calls agyBlockReason', () => {
+  const dir = project();
+  try {
+    const body = (extra) => `import { writeSync } from 'node:fs';\nimport { agyBlockReason } from ${JSON.stringify(COMMON)};\nwriteSync(2, 'H10 demand text\\n');\n${extra}process.exit(2);\n`;
+    const withHelper = harness(dir, body("agyBlockReason('H10 demand text\\n');\n"));
+    const r = run(withHelper, agy('Stop', dir), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { decision: 'continue', reason: 'H10 demand text' });
+    // a second project: the first Stop already used this conversation's one continue
+    const dir2 = project();
+    const without = harness(dir2, body(''));
+    const bare = run(without, agy('Stop', dir2), dir2);
+    rmSync(dir2, { recursive: true, force: true });
+    assert.match(JSON.parse(bare.stdout).reason, /blocked this without giving a reason/, 'writeSync alone is not captured: the defect');
+    // outside agy the helper does nothing and the Claude Code exit-2 path is unchanged
+    const cc = run(withHelper, { hook_event_name: 'Stop', cwd: dir }, dir);
+    assert.equal(cc.code, 2);
+    assert.equal(cc.stdout, '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H10 hands its Stop reason to the agy adapter in writeThenSpend, next to the writeSync delivery check', () => {
+  const src = readFileSync(join(HOOKS, 'h10-direct-capture.mjs'), 'utf8');
+  const fn = src.slice(src.indexOf('const writeThenSpend'), src.indexOf('const releaseWithPressure'));
+  assert.match(fn, /writeSync\(2, buf/, 'the delivery check keeps its synchronous write');
+  assert.match(fn, /agyBlockReason\(text\)/);
+});
