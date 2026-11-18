@@ -317,7 +317,7 @@ export const configSchema = z.object({
       // read-only grant as the reviewer, so the same install-time default. Every
       // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
       // role tier decides.
-      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }),
+      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' }),
       // preflight is the sterling/preflight agent (decision
       // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
       // lookup, so a cheap model at low effort like the scout.

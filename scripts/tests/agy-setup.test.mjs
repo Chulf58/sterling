@@ -599,3 +599,19 @@ test('agyModelsOf reads config.models.<role>.agy_model and ignores roles without
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('the shipped default config pins only the sparring agy agent to Opus 5.5 (cross-vendor with the Gemini conductor); every other role stays model: inherit (issue #309)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-default-pin-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
+    const pins = agyModelsOf(dir);
+    assert.deepEqual(pins, { sparring: 'claude-opus-5-5-high' });
+    for (const name of AGY_ROSTER) {
+      const text = renderAgyAgent(readFileSync(join(repo, 'agent-templates', `${name}.md`), 'utf8'), 't', name, { root: repo, nodePath: NODE, agyModel: pins[name] });
+      assert.match(text, name === 'sparring' ? /^model: claude-opus-5-5-high$/m : /^model: inherit$/m, name);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
