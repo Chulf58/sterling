@@ -24,7 +24,7 @@
 //    per-user; a GEMINI.md that git tracks, or one Sterling did not write, is not listed.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { renderAgyText } from './agent-fences.mjs';
@@ -260,18 +260,52 @@ export function renderGeminiMd({ pluginRoot, root, projectName }) {
   const dead = findDeadTerms(text);
   if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(', ')} (P5)`);
   const bytes = Buffer.byteLength(text, 'utf8');
-  if (bytes > GEMINI_MD_MAX_BYTES) throw new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`);
+  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
   return text;
 }
 
+/** The short stable path GEMINI.md uses for a Sterling root too long to fit agy's cap: a per-user link to the root. */
+export function geminiRootAlias(home) {
+  return join(home, '.gemini', 'sterling-root');
+}
+
+/** Point the alias at root (replacing a stale link). Throws (P5) when something that is not a link sits there. */
+function ensureRootAlias(alias, root) {
+  let st = null;
+  try { st = lstatSync(alias); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  if (st) {
+    if (!st.isSymbolicLink()) throw new Error(`${fwd(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
+    if (resolve(dirname(alias), readlinkSync(alias)) === resolve(root)) return;
+    unlinkSync(alias);
+  }
+  mkdirSync(dirname(alias), { recursive: true });
+  symlinkSync(root, alias, 'junction');
+}
+
 /** GEMINI.md, written only when absent (the CLAUDE.md rule). Row status: created | matches | differs | refused. */
-export function ensureGeminiMd({ projectDir, pluginRoot, root }) {
+export function ensureGeminiMd({ projectDir, pluginRoot, root, home = homedir() }) {
   const path = join(projectDir, GEMINI_MD);
+  const projectName = projectNameOf(projectDir);
   let want;
+  let aliased = false;
   try {
-    want = renderGeminiMd({ pluginRoot, root, projectName: projectNameOf(projectDir) });
+    try {
+      want = renderGeminiMd({ pluginRoot, root, projectName });
+    } catch (err) {
+      if (!err.overCap) throw err;
+      // agy cuts GEMINI.md past its cap and the root is filled in 13 times: a long root goes through a short per-user link.
+      want = renderGeminiMd({ pluginRoot, root: geminiRootAlias(home), projectName });
+      aliased = true;
+    }
   } catch (err) {
     return refusal(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, 'fix the cause named, then rerun /sterling:update');
+  }
+  if (aliased && !existsSync(path) || aliased && normalize(readFileSync(path, 'utf8')) === want) {
+    try {
+      ensureRootAlias(geminiRootAlias(home), root);
+    } catch (err) {
+      return refusal(GEMINI_MD, `${GEMINI_MD} needs the short root link ${fwd(geminiRootAlias(home))} because the Sterling root is too long: ${err.message}`, 'fix the cause named, then rerun /sterling:update');
+    }
   }
   if (!existsSync(path)) {
     writeFileAtomic(path, want);
@@ -332,7 +366,7 @@ export function setupAgy({ projectDir, pluginRoot, env = process.env, home = hom
   rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath }));
   const gemini = tracked.includes(GEMINI_MD)
     ? { item: GEMINI_MD, status: 'matches', detail: 'tracked by git — the project keeps its own; left untouched' }
-    : ensureGeminiMd({ projectDir, pluginRoot, root });
+    : ensureGeminiMd({ projectDir, pluginRoot, root, home });
   rows.push(gemini);
   const geminiRule = tracked.includes(GEMINI_MD) ? 'no' : ['created', 'matches'].includes(gemini.status) ? 'exclude' : 'keep';
   rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));

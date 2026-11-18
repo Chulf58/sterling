@@ -18,6 +18,8 @@ import {
   GEMINI_MD_MAX_BYTES,
   agyMcpRoot,
   ensureAgyExcluded,
+  ensureGeminiMd,
+  geminiRootAlias,
   formatAgyRows,
   probeAgy,
   renderAgyAgent,
@@ -115,8 +117,7 @@ test('GEMINI.md: the agy render under 24,000 bytes, no @AGENTS.md import, writte
   const text = renderGeminiMd({ pluginRoot: repo, root: repo, projectName: 'demo' });
   assert.ok(Buffer.byteLength(text) <= GEMINI_MD_MAX_BYTES, `${Buffer.byteLength(text)} bytes with the root ${repo}`);
   assert.ok(text.includes(`node "${repo}/bin/rotation-note.mjs"`), 'the real root is filled in');
-  // A root of about 200 characters does not fit today (measured 2026-11-18: 24,121 bytes).
-  // It must refuse loudly with the byte count, never write a GEMINI.md agy would cut.
+  // A root of about 200 characters does not fit (measured 2026-11-18: 24,121 bytes), so the render refuses with the byte count.
   const longRoot = `/home/${'u'.repeat(194)}`;
   assert.equal(longRoot.length, 200);
   assert.throws(() => renderGeminiMd({ pluginRoot: repo, root: longRoot, projectName: 'demo' }), /is \d+ bytes, over agy's 24000-byte cap/);
@@ -133,6 +134,32 @@ test('GEMINI.md: the agy render under 24,000 bytes, no @AGENTS.md import, writte
   writeFileSync(join(dir, 'GEMINI.md'), 'my own\n');
   assert.equal(rowOf(setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false })).status, 'differs');
   assert.equal(readFileSync(join(dir, 'GEMINI.md'), 'utf8'), 'my own\n');
+});
+
+test('GEMINI.md: a Sterling root over 180 characters goes through a short per-user link, and a blocked link refuses loudly', () => {
+  const home = tmp('sterling-agy-home-');
+  const longRoot = join(tmp('sterling-agy-long-'), 'a'.repeat(100), 'b'.repeat(100));
+  copyAt(longRoot, '1.0.0');
+  const dir = gitProject();
+  const run = () => ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: longRoot, home });
+  assert.ok(longRoot.length > 200);
+  const alias = geminiRootAlias(home);
+  assert.equal(run().status, 'created');
+  const text = readFileSync(join(dir, 'GEMINI.md'), 'utf8');
+  assert.ok(Buffer.byteLength(text) <= GEMINI_MD_MAX_BYTES);
+  assert.ok(text.includes(`node "${alias}/bin/rotation-note.mjs"`), 'the short link stands in for the root');
+  assert.ok(!text.includes(longRoot));
+  assert.equal(readFileSync(join(alias, 'mcp', 'sterling-mcp.mjs'), 'utf8'), '', 'the link reaches the real root');
+  assert.equal(run().status, 'matches');
+  const moved = join(tmp('sterling-agy-long2-'), 'c'.repeat(200));
+  copyAt(moved, '2.0.0');
+  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: moved, home }).status, 'matches');
+  assert.ok(existsSync(join(alias, '.claude-plugin', 'plugin.json')) && JSON.parse(readFileSync(join(alias, 'package.json'), 'utf8')).version === '2.0.0', 'the link follows the new root');
+  const blocked = tmp('sterling-agy-blocked-');
+  mkdirSync(join(blocked, '.gemini', 'sterling-root'), { recursive: true });
+  const row = ensureGeminiMd({ projectDir: gitProject(), pluginRoot: repo, root: longRoot, home: blocked });
+  assert.equal(row.status, 'refused');
+  assert.match(row.detail, /is not a link Sterling made/);
 });
 
 test('exclude block: every agy agent dir plus GEMINI.md; a Sterling GEMINI.md that later differs stays listed; a tracked one never is', () => {
