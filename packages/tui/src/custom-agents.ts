@@ -40,7 +40,7 @@ const OPENCODE_STERLING_DIR = ['.opencode', 'agents', 'sterling'];
 const AGY_DIR = AGY_AGENTS_DIR.split('/');
 
 const STERLING_ROLES = new Set<string>([...Object.keys(AGENT_MODEL_KEY), ...AGY_ROSTER]);
-const STERLING_STAMP_RE = /<!--\s*sterling-(?:full|agy|generated)\b/;
+const STERLING_STAMP_RE = /<!--\s*sterling-(?:full|agy|generated|custom)\b/;
 
 /** The governed agent names (AGENT_MODEL_KEY) installed at Sterling's managed location in each
  *  host: .claude/agents/<name>.md, .opencode/agents/sterling/<name>.md, and
