@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, symlinkSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -624,6 +624,46 @@ test('controller: an agy render that refuses a sibling agent puts the already re
     assert.ok(readFileSync(a.agent('implementor')).equals(implementorBefore), 'the implementor agent file is back to its old bytes');
     assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is back to its old bytes');
     assert.match(ctl.ui().notice ?? '', /not changed — .*edited after Sterling wrote it.*config\.json and the agy agent files are as they were/);
+  } finally {
+    ctl.close();
+    a.cleanup();
+  }
+});
+
+// Review re-check (issue #306): the agy agent-file snapshot is taken and validated before anything is written.
+test('controller: an agy agent path that is a directory refuses the change before config.json is written; setup never runs', async () => {
+  const a = await agyFixture();
+  let setupCalls = 0;
+  const ctl = openDashboard(a.f.storePath, { agySetup: (args) => { setupCalls += 1; return a.agySetup(args); } });
+  try {
+    mkdirSync(a.agent('implementor'), { recursive: true }); // agent.md is a directory
+    const configBefore = readFileSync(a.f.configPath);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is unchanged');
+    assert.equal(setupCalls, 0, 'setup did not run');
+    assert.match(ctl.ui().notice ?? '', /not changed — cannot snapshot the agy agent files: .*implementor.*not a regular file/);
+  } finally {
+    ctl.close();
+    a.cleanup();
+  }
+});
+
+test('controller: a symlinked agy agent path is refused before any write, and the link is left a link', async () => {
+  const a = await agyFixture();
+  let setupCalls = 0;
+  const ctl = openDashboard(a.f.storePath, { agySetup: (args) => { setupCalls += 1; return a.agySetup(args); } });
+  try {
+    mkdirSync(join(a.f.dir, '.agents', 'agents', 'scout'), { recursive: true });
+    const target = join(a.f.dir, 'elsewhere.md');
+    writeFileSync(target, 'target bytes\n');
+    symlinkSync(target, a.agent('scout'));
+    const configBefore = readFileSync(a.f.configPath);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is unchanged');
+    assert.equal(setupCalls, 0, 'setup did not run');
+    assert.equal(lstatSync(a.agent('scout')).isSymbolicLink(), true, 'the link is still a link');
+    assert.equal(readFileSync(target, 'utf8'), 'target bytes\n');
+    assert.match(ctl.ui().notice ?? '', /not changed — cannot snapshot the agy agent files: .*scout.*is a symlink/);
   } finally {
     ctl.close();
     a.cleanup();

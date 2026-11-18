@@ -3,7 +3,7 @@
 // (main.ts) and the OpenCode plugin (packages/opencode-plugin/src/tui.tsx)
 // both drive it, so a board edit or a config toggle runs the same code in
 // either host. Nothing here touches a terminal.
-import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, lstatSync, chmodSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -23,6 +23,7 @@ import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
 import { discoverCustomAgents, installedGovernedAgents } from './custom-agents.js';
+import { writeFileAtomic } from '../../../scripts/lib/atomic-write.mjs';
 import { AGY_AGENTS_DIR, AGY_ROSTER, probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
@@ -860,23 +861,44 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       fail((err as Error).message);
       return;
     }
+    // setupAgy writes the agent files one by one and reports a refused one as a row, so a refusal
+    // leaves the files before it rewritten: snapshot every file the render may touch BEFORE anything is
+    // written, and put them back with config.json when the render does not converge. A path that is not
+    // a plain file (a symlink, a directory) or cannot be read refuses the change up front, so nothing
+    // is written and restoring never replaces a link with a regular file.
+    const agentsBefore: Array<{ path: string; bytes: Buffer | null; mode: number }> = [];
+    try {
+      for (const name of AGY_ROSTER) {
+        const path = join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md');
+        let st: ReturnType<typeof lstatSync> | undefined;
+        try {
+          st = lstatSync(path);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        if (st === undefined) agentsBefore.push({ path, bytes: null, mode: 0o644 });
+        else if (st.isSymbolicLink()) throw new Error(`${path} is a symlink, and the agy render would replace it with a plain file`);
+        else if (!st.isFile()) throw new Error(`${path} is not a regular file`);
+        else agentsBefore.push({ path, bytes: readFileSync(path), mode: Number(st.mode) & 0o777 });
+      }
+    } catch (err) {
+      fail(`cannot snapshot the agy agent files: ${(err as Error).message}`);
+      return;
+    }
+    const restoreAgents = (): void => {
+      for (const { path, bytes, mode } of agentsBefore) {
+        if (bytes === null) rmSync(path, { force: true });
+        else if (!existsSync(path) || !readFileSync(path).equals(bytes)) {
+          writeFileAtomic(path, bytes as unknown as string, { writeFile: (tmp: string, content: unknown) => { writeFileSync(tmp, content as Buffer, { mode }); chmodSync(tmp, mode); } });
+        }
+      }
+    };
     try {
       replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
     } catch (err) {
       fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
       return;
     }
-    // setupAgy writes the agent files one by one and reports a refused one as a row, so a refusal
-    // leaves the files before it rewritten: snapshot every file the render may touch first, and put
-    // them back with config.json when the render does not converge
-    const agentPaths = AGY_ROSTER.map((name) => join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md'));
-    const agentsBefore = agentPaths.map((path) => ({ path, bytes: existsSync(path) ? readFileSync(path) : null }));
-    const restoreAgents = (): void => {
-      for (const { path, bytes } of agentsBefore) {
-        if (bytes === null) rmSync(path, { force: true });
-        else if (!existsSync(path) || !readFileSync(path).equals(bytes)) writeFileSync(path, bytes);
-      }
-    };
     let outcome: string;
     try {
       const r = (options.agySetup ?? setupAgy)({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() }) as { skipped?: string; rows?: Array<{ refused?: boolean; detail?: string }> };
