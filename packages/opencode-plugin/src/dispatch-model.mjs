@@ -24,7 +24,7 @@
 // execute.before, as a bad OVERPASS-BYPASS line is), because the conductor's own line is
 // cheap to fix. A config.models value that fails validation never refuses and never drops
 // the dispatch: the call keeps its own model and carries a loud line plus a notice.
-import { CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, configSchema, judgeProjectMode } from '@sterling/schemas';
+import { CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, configSchema, judgeProjectMode, migrateStaleAgyModels } from '@sterling/schemas';
 import { agentRole } from './agent-name.mjs';
 import { unfencedMarkers } from './overpass.mjs';
 
@@ -68,7 +68,8 @@ const claudeRef = (entry) => `anthropic/${entry.model}`;
 
 /** The role's config.models entry judged by the schema (defaults applied): { entry } | { entry: null } | { problem }. */
 function roleEntry(config, role) {
-  const models = config?.models;
+  // a v0.19.155 config may hold an exact agy_model id; the shared legacy strip, never a second copy
+  const models = migrateStaleAgyModels(config).config?.models;
   if (models !== undefined && !isObject(models)) return { problem: `config.models is ${JSON.stringify(models)}, not an object` };
   const raw = models ?? {};
   const parsed = configSchema.shape.models.safeParse(Object.hasOwn(raw, role) ? { [role]: raw[role] } : {});

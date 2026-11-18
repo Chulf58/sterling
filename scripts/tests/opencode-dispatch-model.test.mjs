@@ -415,3 +415,22 @@ test('seam: resuming leaves the model unset (hobby and work); an intent line set
     assert.doesNotMatch(resumed.result, /resumed session/);
   });
 });
+
+// GitHub #310 review round: a config written by v0.19.155 may carry an exact agy_model id. The dispatch resolver
+// judges config.models entries with the schema, so it must apply the shared legacy strip first; otherwise a
+// stale value reads as an invalid config and the dispatch loses its model.
+test('legacy agy_model ids in config.models resolve exactly as a clean config: normal, review-of and fallback', () => {
+  const entry = (opencode, agy) => ({ model: 'claude-opus-5-5', effort: 'high', opencode_model: opencode, agy_model: agy });
+  const legacy = { models: { reviewer: entry('openai/gpt-6.1-sol', 'gemini-4-hydrogen-high'), sparring: entry('openai/gpt-6-astra', 'claude-opus-5-5-high') } };
+  const clean = { models: { reviewer: entry('openai/gpt-6.1-sol', undefined), sparring: entry('openai/gpt-6-astra', undefined) } };
+  assert.equal(ref('reviewer', null, legacy), SOL);
+  assert.equal(ref('sparring', null, legacy), ASTRA);
+  assert.equal(ref('reviewer', 'review-of=openai', legacy, 'hobby'), OPUS, 'MODEL-INTENT review-of=openai pairs the Opus reviewer in hobby');
+  assert.equal(ref('reviewer', 'fallback=openai not logged in', legacy), OPUS);
+  for (const [role, intent, mode] of [['reviewer', null, null], ['sparring', null, null], ['reviewer', 'review-of=openai', 'hobby'], ['reviewer', 'fallback=x', null]]) {
+    assert.equal(ref(role, intent, legacy, mode), ref(role, intent, clean, mode), `${role} ${intent}`);
+  }
+  const call = dm.dispatchModel(legacy, { agent: 'sterling/reviewer', prompt: brief('') });
+  assert.equal(call.model, SOL, 'the dispatch gets its model, with no invalid-config notice');
+  assert.equal(call.notice ?? null, null);
+});
