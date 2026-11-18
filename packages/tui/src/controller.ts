@@ -3,14 +3,15 @@
 // (main.ts) and the OpenCode plugin (packages/opencode-plugin/src/tui.tsx)
 // both drive it, so a board edit or a config toggle runs the same code in
 // either host. Nothing here touches a terminal.
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, lstatSync, chmodSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, OVERPASS_ROLES } from '@sterling/schemas';
-import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type WorkerModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
+import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_ROLES } from '@sterling/schemas';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type AgyModelEffect, type WorkerModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
 import { ConfigChangedError, replaceConfigFile, writeConfigKey, type ConfigWriteSeams, applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassRole, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
@@ -21,6 +22,9 @@ import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
+import { discoverCustomAgents, installedGovernedAgents } from './custom-agents.js';
+import { writeFileAtomic } from '../../../scripts/lib/atomic-write.mjs';
+import { AGY_AGENTS_DIR, AGY_ROSTER, probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -52,6 +56,8 @@ export interface DashboardOptions {
   /** The file operations the OpenCode-override config.json write uses; tests
    *  use it to make that write fail part-way. */
   configWriteFs?: ConfigWriteSeams;
+  /** The agy project setup an agy_model effect runs after writing config.json; tests inject a hermetic one. */
+  agySetup?: (args: { projectDir: string; pluginRoot: string }) => ReturnType<typeof setupAgy>;
   /** Which host opened the dashboard. 'opencode' offers the Overpass rows (in
    *  work mode). The in-OpenCode dashboard (opencode/sterling-tui/tui.tsx)
    *  passes 'opencode'; the tmux side pane (main.ts) passes it from
@@ -546,7 +552,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
     const cfg = config as {
-      models?: Record<string, { model: string; effort: string; opencode_model?: string }>;
+      models?: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }>;
       models_catalog?: { staleness_days?: number };
       sparring_partner?: { enabled?: boolean; models?: { openai?: { model?: string } } };
       tdd?: { enabled?: boolean };
@@ -564,6 +570,13 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         const v = readInstalledModelEffort(name);
         return { name, installedModel: v.model, installedEffort: v.effort };
       });
+
+    // governed roles installed in the OpenCode or agy folders count as installed too, and
+    // the custom agents of every host folder are listed read-only (issue #307); discovery
+    // never throws, so a bad agent file cannot fail the tab
+    const installedAt = installedGovernedAgents(projectRoot);
+    const hostInstalled = [...new Set([...installedAt.opencode, ...installedAt.agy])].filter((name) => !agents.some((a) => a.name === name));
+    const customAgents = discoverCustomAgents(projectRoot);
 
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
     try {
@@ -584,7 +597,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+    return { agents, hostInstalled, opencodeInstalled: installedAt.opencode, agyInstalled: installedAt.agy, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
   }
 
   /** maintenance_worker.opencode_model for the Maintenance worker row, from the RAW
@@ -827,6 +840,103 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
   }
 
+  /** Execute an agy_model effect (issue #306): set or clear config.models[key].agy_model
+   *  and re-render the agy agent files. config.json is replaced atomically (refused when
+   *  it changed since it was read); a failed agy render puts config.json back. The Claude
+   *  and OpenCode agent files are not touched. */
+  function applyAgyModel(e: AgyModelEffect): void {
+    const fail = (msg: string) => { ui = { ...ui, notice: `Antigravity model for '${e.key}' not changed — ${msg}; config.json and the agy agent files are as they were` }; };
+    let configBefore: Buffer;
+    let configAfter: string;
+    try {
+      if (e.to !== undefined && !(AGY_MODEL_IDS as readonly string[]).includes(e.to)) throw new Error(`'${e.to}' is not a known agy model id`);
+      configBefore = readFileSync(configPath);
+      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
+      if (refuseOverpassModelEdit(e.key, raw)) return;
+      raw.models = raw.models ?? {};
+      const { agy_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === undefined ? rest : { ...rest, agy_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + '\n';
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    // setupAgy writes the agent files one by one and reports a refused one as a row, so a refusal
+    // leaves the files before it rewritten: snapshot every file the render may touch BEFORE anything is
+    // written, and put them back with config.json when the render does not converge. A path that is not
+    // a plain file (a symlink, a directory) or cannot be read refuses the change up front, so nothing
+    // is written and restoring never replaces a link with a regular file.
+    const agentsBefore: Array<{ path: string; bytes: Buffer | null; mode: number }> = [];
+    try {
+      for (const name of AGY_ROSTER) {
+        const path = join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md');
+        let st: ReturnType<typeof lstatSync> | undefined;
+        try {
+          st = lstatSync(path);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        if (st === undefined) agentsBefore.push({ path, bytes: null, mode: 0o644 });
+        else if (st.isSymbolicLink()) throw new Error(`${path} is a symlink, and the agy render would replace it with a plain file`);
+        else if (!st.isFile()) throw new Error(`${path} is not a regular file`);
+        else agentsBefore.push({ path, bytes: readFileSync(path), mode: Number(st.mode) & 0o777 });
+      }
+    } catch (err) {
+      fail(`cannot snapshot the agy agent files: ${(err as Error).message}`);
+      return;
+    }
+    const restoreAgents = (): void => {
+      for (const { path, bytes, mode } of agentsBefore) {
+        if (bytes === null) rmSync(path, { force: true });
+        else if (!existsSync(path) || !readFileSync(path).equals(bytes)) {
+          writeFileAtomic(path, bytes as unknown as string, { writeFile: (tmp: string, content: unknown) => { writeFileSync(tmp, content as Buffer, { mode }); chmodSync(tmp, mode); } });
+        }
+      }
+    };
+    try {
+      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
+    } catch (err) {
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
+      return;
+    }
+    let outcome: string;
+    try {
+      const r = (options.agySetup ?? setupAgy)({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() }) as { skipped?: string; rows?: Array<{ refused?: boolean; detail?: string }> };
+      const refused = (r.rows ?? []).filter((x) => x.refused);
+      if (refused.length) throw new Error(`agy agent file(s) refused: ${refused.map((x) => x.detail).join('; ')}`);
+      outcome = r.skipped ?? 'the agy agent files were re-rendered';
+    } catch (err) {
+      try {
+        restoreAgents();
+      } catch (agentErr) {
+        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${(err as Error).message}) and the agy agent files were not restored: ${(agentErr as Error).message}; config.json was left as written` };
+        return;
+      }
+      try {
+        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${(err as Error).message}) and config.json was not restored: ${(restoreErr as Error).message}` };
+        return;
+      }
+      fail((err as Error).message);
+      return;
+    }
+    const nowISO = new Date().toISOString();
+    try {
+      store.create({
+        id: randomUUID(), type: 'decision', created_at: nowISO, updated_at: nowISO, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+        title: `Antigravity model: ${e.key} ${e.from ?? 'inherit'}→${e.to ?? 'inherit'} (System tab)`,
+        statement: `config.models['${e.key}'].agy_model ${e.to === undefined ? 'cleared' : `set to ${e.to}`} (was ${e.from ?? 'unset'}); the agy agents for this role now run ${e.to ?? 'inherit'}, and Claude Code keeps ${e.model}.`,
+        rationale: 'Antigravity model override changed from the TUI System tab (GitHub issue #306, mirroring decision openai-models-in-the-system-tab-each-role-gets-an-optional-opencode-only-model-override: only the agy agent files are re-rendered).',
+        alternatives_rejected: [],
+      }, { operation_id: randomUUID() });
+    } catch (err) {
+      ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? 'inherit'}, but recording the decision failed — ${(err as Error).message}` };
+      return;
+    }
+    ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? 'inherit'} (${outcome}); Claude Code keeps ${e.model}.` };
+  }
+
   async function applyEffects(all: Effect[]): Promise<boolean> {
     // the host's effect switch: a declined effect never reaches its writer
     const effects = all.filter((e) => {
@@ -850,6 +960,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     overpassRefusedEdit = false;
     for (const e of swaps) await applySwap(e);
     for (const e of overrides) applyOpenCodeModel(e);
+    for (const e of effects) if (e.type === 'agy_model') applyAgyModel(e);
     const workerModels = effects.filter((e): e is WorkerModelEffect => e.type === 'worker_model');
     for (const e of workerModels) applyWorkerModel(e);
     const refused = overpassRefusedEdit;

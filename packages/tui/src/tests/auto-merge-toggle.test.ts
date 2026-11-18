@@ -36,6 +36,8 @@ const key = (name: string): UiEvent => ({ kind: 'key', name }) as UiEvent;
 function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: 'claude-opus-5-5', installedEffort: 'medium' }],
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: {
       implementor: { model: 'claude-opus-5-5', effort: 'medium' },
       scout: { model: 'claude-sonnet-5', effort: 'low' },

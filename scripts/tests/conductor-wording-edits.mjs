@@ -432,6 +432,34 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "\n\n## Brief quality is your product",
     after: "\n\nNo new mechanism (a tool, hook, gate, script or schema) is added without a user ruling through the question form; a finding that seems to need one is boarded, not built (user-ruled 2026-11-17, \"Tighter conductor rules\", because a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\").\n\n## Brief quality is your product",
   },
+  {
+    commit: 'sterling/implementor-hard-only-on-evidence',
+    date: '2026-11-18',
+    reason: 'the up-front implementor-hard triggers are removed; the conductor dispatches it only on evidence (user-ruled 2026-11-18, "Evidence-only (Recommended)", GitHub issue #308; decision implementor-hard-only-on-evidence-after-a-sonnet-lane)',
+    before: "only when the lane designs a new mechanism or store schema, changes a fail-closed decision itself across several sites, debugs an unknown root cause, or follows a Sonnet lane that already needed a fix round. A single-area fix inside safety code (a hook, a permission rule, store code) stays on the implementor: touching safety code is not by itself a reason. Not a reason for implementor-hard: a probe with no change to make, a single-site safety fix, or speculation about what the work might need (such as \"likely a migration\"). Building an already-ruled design and resuming a hard lane may stay on hard. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and why, so the split can be re-measured \u2014 decision `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`, user-ruled 2026-10-20, exclusions added 2026-10-25 because the misses measured in the Customer Hub projects were probes, a single-site safety refusal and speculation, finding `how-often-do-conductors-use-implementor-hard-versus-implemen`)",
+    after: "only on evidence: a Sonnet lane on this work already needed a fix round, two attempts produced no new information, or lanes returned contradictory evidence. Never up front: a new mechanism, a store schema, a fail-closed change across several sites or an unknown root cause is not by itself a reason, because every one of those is tried on the implementor first. A probe with no change to make, a single-site safety fix and speculation about what the work might need (such as \"likely a migration\") are not evidence. Resuming an already-hard lane may stay on hard. Open every implementor and implementor-hard brief with a `Tier reason:` line naming which of the two and which evidence applies, or \"default\" for the implementor, so the split can be re-measured \u2014 decision `implementor-hard-only-on-evidence-after-a-sonnet-lane`, user-ruled 2026-11-18, superseding `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`; finding `how-often-do-conductors-use-implementor-hard-versus-implemen`)",
+  },
+  {
+    commit: 'sterling/sparring-steps-down-astra-sol-opus',
+    date: '2026-11-18',
+    reason: 'sparring steps down Astra, then Sol, then Opus 5.5, replacing the Fable fallback (user-ruled 2026-11-18, "Astra → Sol → Opus 5.5 (Recommended)", GitHub issue #309; decision sparring-steps-down-astra-sol-opus-5-5-replaces-fable)',
+    before: "with the model pinned (the Fable fallback below; Astra goes through the `codex` MCP tool on this host)",
+    after: "with the model pinned (the Sol and Opus 5.5 step-downs below; Astra goes through the `codex` MCP tool on this host)",
+  },
+  {
+    commit: 'sterling/sparring-steps-down-astra-sol-opus',
+    date: '2026-11-18',
+    reason: 'sparring steps down Astra, then Sol, then Opus 5.5, replacing the Fable fallback (user-ruled 2026-11-18, "Astra → Sol → Opus 5.5 (Recommended)", GitHub issue #309; decision sparring-steps-down-astra-sol-opus-5-5-replaces-fable)',
+    before: "only if it still fails fall back (Opus for review, Fable for sparring) and say so",
+    after: "only if it still fails fall back (Opus for review; for sparring Sol, then Opus 5.5) and say so",
+  },
+  {
+    commit: 'sterling/sparring-steps-down-astra-sol-opus',
+    date: '2026-11-18',
+    reason: 'sparring steps down Astra, then Sol, then Opus 5.5, replacing the Fable fallback (user-ruled 2026-11-18, "Astra → Sol → Opus 5.5 (Recommended)", GitHub issue #309; decision sparring-steps-down-astra-sol-opus-5-5-replaces-fable)',
+    before: "When Astra is unavailable or capped, say so and put the same brief (the problem, your own proposal, your own objections) to a Fable model instead: the `sparring` agent with `model: \"fable\"` pinned at the call (user-ruled 2026-10-01 through the question form, 'Fallback only'; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22). Astra stays the default because it keeps the sparring cross-family; Fable is the fallback, never the first call. With neither available, say so and proceed.",
+    after: "When Astra is unavailable or capped, say so and put the same brief (the problem, your own proposal, your own objections) to Sol through the `codex` MCP tool (`gpt-5.6-sol`, the model this route reaches, decision `claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4`). When the openai provider is unavailable, put it to Opus 5.5 instead: the `sparring` agent with `model: \"claude-opus-5-5\"` pinned at the call. The order is Astra, then Sol, then Opus 5.5 (user-ruled 2026-11-18 through the question form, \"Astra → Sol → Opus 5.5 (Recommended)\", replacing the Fable fallback of 2026-10-01; decision `sparring-steps-down-astra-sol-opus-5-5-replaces-fable`; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22). Astra stays the default because it keeps the sparring cross-family; Sol and Opus 5.5 are step-downs, never the first call. With none available, say so and proceed.",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

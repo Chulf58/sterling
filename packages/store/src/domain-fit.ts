@@ -15,6 +15,22 @@ import { AXIS_MIN_TERM_LEN, GENERIC_DEV_TERMS, extractAxisTermsUncapped } from '
  *  distinct terms than this needs all of them (see fitDomains). */
 export const DOMAIN_FIT_MIN_TERMS = 2;
 
+/** Ordinary non-subject words that domain descriptions and records both use
+ *  ('Python language and standard library', 'Node.js runtime ... independent of
+ *  any one project'). Matching on them alone fitted a game store-page decision
+ *  to domain:python via "language, library" (GitHub issue #305; six such items
+ *  were ruled "keep in project"). Domain-fit only: it is NOT added to
+ *  axis.ts's GENERIC_DEV_TERMS, which H20 depends on and decision foreign_3b09bc8f
+ *  rejected widening. Chosen from the words in mounted domain descriptions that
+ *  name no subject. */
+export const DOMAIN_FIT_GENERIC_TERMS: ReadonlySet<string> = new Set([
+  'language', 'languages', 'library', 'libraries', 'game', 'games', 'data', 'tool', 'tools',
+  'framework', 'frameworks', 'application', 'applications', 'software', 'system', 'systems',
+  'project', 'projects', 'package', 'packages', 'service', 'services', 'runtime', 'knowledge',
+  'practice', 'practices', 'pattern', 'patterns', 'independent', 'using', 'usage', 'standard',
+  'general', 'common', 'conventions', 'development', 'platform', 'page', 'pages', 'store',
+]);
+
 export interface DomainDescriptor {
   name: string;
   /** Missing, null or blank: the domain never fits. */
@@ -48,17 +64,18 @@ function termsMatch(a: string, b: string): boolean {
 }
 
 /** Terms that can carry a subject: the shared extraction minus universal dev
- *  vocabulary ('test', 'build', 'output'), which appears in every record and
+ *  vocabulary ('test', 'build', 'output') and DOMAIN_FIT_GENERIC_TERMS, which appears in every record and
  *  would make any description that uses it fit everything. */
 function subjectTerms(text: string): string[] {
-  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t) && !DOMAIN_FIT_GENERIC_TERMS.has(t));
 }
 
 /** The domains whose description fits `recordText`, best first: score
  *  descending, then matched count descending, then name ascending, so the order
  *  never depends on the input order. A domain fits when at least
- *  min(minTerms, its distinct description terms) of those terms appear in the
- *  record. Throws TypeError for non-string text, a non-array domain list, a
+ *  minTerms (default 2, decision
+ *  domain-fit-ignores-generic-words-promotion-review-needs-subject-terms) of those terms
+ *  appear in the record, so a description with fewer subject terms than that never fits. Throws TypeError for non-string text, a non-array domain list, a
  *  malformed entry or a non-string exclude; RangeError for a bad minTerms;
  *  Error for a duplicate domain name (case-insensitive). */
 export function fitDomains(
@@ -97,7 +114,7 @@ export function fitDomains(
     const descTerms = subjectTerms(d.description);
     if (!descTerms.length) continue;
     const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
-    if (matched.length < Math.min(minTerms, descTerms.length)) continue;
+    if (matched.length < minTerms) continue;
     fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
   }
   return fits.sort(

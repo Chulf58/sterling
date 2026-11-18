@@ -6436,7 +6436,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6449,11 +6449,36 @@ var init_config = __esm({
     }).strict();
     OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
     CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    AGY_MODEL_IDS = [
+      "claude-opus-5-5-low",
+      "claude-opus-5-5-medium",
+      "claude-opus-5-5-high",
+      "claude-sonnet-5-5-low",
+      "claude-sonnet-5-5-medium",
+      "claude-sonnet-5-5-high",
+      "gemini-3.8-flash-low",
+      "gemini-3.8-flash-medium",
+      "gemini-3.8-flash-high",
+      "gemini-4-argon-low",
+      "gemini-4-argon-medium",
+      "gemini-4-argon-high",
+      "gemini-4-carbon-low",
+      "gemini-4-carbon-medium",
+      "gemini-4-carbon-high",
+      "gemini-4-hydrogen-low",
+      "gemini-4-hydrogen-medium",
+      "gemini-4-hydrogen-high",
+      "gemini-4-hydrogen-xhigh",
+      "gemini-pro-orchestrator",
+      "gemini-pro-orchestrator-argon",
+      "gpt-oss-120b-medium"
+    ];
     agentModelEntry = external_exports.object({
       model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
       effort: effortLevel,
       hard_task: modelPin.optional(),
-      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
+      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
+      agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
     }).strict();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
@@ -6658,9 +6683,9 @@ var init_config = __esm({
         reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6.1-sol" }),
         // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
         // read-only grant as the reviewer, so the same install-time default. Every
-        // dispatch pins its model (Astra, else a Fable model); under Overpass its
+        // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
         // role tier decides.
-        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra", agy_model: "claude-opus-5-5-high" }),
         // preflight is the sterling/preflight agent (decision
         // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
         // lookup, so a cheap model at low effort like the scout.
@@ -7265,6 +7290,7 @@ var dist_exports = {};
 __export(dist_exports, {
   AGENT_MODEL_KEY: () => AGENT_MODEL_KEY,
   AGENT_TOOL_NAME_RE: () => AGENT_TOOL_NAME_RE,
+  AGY_MODEL_IDS: () => AGY_MODEL_IDS,
   ARTICLE_KINDS: () => ARTICLE_KINDS,
   ARTICLE_STATE_REQUIRES: () => ARTICLE_STATE_REQUIRES,
   AUTHOR_RE: () => AUTHOR_RE,
@@ -10276,7 +10302,7 @@ function termsMatch(a, b) {
   return a === b || a.startsWith(b) || b.startsWith(a);
 }
 function subjectTerms(text) {
-  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t) && !DOMAIN_FIT_GENERIC_TERMS.has(t));
 }
 function fitDomains(recordText, domains, opts2 = {}) {
   if (typeof recordText !== "string")
@@ -10313,18 +10339,60 @@ function fitDomains(recordText, domains, opts2 = {}) {
     if (!descTerms.length)
       continue;
     const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
-    if (matched.length < Math.min(minTerms, descTerms.length))
+    if (matched.length < minTerms)
       continue;
     fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
   }
   return fits.sort((a, b) => b.score - a.score || b.matched.length - a.matched.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
-var DOMAIN_FIT_MIN_TERMS;
+var DOMAIN_FIT_MIN_TERMS, DOMAIN_FIT_GENERIC_TERMS;
 var init_domain_fit = __esm({
   "packages/store/dist/domain-fit.js"() {
     "use strict";
     init_axis();
     DOMAIN_FIT_MIN_TERMS = 2;
+    DOMAIN_FIT_GENERIC_TERMS = /* @__PURE__ */ new Set([
+      "language",
+      "languages",
+      "library",
+      "libraries",
+      "game",
+      "games",
+      "data",
+      "tool",
+      "tools",
+      "framework",
+      "frameworks",
+      "application",
+      "applications",
+      "software",
+      "system",
+      "systems",
+      "project",
+      "projects",
+      "package",
+      "packages",
+      "service",
+      "services",
+      "runtime",
+      "knowledge",
+      "practice",
+      "practices",
+      "pattern",
+      "patterns",
+      "independent",
+      "using",
+      "usage",
+      "standard",
+      "general",
+      "common",
+      "conventions",
+      "development",
+      "platform",
+      "page",
+      "pages",
+      "store"
+    ]);
   }
 });
 

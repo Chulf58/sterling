@@ -44,11 +44,28 @@ export const CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])
 // opencode-only-model-override-per-role-for-openai-picks): `model` stays the
 // Claude model Claude Code runs, and the OpenCode agent pins opencode_model
 // when it is set, anthropic/<model> otherwise.
+//
+// agy_model is the role's Antigravity-only override (decision
+// openai-models-in-the-system-tab-each-role-gets-an-optional-opencode-only-model-override
+// mirrored for agy, GitHub issue #306): one of AGY_MODEL_IDS, the generated agy agent
+// file's `model:` line when set, `inherit` otherwise. It never changes the Claude model.
+export const AGY_MODEL_IDS = [
+  'claude-opus-5-5-low', 'claude-opus-5-5-medium', 'claude-opus-5-5-high',
+  'claude-sonnet-5-5-low', 'claude-sonnet-5-5-medium', 'claude-sonnet-5-5-high',
+  'gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-high',
+  'gemini-4-argon-low', 'gemini-4-argon-medium', 'gemini-4-argon-high',
+  'gemini-4-carbon-low', 'gemini-4-carbon-medium', 'gemini-4-carbon-high',
+  'gemini-4-hydrogen-low', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh',
+  'gemini-pro-orchestrator', 'gemini-pro-orchestrator-argon',
+  'gpt-oss-120b-medium',
+] as const;
+
 const agentModelEntry = z.object({
   model: z.string().regex(CLAUDE_MODEL_ID_RE, 'model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines'),
   effort: effortLevel,
   hard_task: modelPin.optional(),
   opencode_model: z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra').optional(),
+  agy_model: z.enum(AGY_MODEL_IDS).optional(),
 }).strict();
 
 // One pin per vendor, shared by sparring_partner.models and review.models.
@@ -298,9 +315,9 @@ export const configSchema = z.object({
       reviewer: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' }),
       // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
       // read-only grant as the reviewer, so the same install-time default. Every
-      // dispatch pins its model (Astra, else a Fable model); under Overpass its
+      // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
       // role tier decides.
-      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }),
+      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' }),
       // preflight is the sterling/preflight agent (decision
       // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
       // lookup, so a cheap model at low effort like the scout.

@@ -33,6 +33,8 @@ function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot 
       { name: 'scout', installedModel: 'claude-sonnet-5', installedEffort: 'low' },
       { name: 'sparring', installedModel: 'claude-fable-5-1', installedEffort: 'high' },
     ],
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: {
       implementor: { model: 'claude-opus-5-5', effort: 'medium', opencode_model: 'openai/gpt-6-terra' },
       scout: { model: 'claude-sonnet-5', effort: 'low' },
@@ -325,6 +327,9 @@ test('controller: Overpass on shows the tier rows from config; the picker commit
   const dir = mkdtempSync(join(tmpdir(), 'sterling-overpass-roles-ctl-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   const configPath = join(dir, '.sterling', 'config.json');
+  // the System tab lists a governed role only while its agent file is installed (issue #307)
+  mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'agents', 'implementor.md'), '---\nname: implementor\nmodel: claude-opus-5-5\neffort: medium\n---\nbody\n');
   writeFileSync(configPath, JSON.stringify({ mode: 'work', models, overpass: { enabled: true, roles: { implementor: { effort: 'low' } } } }, null, 2) + '\n');
   const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'), { host: 'opencode' });
   try {

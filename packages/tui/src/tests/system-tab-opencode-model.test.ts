@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import {
   buildSystemTab, initialUi, reduce, SYSTEM_TAB,
-  type AgentRosterSnapshot, type CatalogEntry, type Effect, type OpenCodeModelEffect, type UiEvent, type UiState,
+  type AgentRosterSnapshot, type CatalogEntry, type Effect, type OpenCodeModelEffect, type AgyModelEffect, type UiEvent, type UiState,
 } from '../state.js';
 
 // The System tab's OpenCode-only model override (decision
@@ -22,6 +22,11 @@ const CATALOG: CatalogEntry[] = [
 function snapshot(implementor: AgentRosterSnapshot['configModels'][string] = { model: 'claude-sonnet-5-5', effort: 'high' }): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: implementor.model, installedEffort: implementor.effort }],
+    // implementor is installed in the Claude, OpenCode and agy folders; scout is listed through `hostInstalled`
+    // but is in neither the OpenCode nor the agy list unless a test adds it (overrides are validated per host)
+    hostInstalled: ['scout'],
+    opencodeInstalled: ['implementor'],
+    agyInstalled: ['implementor'],
     // cursor 0 = implementor (governs the implementor agent), 1 = scout (a config key whose agent is not installed here)
     configModels: { implementor, scout: { model: 'claude-sonnet-5-5', effort: 'low' } },
     catalog: { present: true, stale: false, staleDate: null, entries: CATALOG },
@@ -66,10 +71,10 @@ test('a Claude pick still walks model then effort and emits a model_swap, not an
   assert.equal(swap.to.model, 'claude-opus-5-5');
 });
 
-test('an OpenAI pick on a key with no agent is refused with a notice', () => {
+test('an OpenAI pick on a key with no OpenCode agent installed is refused with a notice', () => {
   const r = drive(snapshot(), 1, ['ENTER', 'DOWN', 'ENTER']);
   assert.equal(r.effects.length, 0);
-  assert.match(r.ui.notice ?? '', /OpenCode model refused: 'scout' has no agent/);
+  assert.match(r.ui.notice ?? '', /OpenCode model refused: 'scout' has no OpenCode agent installed/);
 });
 
 test('the row shows a set override; the picker marks OpenAI entries OpenCode-only and offers a clear option', () => {
@@ -104,4 +109,71 @@ test('END in the model picker reaches the clear option when an override is set',
   const r = drive(snapshot({ model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' }), 0, ['ENTER', 'END', 'ENTER']);
   assert.equal(overrideOf(r.effects)?.to, undefined, 'the last option clears the override');
   assert.equal(overrideOf(r.effects)?.from, 'openai/gpt-5.6-terra');
+});
+
+// The System tab's Antigravity-only model override (GitHub issue #306): with agy
+// installed the picker offers every agy id after the catalog; a pick commits at
+// once as an agy_model effect, and a set override adds a clear option.
+const agyOf = (effects: Effect[]) => effects.find((e): e is AgyModelEffect => e.type === 'agy_model');
+
+test('an agy pick sets agy_model only: no model_swap, no opencode_model, no effort stage', () => {
+  const roster = { ...snapshot(), agy: true };
+  // entries: 0 opus, 1 terra; agy ids start at 2
+  const r = drive(roster, 0, ['ENTER', 'DOWN', 'DOWN', 'ENTER']);
+  assert.equal(r.effects.some((e) => e.type === 'model_swap' || e.type === 'opencode_model'), false);
+  assert.deepEqual(agyOf(r.effects), { type: 'agy_model', key: 'implementor', from: undefined, to: 'claude-opus-5-5-low', model: 'claude-sonnet-5-5', effort: 'high' });
+  assert.equal(r.ui.selector, undefined);
+});
+
+test('a set agy_model shows on the row and END reaches the clear option, which clears it', () => {
+  const roster = { ...snapshot({ model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gpt-oss-120b-medium' }), agy: true };
+  const row = buildSystemTab(roster, { ...initialUi, tab: SYSTEM_TAB, cursor: 0 }).rows.find((x) => x.key === 'implementor')!;
+  assert.ok(row.lines.some((l) => l.text === '    Antigravity: gpt-oss-120b-medium'), JSON.stringify(row.lines));
+  const r = drive(roster, 0, ['ENTER', 'END', 'ENTER']);
+  assert.deepEqual(agyOf(r.effects), { type: 'agy_model', key: 'implementor', from: 'gpt-oss-120b-medium', to: undefined, model: 'claude-sonnet-5-5', effort: 'high' });
+});
+
+test('without agy installed and no override the picker offers no agy ids', () => {
+  const r = drive(snapshot(), 0, ['ENTER', 'END', 'ENTER']);
+  assert.equal(agyOf(r.effects), undefined);
+});
+
+test('an agy pick on a key with no agy agent installed is refused with a notice', () => {
+  const r = drive({ ...snapshot(), agy: true }, 1, ['ENTER', 'DOWN', 'DOWN', 'ENTER']);
+  assert.equal(r.effects.length, 0);
+  assert.match(r.ui.notice ?? '', /Antigravity model refused: 'scout' has no agy agent installed/);
+});
+
+// Review fix (issue #307): an override is validated against the hosts it governs, not against the
+// Claude install. The two refusal tests above now name the host; these two prove a role installed in
+// only one non-Claude host accepts that host's override and refuses the other's.
+test('a role installed only in agy (no Claude agent) accepts an agy pick and refuses an OpenCode pick', () => {
+  const roster = { ...snapshot(), agy: true, agyInstalled: ['implementor', 'scout'] };
+  const agy = drive(roster, 1, ['ENTER', 'DOWN', 'DOWN', 'ENTER']);
+  assert.deepEqual(agyOf(agy.effects), { type: 'agy_model', key: 'scout', from: undefined, to: 'claude-opus-5-5-low', model: 'claude-sonnet-5-5', effort: 'low' });
+  const oc = drive(roster, 1, ['ENTER', 'DOWN', 'ENTER']);
+  assert.equal(oc.effects.length, 0);
+  assert.match(oc.ui.notice ?? '', /OpenCode model refused: 'scout' has no OpenCode agent installed/);
+});
+
+test('a role installed only in the OpenCode folder (no Claude agent) accepts an OpenCode pick for that agent and refuses an agy pick', () => {
+  const roster = { ...snapshot(), agy: true, opencodeInstalled: ['implementor', 'scout'] };
+  const oc = drive(roster, 1, ['ENTER', 'DOWN', 'ENTER']);
+  assert.deepEqual(overrideOf(oc.effects), { type: 'opencode_model', key: 'scout', from: undefined, to: 'openai/gpt-5.6-terra', model: 'claude-sonnet-5-5', effort: 'low', agents: ['scout'] });
+  const agy = drive(roster, 1, ['ENTER', 'DOWN', 'DOWN', 'ENTER']);
+  assert.equal(agy.effects.length, 0);
+  assert.match(agy.ui.notice ?? '', /Antigravity model refused: 'scout' has no agy agent installed/);
+});
+
+// Review fix: the picker opens when the catalog is empty but agy options or a clear option exist.
+test('with an empty catalog the picker still opens when agy is installed, and a saved agy override can be cleared', () => {
+  const empty = { present: true, stale: false, staleDate: null, entries: [] as CatalogEntry[] };
+  const roster = { ...snapshot({ model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gpt-oss-120b-medium' }), agy: true, catalog: empty };
+  const open = drive(roster, 0, ['ENTER']);
+  assert.equal(open.ui.selector?.stage, 'model', 'the picker opened');
+  const cleared = drive(roster, 0, ['ENTER', 'END', 'ENTER']);
+  assert.equal(agyOf(cleared.effects)?.to, undefined);
+  assert.equal(agyOf(cleared.effects)?.from, 'gpt-oss-120b-medium');
+  const none = drive({ ...snapshot(), catalog: empty }, 0, ['ENTER']);
+  assert.match(none.ui.notice ?? '', /model catalog empty/, 'no agy, no override, no catalog: still refused');
 });

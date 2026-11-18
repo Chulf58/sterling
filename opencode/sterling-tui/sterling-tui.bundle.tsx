@@ -12,10 +12,11 @@ import { createSignal, For, Index, Show, untrack } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync16, writeFileSync as writeFileSync7, existsSync as existsSync12 } from "node:fs";
-import { basename as basename5, dirname as dirname9, join as join21 } from "node:path";
+import { readFileSync as readFileSync18, writeFileSync as writeFileSync8, existsSync as existsSync15, rmSync as rmSync6, lstatSync as lstatSync8, chmodSync as chmodSync2 } from "node:fs";
+import { basename as basename6, dirname as dirname10, join as join24 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
+import { homedir as homedir9 } from "node:os";
 
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
@@ -4065,15 +4066,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd3 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd3)) {
+  const fwd4 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd4)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd3.startsWith("/")) {
+  if (fwd4.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd3.split("/")) {
+  for (const seg of fwd4.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -5216,11 +5217,36 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var AGY_MODEL_IDS = [
+  "claude-opus-5-5-low",
+  "claude-opus-5-5-medium",
+  "claude-opus-5-5-high",
+  "claude-sonnet-5-5-low",
+  "claude-sonnet-5-5-medium",
+  "claude-sonnet-5-5-high",
+  "gemini-3.8-flash-low",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-high",
+  "gemini-4-argon-low",
+  "gemini-4-argon-medium",
+  "gemini-4-argon-high",
+  "gemini-4-carbon-low",
+  "gemini-4-carbon-medium",
+  "gemini-4-carbon-high",
+  "gemini-4-hydrogen-low",
+  "gemini-4-hydrogen-medium",
+  "gemini-4-hydrogen-high",
+  "gemini-4-hydrogen-xhigh",
+  "gemini-pro-orchestrator",
+  "gemini-pro-orchestrator-argon",
+  "gpt-oss-120b-medium"
+];
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
   hard_task: modelPin.optional(),
-  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
+  agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -5424,9 +5450,9 @@ var configSchema = external_exports.object({
     reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6.1-sol" }),
     // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
     // read-only grant as the reviewer, so the same install-time default. Every
-    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra", agy_model: "claude-opus-5-5-high" }),
     // preflight is the sterling/preflight agent (decision
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
@@ -9193,11 +9219,11 @@ var DEBT_OWNER_HOP_CAP = 32;
 function resolveDebtOwner(link, get, aliases) {
   if (!link)
     return void 0;
-  let canonical = link;
+  let canonical2 = link;
   for (const a of aliases)
     if (a.historical_id === link)
-      canonical = a.canonical_id;
-  let record = get(canonical);
+      canonical2 = a.canonical_id;
+  let record = get(canonical2);
   const seen = /* @__PURE__ */ new Set();
   while (record && record.status === "superseded") {
     if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record.id) || !record.superseded_by)
@@ -12585,7 +12611,7 @@ var SterlingStore = class _SterlingStore {
       old.close();
     } catch {
     }
-    const refusal3 = () => new Error("SterlingStore: this connection was retired after a failed ROLLBACK left its transaction state unknown, so it refuses every read and write; reopen the store. Nothing was read or written.", { cause: rollbackError });
+    const refusal4 = () => new Error("SterlingStore: this connection was retired after a failed ROLLBACK left its transaction state unknown, so it refuses every read and write; reopen the store. Nothing was read or written.", { cause: rollbackError });
     this.db = new Proxy(old, {
       get(target, prop) {
         if (prop === "close")
@@ -12594,7 +12620,7 @@ var SterlingStore = class _SterlingStore {
         if (typeof value !== "function")
           return value;
         return () => {
-          throw refusal3();
+          throw refusal4();
         };
       }
     });
@@ -13452,14 +13478,21 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
-function modelOptions(entries, config) {
+function modelOptions(entries, config, agy = false) {
   const opts = entries.map((entry) => ({ kind: "entry", entry }));
   if (config?.opencode_model)
     opts.push({ kind: "clear" });
+  if (agy || config?.agy_model)
+    for (const id of AGY_MODEL_IDS)
+      opts.push({ kind: "agy", id });
+  if (config?.agy_model)
+    opts.push({ kind: "agy_clear" });
   return opts;
 }
 function systemKeys(snap) {
-  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k)), MAINTENANCE_WORKER_ROLE];
+  const installed = /* @__PURE__ */ new Set([...snap.agents.map((a) => a.name), ...snap.hostInstalled ?? [], ...snap.opencodeInstalled ?? [], ...snap.agyInstalled ?? []]);
+  const isInstalled = (k) => [...installed].some((n) => AGENT_MODEL_KEY[n] === k);
+  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), MAINTENANCE_WORKER_ROLE];
 }
 function workerModelOptions(entries, current) {
   const opts = entries.map((e) => ({ kind: "entry", ref: `${e.vendor ?? "anthropic"}/${e.id}`, label: e.label }));
@@ -13684,6 +13717,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     if (!agentNames.every((name) => name === key))
       for (const name of agentNames)
         lines.push({ text: clip3(`    ${name}`), kind: "body" });
+    if (config.agy_model)
+      lines.push({ text: clip3(`    Antigravity: ${config.agy_model}`), kind: "body" });
     if (config.opencode_model) {
       lines.push(overpassEffective ? { text: clip3(`    saved OpenCode: ${config.opencode_model}`), kind: "meta" } : { text: clip3(`    OpenCode: ${config.opencode_model}`), kind: "body" });
     }
@@ -13691,9 +13726,9 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
       if (selector.stage === "tier" || selector.stage === "role_effort") {
         lines.push(...overpassPickerLines(key));
       } else if (selector.stage === "model") {
-        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
+        modelOptions(snap.catalog.entries, config, snap.agy).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : o.kind === "agy_clear" ? "Antigravity: inherit" : o.kind === "agy" ? `${o.id} (Antigravity only)` : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
           lines.push({ text: clip3(`  ${m}${text}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
@@ -13715,7 +13750,17 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
   const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows };
+  const customRows = selector ? [] : customAgentRows(snap, width);
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows, customRows };
+}
+function customAgentRows(snap, width) {
+  return (snap.customAgents ?? []).map((a, i) => ({
+    id: `sys:custom:${a.source}:${i}`,
+    key: `custom:${a.source}:${a.name}`,
+    drift: false,
+    agents: [a.name],
+    lines: [{ text: clipEllipsis(`  ${a.name} (${a.source}): ${a.error !== void 0 ? `\u26A0 ${a.error}` : a.model ?? "inherit/default"}  read-only`, width), kind: "meta" }]
+  }));
 }
 function catalogBanner(catalog, width) {
   const clip3 = (s2) => clipEllipsis(s2, width);
@@ -14059,7 +14104,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows, ...view.customRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -14339,7 +14384,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
-  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
+  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key], roster.agy).length : effortOptions(sel.key).length;
   const revealPicker = (next) => {
     const sel = next.selector;
     if (!sel || !roster || !Number.isFinite(maxBodyLines))
@@ -14371,7 +14416,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
   };
   const clickSystem = (state, index, line1) => {
     const row = state.rows[index];
-    if (row.type !== "system" || row.id === "sys:storage" || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
+    if (row.type !== "system" || row.id === "sys:storage" || row.id.startsWith("sys:custom:") || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
       return { ui, effects };
     const enter = { kind: "key", name: "ENTER" };
     const sel = ui.selector;
@@ -14612,22 +14657,31 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
               return { ui: { ...ui, cursor, notice: `Maintenance worker model not editable: config unreadable: ${roster.maintenanceWorker.unreadable}` }, effects };
             }
             if (!sel) {
-              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : roster.catalog.entries.length === 0) {
+              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : modelOptions(roster.catalog.entries, roster.configModels[key], roster.agy).length === 0) {
                 return { ui: { ...ui, cursor, notice: "model catalog empty or invalid \u2014 nothing to pick; refresh the catalog first" }, effects };
               }
               return { ui: revealPicker({ ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }), effects };
             }
             if (sel.stage === "model") {
               const keyConfig = roster.configModels[sel.key];
-              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              const option = modelOptions(roster.catalog.entries, keyConfig, roster.agy)[sel.highlight];
+              if (option?.kind === "agy" || option?.kind === "agy_clear") {
+                if (!keyConfig)
+                  return { ui: { ...ui, selector: void 0, notice: `Antigravity model refused: '${sel.key}' has no config entry` }, effects };
+                if (option.kind === "agy" && !(roster.agyInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === sel.key)) {
+                  return { ui: { ...ui, selector: void 0, notice: `Antigravity model refused: '${sel.key}' has no agy agent installed, so an Antigravity model would govern nothing` }, effects };
+                }
+                effects.push({ type: "agy_model", key: sel.key, from: keyConfig.agy_model, to: option.kind === "agy" ? option.id : void 0, model: keyConfig.model, effort: keyConfig.effort });
+                return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+              }
               if (option && keyConfig && (option.kind === "clear" || isOpenCodeOnlyEntry(option.entry))) {
-                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                const agents = (roster.opencodeInstalled ?? []).filter((n) => AGENT_MODEL_KEY[n] === sel.key);
                 const to = option.kind === "clear" ? void 0 : `${option.entry.vendor}/${option.entry.id}`;
                 if (to !== void 0 && !OPENCODE_MODEL_REF_RE.test(to)) {
                   return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
                 }
                 if (to !== void 0 && agents.length === 0) {
-                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${sel.key}' has no OpenCode agent installed, so an OpenCode model would govern nothing` }, effects };
                 }
                 effects.push({ type: "opencode_model", key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
                 return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
@@ -15225,8 +15279,25 @@ function renderPortableText(text, label) {
 function renderOpenCodeFullText(text, label) {
   return render(text, label, ["sterling-only", "opencode-only"]);
 }
+function renderAgyText(text, label) {
+  return render(text, label, ["sterling-only", "agy-only"]);
+}
 
 // scripts/lib/agent-distribution.mjs
+var DEAD_TERM_PATTERNS = [
+  { term: "Forge", re: /\bforge\b/i },
+  { term: "Quatermain/Quartermain(e)", re: /qua(?:rt?|t)ermaine?/i },
+  { term: "wave", re: /\bwaves?\b/i },
+  { term: "brainstormer", re: /brainstormers?/i }
+];
+function findDeadTerms(text) {
+  const hits = [];
+  for (const { term, re } of DEAD_TERM_PATTERNS) {
+    const m = text.match(re);
+    if (m) hits.push({ term, match: m[0] });
+  }
+  return hits;
+}
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
   return createHash2("sha256").update(normalize(text), "utf8").digest("hex");
@@ -15652,8 +15723,8 @@ function readStoreWriteToolNames(pluginRoot) {
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync11, mkdirSync as mkdirSync7, readFileSync as readFileSync14, readdirSync as readdirSync4, realpathSync as realpathSync6, rmSync as rmSync4, statSync as statSync6, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
-import { basename as basename4, dirname as dirname8, isAbsolute, join as join19, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync12, mkdirSync as mkdirSync7, readFileSync as readFileSync14, readdirSync as readdirSync4, realpathSync as realpathSync6, rmSync as rmSync4, statSync as statSync6, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { basename as basename4, dirname as dirname8, isAbsolute, join as join20, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
@@ -16135,6 +16206,11 @@ function isPlainObject3(data) {
   const prototype = Object.getPrototypeOf(data);
   return prototype === null || prototype === Object.prototype;
 }
+function pick(object, keys) {
+  const result = {};
+  for (const key of keys) if (object[key] !== void 0) result[key] = object[key];
+  return result;
+}
 var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
   create: () => ({
     list: [],
@@ -16485,6 +16561,131 @@ var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
     return container[normalizedKey];
   }
 });
+var DEFAULT_SNIPPET_OPTIONS = {
+  maxLength: 79,
+  indent: 1,
+  linesBefore: 3,
+  linesAfter: 2
+};
+function getLine(buffer, lineStart, lineEnd, position, maxLineLength) {
+  let head = "";
+  let tail = "";
+  const maxHalfLength = Math.floor(maxLineLength / 2) - 1;
+  if (position - lineStart > maxHalfLength) {
+    head = " ... ";
+    lineStart = position - maxHalfLength + head.length;
+  }
+  if (lineEnd - position > maxHalfLength) {
+    tail = " ...";
+    lineEnd = position + maxHalfLength - tail.length;
+  }
+  return {
+    str: head + buffer.slice(lineStart, lineEnd).replace(/\t/g, "\u2192") + tail,
+    pos: position - lineStart + head.length
+  };
+}
+function padStart(string, max) {
+  return " ".repeat(Math.max(max - string.length, 0)) + string;
+}
+function makeSnippet(mark, options) {
+  if (!mark.buffer) return null;
+  const opts = {
+    ...DEFAULT_SNIPPET_OPTIONS,
+    ...options
+  };
+  const re = /\r?\n|\r|\0/g;
+  const lineStarts = [0];
+  const lineEnds = [];
+  let match;
+  let foundLineNo = -1;
+  while (match = re.exec(mark.buffer)) {
+    lineEnds.push(match.index);
+    lineStarts.push(match.index + match[0].length);
+    if (mark.position <= match.index && foundLineNo < 0) foundLineNo = lineStarts.length - 2;
+  }
+  if (foundLineNo < 0) foundLineNo = lineStarts.length - 1;
+  let result = "";
+  const lineNoLength = Math.min(mark.line + opts.linesAfter, lineEnds.length).toString().length;
+  const maxLineLength = opts.maxLength - (opts.indent + lineNoLength + 3);
+  for (let i = 1; i <= opts.linesBefore; i++) {
+    if (foundLineNo - i < 0) break;
+    const line2 = getLine(mark.buffer, lineStarts[foundLineNo - i], lineEnds[foundLineNo - i], mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo - i]), maxLineLength);
+    result = `${" ".repeat(opts.indent)}${padStart((mark.line - i + 1).toString(), lineNoLength)} | ${line2.str}
+${result}`;
+  }
+  const line = getLine(mark.buffer, lineStarts[foundLineNo], lineEnds[foundLineNo], mark.position, maxLineLength);
+  result += `${" ".repeat(opts.indent)}${padStart((mark.line + 1).toString(), lineNoLength)} | ${line.str}
+`;
+  result += `${"-".repeat(opts.indent + lineNoLength + 3 + line.pos)}^
+`;
+  for (let i = 1; i <= opts.linesAfter; i++) {
+    if (foundLineNo + i >= lineEnds.length) break;
+    const line2 = getLine(mark.buffer, lineStarts[foundLineNo + i], lineEnds[foundLineNo + i], mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo + i]), maxLineLength);
+    result += `${" ".repeat(opts.indent)}${padStart((mark.line + i + 1).toString(), lineNoLength)} | ${line2.str}
+`;
+  }
+  return result.replace(/\n$/, "");
+}
+function formatError(exception, compact) {
+  let where = "";
+  if (!exception.mark) return exception.reason;
+  if (exception.mark.name) where += `in "${exception.mark.name}" `;
+  where += `(${exception.mark.line + 1}:${exception.mark.column + 1})`;
+  if (!compact && exception.mark.snippet) where += `
+
+${exception.mark.snippet}`;
+  return `${exception.reason} ${where}`;
+}
+var YAMLException = class YAMLException2 extends Error {
+  reason;
+  mark;
+  /**
+  * Optional `mark` contains source snippet data. Usually, use
+  * {@link YAMLException.throwAt} instead of passing it directly.
+  */
+  constructor(reason, mark) {
+    super();
+    this.name = "YAMLException";
+    this.reason = reason;
+    this.mark = mark;
+    this.message = formatError(this, false);
+    if (Error.captureStackTrace) Error.captureStackTrace(this, this.constructor);
+  }
+  /**
+  * Returns the formatted error, omitting the source snippet in compact mode.
+  */
+  toString(compact) {
+    return `${this.name}: ${formatError(this, compact)}`;
+  }
+  /**
+  * Builds a YAMLException with a source snippet and throws it. `source` is
+  * the raw input text; `position` is an offset into it.
+  */
+  static throwAt(source, position, message, filename = "") {
+    let line = 0;
+    let lineStart = 0;
+    for (let index = 0; index < position; index++) {
+      const ch = source.charCodeAt(index);
+      if (ch === 10) {
+        line++;
+        lineStart = index + 1;
+      } else if (ch === 13) {
+        line++;
+        if (source.charCodeAt(index + 1) === 10) index++;
+        lineStart = index + 1;
+      }
+    }
+    const mark = {
+      name: filename,
+      buffer: source,
+      position,
+      line,
+      column: position - lineStart
+    };
+    mark.snippet = makeSnippet(mark);
+    throw new YAMLException2(message, mark);
+  }
+};
 var EVENT_ID = {
   DOCUMENT: 1,
   SEQUENCE: 2,
@@ -16509,6 +16710,7 @@ var CHOMPING_MODE = {
   STRIP: 2,
   KEEP: 3
 };
+var NO_RANGE$3 = -1;
 function simpleEscapeSequence(c) {
   switch (c) {
     case 48:
@@ -16557,12 +16759,218 @@ for (let i = 0; i < 256; i++) {
   simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
   simpleEscapeMap[i] = simpleEscapeSequence(i);
 }
+function charFromCodepoint(c) {
+  if (c <= 65535) return String.fromCharCode(c);
+  return String.fromCharCode((c - 65536 >> 10) + 55296, (c - 65536 & 1023) + 56320);
+}
+function fromHexCode$1(c) {
+  if (c >= 48 && c <= 57) return c - 48;
+  return (c | 32) - 97 + 10;
+}
+function escapedHexLen$1(c) {
+  if (c === 120) return 2;
+  if (c === 117) return 4;
+  return 8;
+}
+function skipFoldedBreaks(input, position, end) {
+  let breaks = 0;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 10) {
+      breaks++;
+      position++;
+    } else if (ch === 13) {
+      breaks++;
+      position++;
+      if (input.charCodeAt(position) === 10) position++;
+    } else if (ch === 32 || ch === 9) position++;
+    else break;
+  }
+  return {
+    position,
+    breaks
+  };
+}
+function foldedBreaks(count) {
+  if (count === 1) return " ";
+  return "\n".repeat(count - 1);
+}
+function getPlainValue(input, start, end) {
+  let result = "";
+  let position = start;
+  let captureStart = start;
+  let captureEnd = start;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 10 || ch === 13) {
+      result += input.slice(captureStart, captureEnd);
+      const fold = skipFoldedBreaks(input, position, end);
+      result += foldedBreaks(fold.breaks);
+      position = captureStart = captureEnd = fold.position;
+    } else {
+      position++;
+      if (ch !== 32 && ch !== 9) captureEnd = position;
+    }
+  }
+  return result + input.slice(captureStart, captureEnd);
+}
+function getSingleQuotedValue(input, start, end) {
+  let result = "";
+  let position = start;
+  let captureStart = start;
+  let captureEnd = start;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 39) {
+      result += input.slice(captureStart, position) + "'";
+      position += 2;
+      captureStart = captureEnd = position;
+    } else if (ch === 10 || ch === 13) {
+      result += input.slice(captureStart, captureEnd);
+      const fold = skipFoldedBreaks(input, position, end);
+      result += foldedBreaks(fold.breaks);
+      position = captureStart = captureEnd = fold.position;
+    } else {
+      position++;
+      if (ch !== 32 && ch !== 9) captureEnd = position;
+    }
+  }
+  return result + input.slice(captureStart, end);
+}
+function getDoubleQuotedValue(input, start, end) {
+  let result = "";
+  let position = start;
+  let captureStart = start;
+  let captureEnd = start;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 92) {
+      result += input.slice(captureStart, position);
+      position++;
+      const escaped = input.charCodeAt(position);
+      if (escaped === 10 || escaped === 13) position = skipFoldedBreaks(input, position, end).position;
+      else if (escaped < 256 && simpleEscapeCheck[escaped]) {
+        result += simpleEscapeMap[escaped];
+        position++;
+      } else {
+        let hexLength = escapedHexLen$1(escaped);
+        let hexResult = 0;
+        for (; hexLength > 0; hexLength--) {
+          position++;
+          const digit = fromHexCode$1(input.charCodeAt(position));
+          hexResult = (hexResult << 4) + digit;
+        }
+        result += charFromCodepoint(hexResult);
+        position++;
+      }
+      captureStart = captureEnd = position;
+    } else if (ch === 10 || ch === 13) {
+      result += input.slice(captureStart, captureEnd);
+      const fold = skipFoldedBreaks(input, position, end);
+      result += foldedBreaks(fold.breaks);
+      position = captureStart = captureEnd = fold.position;
+    } else {
+      position++;
+      if (ch !== 32 && ch !== 9) captureEnd = position;
+    }
+  }
+  return result + input.slice(captureStart, end);
+}
+function getBlockValue(input, start, end, indent, chomping, folded) {
+  const textIndent = indent < 0 ? 0 : indent;
+  const region = input.slice(start, end).replace(/\r\n?/g, "\n");
+  const lines = region === "" ? [] : (region.endsWith("\n") ? region.slice(0, -1) : region).split("\n");
+  let result = "";
+  let didReadContent = false;
+  let emptyLines = 0;
+  let atMoreIndented = false;
+  for (const line of lines) {
+    let column = 0;
+    while (column < textIndent && line.charCodeAt(column) === 32) column++;
+    if (indent < 0 || column >= line.length) {
+      emptyLines++;
+      continue;
+    }
+    const content = line.slice(textIndent);
+    const first = content.charCodeAt(0);
+    if (folded) {
+      if (first === 32 || first === 9) {
+        atMoreIndented = true;
+        result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+      } else if (atMoreIndented) {
+        atMoreIndented = false;
+        result += "\n".repeat(emptyLines + 1);
+      } else if (emptyLines === 0) {
+        if (didReadContent) result += " ";
+      } else result += "\n".repeat(emptyLines);
+    } else result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+    result += content;
+    didReadContent = true;
+    emptyLines = 0;
+  }
+  if (chomping === CHOMPING_MODE.KEEP) result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+  else if (chomping !== CHOMPING_MODE.STRIP) {
+    if (didReadContent) result += "\n";
+  }
+  return result;
+}
+function getScalarValue(input, scalar) {
+  if (scalar.valueStart === NO_RANGE$3) return "";
+  const { valueStart, valueEnd } = scalar;
+  if (scalar.fast) return input.slice(valueStart, valueEnd);
+  switch (scalar.style) {
+    case SCALAR_STYLE.SINGLE_QUOTED:
+      return getSingleQuotedValue(input, valueStart, valueEnd);
+    case SCALAR_STYLE.DOUBLE_QUOTED:
+      return getDoubleQuotedValue(input, valueStart, valueEnd);
+    case SCALAR_STYLE.LITERAL_BLOCK:
+      return getBlockValue(input, valueStart, valueEnd, scalar.indent, scalar.chomping, false);
+    case SCALAR_STYLE.FOLDED_BLOCK:
+      return getBlockValue(input, valueStart, valueEnd, scalar.indent, scalar.chomping, true);
+    default:
+      return getPlainValue(input, valueStart, valueEnd);
+  }
+}
 var DEFAULT_TAG_HANDLERS = Object.assign(/* @__PURE__ */ Object.create(null), {
   "!": "!",
   "!!": "tag:yaml.org,2002:"
 });
 var TAG_SUFFIX_CHARS = "-#;/?:@&=+$_.~*'()";
 var TAG_URI_CHARS = TAG_SUFFIX_CHARS + "!,[]";
+function tagPercentDecode(source) {
+  let result = "";
+  let index = 0;
+  while (index < source.length) {
+    if (source.charCodeAt(index) !== 37) {
+      result += source[index++];
+      continue;
+    }
+    let ch = parseInt(source.slice(index + 1, index + 3), 16);
+    index += 3;
+    if (ch >= 192) {
+      let remaining = ch < 224 ? 1 : ch < 240 ? 2 : 3;
+      ch &= (1 << 6 - remaining) - 1;
+      while (remaining-- > 0) {
+        ch = ch << 6 | parseInt(source.slice(index + 1, index + 3), 16) & 63;
+        index += 3;
+      }
+    }
+    if (ch < 65536) result += String.fromCharCode(ch);
+    else {
+      ch -= 65536;
+      result += String.fromCharCode(55296 | ch >> 10, 56320 | ch & 1023);
+    }
+  }
+  return result;
+}
+function tagNameFull(rawTag, tagHandlers) {
+  if (rawTag.startsWith("!<") && rawTag.endsWith(">")) return tagPercentDecode(rawTag.slice(2, -1));
+  const handleEnd = rawTag.indexOf("!", 1);
+  const handle2 = handleEnd === -1 ? "!" : rawTag.slice(0, handleEnd + 1);
+  return tagPercentDecode(tagHandlers?.[handle2] ?? DEFAULT_TAG_HANDLERS[handle2] ?? handle2) + tagPercentDecode(rawTag.slice(handle2.length));
+}
+var NO_RANGE$2 = -1;
+var MERGE_TAG_NAME = "tag:yaml.org,2002:merge";
 var DEFAULT_CONSTRUCTOR_OPTIONS = {
   filename: "",
   schema: CORE_SCHEMA,
@@ -16570,6 +16978,251 @@ var DEFAULT_CONSTRUCTOR_OPTIONS = {
   maxTotalMergeKeys: 1e4,
   maxAliases: -1
 };
+function eventPosition$1(event) {
+  if ("tagStart" in event && event.tagStart !== NO_RANGE$2) return event.tagStart;
+  if ("anchorStart" in event && event.anchorStart !== NO_RANGE$2) return event.anchorStart;
+  if ("valueStart" in event && event.valueStart !== NO_RANGE$2) return event.valueStart;
+  if ("start" in event) return event.start;
+  return 0;
+}
+function throwError$1(state, message) {
+  YAMLException.throwAt(state.source, state.position, message, state.filename);
+}
+function finalizeCollection(state, position, tag, carrier) {
+  try {
+    return tag.finalize(carrier);
+  } catch (error) {
+    if (error instanceof YAMLException) throw error;
+    YAMLException.throwAt(state.source, position, error instanceof Error ? error.message : String(error), state.filename);
+  }
+}
+function constructScalar(state, event) {
+  const source = getScalarValue(state.source, event);
+  const rawTag = event.tagStart === NO_RANGE$2 ? "" : state.source.slice(event.tagStart, event.tagEnd);
+  const strTag2 = state.schema.defaultScalarTag;
+  if (rawTag !== "") {
+    if (rawTag === "!") return {
+      value: source,
+      tag: strTag2
+    };
+    const tagName = tagNameFull(rawTag, state.tagHandlers);
+    const scalarTag = state.schema.lookupScalarTag(tagName);
+    if (scalarTag) {
+      const result = scalarTag.resolve(source, true, tagName);
+      if (result === NOT_RESOLVED) throwError$1(state, `cannot resolve a node with !<${tagName}> explicit tag`);
+      return {
+        value: result,
+        tag: scalarTag
+      };
+    }
+    const collectionTagDef = state.schema.lookupMappingTag(tagName) ?? state.schema.lookupSequenceTag(tagName);
+    if (collectionTagDef) {
+      if (source !== "") throwError$1(state, `cannot resolve a node with !<${tagName}> explicit tag`);
+      const carrier = collectionTagDef.create(tagName);
+      return {
+        value: collectionTagDef.carrierIsResult ? carrier : finalizeCollection(state, state.position, collectionTagDef, carrier),
+        tag: collectionTagDef
+      };
+    }
+    throwError$1(state, `unknown scalar tag !<${tagName}>`);
+  }
+  if (event.style === SCALAR_STYLE.PLAIN) return state.schema.resolveImplicitScalarTag(source);
+  return {
+    value: strTag2.resolve(source, false, strTag2.tagName),
+    tag: strTag2
+  };
+}
+function collectionTagName(state, event, defaultTagName) {
+  const rawTag = event.tagStart === NO_RANGE$2 ? "" : state.source.slice(event.tagStart, event.tagEnd);
+  return rawTag === "" || rawTag === "!" ? defaultTagName : tagNameFull(rawTag, state.tagHandlers);
+}
+function isMappingTag(tag) {
+  return tag.nodeKind === "mapping";
+}
+function chargeMergeWork(state) {
+  state.totalMergeKeys++;
+  if (state.maxTotalMergeKeys !== -1 && state.totalMergeKeys > state.maxTotalMergeKeys) throwError$1(state, `merge keys exceeded maxTotalMergeKeys (${state.maxTotalMergeKeys})`);
+}
+function mergeKeys(state, frame2, source, sourceTag) {
+  chargeMergeWork(state);
+  for (const sourceKey of sourceTag.keys(source)) {
+    chargeMergeWork(state);
+    if (frame2.tag.has(frame2.value, sourceKey)) continue;
+    const err = frame2.tag.addPair(frame2.value, sourceKey, sourceTag.get(source, sourceKey));
+    if (err) throwError$1(state, err);
+    frame2.overridable ??= /* @__PURE__ */ new Set();
+    frame2.overridable.add(sourceKey);
+  }
+}
+function mergeSource(state, frame2, source, sourceTag) {
+  state.position = frame2.keyPosition;
+  if (isMappingTag(sourceTag)) mergeKeys(state, frame2, source, sourceTag);
+  else if (sourceTag.nodeKind === "sequence" && Array.isArray(source)) {
+    if (source.length > 100) throwError$1(state, "abnormal merge sequence size");
+    for (const element of source) {
+      const elementTag = state.nodeTags.get(element);
+      if (!elementTag) throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
+      mergeKeys(state, frame2, element, elementTag);
+    }
+  } else throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
+}
+function addMappingValue(state, frame2, key, value, tag) {
+  state.position = frame2.keyPosition;
+  if (frame2.keyIsMerge) {
+    mergeSource(state, frame2, value, tag);
+    return;
+  }
+  if (!state.json && frame2.tag.has(frame2.value, key) && !frame2.overridable?.has(key)) throwError$1(state, "duplicated mapping key");
+  const err = frame2.tag.addPair(frame2.value, key, value);
+  if (err) throwError$1(state, err);
+  frame2.overridable?.delete(key);
+}
+function addValue(state, value, tag) {
+  const frame2 = state.frames[state.frames.length - 1];
+  if (frame2.kind === "document") {
+    frame2.value = value;
+    frame2.hasValue = true;
+  } else if (frame2.kind === "sequence") {
+    if (isMappingTag(tag)) state.nodeTags.set(value, tag);
+    const err = frame2.tag.addItem(frame2.value, value, frame2.index++);
+    if (err) throwError$1(state, err);
+  } else if (frame2.hasKey) {
+    const key = frame2.key;
+    frame2.key = void 0;
+    frame2.hasKey = false;
+    addMappingValue(state, frame2, key, value, tag);
+  } else {
+    frame2.key = value;
+    frame2.keyPosition = state.position;
+    frame2.hasKey = true;
+    frame2.keyIsMerge = tag.tagName === MERGE_TAG_NAME;
+  }
+}
+function storeAnchor(state, event, value, tag, isValueFinal) {
+  if (event.anchorStart !== NO_RANGE$2) {
+    const anchor = {
+      value,
+      tag,
+      isValueFinal
+    };
+    state.anchors.set(state.source.slice(event.anchorStart, event.anchorEnd), anchor);
+    return anchor;
+  }
+  return null;
+}
+function constructFromEvents(events, options) {
+  const state = {
+    ...DEFAULT_CONSTRUCTOR_OPTIONS,
+    ...options,
+    events,
+    documents: [],
+    eventIndex: 0,
+    position: 0,
+    frames: [],
+    anchors: /* @__PURE__ */ new Map(),
+    nodeTags: /* @__PURE__ */ new Map(),
+    tagHandlers: /* @__PURE__ */ Object.create(null),
+    totalMergeKeys: 0,
+    aliasCount: 0
+  };
+  while (state.eventIndex < state.events.length) {
+    const event = state.events[state.eventIndex++];
+    state.position = eventPosition$1(event);
+    switch (event.type) {
+      case EVENT_ID.DOCUMENT:
+        state.anchors = /* @__PURE__ */ new Map();
+        state.nodeTags = /* @__PURE__ */ new Map();
+        state.aliasCount = 0;
+        state.tagHandlers = /* @__PURE__ */ Object.create(null);
+        for (const directive of event.directives) if (directive.kind === "tag") state.tagHandlers[directive.handle] = directive.prefix;
+        state.frames.push({
+          kind: "document",
+          position: state.position,
+          value: void 0,
+          hasValue: false
+        });
+        break;
+      case EVENT_ID.SCALAR: {
+        const { value, tag } = constructScalar(state, event);
+        storeAnchor(state, event, value, tag, true);
+        addValue(state, value, tag);
+        break;
+      }
+      case EVENT_ID.SEQUENCE: {
+        const tagName = collectionTagName(state, event, "tag:yaml.org,2002:seq");
+        const tag = state.schema.lookupSequenceTag(tagName);
+        if (!tag) throwError$1(state, `unknown sequence tag !<${tagName}>`);
+        const value = tag.create(tagName);
+        const anchor = storeAnchor(state, event, value, tag, tag.carrierIsResult);
+        state.frames.push({
+          kind: "sequence",
+          position: state.position,
+          value,
+          tag,
+          anchor,
+          index: 0
+        });
+        break;
+      }
+      case EVENT_ID.MAPPING: {
+        const tagName = collectionTagName(state, event, "tag:yaml.org,2002:map");
+        const tag = state.schema.lookupMappingTag(tagName);
+        if (!tag) throwError$1(state, `unknown mapping tag !<${tagName}>`);
+        const value = tag.create(tagName);
+        const anchor = storeAnchor(state, event, value, tag, tag.carrierIsResult);
+        state.frames.push({
+          kind: "mapping",
+          position: state.position,
+          value,
+          tag,
+          anchor,
+          key: void 0,
+          keyPosition: state.position,
+          hasKey: false,
+          keyIsMerge: false,
+          overridable: null
+        });
+        break;
+      }
+      case EVENT_ID.ALIAS: {
+        if (state.maxAliases !== -1 && ++state.aliasCount > state.maxAliases) throwError$1(state, `aliases exceeded maxAliases (${state.maxAliases})`);
+        const name = state.source.slice(event.anchorStart, event.anchorEnd);
+        const anchor = state.anchors.get(name);
+        if (!anchor) throwError$1(state, `unidentified alias "${name}"`);
+        if (!anchor.isValueFinal) throwError$1(state, `recursive alias "${name}" is not supported for tag ${anchor.tag.tagName} because it uses finalize()`);
+        addValue(state, anchor.value, anchor.tag);
+        break;
+      }
+      case EVENT_ID.POP: {
+        const frame2 = state.frames.pop();
+        if (frame2.kind === "mapping" && frame2.hasKey) {
+          state.position = frame2.keyPosition;
+          throwError$1(state, "incomplete mapping pair in event stream");
+        }
+        if (frame2.kind === "document") state.documents.push(frame2.value);
+        else {
+          const value = frame2.tag.carrierIsResult ? frame2.value : finalizeCollection(state, frame2.position, frame2.tag, frame2.value);
+          if (frame2.anchor) {
+            frame2.anchor.value = value;
+            frame2.anchor.isValueFinal = true;
+          }
+          addValue(state, value, frame2.tag);
+        }
+        break;
+      }
+    }
+  }
+  return state.documents;
+}
+var NO_RANGE$1 = -1;
+var HAS_OWN = Object.prototype.hasOwnProperty;
+var CONTEXT_FLOW_IN = 1;
+var CONTEXT_FLOW_OUT = 2;
+var CONTEXT_BLOCK_IN = 3;
+var CONTEXT_BLOCK_OUT = 4;
+var PATTERN_NON_PRINTABLE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
+var PATTERN_FLOW_INDICATORS = /[,\[\]{}]/;
+var PATTERN_TAG_HANDLE = /^(?:!|!!|![0-9A-Za-z-]+!)$/;
 var NS_URI_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$,_.!~*'()\[\]])`;
 var NS_TAG_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$.~*'()_])`;
 var PATTERN_TAG_URI = new RegExp(`^(?:${NS_URI_CHAR})*$`);
@@ -16579,10 +17232,857 @@ var DEFAULT_PARSER_OPTIONS = {
   filename: "",
   maxDepth: 100
 };
+function addDocumentEvent(state, explicitStart, explicitEnd) {
+  state.events.push({
+    type: EVENT_ID.DOCUMENT,
+    explicitStart,
+    explicitEnd,
+    directives: state.directives
+  });
+}
+function addSequenceEvent(state, start, anchorStart, anchorEnd, tagStart, tagEnd, style) {
+  state.events.push({
+    type: EVENT_ID.SEQUENCE,
+    start,
+    anchorStart,
+    anchorEnd,
+    tagStart,
+    tagEnd,
+    style
+  });
+}
+function addMappingEvent(state, start, anchorStart, anchorEnd, tagStart, tagEnd, style) {
+  state.events.push({
+    type: EVENT_ID.MAPPING,
+    start,
+    anchorStart,
+    anchorEnd,
+    tagStart,
+    tagEnd,
+    style
+  });
+}
+function insertFlowPairMappingEvent(state, snapshot) {
+  state.events.splice(snapshot.eventsLength, 0, {
+    type: EVENT_ID.MAPPING,
+    start: snapshot.position,
+    anchorStart: NO_RANGE$1,
+    anchorEnd: NO_RANGE$1,
+    tagStart: NO_RANGE$1,
+    tagEnd: NO_RANGE$1,
+    style: COLLECTION_STYLE.FLOW
+  });
+}
+function addScalarEvent(state, valueStart, valueEnd, anchorStart, anchorEnd, tagStart, tagEnd, style, chomping = CHOMPING_MODE.CLIP, indent = -1, fast = false) {
+  state.events.push({
+    type: EVENT_ID.SCALAR,
+    valueStart,
+    valueEnd,
+    anchorStart,
+    anchorEnd,
+    tagStart,
+    tagEnd,
+    style,
+    chomping,
+    indent,
+    fast
+  });
+}
+function addAliasEvent(state, anchorStart, anchorEnd) {
+  state.events.push({
+    type: EVENT_ID.ALIAS,
+    anchorStart,
+    anchorEnd
+  });
+}
+function addPopEvent(state) {
+  state.events.push({ type: EVENT_ID.POP });
+}
+function addEmptyScalarEvent(state) {
+  addScalarEvent(state, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, SCALAR_STYLE.PLAIN);
+}
+function emptyProperties() {
+  return {
+    anchorStart: NO_RANGE$1,
+    anchorEnd: NO_RANGE$1,
+    tagStart: NO_RANGE$1,
+    tagEnd: NO_RANGE$1
+  };
+}
+function snapshotState(state) {
+  return {
+    position: state.position,
+    line: state.line,
+    lineStart: state.lineStart,
+    lineIndent: state.lineIndent,
+    firstTabInLine: state.firstTabInLine,
+    eventsLength: state.events.length
+  };
+}
+function restoreState(state, snapshot) {
+  state.position = snapshot.position;
+  state.line = snapshot.line;
+  state.lineStart = snapshot.lineStart;
+  state.lineIndent = snapshot.lineIndent;
+  state.firstTabInLine = snapshot.firstTabInLine;
+  state.events.length = snapshot.eventsLength;
+}
+function throwError(state, message) {
+  YAMLException.throwAt(state.input.slice(0, state.length), state.position, message, state.filename);
+}
+function isEol(c) {
+  return c === 10 || c === 13;
+}
+function isWhiteSpace(c) {
+  return c === 9 || c === 32;
+}
+function isWsOrEol(c) {
+  return isWhiteSpace(c) || isEol(c);
+}
+function isWsOrEolOrEnd(c) {
+  return c === 0 || isWsOrEol(c);
+}
+function isFlowIndicator(c) {
+  return c === 44 || c === 91 || c === 93 || c === 123 || c === 125;
+}
+function fromDecimalCode(c) {
+  return c >= 48 && c <= 57 ? c - 48 : -1;
+}
+function fromHexCode(c) {
+  if (c >= 48 && c <= 57) return c - 48;
+  const lc = c | 32;
+  if (lc >= 97 && lc <= 102) return lc - 97 + 10;
+  return -1;
+}
+function escapedHexLen(c) {
+  if (c === 120) return 2;
+  if (c === 117) return 4;
+  if (c === 85) return 8;
+  return 0;
+}
+function isSimpleEscape(c) {
+  return c === 48 || c === 97 || c === 98 || c === 116 || c === 9 || c === 110 || c === 118 || c === 102 || c === 114 || c === 101 || c === 32 || c === 34 || c === 47 || c === 92 || c === 78 || c === 95 || c === 76 || c === 80;
+}
+function consumeLineBreak(state) {
+  if (state.input.charCodeAt(state.position) === 10) state.position++;
+  else {
+    state.position++;
+    if (state.input.charCodeAt(state.position) === 10) state.position++;
+  }
+  state.line++;
+  state.lineStart = state.position;
+  state.lineIndent = 0;
+  state.firstTabInLine = -1;
+}
+function skipSeparationSpace(state, allowComments) {
+  let lineBreaks = 0;
+  let ch = state.input.charCodeAt(state.position);
+  let hasSeparation = state.position === state.lineStart || isWsOrEol(state.input.charCodeAt(state.position - 1));
+  while (ch !== 0) {
+    while (isWhiteSpace(ch)) {
+      hasSeparation = true;
+      if (ch === 9 && state.firstTabInLine === -1) state.firstTabInLine = state.position;
+      ch = state.input.charCodeAt(++state.position);
+    }
+    if (allowComments && hasSeparation && ch === 35) do
+      ch = state.input.charCodeAt(++state.position);
+    while (!isEol(ch) && ch !== 0);
+    if (!isEol(ch)) break;
+    consumeLineBreak(state);
+    lineBreaks++;
+    hasSeparation = true;
+    ch = state.input.charCodeAt(state.position);
+    while (ch === 32) {
+      state.lineIndent++;
+      ch = state.input.charCodeAt(++state.position);
+    }
+  }
+  return lineBreaks;
+}
+function testDocumentSeparator(state, position = state.position) {
+  const ch = state.input.charCodeAt(position);
+  if ((ch === 45 || ch === 46) && ch === state.input.charCodeAt(position + 1) && ch === state.input.charCodeAt(position + 2)) {
+    const following = state.input.charCodeAt(position + 3);
+    return following === 0 || isWsOrEol(following);
+  }
+  return false;
+}
+function skipByteOrderMark(state) {
+  if (state.position === state.lineStart && state.input.charCodeAt(state.position) === 65279) {
+    state.position++;
+    state.lineStart = state.position;
+  }
+}
+function testDocumentBoundary(state) {
+  if (state.position !== state.lineStart) return false;
+  if (testDocumentSeparator(state)) return true;
+  if (state.input.charCodeAt(state.position) !== 65279) return false;
+  const snapshot = snapshotState(state);
+  skipByteOrderMark(state);
+  skipSeparationSpace(state, true);
+  const ch = state.input.charCodeAt(state.position);
+  const result = state.position === state.lineStart && (ch === 37 || ch === 45 && testDocumentSeparator(state));
+  restoreState(state, snapshot);
+  return result;
+}
+function skipUntilLineEnd(state) {
+  let ch = state.input.charCodeAt(state.position);
+  while (ch !== 0 && !isEol(ch)) ch = state.input.charCodeAt(++state.position);
+}
+function checkPrintable(state, start, end) {
+  const match = PATTERN_NON_PRINTABLE.exec(state.input.slice(start, end));
+  if (match !== null) {
+    state.position = start + match.index + match[0].length - 1;
+    throwError(state, "the stream contains non-printable characters");
+  }
+}
+function readTagProperty(state, props, inFlow) {
+  if (state.input.charCodeAt(state.position) !== 33) return false;
+  if (props.tagStart !== NO_RANGE$1) throwError(state, "duplication of a tag property");
+  const start = state.position;
+  let isVerbatim = false;
+  let isNamed = false;
+  let tagHandle = "!";
+  let ch = state.input.charCodeAt(++state.position);
+  if (ch === 60) {
+    isVerbatim = true;
+    ch = state.input.charCodeAt(++state.position);
+  } else if (ch === 33) {
+    isNamed = true;
+    tagHandle = "!!";
+    ch = state.input.charCodeAt(++state.position);
+  }
+  let suffixStart = state.position;
+  let tagName;
+  if (isVerbatim) {
+    while (ch !== 0 && ch !== 62) ch = state.input.charCodeAt(++state.position);
+    if (ch !== 62) throwError(state, "unexpected end of the stream within a verbatim tag");
+    tagName = state.input.slice(suffixStart, state.position);
+    state.position++;
+  } else {
+    while (ch !== 0 && !isWsOrEol(ch) && !(inFlow && isFlowIndicator(ch))) {
+      if (ch === 33) {
+        if (!isNamed) {
+          tagHandle = state.input.slice(suffixStart - 1, state.position + 1);
+          if (!PATTERN_TAG_HANDLE.test(tagHandle)) throwError(state, "named tag handle cannot contain such characters");
+          isNamed = true;
+          suffixStart = state.position + 1;
+        } else throwError(state, "tag suffix cannot contain exclamation marks");
+      }
+      ch = state.input.charCodeAt(++state.position);
+    }
+    tagName = state.input.slice(suffixStart, state.position);
+    if (PATTERN_FLOW_INDICATORS.test(tagName)) throwError(state, "tag suffix cannot contain flow indicator characters");
+  }
+  if (tagName && !(isVerbatim ? PATTERN_TAG_URI.test(tagName) : PATTERN_TAG_SUFFIX.test(tagName))) throwError(state, `tag name cannot contain such characters: ${tagName}`);
+  if (!isVerbatim && tagHandle !== "!" && tagHandle !== "!!" && !HAS_OWN.call(state.tagHandlers, tagHandle)) throwError(state, `undeclared tag handle "${tagHandle}"`);
+  props.tagStart = start;
+  props.tagEnd = state.position;
+  return true;
+}
+function readAnchorProperty(state, props) {
+  if (state.input.charCodeAt(state.position) !== 38) return false;
+  if (props.anchorStart !== NO_RANGE$1) throwError(state, "duplication of an anchor property");
+  state.position++;
+  const start = state.position;
+  while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position)) && !isFlowIndicator(state.input.charCodeAt(state.position))) state.position++;
+  if (state.position === start) throwError(state, "name of an anchor node must contain at least one character");
+  props.anchorStart = start;
+  props.anchorEnd = state.position;
+  return true;
+}
+function readAlias(state, props) {
+  if (state.input.charCodeAt(state.position) !== 42) return false;
+  if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) throwError(state, "alias node should not have any properties");
+  state.position++;
+  const start = state.position;
+  while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position)) && !isFlowIndicator(state.input.charCodeAt(state.position))) state.position++;
+  if (state.position === start) throwError(state, "name of an alias node must contain at least one character");
+  addAliasEvent(state, start, state.position);
+  return true;
+}
+function readFlowScalarBreak(state, nodeIndent) {
+  skipSeparationSpace(state, false);
+  if (state.lineIndent < nodeIndent) throwError(state, "deficient indentation");
+}
+function readSingleQuotedScalar(state, nodeIndent, props) {
+  if (state.input.charCodeAt(state.position) !== 39) return false;
+  state.position++;
+  const start = state.position;
+  let simple = true;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const ch = state.input.charCodeAt(state.position);
+    if (ch === 39) {
+      if (state.input.charCodeAt(state.position + 1) === 39) {
+        simple = false;
+        state.position += 2;
+        continue;
+      }
+      const end = state.position;
+      state.position++;
+      addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.SINGLE_QUOTED, CHOMPING_MODE.CLIP, -1, simple);
+      return true;
+    }
+    if (isEol(ch)) {
+      simple = false;
+      readFlowScalarBreak(state, nodeIndent);
+    } else if (state.position === state.lineStart && testDocumentSeparator(state)) throwError(state, "unexpected end of the document within a single quoted scalar");
+    else if (ch !== 9 && ch < 32) throwError(state, "expected valid JSON character");
+    else state.position++;
+  }
+  throwError(state, "unexpected end of the stream within a single quoted scalar");
+}
+function readDoubleQuotedScalar(state, nodeIndent, props) {
+  if (state.input.charCodeAt(state.position) !== 34) return false;
+  state.position++;
+  const start = state.position;
+  let simple = true;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const ch = state.input.charCodeAt(state.position);
+    if (ch === 34) {
+      const end = state.position;
+      state.position++;
+      addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.DOUBLE_QUOTED, CHOMPING_MODE.CLIP, -1, simple);
+      return true;
+    }
+    if (ch === 92) {
+      simple = false;
+      const escaped = state.input.charCodeAt(++state.position);
+      if (isEol(escaped)) readFlowScalarBreak(state, nodeIndent);
+      else if (isSimpleEscape(escaped)) state.position++;
+      else {
+        let hexLength = escapedHexLen(escaped);
+        if (hexLength === 0) throwError(state, "unknown escape sequence");
+        while (hexLength-- > 0) {
+          state.position++;
+          if (fromHexCode(state.input.charCodeAt(state.position)) < 0) throwError(state, "expected hexadecimal character");
+        }
+        state.position++;
+      }
+    } else if (isEol(ch)) {
+      simple = false;
+      readFlowScalarBreak(state, nodeIndent);
+    } else if (state.position === state.lineStart && testDocumentSeparator(state)) throwError(state, "unexpected end of the document within a double quoted scalar");
+    else if (ch !== 9 && ch < 32) throwError(state, "expected valid JSON character");
+    else state.position++;
+  }
+  throwError(state, "unexpected end of the stream within a double quoted scalar");
+}
+function readBlockScalar(state, parentIndent, props) {
+  const ch = state.input.charCodeAt(state.position);
+  let chomping = CHOMPING_MODE.CLIP;
+  let indent = -1;
+  let detectedIndent = false;
+  if (ch !== 124 && ch !== 62) return false;
+  const style = ch === 124 ? SCALAR_STYLE.LITERAL_BLOCK : SCALAR_STYLE.FOLDED_BLOCK;
+  state.position++;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const current = state.input.charCodeAt(state.position);
+    const digit = fromDecimalCode(current);
+    if (current === 43 || current === 45) {
+      if (chomping !== CHOMPING_MODE.CLIP) throwError(state, "repeat of a chomping mode identifier");
+      chomping = current === 43 ? CHOMPING_MODE.KEEP : CHOMPING_MODE.STRIP;
+      state.position++;
+    } else if (digit >= 0) {
+      if (digit === 0) throwError(state, "bad explicit indentation width of a block scalar; it cannot be less than one");
+      if (detectedIndent) throwError(state, "repeat of an indentation width identifier");
+      indent = parentIndent + digit - 1;
+      detectedIndent = true;
+      state.position++;
+    } else break;
+  }
+  let hadWhitespace = false;
+  while (isWhiteSpace(state.input.charCodeAt(state.position))) {
+    hadWhitespace = true;
+    state.position++;
+  }
+  if (hadWhitespace && state.input.charCodeAt(state.position) === 35) skipUntilLineEnd(state);
+  if (isEol(state.input.charCodeAt(state.position))) consumeLineBreak(state);
+  else if (state.input.charCodeAt(state.position) !== 0) throwError(state, "a line break is expected");
+  let contentIndent = detectedIndent ? indent : -1;
+  let maxLeadingIndent = 0;
+  const valueStart = state.position;
+  let valueEnd = state.position;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const linePosition = state.position;
+    let column = 0;
+    while (state.input.charCodeAt(linePosition + column) === 32) column++;
+    const first = state.input.charCodeAt(linePosition + column);
+    if (first === 0) {
+      if (contentIndent >= 0) {
+        if (column > contentIndent) valueEnd = linePosition + column;
+      } else if (column > 0) valueEnd = linePosition + column;
+      break;
+    }
+    if (testDocumentBoundary(state)) break;
+    if (!detectedIndent && contentIndent === -1 && isEol(first)) maxLeadingIndent = Math.max(maxLeadingIndent, column);
+    if (!detectedIndent && contentIndent === -1 && !isEol(first)) {
+      if (first === 9 && column < parentIndent) {
+        state.position = linePosition + column;
+        throwError(state, "tab characters must not be used in indentation");
+      }
+      if (column >= parentIndent && column < maxLeadingIndent) {
+        state.position = linePosition + column;
+        throwError(state, "bad indentation of a mapping entry");
+      }
+    }
+    if (contentIndent === -1 && first !== 0 && !isEol(first) && column < parentIndent) {
+      state.lineIndent = column;
+      state.position = linePosition + column;
+      break;
+    }
+    if (!detectedIndent && first !== 0 && !isEol(first) && contentIndent === -1) contentIndent = column;
+    const requiredIndent = contentIndent === -1 ? parentIndent + 1 : contentIndent;
+    if (first !== 0 && !isEol(first) && column < requiredIndent) {
+      state.lineIndent = column;
+      state.position = linePosition + column;
+      break;
+    }
+    skipUntilLineEnd(state);
+    valueEnd = state.position;
+    if (isEol(state.input.charCodeAt(state.position))) {
+      consumeLineBreak(state);
+      valueEnd = state.position;
+    }
+  }
+  checkPrintable(state, valueStart, valueEnd);
+  addScalarEvent(state, valueStart, valueEnd, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, style, chomping, contentIndent);
+  return true;
+}
+function canStartPlainScalar(state, nodeContext) {
+  const ch = state.input.charCodeAt(state.position);
+  const inFlow = nodeContext === CONTEXT_FLOW_IN;
+  if (ch === 0 || isWsOrEol(ch) || ch === 35 || ch === 38 || ch === 42 || ch === 33 || ch === 124 || ch === 62 || ch === 39 || ch === 34 || ch === 37 || ch === 64 || ch === 96 || isFlowIndicator(ch)) return false;
+  if (ch === 63 || ch === 45) {
+    const following = state.input.charCodeAt(state.position + 1);
+    if (isWsOrEolOrEnd(following) || inFlow && isFlowIndicator(following)) return false;
+  }
+  return true;
+}
+function readPlainScalar(state, nodeIndent, nodeContext, props) {
+  if (!canStartPlainScalar(state, nodeContext)) return false;
+  const start = state.position;
+  let end = state.position;
+  let ch = state.input.charCodeAt(state.position);
+  const inFlow = nodeContext === CONTEXT_FLOW_IN;
+  let multiline = false;
+  while (ch !== 0) {
+    if (testDocumentBoundary(state)) break;
+    if (ch === 58) {
+      const following = state.input.charCodeAt(state.position + 1);
+      if (isWsOrEolOrEnd(following) || inFlow && isFlowIndicator(following)) break;
+    } else if (ch === 35) {
+      if (isWsOrEol(state.input.charCodeAt(state.position - 1))) break;
+    } else if (inFlow && isFlowIndicator(ch)) break;
+    else if (isEol(ch)) {
+      const savedPosition = state.position;
+      const savedLine = state.line;
+      const savedLineStart = state.lineStart;
+      const savedLineIndent = state.lineIndent;
+      skipSeparationSpace(state, false);
+      if (state.lineIndent >= nodeIndent) {
+        multiline = true;
+        ch = state.input.charCodeAt(state.position);
+        continue;
+      }
+      state.position = savedPosition;
+      state.line = savedLine;
+      state.lineStart = savedLineStart;
+      state.lineIndent = savedLineIndent;
+      break;
+    }
+    if (!isWhiteSpace(ch)) end = state.position + 1;
+    ch = state.input.charCodeAt(++state.position);
+  }
+  if (end === start) return false;
+  checkPrintable(state, start, end);
+  addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.PLAIN, CHOMPING_MODE.CLIP, -1, !multiline);
+  return true;
+}
+function skipFlowSeparationSpace(state, nodeIndent) {
+  const startLine = state.line;
+  skipSeparationSpace(state, true);
+  if (state.line > startLine && state.lineIndent < nodeIndent || state.firstTabInLine !== -1 && state.lineIndent < nodeIndent) throwError(state, "deficient indentation");
+}
+function readFlowCollection(state, nodeIndent, props) {
+  const ch = state.input.charCodeAt(state.position);
+  const isMapping = ch === 123;
+  const start = state.position;
+  let readNext = true;
+  if (ch !== 91 && ch !== 123) return false;
+  const terminator = isMapping ? 125 : 93;
+  if (isMapping) addMappingEvent(state, start, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.FLOW);
+  else addSequenceEvent(state, start, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.FLOW);
+  state.position++;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    skipFlowSeparationSpace(state, nodeIndent);
+    let ch2 = state.input.charCodeAt(state.position);
+    if (ch2 === terminator) {
+      state.position++;
+      addPopEvent(state);
+      return true;
+    } else if (!readNext) throwError(state, "missed comma between flow collection entries");
+    else if (ch2 === 44) throwError(state, "expected the node content, but found ','");
+    let isPair = false;
+    let isExplicitPair = false;
+    if (ch2 === 63 && isWsOrEol(state.input.charCodeAt(state.position + 1))) {
+      isPair = isExplicitPair = true;
+      state.position += 1;
+      skipFlowSeparationSpace(state, nodeIndent);
+    }
+    const entryLine = state.line;
+    const entryStart = snapshotState(state);
+    const keyWasRead = parseNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
+    skipFlowSeparationSpace(state, nodeIndent);
+    ch2 = state.input.charCodeAt(state.position);
+    if ((isMapping || isExplicitPair || state.line === entryLine) && ch2 === 58) {
+      isPair = true;
+      state.position++;
+      skipFlowSeparationSpace(state, nodeIndent);
+      if (!isMapping) {
+        insertFlowPairMappingEvent(state, entryStart);
+        if (!keyWasRead) addEmptyScalarEvent(state);
+      } else if (!keyWasRead) addEmptyScalarEvent(state);
+      if (!parseNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true)) addEmptyScalarEvent(state);
+      skipFlowSeparationSpace(state, nodeIndent);
+      if (!isMapping) addPopEvent(state);
+    } else if (isMapping && isPair) {
+      if (!keyWasRead) addEmptyScalarEvent(state);
+      addEmptyScalarEvent(state);
+    } else if (isMapping) addEmptyScalarEvent(state);
+    else if (isPair) {
+      insertFlowPairMappingEvent(state, entryStart);
+      if (!keyWasRead) addEmptyScalarEvent(state);
+      addEmptyScalarEvent(state);
+      addPopEvent(state);
+    }
+    ch2 = state.input.charCodeAt(state.position);
+    if (ch2 === 44) {
+      readNext = true;
+      state.position++;
+    } else readNext = false;
+  }
+  throwError(state, "unexpected end of the stream within a flow collection");
+}
+function readBlockSequence(state, nodeIndent, props) {
+  if (state.firstTabInLine !== -1 || state.input.charCodeAt(state.position) !== 45 || !isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) return false;
+  addSequenceEvent(state, state.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+  while (state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) {
+    if (state.firstTabInLine !== -1) {
+      state.position = state.firstTabInLine;
+      throwError(state, "tab characters must not be used in indentation");
+    }
+    const entryLine = state.line;
+    state.position++;
+    const hadBreak = skipSeparationSpace(state, true) > 0;
+    if (state.firstTabInLine !== -1 && state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) throwError(state, "bad indentation of a sequence entry");
+    if (hadBreak && state.lineIndent <= nodeIndent) addEmptyScalarEvent(state);
+    else parseNode(state, nodeIndent, CONTEXT_BLOCK_IN, false, true);
+    skipSeparationSpace(state, true);
+    if (state.lineIndent < nodeIndent || state.position >= state.length) break;
+    if (state.lineIndent > nodeIndent) throwError(state, "bad indentation of a sequence entry");
+    if (state.line === entryLine && state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) throwError(state, "bad indentation of a sequence entry");
+  }
+  addPopEvent(state);
+  return true;
+}
+function readBlockMapping(state, nodeIndent, flowIndent, props) {
+  let atExplicitKey = false;
+  let detected = false;
+  let mappingOpened = false;
+  let pendingExplicitKey = false;
+  if (state.firstTabInLine !== -1) return false;
+  let ch = state.input.charCodeAt(state.position);
+  while (ch !== 0) {
+    if (!atExplicitKey && state.firstTabInLine !== -1) {
+      state.position = state.firstTabInLine;
+      throwError(state, "tab characters must not be used in indentation");
+    }
+    const following = state.input.charCodeAt(state.position + 1);
+    const entryLine = state.line;
+    if ((ch === 63 || ch === 58) && isWsOrEolOrEnd(following)) {
+      if (!mappingOpened) {
+        addMappingEvent(state, state.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+        mappingOpened = true;
+      }
+      if (ch === 63) {
+        if (atExplicitKey) addEmptyScalarEvent(state);
+        detected = true;
+        atExplicitKey = true;
+      } else if (atExplicitKey) atExplicitKey = false;
+      else {
+        addEmptyScalarEvent(state);
+        detected = true;
+        atExplicitKey = false;
+      }
+      state.position += 1;
+      pendingExplicitKey = true;
+    } else {
+      if (atExplicitKey) {
+        addEmptyScalarEvent(state);
+        atExplicitKey = false;
+      }
+      const beforeKey = snapshotState(state);
+      if (!parseNode(state, flowIndent, CONTEXT_FLOW_OUT, false, true)) break;
+      if (state.line === entryLine) {
+        ch = state.input.charCodeAt(state.position);
+        while (isWhiteSpace(ch)) ch = state.input.charCodeAt(++state.position);
+        if (ch === 58) {
+          ch = state.input.charCodeAt(++state.position);
+          if (!isWsOrEolOrEnd(ch)) throwError(state, "a whitespace character is expected after the key-value separator within a block mapping");
+          if (!mappingOpened) {
+            state.events.splice(beforeKey.eventsLength, 0, {
+              type: EVENT_ID.MAPPING,
+              start: beforeKey.position,
+              anchorStart: props.anchorStart,
+              anchorEnd: props.anchorEnd,
+              tagStart: props.tagStart,
+              tagEnd: props.tagEnd,
+              style: COLLECTION_STYLE.BLOCK
+            });
+            mappingOpened = true;
+          }
+          detected = true;
+          atExplicitKey = false;
+          pendingExplicitKey = false;
+        } else if (detected) throwError(state, "expected ':' after a mapping key");
+        else {
+          if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) {
+            restoreState(state, beforeKey);
+            return false;
+          }
+          return true;
+        }
+      } else if (detected) throwError(state, "can not read a block mapping entry; a multiline key may not be an implicit key");
+      else {
+        if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) {
+          restoreState(state, beforeKey);
+          return false;
+        }
+        return true;
+      }
+    }
+    if (parseNode(state, nodeIndent, CONTEXT_BLOCK_OUT, true, pendingExplicitKey)) pendingExplicitKey = false;
+    if (!atExplicitKey) {
+      if (pendingExplicitKey) {
+        addEmptyScalarEvent(state);
+        pendingExplicitKey = false;
+      }
+    }
+    skipSeparationSpace(state, true);
+    ch = state.input.charCodeAt(state.position);
+    if ((state.line === entryLine || state.lineIndent > nodeIndent) && ch !== 0) throwError(state, "bad indentation of a mapping entry");
+    else if (state.lineIndent < nodeIndent) break;
+  }
+  if (!detected) return false;
+  if (atExplicitKey) addEmptyScalarEvent(state);
+  if (mappingOpened) addPopEvent(state);
+  return true;
+}
+function parseNode(state, parentIndent, nodeContext, allowToSeek, allowCompact, allowPropertyMapping = true) {
+  if (state.depth >= state.maxDepth) throwError(state, `nesting exceeded maxDepth (${state.maxDepth})`);
+  state.depth++;
+  let indentStatus = 1;
+  let atNewLine = false;
+  let hasContent = false;
+  let propertyStart = null;
+  const props = emptyProperties();
+  let allowBlockScalars = nodeContext === CONTEXT_BLOCK_OUT || nodeContext === CONTEXT_BLOCK_IN;
+  let allowBlockCollections = allowBlockScalars;
+  const allowBlockStyles = allowBlockScalars;
+  if (allowToSeek && skipSeparationSpace(state, true)) {
+    atNewLine = true;
+    if (state.lineIndent > parentIndent) indentStatus = 1;
+    else if (state.lineIndent === parentIndent) indentStatus = 0;
+    else indentStatus = -1;
+  }
+  if (indentStatus === 1) while (true) {
+    const ch = state.input.charCodeAt(state.position);
+    const propertyState = snapshotState(state);
+    if (atNewLine && indentStatus !== 1 && (ch === 33 || ch === 38)) break;
+    if (atNewLine && allowBlockStyles && (props.tagStart !== NO_RANGE$1 || props.anchorStart !== NO_RANGE$1) && (ch === 33 || ch === 38)) {
+      const fallbackState = snapshotState(state);
+      const flowIndent = parentIndent + 1;
+      if (readBlockMapping(state, state.position - state.lineStart, flowIndent, props) && state.events[fallbackState.eventsLength]?.type === EVENT_ID.MAPPING) {
+        state.depth--;
+        return true;
+      }
+      restoreState(state, fallbackState);
+    }
+    if (atNewLine && (ch === 33 && props.tagStart !== NO_RANGE$1 || ch === 38 && props.anchorStart !== NO_RANGE$1)) break;
+    if (!readTagProperty(state, props, nodeContext === CONTEXT_FLOW_IN) && !readAnchorProperty(state, props)) break;
+    if (propertyStart === null) propertyStart = propertyState;
+    if (skipSeparationSpace(state, true)) {
+      atNewLine = true;
+      allowBlockCollections = allowBlockStyles;
+      if (state.lineIndent > parentIndent) indentStatus = 1;
+      else if (state.lineIndent === parentIndent) indentStatus = 0;
+      else indentStatus = -1;
+    } else allowBlockCollections = false;
+  }
+  if (allowBlockCollections) allowBlockCollections = atNewLine || allowCompact;
+  if (indentStatus === 1 || nodeContext === CONTEXT_BLOCK_OUT) {
+    const flowIndent = nodeContext === CONTEXT_FLOW_IN || nodeContext === CONTEXT_FLOW_OUT ? parentIndent : parentIndent + 1;
+    const blockIndent = state.position - state.lineStart;
+    if (indentStatus === 1) {
+      if (allowBlockCollections && (readBlockSequence(state, blockIndent, props) || readBlockMapping(state, blockIndent, flowIndent, props)) || readFlowCollection(state, flowIndent, props)) hasContent = true;
+      else {
+        const ch = state.input.charCodeAt(state.position);
+        if (propertyStart !== null && allowPropertyMapping && allowBlockStyles && !allowBlockCollections && ch !== 124 && ch !== 62) {
+          const fallbackState = snapshotState(state);
+          const propertyIndent = propertyStart.position - propertyStart.lineStart;
+          restoreState(state, propertyStart);
+          if (readBlockMapping(state, propertyIndent, flowIndent, emptyProperties()) && state.events[fallbackState.eventsLength]?.type === EVENT_ID.MAPPING) hasContent = true;
+          else restoreState(state, fallbackState);
+        }
+        if (!hasContent && (allowBlockScalars && readBlockScalar(state, flowIndent, props) || readSingleQuotedScalar(state, flowIndent, props) || readDoubleQuotedScalar(state, flowIndent, props) || readAlias(state, props) || readPlainScalar(state, flowIndent, nodeContext, props))) hasContent = true;
+      }
+    } else if (indentStatus === 0) hasContent = allowBlockCollections && readBlockSequence(state, blockIndent, props);
+  }
+  allowBlockScalars = allowBlockScalars && !hasContent;
+  if (!hasContent && (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1 || allowBlockScalars)) {
+    addScalarEvent(state, NO_RANGE$1, NO_RANGE$1, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.PLAIN);
+    hasContent = true;
+  }
+  state.depth--;
+  return hasContent || props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1;
+}
+function readDirective(state) {
+  if (state.lineIndent > 0 || state.input.charCodeAt(state.position) !== 37) return false;
+  state.position++;
+  const nameStart = state.position;
+  while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position))) state.position++;
+  const name = state.input.slice(nameStart, state.position);
+  const args = [];
+  if (name.length === 0) throwError(state, "directive name must not be less than one character in length");
+  while (state.input.charCodeAt(state.position) !== 0 && !isEol(state.input.charCodeAt(state.position))) {
+    while (isWhiteSpace(state.input.charCodeAt(state.position))) state.position++;
+    if (state.input.charCodeAt(state.position) === 35 || isEol(state.input.charCodeAt(state.position)) || state.input.charCodeAt(state.position) === 0) break;
+    const start = state.position;
+    while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position))) state.position++;
+    args.push(state.input.slice(start, state.position));
+  }
+  if (isEol(state.input.charCodeAt(state.position))) consumeLineBreak(state);
+  if (name === "YAML") {
+    if (state.directives.some((directive) => directive.kind === "yaml")) throwError(state, "duplication of %YAML directive");
+    if (args.length !== 1) throwError(state, "YAML directive accepts exactly one argument");
+    const match = /^([0-9]+)\.([0-9]+)$/.exec(args[0]);
+    if (match === null) throwError(state, "ill-formed argument of the YAML directive");
+    if (parseInt(match[1], 10) !== 1) throwError(state, "unacceptable YAML version of the document");
+    state.directives.push({
+      kind: "yaml",
+      version: args[0]
+    });
+  } else if (name === "TAG") {
+    if (args.length !== 2) throwError(state, "TAG directive accepts exactly two arguments");
+    const [handle2, prefix] = args;
+    if (!PATTERN_TAG_HANDLE.test(handle2)) throwError(state, "ill-formed tag handle (first argument) of the TAG directive");
+    if (HAS_OWN.call(state.tagHandlers, handle2)) throwError(state, `there is a previously declared suffix for "${handle2}" tag handle`);
+    if (!PATTERN_TAG_PREFIX.test(prefix)) throwError(state, "ill-formed tag prefix (second argument) of the TAG directive");
+    state.tagHandlers[handle2] = prefix;
+    state.directives.push({
+      kind: "tag",
+      handle: handle2,
+      prefix
+    });
+  }
+  return true;
+}
+function readDocument(state) {
+  state.directives = [];
+  state.tagHandlers = /* @__PURE__ */ Object.create(null);
+  let hasDirectives = false;
+  skipSeparationSpace(state, true);
+  while (readDirective(state)) {
+    hasDirectives = true;
+    skipSeparationSpace(state, true);
+  }
+  let explicitStart = false;
+  let explicitEnd = false;
+  let allowCompact = true;
+  if (state.lineIndent === 0 && state.input.charCodeAt(state.position) === 45 && state.input.charCodeAt(state.position + 1) === 45 && state.input.charCodeAt(state.position + 2) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 3))) {
+    explicitStart = true;
+    const markerLine = state.line;
+    state.position += 3;
+    skipSeparationSpace(state, true);
+    allowCompact = state.line > markerLine;
+  } else if (hasDirectives) throwError(state, "directives end mark is expected");
+  const documentEventIndex = state.events.length;
+  if (!explicitStart && state.position === state.lineStart && state.input.charCodeAt(state.position) === 46 && testDocumentSeparator(state)) {
+    state.position += 3;
+    skipSeparationSpace(state, true);
+    return;
+  }
+  addDocumentEvent(state, explicitStart, false);
+  if (!parseNode(state, state.lineIndent - 1, CONTEXT_BLOCK_OUT, false, allowCompact, allowCompact)) addEmptyScalarEvent(state);
+  skipSeparationSpace(state, true);
+  if (state.position === state.lineStart && testDocumentSeparator(state)) {
+    explicitEnd = state.input.charCodeAt(state.position) === 46;
+    if (explicitEnd) {
+      const markerLine = state.line;
+      state.position += 3;
+      skipSeparationSpace(state, true);
+      if (state.line === markerLine && state.position < state.length) throwError(state, "end of the stream or a document separator is expected");
+    }
+  }
+  const documentEvent = state.events[documentEventIndex];
+  if (documentEvent?.type === EVENT_ID.DOCUMENT) documentEvent.explicitEnd = explicitEnd;
+  addPopEvent(state);
+  if (!explicitEnd && state.position < state.length && !testDocumentBoundary(state)) throwError(state, "end of the stream or a document separator is expected");
+}
+function parseEvents(input, options) {
+  const length = input.length;
+  const state = {
+    ...DEFAULT_PARSER_OPTIONS,
+    ...options,
+    input: `${input}\0`,
+    length,
+    position: 0,
+    line: 0,
+    lineStart: 0,
+    lineIndent: 0,
+    firstTabInLine: -1,
+    depth: 0,
+    directives: [],
+    tagHandlers: /* @__PURE__ */ Object.create(null),
+    events: []
+  };
+  const nullpos = input.indexOf("\0");
+  if (nullpos !== -1) YAMLException.throwAt(input, nullpos, "null byte is not allowed in input", state.filename);
+  while (state.position < state.length) {
+    skipByteOrderMark(state);
+    skipSeparationSpace(state, true);
+    if (state.position >= state.length) break;
+    const documentStart = state.position;
+    readDocument(state);
+    if (state.position === documentStart)
+      throwError(state, "can not read a document");
+  }
+  return state.events;
+}
 var DEFAULT_LOAD_OPTIONS = {
   ...DEFAULT_PARSER_OPTIONS,
   ...DEFAULT_CONSTRUCTOR_OPTIONS
 };
+function loadDocuments(input, options = {}) {
+  const opts = {
+    ...DEFAULT_LOAD_OPTIONS,
+    ...options
+  };
+  const source = String(input);
+  const PARSER_OPT_KEYS = Object.keys(DEFAULT_PARSER_OPTIONS);
+  const CONSTRUCTOR_OPT_KEYS = Object.keys(DEFAULT_CONSTRUCTOR_OPTIONS);
+  return constructFromEvents(parseEvents(source, pick(opts, PARSER_OPT_KEYS)), {
+    ...pick(opts, CONSTRUCTOR_OPT_KEYS),
+    source
+  });
+}
+function load(input, options) {
+  const documents = loadDocuments(input, options);
+  if (documents.length === 0) throw new YAMLException("expected a document, but the input is empty");
+  if (documents.length === 1) return documents[0];
+  throw new YAMLException("expected a single document in the stream, but found more");
+}
 function hasBit(mask, bit) {
   return (mask & 1 << bit) !== 0;
 }
@@ -16722,6 +18222,11 @@ var COLLECTION_STYLE_FLOW = COLLECTION_STYLE.FLOW;
 var CHOMPING_CLIP = CHOMPING_MODE.CLIP;
 var CHOMPING_STRIP = CHOMPING_MODE.STRIP;
 var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
+
+// scripts/lib/installed-copy.mjs
+import { existsSync as existsSync9 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { join as join17 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync8, readFileSync as readFileSync12, readdirSync as readdirSync3, realpathSync as realpathSync4 } from "node:fs";
@@ -16995,25 +18500,49 @@ return { openCodeCacheKey, openCodeLoadedSterling };`
 )(createHash3, existsSync8, readFileSync12, readdirSync3, join16, homedir6);
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
+function canonical(p) {
+  try {
+    return realpathSync4(p);
+  } catch (err) {
+    if (err?.code === "ENOENT") return resolve7(p);
+    throw err;
+  }
+}
+function installHostOf(root, { env = process.env, home = homedir6() } = {}) {
+  const real = canonical(root);
+  for (const { host, dir } of installRoots(env, home)) {
+    if (real.startsWith(canonical(dir) + sep2)) return host;
+  }
+  return null;
+}
+
+// scripts/lib/installed-copy.mjs
+function isInstalledCopy(root, { env = process.env, home = homedir7() } = {}) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
+  }
+  if (!existsSync9(join17(root, ".git"))) return true;
+  return installHostOf(root, { env, home }) !== null;
+}
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync10, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
-import { basename as basename3, dirname as dirname7, join as join18, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync11, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
+import { basename as basename3, dirname as dirname7, join as join19, resolve as resolve8 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync9, readFileSync as readFileSync13 } from "node:fs";
-import { join as join17 } from "node:path";
-var CONFIG_REL3 = join17(".sterling", "config.json");
-var STORE_DB_REL = join17(".sterling", "sterling.db");
+import { existsSync as existsSync10, readFileSync as readFileSync13 } from "node:fs";
+import { join as join18 } from "node:path";
+var CONFIG_REL3 = join18(".sterling", "config.json");
+var STORE_DB_REL = join18(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync9(join17(dir, CONFIG_REL3)) || existsSync9(join17(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync10(join18(dir, CONFIG_REL3)) || existsSync10(join18(dir, STORE_DB_REL)));
 }
 function storeBackend(root) {
-  const dbExists = () => existsSync9(join17(root, STORE_DB_REL));
+  const dbExists = () => existsSync10(join18(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync13(join17(root, CONFIG_REL3), "utf8");
+    text = readFileSync13(join18(root, CONFIG_REL3), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -17029,7 +18558,7 @@ function storeBackend(root) {
 
 // scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git2 = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const git3 = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
       return realpathSync5(p);
@@ -17037,7 +18566,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
       return null;
     }
   };
-  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
@@ -17045,7 +18574,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   const commonReal = real(resolve8(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
   const settings = {};
   if (!core.error && core.status === 0) {
     for (const line of core.stdout.split("\n")) {
@@ -17062,8 +18591,8 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
 }
 function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
   if (!linkedWorktree) return target;
-  const configRel = join18(".sterling", "config.json");
-  const worktreeOnlyConfig = !existsSync10(join18(linkedWorktree.mainRoot, configRel)) && existsSync10(join18(linkedWorktree.worktree, configRel));
+  const configRel = join19(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync11(join19(linkedWorktree.mainRoot, configRel)) && existsSync11(join19(linkedWorktree.worktree, configRel));
   return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
 }
 var linkedProbes = /* @__PURE__ */ new Map();
@@ -17073,7 +18602,7 @@ function linkedWorktreeOnce(dir) {
 }
 function gitFileAt(dir) {
   try {
-    return statSync5(join18(dir, ".git")).isFile();
+    return statSync5(join19(dir, ".git")).isFile();
   } catch {
     return false;
   }
@@ -17093,6 +18622,22 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
     const parent = dirname7(dir);
     if (parent === dir) return null;
     dir = parent;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve8(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync5(p);
+  } catch {
+    return p;
   }
 }
 
@@ -17226,7 +18771,7 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
 function sterlingRootFrom(moduleUrl = new URL("../../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname8(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname8(dir)) {
-    if (existsSync11(join19(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync12(join20(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname8(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -17309,19 +18854,19 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join19(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join20(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir2), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join19(projectDir2, rel);
-    const templateContent = readFileSync14(join19(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join20(projectDir2, rel);
+    const templateContent = readFileSync14(join20(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync11(path) ? readFileSync14(path, "utf8") : null;
+    const raw = existsSync12(path) ? readFileSync14(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -17357,7 +18902,7 @@ function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models =
   return rows;
 }
 function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync11(join19(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync12(join20(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
@@ -17365,7 +18910,7 @@ function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model
   return { rows: ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync11(join19(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync12(join20(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
@@ -17402,20 +18947,450 @@ function restoreFullAgentFiles(writes, fs = {}) {
   if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
 }
 
+// packages/tui/dist/custom-agents.js
+import { existsSync as existsSync14, readdirSync as readdirSync5, readFileSync as readFileSync16 } from "node:fs";
+import { join as join22, relative, sep as sep3 } from "node:path";
+
+// scripts/lib/agy-setup.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { createHash as createHash4 } from "node:crypto";
+import { existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync15, readlinkSync, statSync as statSync7, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { basename as basename5, dirname as dirname9, isAbsolute as isAbsolute2, join as join21, resolve as resolve10 } from "node:path";
+var AGY_AGENTS_DIR = ".agents/agents";
+var GEMINI_MD = "GEMINI.md";
+var AGY_CONDUCTOR = "conductor";
+var GEMINI_MD_MAX_BYTES = 24e3;
+var AGY_MCP_SERVER_NAME = "sterling";
+var AGY_MCP_READ_ONLY_SERVER_NAME = "sterling-ro";
+var AGY_READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
+var EXCLUDE_BEGIN = "# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)";
+var EXCLUDE_END = "# <<< sterling agy";
+var HEADER_RE2 = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
+var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
+var SHELL = ["run_command", "command_status"];
+var EDIT = ["write_file", "edit_file", "multi_replace_file_content"];
+var WEB = ["search_web", "read_url_content"];
+var DISPATCH = ["invoke_subagent", "send_message"];
+var AGY_TOOLS = {
+  conductor: [...READ, ...SHELL, ...EDIT, ...WEB, ...DISPATCH, "ask_question"],
+  implementor: [...READ, ...SHELL, ...EDIT, ...WEB],
+  "implementor-hard": [...READ, ...SHELL, ...EDIT, ...WEB],
+  researcher: [...READ, ...SHELL, ...WEB],
+  scout: [...READ],
+  reviewer: [...READ, ...SHELL],
+  sparring: [...READ, ...SHELL],
+  librarian: ["read_file", "grep_search"],
+  preflight: [...READ]
+};
+var AGY_ROSTER = Object.keys(AGY_TOOLS);
+var CONDUCTOR_DESCRIPTION = "Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Started with `agy --agent conductor` from .agents/agents/conductor/agent.md (written by /sterling:init and sync-agents); never invoked as a subagent.";
+var fwd3 = (p) => p.replace(/\\/g, "/");
+var normalize4 = (s2) => s2.replace(/\r\n/g, "\n");
+var sha2562 = (text) => createHash4("sha256").update(text).digest("hex");
+function agyPluginCopy({ env = process.env, home = homedir8() } = {}) {
+  return join21(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
+}
+function probeAgy({ env = process.env, home = homedir8() } = {}) {
+  const forced = env.STERLING_AGY_PROBE;
+  if (forced === "ok") return { installed: true, version: "forced" };
+  if (forced === "absent") return { installed: false, reason: "STERLING_AGY_PROBE=absent" };
+  if (forced) throw new Error(`STERLING_AGY_PROBE must be 'ok' or 'absent' (got '${forced}')`);
+  let r = spawnSync4("agy", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const homeBin = join21(home, ".local", "bin", "agy");
+  if (r.error?.code === "ENOENT" && existsSync13(homeBin)) r = spawnSync4(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `agy` on PATH or in ~/.local/bin" : `agy --version could not run (${r.error.message})` };
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
+  if (r.status !== 0 || !m) return { installed: false, reason: `agy --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
+  return { installed: true, version: m[0] };
+}
+function agyMcpRoot({ pluginRoot, env = process.env, home = homedir8(), installed }) {
+  const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
+  if (!isInstalled) return { root: resolve10(pluginRoot), why: "the Sterling clone running this" };
+  const agyCopy = agyPluginCopy({ env, home });
+  if (existsSync13(join21(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
+  return { root: resolve10(pluginRoot), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd3(agyCopy)})` };
+}
+var MCP_PROBE_TIMEOUT_MS = 1e4;
+function probeMcpServer({ root, env = process.env, timeoutMs: timeoutMs2 = MCP_PROBE_TIMEOUT_MS }) {
+  const server = join21(root, "mcp", "sterling-mcp.mjs");
+  const r = spawnSync4(process.execPath, [server, "--capabilities"], { encoding: "utf8", env, timeout: timeoutMs2, killSignal: "SIGKILL" });
+  if (r.error?.code === "ETIMEDOUT") return { readOnly: false, reason: `${fwd3(server)} --capabilities did not answer within ${timeoutMs2} ms and was killed` };
+  if (r.error) return { readOnly: false, reason: `${fwd3(server)} --capabilities could not run (${r.error.message})` };
+  if (r.status !== 0) return { readOnly: false, reason: `${fwd3(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
+  let caps = null;
+  try {
+    caps = JSON.parse(r.stdout.trim().split("\n").pop() ?? "");
+  } catch {
+    caps = null;
+  }
+  if (caps?.sterling_mcp?.read_only !== true) return { readOnly: false, reason: `${fwd3(server)} --capabilities does not report read_only: ${r.stdout.trim().slice(0, 200) || "(no output)"}` };
+  return { readOnly: true };
+}
+var yamlString = (s2) => JSON.stringify(s2);
+function templateDescription(frontmatter, label) {
+  const line = frontmatter.match(/^description:\s*(.+)$/m)?.[1];
+  if (!line) throw new Error(`agy agent ${label}: no description in the template frontmatter (P5)`);
+  return /^(["']).*\1$/.test(line) ? line.slice(1, -1) : line;
+}
+function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath, agyModel }) {
+  const tools = AGY_TOOLS[name];
+  if (!tools) throw new Error(`agy agent ${label}: '${name}' is not in the agy roster (P5)`);
+  const rendered = normalize4(renderAgyText(templateContent, label));
+  const m = rendered.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error(`agy agent ${label}: missing frontmatter block (P5)`);
+  const [, frontmatter, body] = m;
+  const leftover = body.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
+  const conductor = name === AGY_CONDUCTOR;
+  const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const readOnly = AGY_READ_ONLY_ROLES.has(name);
+  const fm = [
+    "---",
+    `name: ${name}`,
+    `description: ${yamlString(description)}`,
+    `model: ${agyModel ?? "inherit"}`,
+    `mainAgent: ${conductor}`,
+    `subagent: ${!conductor}`,
+    "tools:",
+    ...tools.map((t) => `  - ${t}`),
+    "# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.",
+    ...readOnly ? ["# A read-only role declares sterling-ro, the Sterling server started with --read-only, which refuses every store-write tool."] : [],
+    "mcpServers:",
+    `  - name: ${readOnly ? AGY_MCP_READ_ONLY_SERVER_NAME : AGY_MCP_SERVER_NAME}`,
+    `    command: ${yamlString(fwd3(nodePath))}`,
+    "    args:",
+    `      - ${yamlString(fwd3(join21(root, "mcp", "sterling-mcp.mjs")))}`,
+    `      - ${yamlString("--project")}`,
+    `      - ${yamlString(".")}`,
+    ...readOnly ? [`      - ${yamlString("--read-only")}`] : [],
+    "---"
+  ].join("\n");
+  const content = `${fm}
+${body}`;
+  const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha2562(templateContent)} content_hash=${sha2562(content)} -->`;
+  return `${fm}
+${header}
+${body}`;
+}
+function unstamped(disk, headerLine) {
+  return disk.replace(`${headerLine}
+`, "");
+}
+function refusal2(item, what, remedy) {
+  return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
+}
+function git2(projectDir2, args) {
+  return spawnSync4("git", args, { cwd: projectDir2, encoding: "utf8" });
+}
+function insideGitCheckout(dir) {
+  for (let d = resolve10(dir); ; d = dirname9(d)) {
+    if (existsSync13(join21(d, ".git"))) return true;
+    if (dirname9(d) === d) return false;
+  }
+}
+function trackedFiles(projectDir2, paths, runGit = git2) {
+  const ls = runGit(projectDir2, ["ls-files", "--", ...paths]);
+  if (!ls.error && ls.status === 0) return { tracked: ls.stdout.split("\n").filter(Boolean) };
+  if (!insideGitCheckout(projectDir2)) return { tracked: [] };
+  const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || "").trim().split("\n")[0] || "no message"}`;
+  return { failed: why };
+}
+function ensureAgyAgents({ projectDir: projectDir2, pluginRoot, root, tracked, nodePath = process.execPath, agyModels = {} }) {
+  const rows = [];
+  for (const name of AGY_ROSTER) {
+    const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
+    const path = join21(projectDir2, rel);
+    if (tracked.includes(rel)) {
+      rows.push(refusal2(rel, `${rel} is tracked by git, and the Sterling agy agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
+      continue;
+    }
+    const templatePath = join21(pluginRoot, "agent-templates", `${name}.md`);
+    const content = renderAgyAgent(readFileSync15(templatePath, "utf8"), `agent-templates/${name}.md`, name, { root, nodePath, agyModel: agyModels[name] });
+    let disk = null;
+    if (existsSync13(path)) {
+      if (!statSync7(path).isFile()) {
+        rows.push(refusal2(rel, `${rel} exists and is not a file`, "move it aside, then rerun /sterling:update"));
+        continue;
+      }
+      disk = normalize4(readFileSync15(path, "utf8"));
+      const h = disk.match(HEADER_RE2);
+      if (!h || h[1] !== name) {
+        rows.push(refusal2(rel, `${rel} carries no Sterling agy header (a file Sterling did not write)`, "rename or remove it, then rerun /sterling:update"));
+        continue;
+      }
+      if (sha2562(unstamped(disk, h[0])) !== h[3]) {
+        rows.push(refusal2(rel, `${rel} was edited after Sterling wrote it`, "move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update"));
+        continue;
+      }
+    }
+    if (disk === content) {
+      rows.push({ item: rel, status: "matches" });
+      continue;
+    }
+    mkdirSync8(dirname9(path), { recursive: true });
+    writeFileAtomic(path, content);
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+  }
+  return rows;
+}
+function agyModelsOf(projectDir2) {
+  const configPath2 = join21(storeRootFor(projectDir2), ".sterling", "config.json");
+  if (!existsSync13(configPath2)) return {};
+  const models = JSON.parse(readFileSync15(configPath2, "utf8")).models;
+  const out = {};
+  if (models === null || typeof models !== "object") return out;
+  for (const [role, entry] of Object.entries(models)) {
+    const id = entry?.agy_model;
+    if (id === void 0) continue;
+    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
+    out[role] = id;
+  }
+  return out;
+}
+function projectNameOf(projectDir2) {
+  const configPath2 = join21(storeRootFor(projectDir2), ".sterling", "config.json");
+  if (!existsSync13(configPath2)) return basename5(projectDir2);
+  const name = JSON.parse(readFileSync15(configPath2, "utf8")).project_name;
+  return typeof name === "string" && name ? name : basename5(projectDir2);
+}
+function renderGeminiMd({ pluginRoot, root, projectName }) {
+  const rel = "templates/target-claude-md.md";
+  const text = renderAgyText(readFileSync15(join21(pluginRoot, rel), "utf8"), rel).replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll("{{STERLING_ROOT}}", () => fwd3(root));
+  if (/^@AGENTS\.md\s*$/m.test(text)) throw new Error(`${GEMINI_MD}: the agy render of ${rel} imports @AGENTS.md; agy loads AGENTS.md itself (P5)`);
+  const leftover = text.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) throw new Error(`${GEMINI_MD}: the agy render of ${rel} keeps the token ${leftover[0]} (P5)`);
+  const dead = findDeadTerms(text);
+  if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
+  return text;
+}
+function geminiRootAlias(home) {
+  return join21(home, ".gemini", "sterling-root");
+}
+function ensureRootAlias(alias, root) {
+  let st = null;
+  try {
+    st = lstatSync7(alias);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (st) {
+    if (!st.isSymbolicLink()) throw new Error(`${fwd3(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
+    if (resolve10(dirname9(alias), readlinkSync(alias)) === resolve10(root)) return;
+    unlinkSync4(alias);
+  }
+  mkdirSync8(dirname9(alias), { recursive: true });
+  symlinkSync(root, alias, "junction");
+}
+function geminiUsesRootAlias(text, home = homedir8()) {
+  return String(text).includes(`${fwd3(geminiRootAlias(home))}/`);
+}
+function ensureGeminiMd({ projectDir: projectDir2, pluginRoot, root, home = homedir8() }) {
+  const path = join21(projectDir2, GEMINI_MD);
+  const alias = geminiRootAlias(home);
+  const existing = existsSync13(path) ? normalize4(readFileSync15(path, "utf8")) : null;
+  const keepAlias = () => {
+    try {
+      ensureRootAlias(alias, root);
+      return null;
+    } catch (err) {
+      return refusal2(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd3(alias)}, which could not be pointed at ${fwd3(root)}: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+    }
+  };
+  if (existing !== null && geminiUsesRootAlias(existing, home)) {
+    const refused = keepAlias();
+    if (refused) return refused;
+  }
+  const projectName = projectNameOf(projectDir2);
+  let want;
+  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
+  try {
+    try {
+      want = renderGeminiMd({ pluginRoot, root: aliased ? alias : root, projectName });
+    } catch (err) {
+      if (!err.overCap || aliased) throw err;
+      want = renderGeminiMd({ pluginRoot, root: alias, projectName });
+      aliased = true;
+    }
+  } catch (err) {
+    return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+  }
+  if (existing === null) {
+    if (aliased) {
+      const refused = keepAlias();
+      if (refused) return refused;
+    }
+    writeFileAtomic(path, want);
+    return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
+  }
+  if (existing === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
+  return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
+}
+function ensureAgyExcluded({ projectDir: projectDir2, gemini }) {
+  const label = ".git/info/exclude (agy)";
+  const gp = git2(projectDir2, ["rev-parse", "--git-path", "info/exclude"]);
+  if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
+  const excludePath = resolve10(projectDir2, gp.stdout.trim());
+  const current = existsSync13(excludePath) ? normalize4(readFileSync15(excludePath, "utf8")) : "";
+  const begin = current.indexOf(EXCLUDE_BEGIN);
+  const end = current.indexOf(EXCLUDE_END);
+  const listed = begin !== -1 && end > begin && current.slice(begin, end).split("\n").includes(`/${GEMINI_MD}`);
+  const excludeGemini = gemini === "exclude" || gemini === "keep" && listed;
+  const lines = [...AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`), ...excludeGemini ? [`/${GEMINI_MD}`] : []];
+  const want = [EXCLUDE_BEGIN, ...lines, EXCLUDE_END].join("\n");
+  if (begin !== -1 && end > begin) {
+    if (current.slice(begin, end + EXCLUDE_END.length) === want) return { item: label, status: "matches", detail: lines.join(" ") };
+    writeFileSync6(excludePath, current.slice(0, begin) + want + current.slice(end + EXCLUDE_END.length));
+    return { item: label, status: "refreshed", detail: lines.join(" ") };
+  }
+  mkdirSync8(dirname9(excludePath), { recursive: true });
+  const sep5 = current === "" || current.endsWith("\n") ? "" : "\n";
+  writeFileSync6(excludePath, `${current}${sep5}${want}
+`);
+  return { item: label, status: "created", detail: lines.join(" ") };
+}
+function setupAgy({ projectDir: projectDir2, pluginRoot, env = process.env, home = homedir8(), installed, probe = probeAgy, probeServer = probeMcpServer, nodePath = process.execPath, runGit = git2 }) {
+  if (!isAbsolute2(projectDir2)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir2}`);
+  if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
+  const found = probe({ env, home });
+  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
+  const { root, why } = agyMcpRoot({ pluginRoot, env, home, installed });
+  const rows = [{ item: "Sterling MCP server", status: "matches", detail: `${fwd3(join21(root, "mcp", "sterling-mcp.mjs"))} (${why})` }];
+  const inventory = trackedFiles(projectDir2, [AGY_AGENTS_DIR, GEMINI_MD], runGit);
+  if (inventory.failed) {
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/, ${GEMINI_MD}, .git/info/exclude (agy)`, `git ls-files failed in ${fwd3(projectDir2)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
+    return { root, rows };
+  }
+  const { tracked } = inventory;
+  const server = probeServer({ root, env });
+  if (server.readOnly) {
+    rows.push(...ensureAgyAgents({ projectDir: projectDir2, pluginRoot, root, tracked, nodePath, agyModels: agyModelsOf(projectDir2) }));
+  } else {
+    const remedy = resolve10(root) !== resolve10(pluginRoot) ? `install this Sterling into agy (agy plugin install ${fwd3(resolve10(pluginRoot))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd3(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
+  }
+  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir: projectDir2, pluginRoot, root, home });
+  rows.push(gemini);
+  const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
+  rows.push(ensureAgyExcluded({ projectDir: projectDir2, gemini: geminiRule }));
+  return { root, rows };
+}
+
+// packages/tui/dist/custom-agents.js
+var CLAUDE_DIR = [".claude", "agents"];
+var OPENCODE_DIR = [".opencode", "agents"];
+var OPENCODE_STERLING_DIR = [".opencode", "agents", "sterling"];
+var AGY_DIR = AGY_AGENTS_DIR.split("/");
+var STERLING_ROLES = /* @__PURE__ */ new Set([...Object.keys(AGENT_MODEL_KEY), ...AGY_ROSTER]);
+var STERLING_STAMP_RE = /<!--\s*sterling-(?:full|agy|generated)\b/;
+function installedGovernedAgents(projectRoot) {
+  const governed = Object.keys(AGENT_MODEL_KEY);
+  return {
+    claude: governed.filter((n) => existsSync14(join22(projectRoot, ...CLAUDE_DIR, `${n}.md`))),
+    opencode: governed.filter((n) => existsSync14(join22(projectRoot, ...OPENCODE_STERLING_DIR, `${n}.md`))),
+    agy: governed.filter((n) => existsSync14(join22(projectRoot, ...AGY_DIR, n, "agent.md")))
+  };
+}
+function walk(dir, found, errors, source, projectRoot) {
+  let entries;
+  try {
+    entries = readdirSync5(dir, { withFileTypes: true });
+  } catch (err) {
+    errors.push({ name: relative(projectRoot, dir).split(sep3).join("/"), source, error: `cannot read folder: ${err.message}` });
+    return;
+  }
+  for (const e of entries) {
+    const p = join22(dir, e.name);
+    if (e.isDirectory())
+      walk(p, found, errors, source, projectRoot);
+    else if (e.isFile())
+      found.push(p);
+  }
+}
+function parse(path, name, source) {
+  let text;
+  try {
+    text = readFileSync16(path, "utf8");
+  } catch (err) {
+    return { name, source, error: `cannot read file: ${err.message}` };
+  }
+  if (STERLING_STAMP_RE.test(text))
+    return null;
+  const normalized = text.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n"))
+    return { name, source };
+  const end = normalized.indexOf("\n---", 4);
+  if (end === -1)
+    return { name, source, error: "frontmatter is not closed" };
+  let data;
+  try {
+    data = load(normalized.slice(4, end), { schema: CORE_SCHEMA });
+  } catch (err) {
+    return { name, source, error: `frontmatter is not valid YAML: ${err.message.split("\n")[0]}` };
+  }
+  if (data === null || data === void 0)
+    return { name, source };
+  if (typeof data !== "object" || Array.isArray(data))
+    return { name, source, error: "frontmatter is not a mapping" };
+  const model = data.model;
+  if (model === void 0 || model === null)
+    return { name, source };
+  if (typeof model !== "string" && typeof model !== "number" && typeof model !== "boolean")
+    return { name, source, error: "frontmatter model is not a scalar" };
+  return { name, source, model: String(model) };
+}
+function discoverCustomAgents(projectRoot) {
+  const out = [];
+  const hosts = [
+    { source: "claude", dir: CLAUDE_DIR, id: (rel) => rel.endsWith(".md") ? rel.slice(0, -3) : null, managed: (rel) => STERLING_ROLES.has(rel.slice(0, -3)) },
+    {
+      source: "opencode",
+      dir: OPENCODE_DIR,
+      id: (rel) => rel.endsWith(".md") ? rel.slice(0, -3) : null,
+      managed: (rel) => rel.startsWith("sterling/") && STERLING_ROLES.has(rel.slice("sterling/".length, -3))
+    },
+    {
+      source: "agy",
+      dir: AGY_DIR,
+      id: (rel) => rel.endsWith("/agent.md") ? rel.slice(0, -"/agent.md".length) : null,
+      managed: (rel) => STERLING_ROLES.has(rel.slice(0, -"/agent.md".length))
+    }
+  ];
+  for (const host of hosts) {
+    const dir = join22(projectRoot, ...host.dir);
+    if (!existsSync14(dir))
+      continue;
+    const files = [];
+    walk(dir, files, out, host.source, projectRoot);
+    for (const f of files) {
+      const rel = relative(dir, f).split(sep3).join("/");
+      const id = host.id(rel);
+      if (id === null || host.managed(rel))
+        continue;
+      const agent = parse(f, id, host.source);
+      if (agent !== null)
+        out.push(agent);
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+}
+
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync15, renameSync as renameSync4, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync17, renameSync as renameSync4, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join20 } from "node:path";
+import { join as join23 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join20(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join23(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync8(join20(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync9(join23(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
-  writeFileSync6(tmp, JSON.stringify({ type, record_id: recordId, at }));
+  writeFileSync7(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync4(tmp, path);
 }
 
@@ -17424,9 +19399,9 @@ var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 var LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 function openDashboard(storePath, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join21(dirname9(storePath), "config.json");
-  const projectRoot = dirname9(dirname9(storePath));
-  const agentsDir = join21(projectRoot, ".claude", "agents");
+  const configPath2 = join24(dirname10(storePath), "config.json");
+  const projectRoot = dirname10(dirname10(storePath));
+  const agentsDir = join24(projectRoot, ".claude", "agents");
   const selectionCheckout = options.checkoutRoot && options.checkoutRoot !== projectRoot ? options.checkoutRoot : void 0;
   function resolveProjectHeadSha() {
     try {
@@ -17445,7 +19420,7 @@ function openDashboard(storePath, options = {}) {
   let domainsAvailable = true;
   if (!routed) {
     try {
-      const config = parseConfig(JSON.parse(readFileSync16(configPath2, "utf8")));
+      const config = parseConfig(JSON.parse(readFileSync18(configPath2, "utf8")));
       mounts = resolveDomainMounts(config);
     } catch {
       mounts = [];
@@ -17461,7 +19436,7 @@ function openDashboard(storePath, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename5(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename6(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -17606,7 +19581,7 @@ function openDashboard(storePath, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync16(join21(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync18(join24(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -17622,7 +19597,7 @@ function openDashboard(storePath, options = {}) {
   }
   function readRawMode() {
     try {
-      const raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync18(configPath2, "utf8"));
       return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
     } catch (err) {
       ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
@@ -17632,7 +19607,7 @@ function openDashboard(storePath, options = {}) {
   function readRawStorage() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync18(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -17644,7 +19619,7 @@ function openDashboard(storePath, options = {}) {
   function readHandoff() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync18(configPath2, "utf8"));
     } catch {
       return { handoff: null };
     }
@@ -17665,7 +19640,7 @@ function openDashboard(storePath, options = {}) {
   function readAutoMergeOnClean() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync18(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -17683,7 +19658,7 @@ function openDashboard(storePath, options = {}) {
   function readOverpass() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync18(configPath2, "utf8"));
     } catch {
       return { enabled: null, provider: null, conductorBypass: null, effective: false };
     }
@@ -17733,7 +19708,7 @@ function openDashboard(storePath, options = {}) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
     try {
-      config = parseConfig(JSON.parse(readFileSync16(configPath2, "utf8")));
+      config = parseConfig(JSON.parse(readFileSync18(configPath2, "utf8")));
     } catch {
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
@@ -17744,10 +19719,13 @@ function openDashboard(storePath, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync12(join21(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync15(join24(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
+    const installedAt = installedGovernedAgents(projectRoot);
+    const hostInstalled = [.../* @__PURE__ */ new Set([...installedAt.opencode, ...installedAt.agy])].filter((name) => !agents.some((a) => a.name === name));
+    const customAgents = discoverCustomAgents(projectRoot);
     let catalog = { present: false, stale: false, staleDate: null, entries: [] };
     try {
       store.bootstrapCatalogIfAbsent(config, nowISO);
@@ -17766,12 +19744,12 @@ function openDashboard(storePath, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+    return { agents, hostInstalled, opencodeInstalled: installedAt.opencode, agyInstalled: installedAt.agy, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir9() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
   }
   function readMaintenanceWorker() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync18(configPath2, "utf8"));
     } catch (err) {
       return { opencodeModel: null, unreadable: `${err.message.split("\n")[0]}` };
     }
@@ -17822,7 +19800,7 @@ function openDashboard(storePath, options = {}) {
   async function applySwap(e) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      const original = readFileSync16(configPath2);
+      const original = readFileSync18(configPath2);
       const raw = JSON.parse(original.toString("utf8"));
       if (refuseOverpassModelEdit(e.key, raw))
         return;
@@ -17840,12 +19818,12 @@ function openDashboard(storePath, options = {}) {
       }
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join21(agentsDir, `${name}.md`);
-        if (!existsSync12(p))
+        const p = join24(agentsDir, `${name}.md`);
+        if (!existsSync15(p))
           continue;
-        const content = readFileSync16(p, "utf8");
+        const content = readFileSync18(p, "utf8");
         const hdr = parseInstalledHeader(content);
-        writeFileSync7(p, setInstalledModelEffort(content, {
+        writeFileSync8(p, setInstalledModelEffort(content, {
           model: e.to.model,
           effort: e.to.effort,
           pluginVersion: hdr?.pluginVersion ?? "0.0.0",
@@ -17891,7 +19869,7 @@ function openDashboard(storePath, options = {}) {
     try {
       if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
         throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync16(configPath2);
+      configBefore = readFileSync18(configPath2);
       const raw = JSON.parse(configBefore.toString("utf8"));
       if (refuseOverpassModelEdit(e.key, raw))
         return;
@@ -17959,6 +19937,116 @@ function openDashboard(storePath, options = {}) {
     }
     ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
   }
+  function applyAgyModel(e) {
+    const fail = (msg) => {
+      ui = { ...ui, notice: `Antigravity model for '${e.key}' not changed \u2014 ${msg}; config.json and the agy agent files are as they were` };
+    };
+    let configBefore;
+    let configAfter;
+    try {
+      if (e.to !== void 0 && !AGY_MODEL_IDS.includes(e.to))
+        throw new Error(`'${e.to}' is not a known agy model id`);
+      configBefore = readFileSync18(configPath2);
+      const raw = JSON.parse(configBefore.toString("utf8"));
+      if (refuseOverpassModelEdit(e.key, raw))
+        return;
+      raw.models = raw.models ?? {};
+      const { agy_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === void 0 ? rest : { ...rest, agy_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + "\n";
+    } catch (err) {
+      fail(err.message);
+      return;
+    }
+    const agentsBefore = [];
+    try {
+      for (const name of AGY_ROSTER) {
+        const path = join24(projectRoot, ...AGY_AGENTS_DIR.split("/"), name, "agent.md");
+        let st;
+        try {
+          st = lstatSync8(path);
+        } catch (err) {
+          if (err.code !== "ENOENT")
+            throw err;
+        }
+        if (st === void 0)
+          agentsBefore.push({ path, bytes: null, mode: 420 });
+        else if (st.isSymbolicLink())
+          throw new Error(`${path} is a symlink, and the agy render would replace it with a plain file`);
+        else if (!st.isFile())
+          throw new Error(`${path} is not a regular file`);
+        else
+          agentsBefore.push({ path, bytes: readFileSync18(path), mode: Number(st.mode) & 511 });
+      }
+    } catch (err) {
+      fail(`cannot snapshot the agy agent files: ${err.message}`);
+      return;
+    }
+    const restoreAgents = () => {
+      for (const { path, bytes, mode } of agentsBefore) {
+        if (bytes === null)
+          rmSync6(path, { force: true });
+        else if (!existsSync15(path) || !readFileSync18(path).equals(bytes)) {
+          writeFileAtomic(path, bytes, { writeFile: (tmp, content) => {
+            writeFileSync8(tmp, content, { mode });
+            chmodSync2(tmp, mode);
+          } });
+        }
+      }
+    };
+    try {
+      replaceConfigFile(configPath2, configAfter, configBefore, options.configWriteFs);
+    } catch (err) {
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${err.message}`);
+      return;
+    }
+    let outcome;
+    try {
+      const r = (options.agySetup ?? setupAgy)({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() });
+      const refused = (r.rows ?? []).filter((x) => x.refused);
+      if (refused.length)
+        throw new Error(`agy agent file(s) refused: ${refused.map((x) => x.detail).join("; ")}`);
+      outcome = r.skipped ?? "the agy agent files were re-rendered";
+    } catch (err) {
+      try {
+        restoreAgents();
+      } catch (agentErr) {
+        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${err.message}) and the agy agent files were not restored: ${agentErr.message}; config.json was left as written` };
+        return;
+      }
+      try {
+        replaceConfigFile(configPath2, configBefore.toString("utf8"), Buffer.from(configAfter), options.configWriteFs);
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${err.message}) and config.json was not restored: ${restoreErr.message}` };
+        return;
+      }
+      fail(err.message);
+      return;
+    }
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      store.create({
+        id: randomUUID7(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: `Antigravity model: ${e.key} ${e.from ?? "inherit"}\u2192${e.to ?? "inherit"} (System tab)`,
+        statement: `config.models['${e.key}'].agy_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the agy agents for this role now run ${e.to ?? "inherit"}, and Claude Code keeps ${e.model}.`,
+        rationale: "Antigravity model override changed from the TUI System tab (GitHub issue #306, mirroring decision openai-models-in-the-system-tab-each-role-gets-an-optional-opencode-only-model-override: only the agy agent files are re-rendered).",
+        alternatives_rejected: []
+      }, { operation_id: randomUUID7() });
+    } catch (err) {
+      ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? "inherit"}, but recording the decision failed \u2014 ${err.message}` };
+      return;
+    }
+    ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? "inherit"} (${outcome}); Claude Code keeps ${e.model}.` };
+  }
   async function applyEffects(all) {
     const effects = all.filter((e) => {
       if (e.type !== "model_swap" && e.type !== "opencode_model" && e.type !== "select")
@@ -17980,6 +20068,9 @@ function openDashboard(storePath, options = {}) {
       await applySwap(e);
     for (const e of overrides)
       applyOpenCodeModel(e);
+    for (const e of effects)
+      if (e.type === "agy_model")
+        applyAgyModel(e);
     const workerModels = effects.filter((e) => e.type === "worker_model");
     for (const e of workerModels)
       applyWorkerModel(e);
@@ -18149,14 +20240,14 @@ function assign(liveIds, current, rng, { poolSize = 48, freed = [] } = {}) {
     for (let i = 0; i < poolSize; i++)
       if (!taken.has(i))
         open2.push(i);
-    let pick;
+    let pick2;
     if (open2.length > 0)
-      pick = open2[Math.floor(rng() * open2.length)];
+      pick2 = open2[Math.floor(rng() * open2.length)];
     else if (order.length > 0)
-      pick = order[0];
+      pick2 = order[0];
     else
-      pick = Math.floor(rng() * poolSize);
-    next.set(id, pick);
+      pick2 = Math.floor(rng() * poolSize);
+    next.set(id, pick2);
   }
   return { current: next, freed: order };
 }
@@ -20483,24 +22574,24 @@ function frameAt(tick2, phase, running) {
 
 // opencode/sterling-tui/pane.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync13 } from "node:fs";
-import { basename as basename6, dirname as dirname10, isAbsolute as isAbsolute2, join as join22, relative, resolve as resolve10, sep as sep3 } from "node:path";
+import { existsSync as existsSync16 } from "node:fs";
+import { basename as basename7, dirname as dirname11, isAbsolute as isAbsolute3, join as join25, relative as relative2, resolve as resolve11, sep as sep4 } from "node:path";
 var PANE_TITLE = "Sterling side pane";
 var EXEC_TIMEOUT_MS = 15e3;
 function isWithin(dir, root) {
-  const rel = relative(resolve10(root), resolve10(dir));
-  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep3}`) && !isAbsolute2(rel);
+  const rel = relative2(resolve11(root), resolve11(dir));
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep4}`) && !isAbsolute3(rel);
 }
 function launcherRoot(dir, storePath, exists) {
-  if (exists(join22(dir, "sterling-launch.sh"))) return dir;
-  const storeRoot = storePath && basename6(dirname10(storePath)) === ".sterling" ? dirname10(dirname10(storePath)) : void 0;
-  return storeRoot && isWithin(dir, storeRoot) && exists(join22(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
+  if (exists(join25(dir, "sterling-launch.sh"))) return dir;
+  const storeRoot = storePath && basename7(dirname11(storePath)) === ".sterling" ? dirname11(dirname11(storePath)) : void 0;
+  return storeRoot && isWithin(dir, storeRoot) && exists(join25(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
 }
 async function reopenPane(root, deps) {
   if (!deps.env.TMUX) {
     return { title: PANE_TITLE, variant: "warning", message: "Not inside tmux; start OpenCode with the Sterling launcher to get a side pane." };
   }
-  const script = join22(root, "sterling-launch.sh");
+  const script = join25(root, "sterling-launch.sh");
   if (!deps.exists(script)) {
     return { title: PANE_TITLE, variant: "warning", message: `No sterling-launch.sh in ${root}; run /sterling:init.` };
   }
@@ -20516,15 +22607,15 @@ async function reopenPane(root, deps) {
 }
 var realPaneDeps = {
   env: process.env,
-  exists: existsSync13,
-  exec: (file, args, options) => new Promise((resolve12, reject) => {
-    execFile(file, args, options, (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve12({ stdout, stderr }));
+  exists: existsSync16,
+  exec: (file, args, options) => new Promise((resolve13, reject) => {
+    execFile(file, args, options, (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve13({ stdout, stderr }));
   })
 };
 
 // opencode/sterling-tui/view.ts
-import { existsSync as existsSync15 } from "node:fs";
-import { dirname as dirname12, join as join24 } from "node:path";
+import { existsSync as existsSync18 } from "node:fs";
+import { dirname as dirname13, join as join27 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -20655,10 +22746,10 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync17, writeFileSync as writeFileSync8, rmSync as rmSync6, rmdirSync, renameSync as renameSync5, existsSync as existsSync14, lstatSync as lstatSync7, readdirSync as readdirSync5, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
-import { join as join23, resolve as resolve11, dirname as dirname11, isAbsolute as isAbsolute3 } from "node:path";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync19, writeFileSync as writeFileSync9, rmSync as rmSync7, rmdirSync, renameSync as renameSync5, existsSync as existsSync17, lstatSync as lstatSync9, readdirSync as readdirSync6, realpathSync as realpathSync7, chmodSync as chmodSync3 } from "node:fs";
+import { join as join26, resolve as resolve12, dirname as dirname12, isAbsolute as isAbsolute4 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { randomBytes, createHash as createHash4 } from "node:crypto";
+import { randomBytes, createHash as createHash5 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -20769,7 +22860,7 @@ function render2(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join23(root, ".sterling", "transient", "dispatch-register.json");
+  return join26(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -20791,10 +22882,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync14(p)) return { availability: "absent", arr: [] };
+  if (!existsSync17(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync17(p, "utf8");
+    raw = readFileSync19(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -20825,7 +22916,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join23(root, ".sterling", "transient", "dispatch-state");
+  return join26(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -20839,7 +22930,7 @@ function liveFileName(key) {
   return `${LIVE_PREFIX}${key}.json`;
 }
 function agentIdHash(agentId) {
-  return createHash4("sha256").update(String(agentId), "utf8").digest("base64url");
+  return createHash5("sha256").update(String(agentId), "utf8").digest("base64url");
 }
 function recordAgentIds(record) {
   return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
@@ -20863,8 +22954,8 @@ function parseStateFileName(name) {
     const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
     if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
     const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
-    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
-    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+    const canonical2 = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical2 ? { kind: "done", key: parts[0], idHashes } : malformed;
   }
   return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
 }
@@ -20878,7 +22969,7 @@ function warnStateFile(file, text) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash4("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash5("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 function isNonEmptyString(v) {
   return typeof v === "string" && v !== "";
@@ -20908,7 +22999,7 @@ function validateRecordShape(r) {
   if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
   if (typeof r.prompt === "string") {
     const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash4("sha256").update(r.prompt, "utf8").digest("hex");
+    const sha = createHash5("sha256").update(r.prompt, "utf8").digest("hex");
     if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
   } else if (r.prompt !== null) {
     return { ok: false, reason: "prompt-type" };
@@ -20923,7 +23014,7 @@ function validateRecordShape(r) {
 function classifyRecordFile(file) {
   let st;
   try {
-    st = lstatSync7(file);
+    st = lstatSync9(file);
   } catch {
     return { exists: false };
   }
@@ -20931,7 +23022,7 @@ function classifyRecordFile(file) {
   if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
   let buf;
   try {
-    buf = readFileSync17(file);
+    buf = readFileSync19(file);
   } catch {
     return { exists: true, poisoned: true, reason: "unreadable" };
   }
@@ -20951,11 +23042,11 @@ function checkDispatchStateContainment(root, { create }) {
   const dir = dispatchStateDir(root);
   let st;
   try {
-    st = lstatSync7(dir);
+    st = lstatSync9(dir);
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
-    mkdirSync9(dir, { recursive: true });
+    mkdirSync10(dir, { recursive: true });
     return { ok: true, availability: "ok" };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
@@ -20969,7 +23060,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync7(join23(dir, to));
+    lstatSync9(join26(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -20979,7 +23070,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync5(join23(dir, from), join23(dir, to));
+    renameSync5(join26(dir, from), join26(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -20991,7 +23082,7 @@ function listStateDir(root) {
   if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
   if (containment.availability === "absent") return { availability: "absent", names: [] };
   try {
-    return { availability: "ok", names: readdirSync5(dispatchStateDir(root)) };
+    return { availability: "ok", names: readdirSync6(dispatchStateDir(root)) };
   } catch (e) {
     return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
   }
@@ -21029,7 +23120,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join23(dir, name));
+    const classified = classifyRecordFile(join26(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -21176,7 +23267,7 @@ function contextText(tokens, model, limit) {
 function isActiveChild(start, env, running) {
   const roots = env.STERLING_STORE ? null : resolveProjectRoots(start);
   const storePath = findStorePath(start, env);
-  const root = roots && roots.storeRoot !== roots.checkoutRoot ? roots.checkoutRoot : storePath ? dirname12(dirname12(storePath)) : start;
+  const root = roots && roots.storeRoot !== roots.checkoutRoot ? roots.checkoutRoot : storePath ? dirname13(dirname13(storePath)) : start;
   return (id) => running(id) || liveChildInRegister(root, id);
 }
 function readSubagents(src) {
@@ -21296,12 +23387,12 @@ function checkoutOf(dir) {
 function findStorePath(start, env) {
   if (env.STERLING_STORE) return env.STERLING_STORE;
   const roots = resolveProjectRoots(start);
-  if (roots && roots.storeRoot !== roots.checkoutRoot) return join24(roots.storeRoot, ".sterling", "sterling.db");
+  if (roots && roots.storeRoot !== roots.checkoutRoot) return join27(roots.storeRoot, ".sterling", "sterling.db");
   let dir = start;
   for (; ; ) {
-    const candidate = join24(dir, ".sterling", "sterling.db");
-    if (existsSync15(candidate) || existsSync15(join24(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
-    const parent = dirname12(dir);
+    const candidate = join27(dir, ".sterling", "sterling.db");
+    if (existsSync18(candidate) || existsSync18(join27(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
+    const parent = dirname13(dir);
     if (parent === dir) return void 0;
     dir = parent;
   }

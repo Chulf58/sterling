@@ -75,9 +75,15 @@ test('threshold: the default needs two matched terms, minTerms raises or lowers 
   assert.deepEqual(fitDomains(twoWords, domains, { minTerms: 3 }), []);
 });
 
-test('threshold scales down for a short description so it can still fit', () => {
+// Changed 2026-11-18 (review of #305): this test pinned a one-term exception, where a description with a
+// single subject term fit on one match. User ruling, decision
+// domain-fit-ignores-generic-words-promotion-review-needs-subject-terms (888e48df): a domain fits on at
+// least 2 subject-specific matched terms, so the threshold no longer scales down.
+test('a description with fewer subject terms than the threshold never fits; one matched term is not enough', () => {
   const terse = { name: 'genesys', description: 'Genesys' };
-  assert.deepEqual(fitDomains('Genesys outage during the weekend.', [terse]).map((f) => f.name), ['genesys']);
+  assert.deepEqual(fitDomains('Genesys outage during the weekend.', [terse]), []);
+  const python = { name: 'python', description: 'Python language and standard library' };
+  assert.deepEqual(fitDomains('Python snake habitat', [python]), [], 'one shared subject word is coincidence');
 });
 
 test('terms match across inflections by prefix, in either direction', () => {
@@ -112,4 +118,23 @@ test('a duplicate domain name throws, even when one copy is excluded or has no d
   assert.throws(() => fitDomains('text', [salesforce, { ...salesforce }]), /duplicate domain name 'salesforce'/);
   assert.throws(() => fitDomains('text', [salesforce, { name: 'Salesforce' }]), /duplicate/);
   assert.throws(() => fitDomains('text', [sterlingDomain, { name: 'sterling' }], { exclude: ['sterling'] }), /duplicate/);
+});
+
+const python = {
+  name: 'python',
+  description: 'Python language and standard library: pip, virtualenv, asyncio, packaging, type hints',
+};
+
+test('issue #305: shared generic words (language, library) do not fit a game decision to python', () => {
+  const text =
+    'Game store page decision: pick the language and library for the store page copy, data and tool choices for the game.';
+  assert.deepEqual(fitDomains(text, [python]), []);
+});
+
+test('issue #305: a genuine python record still fits', () => {
+  const text = 'Create a virtualenv, pip install the deps, and run the asyncio event loop.';
+  const fits = fitDomains(text, [python]);
+  assert.equal(fits.length, 1);
+  assert.equal(fits[0].name, 'python');
+  for (const t of ['virtualenv', 'asyncio']) assert.ok(fits[0].matched.includes(t), `matched ${t}`);
 });
