@@ -52605,6 +52605,15 @@ var OVERPASS_EFFORT_OPTIONS = ["default", ...OVERPASS_EFFORTS];
 function overpassOffered(snap) {
   return snap.host === "opencode" && snap.mode === "work";
 }
+var LEGACY_VIEW_LISTS = {
+  sparringRows: ["sys:sparring_enabled", "sys:sparring_model"],
+  tddRows: ["sys:tdd_enabled"],
+  modeRows: ["sys:project_mode"],
+  handoffRows: ["sys:handoff_files"],
+  autoMergeRows: ["sys:pr_auto_merge"],
+  overpassRows: ["sys:overpass", "sys:overpass_provider", "sys:overpass_bypass"],
+  storageRows: ["sys:storage"]
+};
 var EMPTY_ROSTER = {
   agents: [],
   configModels: {},
@@ -52790,7 +52799,7 @@ function wrapText(text, width) {
   return out;
 }
 var clipEllipsis = (s2, width) => Number.isFinite(width) && s2.length > width ? `${s2.slice(0, Math.max(1, width) - 1)}\u2026` : s2;
-function buildSystemTab(snapshot, ui, width = Infinity) {
+function systemEntries(snapshot, ui, width) {
   const snap = snapshot ?? EMPTY_ROSTER;
   const keys = systemKeys(snap);
   const selector = ui.selector;
@@ -52810,8 +52819,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
       const fallback = isOverpassRole(key) ? DEFAULT_OVERPASS_ROLE_EFFORTS[key] : void 0;
       OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
         const m = oi === selector.highlight ? "\u203A " : "  ";
-        const shown2 = eff === "default" ? `default (${fallback ?? "none sent"})` : eff;
-        out.push({ text: clip2(`  ${m}effort ${shown2}`), kind: "option", selected: oi === selector.highlight });
+        const shown = eff === "default" ? `default (${fallback ?? "none sent"})` : eff;
+        out.push({ text: clip2(`  ${m}effort ${shown}`), kind: "option", selected: oi === selector.highlight });
       });
     }
     return out;
@@ -52890,18 +52899,53 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     }
     return { id: `sys:${key}`, key, drift, agents: agentNames, lines };
   });
-  const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
   const catBanner = catalogBanner(snap.catalog, width);
   const banner = ui.notice ? [clip2(`\u26A0 ${ui.notice}`), ...catBanner] : catBanner;
-  const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
-  const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
-  const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
-  const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
-  const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
-  const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
-  const storageRows = selector ? [] : [storageRow(snap, width)];
-  const customRows = selector ? [] : customAgentRows(snap, width);
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows, customRows };
+  const entries = rows.map((row) => ({ id: row.id, section: "agents", cursorable: true, row, action: { kind: "agent", key: row.key } }));
+  const next = () => entries.filter((e) => e.cursorable).length;
+  const setting = (row, action) => {
+    entries.push({ id: row.id, section: "settings", cursorable: true, row, action });
+  };
+  const sparring = sparringPartnerRows(snap, ui, width, next());
+  setting(sparring[0], { kind: "toggle", effect: { type: "sparring_toggle", enabled: !(snap.sparringPartner?.enabled ?? true) } });
+  setting(sparring[1], { kind: "edit", uiPatch: { sparringModelEdit: snap.sparringPartner?.model ?? "" } });
+  setting(tddToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "tdd_toggle", enabled: !(snap.tdd?.enabled ?? true) } });
+  setting(modeToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "mode_toggle", mode: (snap.mode ?? "hobby") === "hobby" ? "work" : "hobby" } });
+  setting(handoffToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "handoff_toggle", enabled: (snap.handoff ?? false) === false } });
+  setting(autoMergeToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "auto_merge_toggle", enabled: (snap.autoMergeOnClean ?? true) === false } });
+  if (overpassOffered(snap)) {
+    const [op, provider, bypass] = overpassToggleRows(snap, ui, width, next());
+    const current = overpassView.provider !== null && OVERPASS_PROVIDER_RE.test(overpassView.provider) ? overpassView.provider : "";
+    setting(op, { kind: "toggle", effect: { type: "overpass_toggle", enabled: overpassView.enabled === false } });
+    setting(provider, { kind: "edit", uiPatch: { overpassProviderEdit: current } });
+    setting(bypass, { kind: "toggle", effect: { type: "overpass_bypass_toggle", enabled: overpassView.conductorBypass === false } });
+  }
+  entries.push({ id: "sys:storage", section: "settings", cursorable: false, row: storageRow(snap, width) });
+  for (const row of customAgentRows(snap, width))
+    entries.push({ id: row.id, section: "agents", cursorable: false, row });
+  return { entries, banner };
+}
+function cursorEntries(snap, ui) {
+  return systemEntries(snap, ui, Infinity).entries.filter((e) => e.cursorable);
+}
+function buildSystemTab(snapshot, ui, width = Infinity) {
+  const { entries: all, banner } = systemEntries(snapshot, ui, width);
+  const selector = ui.selector;
+  const entries = selector ? all.filter((e) => e.action?.kind === "agent" && e.row.key === selector.key) : all;
+  const byIds = (ids) => entries.filter((e) => ids.includes(e.id)).map((e) => e.row);
+  return {
+    entries,
+    banner,
+    rows: entries.filter((e) => e.action?.kind === "agent").map((e) => e.row),
+    sparringRows: byIds(LEGACY_VIEW_LISTS.sparringRows),
+    tddRows: byIds(LEGACY_VIEW_LISTS.tddRows),
+    modeRows: byIds(LEGACY_VIEW_LISTS.modeRows),
+    handoffRows: byIds(LEGACY_VIEW_LISTS.handoffRows),
+    autoMergeRows: byIds(LEGACY_VIEW_LISTS.autoMergeRows),
+    overpassRows: byIds(LEGACY_VIEW_LISTS.overpassRows),
+    storageRows: byIds(LEGACY_VIEW_LISTS.storageRows),
+    customRows: entries.filter((e) => e.section === "agents" && e.action === void 0).map((e) => e.row)
+  };
 }
 function customAgentRows(snap, width) {
   return (snap.customAgents ?? []).map((a, i) => ({
@@ -53241,23 +53285,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     rows.push({ id: `sysbanner:${screenRow}`, type: "system-banner", selected: false, expanded: false, lines: [{ text, kind: "meta" }], screenRow });
     screenRow += 1;
   }
-  for (const sr of view.rows) {
-    const lines = sr.lines.map((l) => ({
-      text: l.text,
-      kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
-    }));
-    rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
-    screenRow += lines.length;
-  }
-  for (const sr of view.sparringRows) {
-    const lines = sr.lines.map((l) => ({
-      text: l.text,
-      kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
-    }));
-    rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
-    screenRow += lines.length;
-  }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows, ...view.customRows]) {
+  for (const { row: sr } of view.entries) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -53524,8 +53552,9 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
     const window2 = bodyWindow(st, maxBodyLines);
     const max = Math.max(0, total - window2);
     let scroll = ui.scroll ?? 0;
+    const sysCursorId = ui.tab === SYSTEM_TAB && roster ? cursorEntries(roster, ui)[cursor]?.id : void 0;
     const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
-    const row = st.rows[cursor + bannerOffset];
+    const row = ui.tab === SYSTEM_TAB ? st.rows.find((r) => r.id === sysCursorId) : st.rows[cursor + bannerOffset];
     if (row) {
       const top = row.screenRow;
       const bottom = row.screenRow + row.lines.length;
@@ -53569,7 +53598,8 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
   };
   const clickSystem = (state, index, line1) => {
     const row = state.rows[index];
-    if (row.type !== "system" || row.id === "sys:storage" || row.id.startsWith("sys:custom:") || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
+    const clickable = roster ? cursorEntries(roster, ui) : [];
+    if (row.type !== "system" || !clickable.some((e) => e.id === row.id) || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
       return { ui, effects };
     const enter = { kind: "key", name: "ENTER" };
     const sel = ui.selector;
@@ -53580,7 +53610,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
         return { ui, effects };
       return reduceNodes(store, { ...ui, selector: { ...sel, highlight: k } }, enter, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn);
     }
-    const cursor = state.rows.filter((r) => r.type === "system").indexOf(row);
+    const cursor = clickable.findIndex((e) => e.id === row.id);
     return reduceNodes(store, { ...ui, cursor }, enter, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn);
   };
   const toggle = (id) => ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
@@ -53666,9 +53696,9 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
         return { ui, effects };
       }
       if (ui.tab === SYSTEM_TAB && roster) {
-        const sysKeys = systemKeys(roster);
+        const sysEntries = cursorEntries(roster, ui);
         const overpassOn = roster !== void 0 && overpassOffered(roster);
-        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 + (overpassOn ? 3 : 0) - 1)));
+        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysEntries.length - 1)));
         const sel = ui.selector;
         const providerEditing = ui.overpassProviderEdit !== void 0;
         const editing = ui.sparringModelEdit !== void 0 || providerEditing;
@@ -53692,7 +53722,8 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
               return { ui: revealAt(sysClamp(ui.cursor + (name === "UP" ? -1 : 1))), effects };
             if (name === "HOME" || name === "END")
               return { ui: revealAt(sysClamp(name === "HOME" ? 0 : Infinity)), effects };
-            const selectable = buildSelf(ui).rows.filter((r) => r.type === "system" && r.id !== "sys:storage");
+            const cursorIds = new Set(sysEntries.map((e) => e.id));
+            const selectable = buildSelf(ui).rows.filter((r) => r.type === "system" && cursorIds.has(r.id));
             return { ui: revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === "PAGE_UP" ? -1 : 1, maxBodyLines))), effects };
           }
           case "ESCAPE":
@@ -53726,43 +53757,13 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
               const sparringNotice = committedModel ? `Default Codex model set to '${committedModel}' \u2014 a model named on the call itself overrides it, and existing Codex threads keep their opener's model until a new consult starts.` : `Default Codex model cleared \u2014 consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
               return { ui: { ...ui, sparringModelEdit: void 0, notice: sparringNotice }, effects };
             }
-            if (cursor === sysKeys.length) {
-              effects.push({ type: "sparring_toggle", enabled: !(roster.sparringPartner?.enabled ?? true) });
-              return { ui: { ...ui, cursor, notice: void 0 }, effects };
+            const entry = sysEntries[cursor];
+            if (entry?.action && entry.action.kind !== "agent") {
+              if (entry.action.kind === "toggle")
+                effects.push(entry.action.effect);
+              return { ui: { ...ui, cursor, notice: void 0, ...entry.action.kind === "edit" ? entry.action.uiPatch : {} }, effects };
             }
-            if (cursor === sysKeys.length + 1) {
-              return { ui: { ...ui, cursor, sparringModelEdit: roster.sparringPartner?.model ?? "", notice: void 0 }, effects };
-            }
-            if (cursor === sysKeys.length + 2) {
-              effects.push({ type: "tdd_toggle", enabled: !(roster.tdd?.enabled ?? true) });
-              return { ui: { ...ui, cursor, notice: void 0 }, effects };
-            }
-            if (cursor === sysKeys.length + 3) {
-              effects.push({ type: "mode_toggle", mode: (roster.mode ?? "hobby") === "hobby" ? "work" : "hobby" });
-              return { ui: { ...ui, cursor, notice: void 0 }, effects };
-            }
-            if (cursor === sysKeys.length + 4) {
-              effects.push({ type: "handoff_toggle", enabled: (roster.handoff ?? false) === false });
-              return { ui: { ...ui, cursor, notice: void 0 }, effects };
-            }
-            if (cursor === sysKeys.length + 5) {
-              effects.push({ type: "auto_merge_toggle", enabled: (roster.autoMergeOnClean ?? true) === false });
-              return { ui: { ...ui, cursor, notice: void 0 }, effects };
-            }
-            if (overpassOn && cursor >= sysKeys.length + 6) {
-              const view = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
-              if (cursor === sysKeys.length + 6) {
-                effects.push({ type: "overpass_toggle", enabled: view.enabled === false });
-                return { ui: { ...ui, cursor, notice: void 0 }, effects };
-              }
-              if (cursor === sysKeys.length + 7) {
-                const current = view.provider !== null && OVERPASS_PROVIDER_RE.test(view.provider) ? view.provider : "";
-                return { ui: { ...ui, cursor, overpassProviderEdit: current, notice: void 0 }, effects };
-              }
-              effects.push({ type: "overpass_bypass_toggle", enabled: view.conductorBypass === false });
-              return { ui: { ...ui, cursor, notice: void 0 }, effects };
-            }
-            const key = sysKeys[cursor];
+            const key = entry?.action?.kind === "agent" ? entry.action.key : void 0;
             if (!key)
               return { ui, effects };
             const overpassView = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
@@ -53839,8 +53840,8 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
                 effects.push({ type: "opencode_model", key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
                 return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
               }
-              const entry = option?.kind === "entry" ? option.entry : void 0;
-              return { ui: revealPicker({ ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }), effects };
+              const entry2 = option?.kind === "entry" ? option.entry : void 0;
+              return { ui: revealPicker({ ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry2 ? entry2.id : "" } }), effects };
             }
             const efforts = effortOptions(sel.key);
             const effort = efforts[sel.highlight] ?? efforts[0];
