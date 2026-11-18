@@ -336,7 +336,7 @@ test('engine: re-attach re-adds a missing TUI pane, and leaves one that is there
   assert.equal(present.calls.at(-1), 'attach-session -t =sterling-demo-1a2b-claude');
 });
 
-test('engine tui mode: the caller\'s own session inside tmux; outside, -claude, then -opencode; neither running is loud', { skip: LINUX }, () => {
+test('engine tui mode: the caller\'s own session inside tmux; outside, -claude, -opencode, then -agy; neither running is loud', { skip: LINUX }, () => {
   const inside = runEngine(['tui'], { tmux: '/tmp/tmux-1/default,1,0', caller: 'sterling-demo-1a2b-opencode', running: 'sterling-demo-1a2b-claude' });
   assert.equal(inside.r.status, 0, inside.r.stderr);
   assert.ok(first(inside.calls, 'split-window').includes('-t =sterling-demo-1a2b-opencode:'), first(inside.calls, 'split-window'));
@@ -353,14 +353,14 @@ test('engine tui mode: the caller\'s own session inside tmux; outside, -claude, 
 
   const none = runEngine(['tui']);
   assert.equal(none.r.status, 1);
-  assert.match(none.r.stderr, /no session of this project is running \(sterling-demo-1a2b-claude, sterling-demo-1a2b-opencode\)/);
+  assert.match(none.r.stderr, /no session of this project is running \(sterling-demo-1a2b-claude, sterling-demo-1a2b-opencode, sterling-demo-1a2b-agy\)/);
   assert.equal(all(none.calls, 'split-window').length, 0);
 });
 
 test('engine: an unknown mode is refused', { skip: LINUX }, () => {
   const r = runEngine(['split']);
   assert.equal(r.r.status, 1);
-  assert.match(r.r.stderr, /unknown mode 'split' \(use claude, opencode or tui\)/);
+  assert.match(r.r.stderr, /unknown mode 'split' \(use claude, opencode, agy or tui\)/);
 });
 
 // A stand-in TUI: a process whose command line names sterling-tui, started through a
@@ -458,7 +458,7 @@ test('ensureLaunchers: checkText sees every render before it is written', () => 
   const target = tmp('sterling-ln-target-');
   const seen = [];
   ensureLaunchers(target, REPO, { splitPercent: 35, host: 'windows', installedCopy: false, checkText: (label, text) => { seen.push(label); return text; } });
-  assert.deepEqual(seen, ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat']);
+  assert.deepEqual(seen, ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat', 'antigravity.bat']);
 });
 
 test('removeRetiredLaunchers: a current-template render of sterling.bat and tui.bat (any project path) is deleted; a hand-written one is kept and reported; none present is silent', () => {
@@ -502,16 +502,16 @@ test('ensureExecutable: a mode that cannot be read or set (a drvfs mount, a vani
 test('launcherTools: claude on PATH; opencode on PATH or in ~/.opencode/bin; the claude argument and STERLING_LAUNCHER_OPENCODE override; a bad override throws', () => {
   const bin = tmp('sterling-ln-path-');
   const home = tmp('sterling-ln-home-');
-  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: false, opencode: false });
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: false, opencode: false, agy: false });
   script(join(bin, 'claude'), '#!/bin/sh\n');
   writeFileSync(join(bin, 'opencode'), 'not executable');
-  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: true, opencode: false }, 'a file without the execute bit is not a program');
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: true, opencode: false, agy: false }, 'a file without the execute bit is not a program');
   mkdirSync(join(home, '.opencode', 'bin'), { recursive: true });
   script(join(home, '.opencode', 'bin', 'opencode'), '#!/bin/sh\n');
-  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: true, opencode: true });
-  assert.deepEqual(launcherTools({ env: { PATH: bin }, home, claude: false }), { claude: false, opencode: true });
-  assert.deepEqual(launcherTools({ env: { PATH: bin, STERLING_LAUNCHER_OPENCODE: 'absent' }, home }), { claude: true, opencode: false });
-  assert.deepEqual(launcherTools({ env: { PATH: '', STERLING_LAUNCHER_OPENCODE: 'found' }, home: tmp('sterling-ln-home-') }), { claude: false, opencode: true });
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: true, opencode: true, agy: false });
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home, claude: false }), { claude: false, opencode: true, agy: false });
+  assert.deepEqual(launcherTools({ env: { PATH: bin, STERLING_LAUNCHER_OPENCODE: 'absent' }, home }), { claude: true, opencode: false, agy: false });
+  assert.deepEqual(launcherTools({ env: { PATH: '', STERLING_LAUNCHER_OPENCODE: 'found' }, home: tmp('sterling-ln-home-') }), { claude: false, opencode: true, agy: false });
   assert.throws(() => launcherTools({ env: { STERLING_LAUNCHER_OPENCODE: 'yes' } }), /STERLING_LAUNCHER_OPENCODE must be 'found' or 'absent' \(got 'yes'\)/);
 });
 
@@ -535,8 +535,8 @@ test('ensureLauncherIgnores: appends only the missing launcher names, once', () 
   assert.equal(lines.filter((l) => l === 'sterling.bat').length, 1);
 });
 
-test('LAUNCHER_GITIGNORE_ENTRIES: the engine, all four openers and the retired names', () => {
-  assert.deepEqual([...LAUNCHER_GITIGNORE_ENTRIES].sort(), ['claude-code.bat', 'claude-code.sh', 'opencode.bat', 'opencode.sh', 'sterling-launch.sh', 'sterling-windows.bat', 'sterling.bat', 'tui.bat']);
+test('LAUNCHER_GITIGNORE_ENTRIES: the engine, all six openers and the retired names', () => {
+  assert.deepEqual([...LAUNCHER_GITIGNORE_ENTRIES].sort(), ['antigravity.bat', 'antigravity.sh', 'claude-code.bat', 'claude-code.sh', 'opencode.bat', 'opencode.sh', 'sterling-launch.sh', 'sterling-windows.bat', 'sterling.bat', 'tui.bat']);
 });
 
 test('ensureLaunchers (issue #52): a generated engine or Linux opener without the execute bit gets it back; a hand-edited one is left as it is', { skip: LINUX }, () => {
@@ -546,7 +546,58 @@ test('ensureLaunchers (issue #52): a generated engine or Linux opener without th
   const edited = `${readFileSync(join(target, 'opencode.sh'), 'utf8')}# mine\n`;
   writeFileSync(join(target, 'opencode.sh'), edited);
   const r = ensureLaunchers(target, REPO, { splitPercent: 35, host: 'linux', installedCopy: false });
-  assert.deepEqual(r.items.map((i) => i.status), ['matches', 'matches', 'differs']);
+  assert.deepEqual(r.items.map((i) => i.status), ['matches', 'matches', 'differs', 'matches']);
   for (const f of ['sterling-launch.sh', 'claude-code.sh']) assert.equal(statSync(join(target, f)).mode & 0o777, 0o755, `${f} is 0755 again`);
   assert.equal(statSync(join(target, 'opencode.sh')).mode & 0o777, 0o644, 'a hand-edited opener keeps its mode');
+});
+
+test('launcherTools: agy on PATH or in ~/.local/bin; STERLING_LAUNCHER_AGY overrides; a bad value throws', () => {
+  const bin = tmp('sterling-ln-path-');
+  const home = tmp('sterling-ln-home-');
+  assert.equal(launcherTools({ env: { PATH: bin }, home }).agy, false, 'agy absent');
+  mkdirSync(join(home, '.local', 'bin'), { recursive: true });
+  script(join(home, '.local', 'bin', 'agy'), '#!/bin/sh\n');
+  assert.equal(launcherTools({ env: { PATH: bin }, home }).agy, true, '~/.local/bin/agy, though PATH lacks it');
+  const home2 = tmp('sterling-ln-home-');
+  script(join(bin, 'agy'), '#!/bin/sh\n');
+  assert.equal(launcherTools({ env: { PATH: bin }, home: home2 }).agy, true, 'on PATH');
+  assert.equal(launcherTools({ env: { PATH: bin, STERLING_LAUNCHER_AGY: 'absent' }, home }).agy, false);
+  assert.equal(launcherTools({ env: { PATH: '', STERLING_LAUNCHER_AGY: 'found' }, home: home2 }).agy, true);
+  assert.throws(() => launcherTools({ env: { STERLING_LAUNCHER_AGY: 'yes' } }), /STERLING_LAUNCHER_AGY must be 'found' or 'absent' \(got 'yes'\)/);
+});
+
+test('ensureLaunchers: antigravity opener only when agy is found; absent writes no file and no warning', () => {
+  for (const host of ['linux', 'windows']) {
+    const ext = host === 'linux' ? 'sh' : 'bat';
+    const present = tmp('sterling-ln-target-');
+    ensureLaunchers(present, REPO, { splitPercent: 35, host, tools: { claude: false, opencode: false, agy: true }, installedCopy: false });
+    const text = readFileSync(join(present, `antigravity.${ext}`), 'utf8');
+    assert.ok(text.includes('sterling-launch.sh agy'), text);
+    assert.ok(text.includes('Antigravity'));
+    assert.ok(!existsSync(join(present, `claude-code.${ext}`)) && !existsSync(join(present, `opencode.${ext}`)));
+    const absent = tmp('sterling-ln-target-');
+    const r = ensureLaunchers(absent, REPO, { splitPercent: 35, host, tools: { claude: true, opencode: true, agy: false }, installedCopy: false });
+    assert.ok(!existsSync(join(absent, `antigravity.${ext}`)));
+    assert.deepEqual(r.warns, []);
+  }
+});
+
+test('engine: agy mode runs agy --agent conductor by absolute path in a separate -agy session; ~/.local/bin is found off PATH; missing is loud', { skip: LINUX }, () => {
+  const { r, calls, root, work } = runEngine(['agy'], { extraEnv: { AGY_BIN: '/opt/agy/agy' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-agy -c ${work} /opt/agy/agy --agent conductor`);
+  assert.ok(first(calls, 'split-window').includes('-t =sterling-demo-1a2b-agy:'));
+  assert.ok(first(calls, 'split-window').endsWith(`${root}/tui/sterling-tui.mjs --store ${work}/.sterling/sterling.db`));
+  assert.equal(calls.at(-1), 'attach-session -t =sterling-demo-1a2b-agy');
+
+  const home = tmp('sterling-ln-home-');
+  mkdirSync(join(home, '.local', 'bin'), { recursive: true });
+  script(join(home, '.local', 'bin', 'agy'), '#!/bin/sh\n');
+  const found = runEngine(['agy'], { home });
+  assert.ok(first(found.calls, 'new-session').endsWith(` ${home}/.local/bin/agy --agent conductor`), first(found.calls, 'new-session'));
+
+  const missing = runEngine(['agy']);
+  assert.equal(missing.r.status, 1);
+  assert.match(missing.r.stderr, /'agy' not found on PATH or in ~\/\.local\/bin \(set AGY_BIN\)/);
+  assert.equal(all(missing.calls, 'new-session').length, 0);
 });
