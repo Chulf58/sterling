@@ -435,7 +435,7 @@ test('launchers: a hand-written sterling.bat and tui.bat are kept byte-identical
 test('launchers: with neither Claude Code nor OpenCode found a pristine sterling.bat is kept with a warning; the next run that finds a tool deletes it', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
-    const NONE = { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent' };
+    const NONE = { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent', STERLING_LAUNCHER_AGY: 'absent' };
     assert.equal(init(dir, FRESH_FLAGS, NONE).code, 0);
     const pristine = readFileSync(join(root, 'templates', 'launcher-win.bat'), 'utf8').replaceAll('{{WIN_PROJECT_DIR}}', 'C:\\Users\\demo\\proj').replace(/\r?\n/g, '\r\n');
     writeFileSync(join(dir, 'sterling.bat'), pristine);
@@ -443,14 +443,14 @@ test('launchers: with neither Claude Code nor OpenCode found a pristine sterling
     assert.equal(none.code, 0, none.stderr);
     assert.equal(readFileSync(join(dir, 'sterling.bat'), 'utf8'), pristine, 'kept, not deleted');
     assert.equal(statusLineFor(none.stdout, 'sterling.bat'), null, 'no removed row');
-    assert.match(none.stdout, /Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of the two\./);
+    assert.match(none.stdout, /None of Claude Code, OpenCode or Antigravity CLI \(agy\) was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of them\./);
     assert.ok(!existsSync(join(dir, 'claude-code.bat')) && !existsSync(join(dir, 'opencode.bat')), 'no opener written');
 
     const found = init(dir, [], { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'absent' });
     assert.equal(found.code, 0, found.stderr);
     assert.ok(!existsSync(join(dir, 'sterling.bat')), 'deleted once a tool is found');
     assert.match(statusLineFor(found.stdout, 'sterling.bat') ?? '', /^sterling\.bat\s+removed\b/);
-    assert.doesNotMatch(found.stdout, /Neither Claude Code nor OpenCode was found/);
+    assert.doesNotMatch(found.stdout, /None of Claude Code, OpenCode or Antigravity CLI/);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

@@ -45,6 +45,7 @@ function init(dir, extraEnv = {}) {
     STERLING_OPENCODE_SETUP_DISABLE: '1',
     STERLING_LAUNCHER_HOST: 'windows', // a WSL2 host: the .bat openers (scripts/lib/launchers.mjs)
     STERLING_LAUNCHER_OPENCODE: 'absent', // no opencode.* unless a case says found
+    STERLING_LAUNCHER_AGY: 'absent', // no antigravity.* unless a case says found
     ...extraEnv,
   };
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
@@ -185,12 +186,13 @@ test('an unrecognized STERLING_CLAUDE_PROBE value fails init loud', () => {
   assert.match(r.stderr + r.stdout, /STERLING_CLAUDE_PROBE must be/);
 });
 
-test('launchers per tool found: the engine with either tool, claude-code.* only with Claude Code, opencode.* only with OpenCode', () => {
+test('launchers per tool found: the engine with any tool, claude-code.* only with Claude Code, opencode.* only with OpenCode, antigravity.* only with agy', () => {
   const cases = [
     ['claude only', { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'absent' }, ['sterling-launch.sh', 'claude-code.bat'], ['opencode.bat']],
     ['opencode only', { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'found' }, ['sterling-launch.sh', 'opencode.bat'], ['claude-code.bat']],
     ['both', { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'found' }, ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat'], []],
-    ['neither', { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent' }, [], ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat']],
+    ['agy only', { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent', STERLING_LAUNCHER_AGY: 'found' }, ['sterling-launch.sh', 'antigravity.bat'], ['claude-code.bat', 'opencode.bat']],
+    ['none', { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent', STERLING_LAUNCHER_AGY: 'absent' }, [], ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat', 'antigravity.bat']],
   ];
   for (const [label, env, written, absent] of cases) {
     const dir = tmp('sterling-cp-tools-');

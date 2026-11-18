@@ -20745,7 +20745,7 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
 var installedCopy = isInstalledCopy(pluginRoot);
 var oldClonePaths = [];
 var launcherHistory = launcherHistoryLoader(pluginRoot);
-if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+if (launcherToolsFound.claude || launcherToolsFound.opencode || launcherToolsFound.agy) {
   const launchers = ensureLaunchers(target, pluginRoot, {
     splitPercent: Math.round(eff.splitRatio * 100),
     host: launcherHostKind,
@@ -20759,12 +20759,12 @@ if (launcherToolsFound.claude || launcherToolsFound.opencode) {
   warns.push(...launchers.warns);
   oldClonePaths.push(...launchers.oldClonePaths);
 }
-if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+if (launcherToolsFound.claude || launcherToolsFound.opencode || launcherToolsFound.agy) {
   const retired = removeRetiredLaunchers(target, pluginRoot, { history: launcherHistory });
   items.push(...retired.items);
   warns.push(...retired.warns);
 } else {
-  warns.push("\n\u26A0 Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.");
+  warns.push("\n\u26A0 None of Claude Code, OpenCode or Antigravity CLI (agy) was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of them.");
 }
 var { clonePath: updaterClonePath, ...updateLauncherRow } = ensureUpdateLauncher(target, pluginRoot);
 if (updaterClonePath) oldClonePaths.push(updaterClonePath);

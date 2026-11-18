@@ -17402,19 +17402,19 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
       const { host, tools } = launcherSetup;
       const rows = [];
       const warns = [];
-      if (tools.claude || tools.opencode) {
+      if (tools.claude || tools.opencode || tools.agy) {
         const ratio = JSON.parse(readFileSync15(join21(repoPath2, ".sterling", "config.json"), "utf8")).tui_split_ratio;
         if (ratio !== void 0 && !(typeof ratio === "number" && ratio > 0 && ratio <= 1)) throw new Error(`tui_split_ratio in .sterling/config.json is ${JSON.stringify(ratio)}, not a number in (0, 1]`);
         const r = ensureLaunchers(repoPath2, cwd, { splitPercent: Math.round((ratio ?? 0.35) * 100), host, tools, history: launcherHistory, installedCopy: false });
         rows.push(...r.items);
         warns.push(...r.warns);
       }
-      if (tools.claude || tools.opencode) {
+      if (tools.claude || tools.opencode || tools.agy) {
         const retired = removeRetiredLaunchers(repoPath2, cwd, { history: launcherHistory });
         rows.push(...retired.items);
         warns.push(...retired.warns);
       } else {
-        warns.push("\u26A0 Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.");
+        warns.push("\u26A0 None of Claude Code, OpenCode or Antigravity CLI (agy) was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of them.");
       }
       const ignored = ensureLauncherIgnores(repoPath2);
       const out = rows.filter((r) => r.status !== "matches").map((r) => `${r.item}: ${r.status} \u2014 ${r.detail}`);

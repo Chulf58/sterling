@@ -2610,13 +2610,13 @@ test('consumer update: with neither tool found no opener is written, the pristin
     const none = await run({ ...fx.env, PATH: emptyBin });
     assert.ok(existsSync(join(fx.proj, 'sterling.bat')), 'kept');
     assert.ok(!existsSync(join(fx.proj, 'claude-code.bat')) && !existsSync(join(fx.proj, 'sterling-launch.sh')), 'no opener, no engine');
-    assert.match(none, /Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of the two\./);
+    assert.match(none, /None of Claude Code, OpenCode or Antigravity CLI \(agy\) was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of them\./);
     assert.doesNotMatch(none, /sterling\.bat: removed/);
 
     const found = await run(fx.env);
     assert.ok(!existsSync(join(fx.proj, 'sterling.bat')), 'deleted once a tool is found');
     assert.match(found, /sterling\.bat: removed — deleted — an unedited generated copy/);
-    assert.doesNotMatch(found, /Neither Claude Code nor OpenCode was found/);
+    assert.doesNotMatch(found, /None of Claude Code, OpenCode or Antigravity CLI/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(emptyBin, { recursive: true, force: true });

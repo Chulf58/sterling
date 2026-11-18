@@ -916,13 +916,15 @@ const installedCopy = isInstalledCopy(pluginRoot);
 const oldClonePaths = [];
 
 // Per tool found (user-ruled 2026-10-08, "Yes, per tool found"): the engine when Claude
-// Code or OpenCode is installed, and the opener pair of each tool that is.
+// Code, OpenCode or Antigravity CLI (agy) is installed, and the opener pair of each tool that is.
 const launcherHistory = launcherHistoryLoader(pluginRoot);
-if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+if (launcherToolsFound.claude || launcherToolsFound.opencode || launcherToolsFound.agy) {
   // WSL/tmux launchers (§11,
-  // decision launchers-consolidated-to-claude-code-and-opencode-pair): the engine sterling-launch.sh claude|opencode|tui, plus claude-code.bat and
-  // opencode.bat on a Windows (WSL2) host or claude-code.sh and opencode.sh on a native
-  // Linux host. node/claude/opencode and the terminal are found at RUN time, so init
+  // decision launchers-consolidated-to-claude-code-and-opencode-pair, extended to a third
+  // opener for agy by the Antigravity CLI slice 7): the engine sterling-launch.sh
+  // claude|opencode|agy|tui, plus claude-code.bat, opencode.bat and antigravity.bat on a
+  // Windows (WSL2) host or claude-code.sh, opencode.sh and antigravity.sh on a native Linux
+  // host. node/claude/opencode/agy and the terminal are found at RUN time, so init
   // bakes no program paths. Ensure logic in scripts/lib/launchers.mjs.
   const launchers = ensureLaunchers(target, pluginRoot, {
     splitPercent: Math.round(eff.splitRatio * 100),
@@ -944,12 +946,12 @@ if (launcherToolsFound.claude || launcherToolsFound.opencode) {
 // With neither tool found no opener was written, so the old ones are the project's only
 // launchers: they are kept until a run that finds a tool writes the new ones (user-ruled
 // 2026-10-08, "Keep old ones if no tool (Recommended)").
-if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+if (launcherToolsFound.claude || launcherToolsFound.opencode || launcherToolsFound.agy) {
   const retired = removeRetiredLaunchers(target, pluginRoot, { history: launcherHistory });
   items.push(...retired.items);
   warns.push(...retired.warns);
 } else {
-  warns.push('\n⚠ Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.');
+  warns.push('\n⚠ None of Claude Code, OpenCode or Antigravity CLI (agy) was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of them.');
 }
 
 // (5) the double-click updater entry: brings the machine's Sterling CLONE to
