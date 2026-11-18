@@ -6158,31 +6158,6 @@ function flushAgyQueue() {
   }
   for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
 }
-function queueAgyWarningOnce(name, text) {
-  if (!agy.active || !agy.checkout) {
-    process.stderr.write(`${text}
-`);
-    return false;
-  }
-  try {
-    const dir = agyStateDir(agy.checkout);
-    mkdirSync(dir, { recursive: true });
-    closeSync(openSync(join4(dir, `${name}-${agyKey(agy.conversationId)}`), "wx"));
-  } catch (e) {
-    if (e?.code === "EEXIST") return false;
-    process.stderr.write(`${text} (the once-per-conversation marker could not be written: ${e && e.message || e})
-`);
-    return false;
-  }
-  try {
-    queueAgyNotice(agy.checkout, agy.conversationId, text);
-    return true;
-  } catch (e) {
-    process.stderr.write(`${text} (it could not be queued for the model: ${e && e.message || e})
-`);
-    return false;
-  }
-}
 function agyStdoutWrite(chunk) {
   const texts = agyContextTexts(chunk);
   if (!texts.length) return;
@@ -6287,105 +6262,6 @@ function recordAgyStopContinue() {
 `);
     return false;
   }
-}
-
-// scripts/hooks/lib/agy-role-guard.mjs
-import { readFileSync as readFileSync5, existsSync as existsSync5 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join6 } from "node:path";
-
-// scripts/lib/store-write-tools.mjs
-import { readFileSync as readFileSync4 } from "node:fs";
-import { join as join5 } from "node:path";
-function implementorTemplatePath(pluginRoot) {
-  return join5(pluginRoot, "agent-templates", "implementor.md");
-}
-function readStoreWriteToolNames(pluginRoot) {
-  const text = readFileSync4(implementorTemplatePath(pluginRoot), "utf8").replace(/\r\n/g, "\n");
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
-  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
-  return [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))];
-}
-
-// scripts/hooks/lib/agy-role-guard.mjs
-var READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
-var STERLING_SERVERS = /* @__PURE__ */ new Set(["sterling", "sterling_sterling"]);
-var CONVERSATIONS_DIR_ENV = "STERLING_AGY_CONVERSATIONS_DIR";
-function conversationsDir(env = process.env) {
-  return env[CONVERSATIONS_DIR_ENV] || join6(homedir2(), ".gemini", "antigravity-cli", "conversations");
-}
-function storeWriteToolNames(pluginRoot) {
-  const names = new Set(readStoreWriteToolNames(pluginRoot));
-  if (!names.size) throw new Error("agent-templates/implementor.md disallowedTools names no mcp__sterling__ tool");
-  return names;
-}
-var SYSTEM_PROMPT = Buffer.from("System Prompt", "latin1");
-var MARKER = Buffer.from("STERLING-ROLE: ", "latin1");
-function rolesInConversationBytes(bytes) {
-  const roles = [];
-  for (let at = bytes.indexOf(SYSTEM_PROMPT); at !== -1; at = bytes.indexOf(SYSTEM_PROMPT, at + 1)) {
-    let i = at + SYSTEM_PROMPT.length;
-    if (bytes[i] !== 18) continue;
-    i += 1;
-    let n = 0;
-    while (n < 10 && i < bytes.length && bytes[i] & 128) {
-      i += 1;
-      n += 1;
-    }
-    i += 1;
-    if (!bytes.subarray(i, i + MARKER.length).equals(MARKER)) continue;
-    const role = /^[A-Za-z0-9_/-]+/.exec(bytes.subarray(i + MARKER.length, i + MARKER.length + 128).toString("latin1"))?.[0];
-    if (role) roles.push(role.split("/").pop());
-  }
-  return roles;
-}
-function agyRoleVerdict({ toolName, conversationId, dir = conversationsDir(), writeTools }) {
-  const m = /^mcp__(.+?)__(.+)$/.exec(String(toolName ?? ""));
-  if (!m || !STERLING_SERVERS.has(m[1])) return { action: "allow" };
-  let writes;
-  try {
-    writes = writeTools();
-  } catch (e) {
-    return { action: "warn", cause: `the store-write tool list could not be read (${e && e.message || e})` };
-  }
-  if (!writes.has(m[2])) return { action: "allow" };
-  if (typeof conversationId !== "string" || !/^[A-Za-z0-9-]+$/.test(conversationId)) {
-    return { action: "warn", cause: `the hook input carries no usable conversationId (${JSON.stringify(conversationId)})` };
-  }
-  const db = join6(dir, `${conversationId}.db`);
-  const roles = [];
-  try {
-    roles.push(...rolesInConversationBytes(readFileSync5(db)));
-    if (existsSync5(`${db}-wal`)) roles.push(...rolesInConversationBytes(readFileSync5(`${db}-wal`)));
-  } catch (e) {
-    return { action: "warn", cause: `the conversation file ${db} could not be read (${e && e.code || e && e.message || e})` };
-  }
-  const distinct = [...new Set(roles)];
-  if (distinct.length === 0) return { action: "warn", cause: `no STERLING-ROLE line opens the agent's system prompt in ${db}` };
-  if (distinct.length > 1) return { action: "warn", cause: `the conversation file names more than one role (${distinct.join(", ")})` };
-  const role = distinct[0];
-  if (!READ_ONLY_ROLES.has(role)) return { action: "allow" };
-  return {
-    action: "deny",
-    role,
-    reason: `H15: the ${role} agent is read-only and may not call ${m[2]}, which writes the Sterling store. Put what you would record into your report; the conductor writes the store.`
-  };
-}
-function unenforcedWarning(cause) {
-  return `\u24D8 STERLING: read-only roles are unenforced on agy: ${cause}. A reviewer, researcher, scout, sparring or preflight agent in this conversation is not stopped from writing the store.`;
-}
-
-// scripts/hooks/lib/plugin-root-walk.mjs
-import { existsSync as existsSync6 } from "node:fs";
-import { dirname as dirname4, join as join7 } from "node:path";
-import { fileURLToPath } from "node:url";
-function walkUpPluginRoot(moduleUrl) {
-  let dir = dirname4(fileURLToPath(moduleUrl));
-  for (let i = 0; i < 4; i++) {
-    if (existsSync6(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname4(dir);
-  }
-  return null;
 }
 
 // scripts/hooks/lib/store-shell-verdict.mjs
@@ -6992,20 +6868,6 @@ if (tool === "Bash" || tool === "PowerShell") {
       "H15: this command writes to a Sterling Postgres schema (sterling_meta, sterling_p_*, sterling_d_*, sterling_test_*) through an ad-hoc client (psql, or node/bun given a program inline or on stdin), and only the Sterling MCP server and store write those schemas \u2014 write with knowledge_create / knowledge_update / board_add and the other MCP tools. Read-only SELECTs, Sterling scripts, the node --test store suites and schemas outside the sterling_ prefix are fine."
     );
   }
-  allow();
-}
-if (input.host === "agy" && typeof tool === "string" && tool.startsWith("mcp__")) {
-  const verdict = agyRoleVerdict({
-    toolName: tool,
-    conversationId: input.session_id,
-    writeTools: () => {
-      const root = walkUpPluginRoot(import.meta.url);
-      if (!root) throw new Error("no plugin root above this hook");
-      return storeWriteToolNames(root);
-    }
-  });
-  if (verdict.action === "deny") deny(verdict.reason);
-  if (verdict.action === "warn") queueAgyWarningOnce("role-guard-unenforced", unenforcedWarning(verdict.cause));
   allow();
 }
 var field = tool === "NotebookEdit" ? "notebook_path" : tool === "Edit" || tool === "Write" || tool === "MultiEdit" ? "file_path" : null;

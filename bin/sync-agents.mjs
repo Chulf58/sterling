@@ -9735,7 +9735,7 @@ function formatOpenCodeRows(result) {
 // scripts/lib/agy-setup.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync4, readFileSync as readFileSync11, statSync as statSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync11, readlinkSync, statSync as statSync4, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute2, join as join15, resolve as resolve8 } from "node:path";
 var AGY_AGENTS_DIR = ".agents/agents";
@@ -9743,6 +9743,8 @@ var GEMINI_MD = "GEMINI.md";
 var AGY_CONDUCTOR = "conductor";
 var GEMINI_MD_MAX_BYTES = 24e3;
 var AGY_MCP_SERVER_NAME = "sterling";
+var AGY_MCP_READ_ONLY_SERVER_NAME = "sterling-ro";
+var AGY_READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
 var EXCLUDE_BEGIN2 = "# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)";
 var EXCLUDE_END2 = "# <<< sterling agy";
 var HEADER_RE2 = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -9807,6 +9809,7 @@ function renderAgyAgent(templateContent, label, name, { root, nodePath = process
   if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
   const conductor = name === AGY_CONDUCTOR;
   const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const readOnly = AGY_READ_ONLY_ROLES.has(name);
   const fm = [
     "---",
     `name: ${name}`,
@@ -9817,21 +9820,21 @@ function renderAgyAgent(templateContent, label, name, { root, nodePath = process
     "tools:",
     ...tools.map((t) => `  - ${t}`),
     "# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.",
+    ...readOnly ? ["# A read-only role declares sterling-ro, the Sterling server started with --read-only, which refuses every store-write tool."] : [],
     "mcpServers:",
-    `  - name: ${AGY_MCP_SERVER_NAME}`,
+    `  - name: ${readOnly ? AGY_MCP_READ_ONLY_SERVER_NAME : AGY_MCP_SERVER_NAME}`,
     `    command: ${yamlString(fwd4(nodePath))}`,
     "    args:",
     `      - ${yamlString(fwd4(join15(root, "mcp", "sterling-mcp.mjs")))}`,
     `      - ${yamlString("--project")}`,
     `      - ${yamlString(".")}`,
+    ...readOnly ? [`      - ${yamlString("--read-only")}`] : [],
     "---"
   ].join("\n");
   const content = `${fm}
-STERLING-ROLE: ${name}
 ${body}`;
   const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha2563(templateContent)} content_hash=${sha2563(content)} -->`;
   return `${fm}
-STERLING-ROLE: ${name}
 ${header}
 ${body}`;
 }
@@ -9911,16 +9914,49 @@ function renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName }) {
   const dead = findDeadTerms(text);
   if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
   const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > GEMINI_MD_MAX_BYTES) throw new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`);
+  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
   return text;
 }
-function ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root }) {
-  const path = join15(projectDir, GEMINI_MD);
-  let want;
+function geminiRootAlias(home) {
+  return join15(home, ".gemini", "sterling-root");
+}
+function ensureRootAlias(alias, root) {
+  let st = null;
   try {
-    want = renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName: projectNameOf(projectDir) });
+    st = lstatSync6(alias);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (st) {
+    if (!st.isSymbolicLink()) throw new Error(`${fwd4(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
+    if (resolve8(dirname4(alias), readlinkSync(alias)) === resolve8(root)) return;
+    unlinkSync4(alias);
+  }
+  mkdirSync4(dirname4(alias), { recursive: true });
+  symlinkSync(root, alias, "junction");
+}
+function ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root, home = homedir4() }) {
+  const path = join15(projectDir, GEMINI_MD);
+  const projectName = projectNameOf(projectDir);
+  let want;
+  let aliased = false;
+  try {
+    try {
+      want = renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName });
+    } catch (err) {
+      if (!err.overCap) throw err;
+      want = renderGeminiMd({ pluginRoot: pluginRoot2, root: geminiRootAlias(home), projectName });
+      aliased = true;
+    }
   } catch (err) {
     return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+  }
+  if (aliased && !existsSync10(path) || aliased && normalize4(readFileSync11(path, "utf8")) === want) {
+    try {
+      ensureRootAlias(geminiRootAlias(home), root);
+    } catch (err) {
+      return refusal2(GEMINI_MD, `${GEMINI_MD} needs the short root link ${fwd4(geminiRootAlias(home))} because the Sterling root is too long: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+    }
   }
   if (!existsSync10(path)) {
     writeFileAtomic(path, want);
@@ -9966,7 +10002,7 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
   }
   const { tracked } = inventory;
   rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
-  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root });
+  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root, home });
   rows.push(gemini);
   const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
   rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));

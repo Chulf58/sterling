@@ -13,6 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { load } from 'js-yaml';
 import { ProjectRegistry } from '@sterling/store';
 import {
+  AGY_MCP_READ_ONLY_SERVER_NAME,
+  AGY_MCP_SERVER_NAME,
+  AGY_READ_ONLY_ROLES,
   AGY_ROSTER,
   AGY_TOOLS,
   GEMINI_MD_MAX_BYTES,
@@ -63,7 +66,7 @@ test('the agy roster mirrors the OpenCode roster and names', () => {
   assert.deepEqual([...AGY_ROSTER].sort(), [...ROSTER].sort());
 });
 
-test('agent.md per role: agy frontmatter, the shared `sterling` server on execPath with --project ., and STERLING-ROLE as the first body line', () => {
+test('agent.md per role: agy frontmatter, `sterling` for writing roles and `sterling-ro` with --read-only for read-only roles, on execPath with --project ., and the stamp as the first body line', () => {
   const dir = gitProject();
   const r = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false, nodePath: NODE });
   assert.equal(r.root, repo, 'a clone bakes its own root');
@@ -76,14 +79,23 @@ test('agent.md per role: agy frontmatter, the shared `sterling` server on execPa
     assert.equal(fm.mainAgent, name === 'conductor', `${name} mainAgent`);
     assert.equal(fm.subagent, name !== 'conductor', `${name} subagent`);
     assert.deepEqual(fm.tools, AGY_TOOLS[name]);
-    assert.deepEqual(fm.mcpServers, [{ name: 'sterling', command: NODE, args: [`${repo}/mcp/sterling-mcp.mjs`, '--project', '.'] }]);
-    assert.equal(body.split('\n')[0], `STERLING-ROLE: ${name}`, `${name}: the role marker is the first body line`);
-    assert.match(body.split('\n')[1], /^<!-- sterling-agy renderer=agy\/1 template=/);
+    const base = [`${repo}/mcp/sterling-mcp.mjs`, '--project', '.'];
+    const expected = AGY_READ_ONLY_ROLES.has(name)
+      ? { name: 'sterling-ro', command: NODE, args: [...base, '--read-only'] }
+      : { name: 'sterling', command: NODE, args: base };
+    assert.deepEqual(fm.mcpServers, [expected], `${name}: its MCP entry`);
+    assert.match(body.split('\n')[0], /^<!-- sterling-agy renderer=agy\/1 template=/);
     assert.doesNotMatch(body, /\{\{[A-Z_]+\}\}/);
     assert.doesNotMatch(body, /<!-- \/?(claude|opencode|agy|sterling|portable)-only -->/);
     if (READ_ONLY.includes(name)) for (const t of WRITE_TOOLS) assert.ok(!fm.tools.includes(t), `${name} must not get ${t}`);
     if (name !== 'conductor') assert.ok(!fm.tools.includes('invoke_subagent'), `${name} cannot dispatch`);
   }
+  // The read-only set is exactly the ruled one, and the two entry names differ (agy deduplicates servers by entry name).
+  assert.deepEqual([...AGY_READ_ONLY_ROLES].sort(), ['preflight', 'researcher', 'reviewer', 'scout', 'sparring']);
+  assert.ok([...AGY_READ_ONLY_ROLES].every((n) => AGY_ROSTER.includes(n)), 'every read-only role is in the roster');
+  assert.notEqual(AGY_MCP_READ_ONLY_SERVER_NAME, AGY_MCP_SERVER_NAME);
+  const names = new Set(AGY_ROSTER.map((n) => frontmatter(readFileSync(join(dir, '.agents', 'agents', n, 'agent.md'), 'utf8')).fm.mcpServers[0].name));
+  assert.deepEqual([...names].sort(), ['sterling', 'sterling-ro']);
   const conductor = frontmatter(readFileSync(join(dir, '.agents', 'agents', 'conductor', 'agent.md'), 'utf8')).fm;
   for (const t of ['invoke_subagent', 'send_message']) assert.ok(conductor.tools.includes(t), `conductor lists ${t}`);
   assert.deepEqual(AGY_TOOLS.scout.filter((t) => ['run_command', 'search_web'].includes(t)), [], 'scout: no shell, no web (its OpenCode permissions)');

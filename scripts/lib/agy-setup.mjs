@@ -8,12 +8,14 @@
 //    roster and names), rendered from agent-templates/<name>.md through renderAgyText.
 //    The frontmatter is agy's: model inherit; the conductor mainAgent: true and
 //    subagent: false, the workers the reverse; tools: a list of agy built-in registry
-//    names per role (AGY_TOOLS); and mcpServers with ONE entry named `sterling` on every
-//    agent, so agy runs one shared server per session (measured: agent-scoped servers are
-//    deduplicated by name and start with cwd = the workspace). The server is
-//    <process.execPath> <root>/mcp/sterling-mcp.mjs --project . (agyMcpRoot picks the root).
-//    The body's first line is `STERLING-ROLE: <name>`, which agy's session-start hook reads
-//    back to know the running role (user-ruled 2026-11-18); a Sterling stamp follows it.
+//    names per role (AGY_TOOLS); and mcpServers with ONE entry: `sterling` on the writing
+//    roles, `sterling-ro` on the read-only ones (AGY_READ_ONLY_ROLES). The server is
+//    <process.execPath> <root>/mcp/sterling-mcp.mjs --project . (agyMcpRoot picks the root),
+//    plus --read-only for `sterling-ro`, where every store-write tool refuses (decision
+//    antigravity-cli-agy-read-only-role-guard-read-the-agent-role). Measured on agy 1.5.11:
+//    an agent reaches only the servers it declares, and agent-scoped servers are deduplicated
+//    by entry NAME and start with cwd = the workspace, so the two entries need distinct names
+//    and a session runs at most one of each. The Sterling stamp is the first body line.
 //    A file Sterling did not write, one edited since, or one git tracks is refused.
 // 2. GEMINI.md at the project root: the agy render of templates/target-claude-md.md, with
 //    no @AGENTS.md import (agy loads AGENTS.md on its own) and under agy's 24,000-byte
@@ -40,6 +42,10 @@ export const AGY_CONDUCTOR = 'conductor';
 // agy reads at most this many bytes of a workspace AGENTS.md or GEMINI.md (finding c588c43d, from the docs).
 export const GEMINI_MD_MAX_BYTES = 24_000;
 export const AGY_MCP_SERVER_NAME = 'sterling';
+/** The MCP entry the read-only roles declare: the same server started with --read-only. */
+export const AGY_MCP_READ_ONLY_SERVER_NAME = 'sterling-ro';
+/** The roles that never write the store; on agy they declare AGY_MCP_READ_ONLY_SERVER_NAME. */
+export const AGY_READ_ONLY_ROLES = new Set(['reviewer', 'researcher', 'scout', 'sparring', 'preflight']);
 const EXCLUDE_BEGIN = '# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)';
 const EXCLUDE_END = '# <<< sterling agy';
 const HEADER_RE = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -124,8 +130,8 @@ function templateDescription(frontmatter, label) {
 }
 
 /**
- * One agy agent file: agy frontmatter, then `STERLING-ROLE: <name>`, the Sterling stamp and
- * the template's agy render. Pure; `nodePath` and `root` are absolute.
+ * One agy agent file: agy frontmatter, the Sterling stamp and the template's agy render.
+ * Pure; `nodePath` and `root` are absolute.
  */
 export function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath }) {
   const tools = AGY_TOOLS[name];
@@ -138,6 +144,7 @@ export function renderAgyAgent(templateContent, label, name, { root, nodePath = 
   if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
   const conductor = name === AGY_CONDUCTOR;
   const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const readOnly = AGY_READ_ONLY_ROLES.has(name);
   const fm = [
     '---',
     `name: ${name}`,
@@ -148,18 +155,20 @@ export function renderAgyAgent(templateContent, label, name, { root, nodePath = 
     'tools:',
     ...tools.map((t) => `  - ${t}`),
     '# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.',
+    ...(readOnly ? ['# A read-only role declares sterling-ro, the Sterling server started with --read-only, which refuses every store-write tool.'] : []),
     'mcpServers:',
-    `  - name: ${AGY_MCP_SERVER_NAME}`,
+    `  - name: ${readOnly ? AGY_MCP_READ_ONLY_SERVER_NAME : AGY_MCP_SERVER_NAME}`,
     `    command: ${yamlString(fwd(nodePath))}`,
     '    args:',
     `      - ${yamlString(fwd(join(root, 'mcp', 'sterling-mcp.mjs')))}`,
     `      - ${yamlString('--project')}`,
     `      - ${yamlString('.')}`,
+    ...(readOnly ? [`      - ${yamlString('--read-only')}`] : []),
     '---',
   ].join('\n');
-  const content = `${fm}\nSTERLING-ROLE: ${name}\n${body}`;
+  const content = `${fm}\n${body}`;
   const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
-  return `${fm}\nSTERLING-ROLE: ${name}\n${header}\n${body}`;
+  return `${fm}\n${header}\n${body}`;
 }
 
 /** The content an agy agent file had before its stamp line was added, for the edited-since check. */

@@ -6553,7 +6553,7 @@ function renderAgyText(text, label) {
 }
 
 // scripts/lib/agy-setup.mjs
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, statSync as statSync2, writeFileSync } from "node:fs";
+import { existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readlinkSync, statSync as statSync2, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { basename as basename2, dirname as dirname3, isAbsolute, join as join8, resolve as resolve4 } from "node:path";
 

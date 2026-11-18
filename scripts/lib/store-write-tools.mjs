@@ -1,9 +1,9 @@
 // The Sterling store-write tool names, read from the implementor template's
 // disallowedTools: the one list of what a non-writing agent may not call. Each
 // host adds its own prefix (OpenCode `sterling_<tool>` in
-// scripts/lib/opencode-install.mjs storeWriteTools; agy matches the bare name in
-// scripts/hooks/lib/agy-role-guard.mjs). Builtins only, because the agy role
-// guard bundles it into a hook (no workspace imports at runtime).
+// scripts/lib/opencode-install.mjs storeWriteTools); the MCP server's --read-only
+// mode (packages/mcp-server/src/read-only.ts, agy's 'sterling-ro' entry) refuses
+// the bare names. Builtins only, so the bin/ and mcp/ bundles inline it.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 

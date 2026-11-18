@@ -1,4 +1,4 @@
-// stdio entry point: sterling-mcp --project <project root> [--checkout <git checkout>]
+// stdio entry point: sterling-mcp --project <project root> [--checkout <git checkout>] [--read-only]
 // (hobby back-compat: sterling-mcp --store <path-to-sterling.db>)
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,8 @@ import { createSterlingServer } from './server.js';
 import { recordRuntimeMarker } from './runtime.js';
 import { startHookBroker } from './broker.js';
 import { hookRoots } from '../../../scripts/hooks/lib/hook-roots.mjs';
+import { walkUpPluginRoot } from '../../../scripts/hooks/lib/plugin-root-walk.mjs';
+import { readOnlyWriteTools } from './read-only.js';
 
 const args = process.argv.slice(2);
 const valueOf = (flag: string): string | undefined => {
@@ -47,6 +49,19 @@ if (workerPolicyArg !== undefined && !isAbsolute(workerPolicyArg)) {
   process.exit(2);
 }
 const workerPolicy = workerPolicyArg !== undefined ? { path: workerPolicyArg, token: workerTokenArg as string } : undefined;
+// Read-only mode (read-only.ts): agy's 'sterling-ro' entry for the read-only
+// roles passes it, and every store-write tool then refuses. The list comes from
+// the Sterling root this server runs from (mcp/ or packages/mcp-server/dist/);
+// a list that cannot be read, or is empty, refuses boot.
+let readOnly: { writeTools: string[] } | undefined;
+if (args.includes('--read-only')) {
+  try {
+    readOnly = { writeTools: readOnlyWriteTools(walkUpPluginRoot(import.meta.url)) };
+  } catch (e) {
+    console.error(`sterling-mcp: ${(e as Error)?.message ?? String(e)}`);
+    process.exit(2);
+  }
+}
 const pathArg = (projectArg ?? storeArg) as string;
 
 // P5: an unexpanded config placeholder must refuse boot loudly, never open a
@@ -104,7 +119,7 @@ export const storePath = projectRoot !== undefined ? join(projectRoot, '.sterlin
 // the runtime marker. The error is printed by name and the process exits 1.
 let created: ReturnType<typeof createSterlingServer>;
 try {
-  created = createSterlingServer(projectRoot !== undefined ? { projectRoot, checkoutRoot } : storePath, { workerPolicy });
+  created = createSterlingServer(projectRoot !== undefined ? { projectRoot, checkoutRoot } : storePath, { workerPolicy, readOnly });
 } catch (e) {
   // The class name: ProjectModeError and ProjectIdentityError keep name 'Error'.
   const err = e as Error;
