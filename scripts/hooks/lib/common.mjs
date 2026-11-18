@@ -1,6 +1,6 @@
 // Shared hook plumbing. Hooks import workspace packages at AUTHOR time; the
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
@@ -126,7 +126,8 @@ export function transientDir(checkout) {
  * project is still silently allowed rather than gated against someone else's store.
  */
 export function readStdin() {
-  const input = JSON.parse(readFileSync(0, 'utf8'));
+  let input = JSON.parse(readFileSync(0, 'utf8'));
+  if (isAgyInput(input)) input = adoptAgyInput(input);
   const roots = hookRoots(input.cwd);
   if (roots) input.cwd = roots.checkoutRoot;
   input.storeRoot = roots ? roots.storeRoot : input.cwd;
@@ -462,4 +463,252 @@ export function repoRel(toolPath, cwd) {
   } catch {
     return null;
   }
+}
+
+// ── Antigravity CLI (agy) arm ────────────────────────────────────────────────
+//
+// THE THIRD HOST (board 792619d3; contract: research_finding
+// how-does-an-antigravity-cli-agy-plugin-load-manifest-hooks-j, phases A and B,
+// measured on agy 1.5.11). agy runs the same bundles from the plugin's ROOT
+// hooks.json. Its stdin is camelCase and carries `hookEventName`; Claude Code's
+// and OpenCode's carry `hook_event_name`, so that one field is the detection and
+// nothing on their path changes. adoptAgyInput rewrites the agy payload into the
+// shape every hook already reads (hook_event_name, session_id, tool_name,
+// tool_input, ...) and takes over stdout and stderr, so the Claude-shaped output
+// each hook writes is translated ONCE, at process exit, into agy's envelope for
+// the event (agyEnvelope). No hook file carries an agy branch.
+//
+// WHY AT EXIT: the hooks write their envelopes several ways (exitAfterWrite, a
+// bare process.stdout.write, deny() on stderr with exit 2), and agy reads one
+// JSON object from an exit-0 hook. A non-zero exit is logged and IGNORED there,
+// so H15's exit-2 deny would fail open. Capturing the writes and emitting from
+// the 'exit' listener covers every path and turns exit 2 into a JSON deny with
+// exit 0.
+//
+// NOT GUARANTEED: Stop's {"decision":"continue"} and a PreToolUse `reason` on an
+// allow are written per the docs and are unmeasured; PostToolUse has no context
+// channel (its output is `{}`), so what a hook adds there (H19's Read/Edit/Bash
+// delivery, H23) reaches nothing under agy; H20's updatedInput has no mapping and
+// is dropped; a hook's onWritten bookkeeping runs when its write is captured,
+// before the envelope leaves at exit.
+
+const AGY_EVENTS = {
+  SessionStart: 'SessionStart',
+  PreInvocation: 'UserPromptSubmit',
+  PreToolUse: 'PreToolUse',
+  PostToolUse: 'PostToolUse',
+  Stop: 'Stop',
+};
+
+/** True for an agy hook payload: camelCase hookEventName and no Claude Code hook_event_name. */
+export function isAgyInput(raw) {
+  return raw !== null && typeof raw === 'object' && typeof raw.hookEventName === 'string' && !('hook_event_name' in raw);
+}
+
+/**
+ * An agy toolCall as Claude Code's {tool_name, tool_input}. The measured names
+ * come first; the docs' names (view_file, write_to_file, replace_file_content,
+ * multi_replace_file_content) were not seen emitted and are mapped too, so the
+ * store guard keeps holding if a later agy emits them. An unknown tool passes
+ * through under its own name with its own args.
+ */
+export function agyToolCall(name, rawArgs) {
+  const a = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? rawArgs : {};
+  switch (name) {
+    case 'run_command':
+      return { tool_name: 'Bash', tool_input: { command: a.CommandLine } };
+    case 'read_file':
+    case 'view_file':
+      return { tool_name: 'Read', tool_input: { file_path: a.Path ?? a.AbsolutePath } };
+    case 'write_file':
+    case 'write_to_file':
+      return { tool_name: 'Write', tool_input: { file_path: a.Path ?? a.TargetFile, content: a.Content ?? a.CodeContent } };
+    case 'edit_file':
+    case 'replace_file_content':
+      return {
+        tool_name: 'Edit',
+        tool_input: { file_path: a.Path ?? a.TargetFile, old_string: a.Target ?? a.TargetContent, new_string: a.Replacement ?? a.ReplacementContent },
+      };
+    case 'multi_replace_file_content':
+      return {
+        tool_name: 'MultiEdit',
+        tool_input: {
+          file_path: a.TargetFile,
+          edits: (Array.isArray(a.ReplacementChunks) ? a.ReplacementChunks : []).map((c) => ({ old_string: c?.TargetContent, new_string: c?.ReplacementContent })),
+        },
+      };
+    case 'invoke_subagent':
+      return { tool_name: 'Task', tool_input: { prompt: a.Prompt, description: a.Role, subagent_type: a.TypeName } };
+    case 'send_message':
+      return { tool_name: 'SendMessage', tool_input: { to: a.Recipient, message: a.Message } };
+    case 'ask_question':
+      return { tool_name: 'AskUserQuestion', tool_input: a };
+    // From the docs only (neither was emitted in the measured turns).
+    case 'search_web':
+      return { tool_name: 'WebSearch', tool_input: { query: a.query } };
+    case 'read_url_content':
+      return { tool_name: 'WebFetch', tool_input: { url: a.Url } };
+    case 'call_mcp_tool': {
+      // Arguments arrives as an object or as JSON text; text that is not JSON
+      // is handed on unparsed under its own key rather than dropped.
+      let args = a.Arguments;
+      if (typeof args === 'string') {
+        try {
+          args = JSON.parse(args);
+        } catch {
+          args = { Arguments: a.Arguments };
+        }
+      }
+      return { tool_name: `mcp__${a.ServerName}__${a.ToolName}`, tool_input: args !== null && typeof args === 'object' ? args : {} };
+    }
+    default:
+      return { tool_name: name, tool_input: a };
+  }
+}
+
+/**
+ * The agy payload as the Claude Code input the hooks read, plus `skip`: a reason
+ * this event must not reach the hook at all (it then exits with the event's
+ * neutral envelope), or null.
+ *
+ * SKIPS, each mirroring what Claude Code never fires:
+ *   • a SUBAGENT conversation's SessionStart, PreInvocation and Stop. agy runs a
+ *     subagent as its own conversation with its own SessionStart and Stop, which
+ *     Claude Code never fires for a subagent (H1 and H10 are the conductor's).
+ *     The signal is the measured one: lastUserInput is "" in a subagent
+ *     conversation and carries the user's prompt in the main one. No better
+ *     signal was measured (the child's id is not on the parent's tool events);
+ *   • PreInvocation past the first model call: it fires once PER MODEL CALL
+ *     (invocationNum 0, 1, 2, ...) and maps from UserPromptSubmit, which fires
+ *     once per prompt;
+ *   • PostToolUse for a FAILED call (non-empty error), which on Claude Code fires
+ *     PostToolUseFailure instead. Only a failed subagent call is passed on, as
+ *     PostToolUseFailure, because H22 is the only hook registered for it.
+ */
+export function normalizeAgyInput(raw) {
+  const event = raw.hookEventName;
+  const input = {
+    hook_event_name: AGY_EVENTS[event] ?? event,
+    session_id: raw.conversationId,
+    transcript_path: raw.transcriptPath,
+    cwd: typeof raw.cwd === 'string' ? raw.cwd : Array.isArray(raw.workspacePaths) ? raw.workspacePaths[0] : undefined,
+    host: 'agy',
+  };
+  const subagent = raw.lastUserInput === '';
+  if (event === 'SessionStart') {
+    input.source = 'startup';
+    if (subagent) return { input, skip: 'subagent conversation' };
+  } else if (event === 'PreInvocation') {
+    input.prompt = raw.lastUserInput;
+    if (subagent) return { input, skip: 'subagent conversation' };
+    if (raw.invocationNum !== 0) return { input, skip: 'not the first model call of the prompt' };
+  } else if (event === 'Stop') {
+    input.stop_hook_active = raw.continuationActive === true;
+    if (subagent) return { input, skip: 'subagent conversation' };
+  } else if (event === 'PreToolUse' || event === 'PostToolUse') {
+    Object.assign(input, agyToolCall(raw.toolCall?.name, raw.toolCall?.args));
+    input.tool_use_id = raw.toolCall?.id;
+    if (event === 'PostToolUse' && typeof raw.error === 'string' && raw.error !== '') {
+      if (input.tool_name !== 'Task') return { input, skip: 'failed tool call' };
+      input.hook_event_name = 'PostToolUseFailure';
+      input.error = raw.error;
+    }
+  }
+  return { input, skip: null };
+}
+
+/** The model-facing texts in a Claude-shaped hook stdout: additionalContext, then systemMessage; plain text is context as-is. */
+function agyContextTexts(out) {
+  const text = out.trim();
+  if (!text) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [text]; // plain stdout is context on Claude Code's SessionStart and UserPromptSubmit
+  }
+  if (parsed === null || typeof parsed !== 'object') return [text];
+  const texts = [];
+  const ctx = parsed.hookSpecificOutput?.additionalContext;
+  if (typeof ctx === 'string' && ctx.trim()) texts.push(ctx);
+  if (typeof parsed.systemMessage === 'string' && parsed.systemMessage.trim()) texts.push(parsed.systemMessage);
+  return texts;
+}
+
+/**
+ * The agy stdout envelope and exit code for a hook that wrote `out` and `err`
+ * and exited `code`, on the agy event `event`. Exit 2 is Claude Code's block:
+ * a PreToolUse deny, or a Stop continue unless agy already continued once
+ * (continuationActive), the loop guard Claude Code's stop_hook_active gives.
+ * A block on any other event and every other non-zero exit stay as they are
+ * (agy logs them). SessionStart and PreInvocation carry context only through
+ * injectSteps (a bare systemMessage was measured to be dropped).
+ */
+export function agyEnvelope({ event, continuationActive = false, out = '', err = '', code = 0 }) {
+  const json = (o) => ({ text: JSON.stringify(o), code: 0 });
+  if (code === 2) {
+    const reason = err.trim() || 'A Sterling hook blocked this without giving a reason.';
+    if (event === 'PreToolUse') return json({ decision: 'deny', reason });
+    if (event === 'Stop') return continuationActive ? json({ decision: 'allow' }) : json({ decision: 'continue', reason });
+    return { text: '', code };
+  }
+  if (code !== 0) return { text: '', code };
+  const texts = agyContextTexts(out);
+  if (event === 'SessionStart' || event === 'PreInvocation') {
+    return json(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+  }
+  if (event === 'PreToolUse') return json(texts.length ? { decision: 'allow', reason: texts.join('\n\n') } : { decision: 'allow' });
+  if (event === 'Stop') return json({ decision: 'allow' });
+  return json({});
+}
+
+/** Write all of `text` to `fd` synchronously, waiting out EAGAIN on a non-blocking pipe. */
+function writeAllSync(fd, text) {
+  const buf = Buffer.from(text, 'utf8');
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += writeSync(fd, buf, off, buf.length - off);
+    } catch (e) {
+      if (e?.code !== 'EAGAIN') throw e;
+      sleepMs(5);
+    }
+  }
+}
+
+/**
+ * Take over this process's stdout and stderr for agy and return the normalized
+ * input. stdout writes are captured (their callbacks still fire, so the
+ * write-then-exit helpers settle as usual); stderr is captured and still
+ * written, because agy logs it. A skipped event exits here with its neutral
+ * envelope.
+ */
+export function adoptAgyInput(raw) {
+  const { input, skip } = normalizeAgyInput(raw);
+  const out = [];
+  const err = [];
+  const text = (chunk) => (typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+  process.stdout.write = (chunk, encoding, callback) => {
+    out.push(text(chunk));
+    const done = typeof encoding === 'function' ? encoding : callback;
+    if (typeof done === 'function') process.nextTick(done, null);
+    return true;
+  };
+  const writeErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => {
+    err.push(text(chunk));
+    return writeErr(chunk, ...rest);
+  };
+  process.on('exit', (code) => {
+    const envelope = agyEnvelope({ event: raw.hookEventName, continuationActive: raw.continuationActive === true, out: out.join(''), err: err.join(''), code });
+    try {
+      if (envelope.text) writeAllSync(1, envelope.text);
+      process.exitCode = envelope.code;
+    } catch (e) {
+      writeErr(`Sterling agy adapter: the hook envelope could not be written (${(e && e.message) || e}), so agy proceeds as if no hook ran.\n`);
+      process.exitCode = 1;
+    }
+  });
+  if (skip) allow();
+  return input;
 }

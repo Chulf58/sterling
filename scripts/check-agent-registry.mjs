@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { checkRegistryConsistency, findBackslashCommandsInHooksJson } from './lib/agent-distribution.mjs';
 import { checkAdapterRegistry } from './adapters/resolve.mjs';
+import { agyHooksShapeViolations, versionParityViolations } from './lib/agy-plugin-surface.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -62,6 +63,26 @@ if (existsSync(hooksJsonPath)) {
     violations.push({ kind: 'backslash_hook_command', detail: `hooks/hooks.json: ${cmd}` });
   }
 }
+
+// Antigravity CLI (board 792619d3): the ROOT hooks.json is agy's registration
+// (Claude Code ignores it) and must keep the shape agy's loader accepts, since
+// one wrong wrapper makes agy skip every hook in it; and package.json, the
+// Claude Code manifest and the agy manifest carry one version.
+const agyHooksPath = join(pluginRoot, 'hooks.json');
+if (existsSync(agyHooksPath)) {
+  let agyHooks = null;
+  try {
+    agyHooks = JSON.parse(readFileSync(agyHooksPath, 'utf8'));
+  } catch (e) {
+    violations.push({ kind: 'agy_hooks_shape', detail: `hooks.json is not valid JSON (${(e && e.message) || e})` });
+  }
+  if (agyHooks !== null) {
+    for (const detail of agyHooksShapeViolations(agyHooks, { bundleExists: (b) => existsSync(join(pluginRoot, 'hooks', b)) })) {
+      violations.push({ kind: 'agy_hooks_shape', detail });
+    }
+  }
+}
+for (const detail of versionParityViolations(pluginRoot)) violations.push({ kind: 'version_parity', detail });
 
 // §9.1 adapter registry check: every member loads and exports the fixed interface
 for (const v of await checkAdapterRegistry()) {

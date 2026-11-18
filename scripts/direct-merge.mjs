@@ -404,7 +404,8 @@ const changed = new Set(diff.stdout.split('\n').map((l) => l.trim()).filter(Bool
 // gap-hunt-2026-09-28-rulings, items 4+5). One implementation, shared with
 // H10's capture duty: scripts/lib/version-only.mjs, which states the full
 // fail-closed rule. It applies to exactly VERSION_ONLY_CANDIDATES
-// (.claude-plugin/plugin.json, package.json, and package-lock.json with its
+// (.claude-plugin/plugin.json, .antigravity-plugin/plugin.json, package.json,
+// and package-lock.json with its
 // 2 version lines) between mergeBase and branchTip: both regular blobs of the
 // same mode, strict UTF-8, valid JSON, a moved version string, and no other
 // changed byte. A whole-file CRLF conversion, JSON reformat, key reorder, a
@@ -727,10 +728,21 @@ if (existsSync(join(target, pluginManifestRel))) {
           `They move together in the same commit. Align them, commit, rerun.`
       );
     }
+    // The Antigravity CLI manifest (board 792619d3) carries the same version
+    // when the target ships one.
+    const agyManifestRel = '.antigravity-plugin/plugin.json';
+    const agyPath = join(target, agyManifestRel);
+    const branchAgy = existsSync(agyPath) ? readVersion(readFileSync(agyPath, 'utf8'), agyManifestRel) : null;
+    if (existsSync(agyPath) && branchAgy !== branchPlugin) {
+      fail(
+        `direct-merge: version fields DIVERGED — ${pluginManifestRel} is ${branchPlugin}, ${agyManifestRel} is ${branchAgy}. ` +
+          `They move together in the same commit. Align them, commit, rerun.`
+      );
+    }
     if (basePlugin !== null && branchPlugin === basePlugin) {
       fail(
         `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.\n` +
-          `The version is the clone-currency signal consumers read: bump BOTH ${pluginManifestRel} and package.json\n` +
+          `The version is the clone-currency signal consumers read: bump ${pluginManifestRel} and package.json (and .antigravity-plugin/plugin.json where it exists)\n` +
           `(0.x rule: breaking → MINOR, additive → PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
       );
     }

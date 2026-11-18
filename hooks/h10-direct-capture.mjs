@@ -8,11 +8,11 @@ var __export = (target, all) => {
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID7, createHash as createHash6 } from "node:crypto";
 import { spawn, spawnSync as spawnSync8 } from "node:child_process";
-import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, writeSync as writeSync2, rmSync as rmSync7, existsSync as existsSync13, mkdirSync as mkdirSync11, renameSync as renameSync7 } from "node:fs";
+import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, writeSync as writeSync3, rmSync as rmSync7, existsSync as existsSync13, mkdirSync as mkdirSync11, renameSync as renameSync7 } from "node:fs";
 import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync } from "node:fs";
 import { join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
@@ -13116,7 +13116,8 @@ function hookRoots(from) {
 
 // scripts/hooks/lib/common.mjs
 function readStdin() {
-  const input2 = JSON.parse(readFileSync6(0, "utf8"));
+  let input2 = JSON.parse(readFileSync6(0, "utf8"));
+  if (isAgyInput(input2)) input2 = adoptAgyInput(input2);
   const roots = hookRoots(input2.cwd);
   if (roots) input2.cwd = roots.checkoutRoot;
   input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
@@ -13273,6 +13274,173 @@ function openStore(dir) {
 function namedError(e) {
   const name = e?.constructor?.name && e.constructor.name !== "Object" ? e.constructor.name : e?.name ?? "Error";
   return `${name}: ${e?.message ?? String(e)}`;
+}
+var AGY_EVENTS = {
+  SessionStart: "SessionStart",
+  PreInvocation: "UserPromptSubmit",
+  PreToolUse: "PreToolUse",
+  PostToolUse: "PostToolUse",
+  Stop: "Stop"
+};
+function isAgyInput(raw) {
+  return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
+}
+function agyToolCall(name, rawArgs) {
+  const a = rawArgs !== null && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs : {};
+  switch (name) {
+    case "run_command":
+      return { tool_name: "Bash", tool_input: { command: a.CommandLine } };
+    case "read_file":
+    case "view_file":
+      return { tool_name: "Read", tool_input: { file_path: a.Path ?? a.AbsolutePath } };
+    case "write_file":
+    case "write_to_file":
+      return { tool_name: "Write", tool_input: { file_path: a.Path ?? a.TargetFile, content: a.Content ?? a.CodeContent } };
+    case "edit_file":
+    case "replace_file_content":
+      return {
+        tool_name: "Edit",
+        tool_input: { file_path: a.Path ?? a.TargetFile, old_string: a.Target ?? a.TargetContent, new_string: a.Replacement ?? a.ReplacementContent }
+      };
+    case "multi_replace_file_content":
+      return {
+        tool_name: "MultiEdit",
+        tool_input: {
+          file_path: a.TargetFile,
+          edits: (Array.isArray(a.ReplacementChunks) ? a.ReplacementChunks : []).map((c) => ({ old_string: c?.TargetContent, new_string: c?.ReplacementContent }))
+        }
+      };
+    case "invoke_subagent":
+      return { tool_name: "Task", tool_input: { prompt: a.Prompt, description: a.Role, subagent_type: a.TypeName } };
+    case "send_message":
+      return { tool_name: "SendMessage", tool_input: { to: a.Recipient, message: a.Message } };
+    case "ask_question":
+      return { tool_name: "AskUserQuestion", tool_input: a };
+    // From the docs only (neither was emitted in the measured turns).
+    case "search_web":
+      return { tool_name: "WebSearch", tool_input: { query: a.query } };
+    case "read_url_content":
+      return { tool_name: "WebFetch", tool_input: { url: a.Url } };
+    case "call_mcp_tool": {
+      let args = a.Arguments;
+      if (typeof args === "string") {
+        try {
+          args = JSON.parse(args);
+        } catch {
+          args = { Arguments: a.Arguments };
+        }
+      }
+      return { tool_name: `mcp__${a.ServerName}__${a.ToolName}`, tool_input: args !== null && typeof args === "object" ? args : {} };
+    }
+    default:
+      return { tool_name: name, tool_input: a };
+  }
+}
+function normalizeAgyInput(raw) {
+  const event = raw.hookEventName;
+  const input2 = {
+    hook_event_name: AGY_EVENTS[event] ?? event,
+    session_id: raw.conversationId,
+    transcript_path: raw.transcriptPath,
+    cwd: typeof raw.cwd === "string" ? raw.cwd : Array.isArray(raw.workspacePaths) ? raw.workspacePaths[0] : void 0,
+    host: "agy"
+  };
+  const subagent = raw.lastUserInput === "";
+  if (event === "SessionStart") {
+    input2.source = "startup";
+    if (subagent) return { input: input2, skip: "subagent conversation" };
+  } else if (event === "PreInvocation") {
+    input2.prompt = raw.lastUserInput;
+    if (subagent) return { input: input2, skip: "subagent conversation" };
+    if (raw.invocationNum !== 0) return { input: input2, skip: "not the first model call of the prompt" };
+  } else if (event === "Stop") {
+    input2.stop_hook_active = raw.continuationActive === true;
+    if (subagent) return { input: input2, skip: "subagent conversation" };
+  } else if (event === "PreToolUse" || event === "PostToolUse") {
+    Object.assign(input2, agyToolCall(raw.toolCall?.name, raw.toolCall?.args));
+    input2.tool_use_id = raw.toolCall?.id;
+    if (event === "PostToolUse" && typeof raw.error === "string" && raw.error !== "") {
+      if (input2.tool_name !== "Task") return { input: input2, skip: "failed tool call" };
+      input2.hook_event_name = "PostToolUseFailure";
+      input2.error = raw.error;
+    }
+  }
+  return { input: input2, skip: null };
+}
+function agyContextTexts(out) {
+  const text = out.trim();
+  if (!text) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [text];
+  }
+  if (parsed === null || typeof parsed !== "object") return [text];
+  const texts = [];
+  const ctx = parsed.hookSpecificOutput?.additionalContext;
+  if (typeof ctx === "string" && ctx.trim()) texts.push(ctx);
+  if (typeof parsed.systemMessage === "string" && parsed.systemMessage.trim()) texts.push(parsed.systemMessage);
+  return texts;
+}
+function agyEnvelope({ event, continuationActive = false, out = "", err = "", code = 0 }) {
+  const json = (o) => ({ text: JSON.stringify(o), code: 0 });
+  if (code === 2) {
+    const reason = err.trim() || "A Sterling hook blocked this without giving a reason.";
+    if (event === "PreToolUse") return json({ decision: "deny", reason });
+    if (event === "Stop") return continuationActive ? json({ decision: "allow" }) : json({ decision: "continue", reason });
+    return { text: "", code };
+  }
+  if (code !== 0) return { text: "", code };
+  const texts = agyContextTexts(out);
+  if (event === "SessionStart" || event === "PreInvocation") {
+    return json(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+  }
+  if (event === "PreToolUse") return json(texts.length ? { decision: "allow", reason: texts.join("\n\n") } : { decision: "allow" });
+  if (event === "Stop") return json({ decision: "allow" });
+  return json({});
+}
+function writeAllSync(fd, text) {
+  const buf = Buffer.from(text, "utf8");
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += writeSync(fd, buf, off, buf.length - off);
+    } catch (e) {
+      if (e?.code !== "EAGAIN") throw e;
+      sleepMs(5);
+    }
+  }
+}
+function adoptAgyInput(raw) {
+  const { input: input2, skip } = normalizeAgyInput(raw);
+  const out = [];
+  const err = [];
+  const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+  process.stdout.write = (chunk, encoding, callback) => {
+    out.push(text(chunk));
+    const done = typeof encoding === "function" ? encoding : callback;
+    if (typeof done === "function") process.nextTick(done, null);
+    return true;
+  };
+  const writeErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => {
+    err.push(text(chunk));
+    return writeErr(chunk, ...rest);
+  };
+  process.on("exit", (code) => {
+    const envelope = agyEnvelope({ event: raw.hookEventName, continuationActive: raw.continuationActive === true, out: out.join(""), err: err.join(""), code });
+    try {
+      if (envelope.text) writeAllSync(1, envelope.text);
+      process.exitCode = envelope.code;
+    } catch (e) {
+      writeErr(`Sterling agy adapter: the hook envelope could not be written (${e && e.message || e}), so agy proceeds as if no hook ran.
+`);
+      process.exitCode = 1;
+    }
+  });
+  if (skip) allow();
+  return input2;
 }
 
 // scripts/lib/dispatch-register.mjs
@@ -14108,6 +14276,7 @@ import { join as join16 } from "node:path";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
   [".claude-plugin/plugin.json", [["version"]]],
+  [".antigravity-plugin/plugin.json", [["version"]]],
   ["package.json", [["version"]]],
   [LOCKFILE, [["version"], ["packages", "", "version"]]]
 ]);
@@ -14392,7 +14561,7 @@ var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, mkdirSync as mkdirSync8, openSync as openSync5, writeSync, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, mkdirSync as mkdirSync8, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -15619,7 +15788,7 @@ try {
       const buf = Buffer.from(text, "utf8");
       let off = 0;
       while (off < buf.length) {
-        const n = writeSync2(2, buf, off, buf.length - off);
+        const n = writeSync3(2, buf, off, buf.length - off);
         if (!(n > 0)) throw new Error("fd 2 wrote nothing");
         off += n;
       }

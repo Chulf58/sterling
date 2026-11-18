@@ -10,11 +10,13 @@
     "./server": "./opencode/sterling-server.mjs"
   },
   "files": [
+    ".antigravity-plugin/",
     ".claude-plugin/",
     "agent-templates/",
     "bin/",
     "commands/",
     "hooks/",
+    "hooks.json",
     "mcp/",
     "opencode/sterling-server.mjs",
     "opencode/sterling-tui/package.json",

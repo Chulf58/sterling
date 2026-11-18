@@ -11,7 +11,7 @@ import { spawn } from "node:child_process";
 import { resolve as resolve5 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync } from "node:fs";
 import { join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js

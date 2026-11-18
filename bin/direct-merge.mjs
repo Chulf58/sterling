@@ -13692,7 +13692,7 @@ init_dist();
 import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync9, existsSync as existsSync7 } from "node:fs";
+import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2 } from "node:fs";
 import { join as join12 } from "node:path";
 init_dist();
 init_dist2();
@@ -14008,6 +14008,7 @@ import { spawnSync as spawnSync5 } from "node:child_process";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
   [".claude-plugin/plugin.json", [["version"]]],
+  [".antigravity-plugin/plugin.json", [["version"]]],
   ["package.json", [["version"]]],
   [LOCKFILE, [["version"], ["packages", "", "version"]]]
 ]);
@@ -15359,10 +15360,18 @@ if (existsSync11(join21(target, pluginManifestRel))) {
         `direct-merge: version fields DIVERGED \u2014 ${pluginManifestRel} is ${branchPlugin}, package.json is ${branchPkg}. They move together in the same commit. Align them, commit, rerun.`
       );
     }
+    const agyManifestRel = ".antigravity-plugin/plugin.json";
+    const agyPath = join21(target, agyManifestRel);
+    const branchAgy = existsSync11(agyPath) ? readVersion(readFileSync14(agyPath, "utf8"), agyManifestRel) : null;
+    if (existsSync11(agyPath) && branchAgy !== branchPlugin) {
+      fail2(
+        `direct-merge: version fields DIVERGED \u2014 ${pluginManifestRel} is ${branchPlugin}, ${agyManifestRel} is ${branchAgy}. They move together in the same commit. Align them, commit, rerun.`
+      );
+    }
     if (basePlugin !== null && branchPlugin === basePlugin) {
       fail2(
         `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.
-The version is the clone-currency signal consumers read: bump BOTH ${pluginManifestRel} and package.json
+The version is the clone-currency signal consumers read: bump ${pluginManifestRel} and package.json (and .antigravity-plugin/plugin.json where it exists)
 (0.x rule: breaking \u2192 MINOR, additive \u2192 PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
       );
     }

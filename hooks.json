@@ -1,0 +1,106 @@
+{
+  "sterling": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node --disable-warning=ExperimentalWarning ./hooks/h1-session-start.mjs",
+        "timeout": 180
+      },
+      {
+        "type": "command",
+        "command": "node --disable-warning=ExperimentalWarning ./hooks/h19-clear-session.mjs"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node --disable-warning=ExperimentalWarning ./hooks/h2-selection-inject.mjs"
+      },
+      {
+        "type": "command",
+        "command": "node --disable-warning=ExperimentalWarning ./hooks/h19-delivery-drain.mjs"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h19-knowledge-delivery.mjs"
+          },
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h15-store-guard.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h15-store-guard.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h20-mechanism-axis.mjs"
+          },
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h22-dispatch-register.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "ask_question",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h20-mechanism-axis.mjs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h7-file-touch.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "search_web|read_url_content|invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h16-event-register.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h22-dispatch-register.mjs"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node --disable-warning=ExperimentalWarning ./hooks/h10-direct-capture.mjs"
+      }
+    ]
+  }
+}

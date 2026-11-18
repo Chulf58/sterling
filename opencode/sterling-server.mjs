@@ -13808,7 +13808,7 @@ import { isAbsolute as isAbsolute5, resolve as resolve14 } from "node:path";
 // scripts/hooks/lib/common.mjs
 init_dist();
 init_dist2();
-import { readFileSync as readFileSync7, existsSync as existsSync6 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync } from "node:fs";
 import { join as join12 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
@@ -21840,7 +21840,7 @@ init_agent_distribution();
 init_agent_fences();
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync15, readdirSync as readdirSync4, mkdirSync as mkdirSync10, openSync as openSync6, writeSync, closeSync as closeSync6, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync7, readFileSync as readFileSync15, readdirSync as readdirSync4, mkdirSync as mkdirSync10, openSync as openSync6, writeSync as writeSync2, closeSync as closeSync6, unlinkSync, constants } from "node:fs";
 import { join as join23, resolve as resolve11 } from "node:path";
 
 // scripts/lib/store-path.mjs
