@@ -74,7 +74,7 @@ import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { modelListItems } from './dispatch-model.mjs';
-import { availabilityLine, availableAgainLine, convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, TRACKED_OVERLAY_NOTICE, projectOverpass, readInventory, requestEffort, workerRequestEffort } from './overpass.mjs';
+import { availabilityLine, availableAgainLine, convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, strandedNotice, TRACKED_OVERLAY_NOTICE, projectOverpass, readInventory, requestEffort, workerRequestEffort } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
@@ -415,26 +415,45 @@ export function createSterlingServer(deps = {}) {
     const sessionModels = createSessionModels();
     /**
      * Converges the Overpass agent overlay in .opencode/opencode.json; returns the
-     * resolution, or null when it could not be read (the fence has logged it and raised
-     * a notice). Never inside the maintenance worker's child, whose run is not the user's.
+     * resolution (null when it could not be read: the fence has logged it and raised
+     * a notice) and `skipped`, true when the overlay write was skipped because git tracks
+     * opencode.json. Never inside the maintenance worker's child, whose run is not the user's.
+     *
+     * A skip says so through a keyed notice (shown once per session, notices.mjs), and
+     * names the entries Sterling wrote that it could not undo, whether or not Overpass is
+     * still on; the log line is written only when its text changes.
      */
     async function convergeOverpass(root) {
-      if (inWorkerChild(env)) return null;
+      if (inWorkerChild(env)) return { res: null, skipped: false };
       let res = null;
+      let skipped = false;
       await fenced('overpass', root, () => {
         res = projectOverpass(root);
-        const { notes, skippedTracked } = convergeOverlay(root, res);
+        const { notes, skippedTracked, stranded } = convergeOverlay(root, res);
+        let said = '';
         if (skippedTracked) {
-          logLine(root, `overpass: ${TRACKED_OVERLAY_NOTICE}`);
-          if (res.effective) addNotice(root, TRACKED_OVERLAY_NOTICE, now());
+          skipped = true;
+          if (stranded.length) {
+            said = strandedNotice(stranded);
+            addNotice(root, said, now(), 'overpass-tracked-stranded');
+          } else if (res.effective) {
+            said = TRACKED_OVERLAY_NOTICE;
+            addNotice(root, said, now(), 'overpass-tracked-overlay');
+          }
+        }
+        if ((trackedLogged.get(root) ?? '') !== said) {
+          trackedLogged.set(root, said);
+          if (said) logLine(root, `overpass: ${said}`);
         }
         for (const note of notes) {
           logLine(root, `overpass: ${note}`);
           addNotice(root, `Sterling Overpass: ${note}.`, now());
         }
       });
-      return res;
+      return { res, skipped };
     }
+    // Per root, the tracked-config text last logged ('' for none), so only a change is logged.
+    const trackedLogged = new Map();
     async function onPrompt(input) {
       // Before any await: the prompt's arrival order for the conductor record (conductor-session.mjs).
       const seq = takePromptSeq();
@@ -444,8 +463,10 @@ export function createSterlingServer(deps = {}) {
       await recordConductorSession(input, seq);
       const root = rootOf();
       if (!root) return;
-      const res = await convergeOverpass(root);
-      const seen = res && sessionModels.get(input?.sessionID);
+      const { res, skipped } = await convergeOverpass(root);
+      // With the overlay skipped, the conductor and Plan models are not Overpass's to set,
+      // so there is no /models switch to ask for.
+      const seen = res && !skipped && sessionModels.get(input?.sessionID);
       const notice = seen ? mismatchNotice(res, seen.agent, seen.model) : '';
       if (notice && typeof input?.prompt?.text === 'string') input.prompt.text = `${input.prompt.text}\n\n${notice}`;
       let availability = '';
