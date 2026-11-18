@@ -3,7 +3,7 @@
 // (main.ts) and the OpenCode plugin (packages/opencode-plugin/src/tui.tsx)
 // both drive it, so a board edit or a config toggle runs the same code in
 // either host. Nothing here touches a terminal.
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -22,7 +22,8 @@ import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
-import { probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
+import { discoverCustomAgents } from './custom-agents.js';
+import { AGY_AGENTS_DIR, probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -360,6 +361,20 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
 
   /** Read a governed agent's INSTALLED model:/effort: from its frontmatter (the
    *  copy that governs dispatch). Missing/unparsable → blanks (surfaces as drift). */
+  /** A governed agent's file in the OpenCode folder (.opencode/agents, subfolders included,
+   *  where Sterling writes .opencode/agents/sterling/<name>.md) or agy's folder. */
+  function hostAgentFileExists(name: string): boolean {
+    if (existsSync(join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md'))) return true;
+    const walk = (dir: string): boolean => {
+      try {
+        return readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name === `${name}.md`));
+      } catch {
+        return false;
+      }
+    };
+    return walk(join(projectRoot, '.opencode', 'agents'));
+  }
+
   function readInstalledModelEffort(name: string): { model: string; effort: string } {
     try {
       const content = readFileSync(join(agentsDir, `${name}.md`), 'utf8');
@@ -567,6 +582,12 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         return { name, installedModel: v.model, installedEffort: v.effort };
       });
 
+    // governed roles installed in the OpenCode or agy folders count as installed too, and
+    // the custom agents of every host folder are listed read-only (issue #307); discovery
+    // never throws, so a bad agent file cannot fail the tab
+    const hostInstalled = Object.keys(AGENT_MODEL_KEY).filter((name) => !agents.some((a) => a.name === name) && hostAgentFileExists(name));
+    const customAgents = discoverCustomAgents(projectRoot);
+
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
     try {
       store.bootstrapCatalogIfAbsent(config, nowISO);
@@ -586,7 +607,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+    return { agents, hostInstalled, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
   }
 
   /** maintenance_worker.opencode_model for the Maintenance worker row, from the RAW

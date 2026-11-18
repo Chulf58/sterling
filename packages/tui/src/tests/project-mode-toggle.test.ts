@@ -34,6 +34,7 @@ interface SystemRow { id: string; lines: { text: string; selected?: boolean }[] 
 interface SystemTabView { rows: SystemRow[]; sparringRows?: SystemRow[]; tddRows?: SystemRow[]; modeRows?: SystemRow[] }
 interface Snapshot {
   agents: { name: string; installedModel: string; installedEffort: string }[];
+  hostInstalled?: string[];
   configModels: Record<string, { model: string; effort: string }>;
   catalog: { present: boolean; stale: boolean; staleDate: string | null; entries: { id: string; label: string; tier: string; status: string }[] };
   codexWired: boolean;
@@ -53,6 +54,8 @@ const reduce = (stateMod as unknown as {
 function snapshot(over: Partial<Snapshot> = {}): Snapshot {
   return {
     agents: [{ name: 'implementor', installedModel: 'claude-opus-5-5', installedEffort: 'medium' }],
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: {
       implementor: { model: 'claude-opus-5-5', effort: 'medium' },
       scout: { model: 'claude-sonnet-5', effort: 'low' },

@@ -22,6 +22,8 @@ const CATALOG: CatalogEntry[] = [
 function snapshot(implementor: AgentRosterSnapshot['configModels'][string] = { model: 'claude-sonnet-5-5', effort: 'high' }): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: implementor.model, installedEffort: implementor.effort }],
+    // scout is installed in another host folder only (no Claude agent file), so it is listed but governs no Claude agent
+    hostInstalled: ['scout'],
     // cursor 0 = implementor (governs the implementor agent), 1 = scout (a config key whose agent is not installed here)
     configModels: { implementor, scout: { model: 'claude-sonnet-5-5', effort: 'low' } },
     catalog: { present: true, stale: false, staleDate: null, entries: CATALOG },

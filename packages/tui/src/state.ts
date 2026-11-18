@@ -161,6 +161,13 @@ export interface RosterAgent {
   installedModel: string;
   installedEffort: string;
 }
+/** A custom agent found in a project agent folder (System tab, read-only row). */
+export interface CustomAgentView {
+  name: string;
+  source: 'claude' | 'opencode' | 'agy';
+  model?: string;
+  error?: string;
+}
 /** A models-catalog entry (reference_material.catalog.entries[]). */
 export interface CatalogEntry {
   id: string;
@@ -197,6 +204,11 @@ export interface AgentRosterSnapshot {
   agents: RosterAgent[];
   /** opencode_model is the role's OpenCode-only override (<provider>/<model>). */
   configModels: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }>;
+  /** Governed agent names installed in the OpenCode or agy folders but not the Claude one
+   *  (a governed role is listed when installed in any host folder). */
+  hostInstalled?: string[];
+  /** Custom agents from the project's agent folders: shown read-only, never edited. */
+  customAgents?: CustomAgentView[];
   /** Antigravity CLI is installed: the model picker then offers the agy-only ids. */
   agy?: boolean;
   catalog: CatalogStatusView;
@@ -378,6 +390,8 @@ export interface SystemTabView {
    *  PR auto-merge row. It owns no cursor index (the cursor clamp does not count it) and
    *  no effect, because only the move-store skill writes config.storage. */
   storageRows: SystemRow[];
+  /** Read-only custom-agent rows (issue #307): no cursor index, never selectable. */
+  customRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
@@ -441,7 +455,11 @@ function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string
  *  maintenance_worker.opencode_model and its Overpass tier is a role of its own), so it
  *  is appended here and every cursor index below the roster counts it. */
 function systemKeys(snap: AgentRosterSnapshot): string[] {
-  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k)), MAINTENANCE_WORKER_ROLE];
+  // a governed role with no installed agent file in any host folder is not listed
+  // (user ruling 2026-11-18, GitHub issue #307)
+  const installed = new Set([...snap.agents.map((a) => a.name), ...(snap.hostInstalled ?? [])]);
+  const isInstalled = (k: string): boolean => [...installed].some((n) => AGENT_MODEL_KEY[n] === k);
+  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), MAINTENANCE_WORKER_ROLE];
 }
 
 /** The worker row's model picker (Overpass off): every catalog entry as the OpenCode
@@ -1188,7 +1206,22 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
   // the storage row is read-only: it takes no cursor index.
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows };
+  // custom agents are read-only and take no cursor index, like the storage row
+  const customRows = selector ? [] : customAgentRows(snap, width);
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows, customRows };
+}
+
+/** Read-only rows for the project's custom agents: name, host folder and the model from the
+ *  file's own frontmatter ('inherit/default' when it names none), or the error marker when
+ *  the file could not be read. They write nothing and take no cursor index. */
+function customAgentRows(snap: AgentRosterSnapshot, width: number): SystemRow[] {
+  return (snap.customAgents ?? []).map((a, i) => ({
+    id: `sys:custom:${a.source}:${i}`,
+    key: `custom:${a.source}:${a.name}`,
+    drift: false,
+    agents: [a.name],
+    lines: [{ text: clipEllipsis(`  ${a.name} (${a.source}): ${a.error !== undefined ? `⚠ ${a.error}` : (a.model ?? 'inherit/default')}  read-only`, width), kind: 'meta' as const }],
+  }));
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -1741,7 +1774,7 @@ function systemDashboardState(
   // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
   // after the tdd row, same row shape. The handoff files row follows it, then
   // the PR auto-merge row.
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows, ...view.customRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -2179,7 +2212,7 @@ function reduceNodes(
    *  model field is being typed do nothing. */
   const clickSystem = (state: DashboardState, index: number, line1: number): { ui: UiState; effects: Effect[] } => {
     const row = state.rows[index]!;
-    if (row.type !== 'system' || row.id === 'sys:storage' || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
+    if (row.type !== 'system' || row.id === 'sys:storage' || row.id.startsWith('sys:custom:') || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
     const enter: UiEvent = { kind: 'key', name: 'ENTER' };
     const sel = ui.selector;
     if (sel) {
