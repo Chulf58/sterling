@@ -15,6 +15,22 @@ import { AXIS_MIN_TERM_LEN, GENERIC_DEV_TERMS, extractAxisTermsUncapped } from '
  *  distinct terms than this needs all of them (see fitDomains). */
 export const DOMAIN_FIT_MIN_TERMS = 2;
 
+/** Ordinary non-subject words that domain descriptions and records both use
+ *  ('Python language and standard library', 'Node.js runtime ... independent of
+ *  any one project'). Matching on them alone fitted a game store-page decision
+ *  to domain:python via "language, library" (GitHub issue #305; six such items
+ *  were ruled "keep in project"). Domain-fit only: it is NOT added to
+ *  axis.ts's GENERIC_DEV_TERMS, which H20 depends on and decision foreign_3b09bc8f
+ *  rejected widening. Chosen from the words in mounted domain descriptions that
+ *  name no subject. */
+export const DOMAIN_FIT_GENERIC_TERMS: ReadonlySet<string> = new Set([
+  'language', 'languages', 'library', 'libraries', 'game', 'games', 'data', 'tool', 'tools',
+  'framework', 'frameworks', 'application', 'applications', 'software', 'system', 'systems',
+  'project', 'projects', 'package', 'packages', 'service', 'services', 'runtime', 'knowledge',
+  'practice', 'practices', 'pattern', 'patterns', 'independent', 'using', 'usage', 'standard',
+  'general', 'common', 'conventions', 'development', 'platform', 'page', 'pages', 'store',
+]);
+
 export interface DomainDescriptor {
   name: string;
   /** Missing, null or blank: the domain never fits. */
@@ -48,10 +64,10 @@ function termsMatch(a: string, b: string): boolean {
 }
 
 /** Terms that can carry a subject: the shared extraction minus universal dev
- *  vocabulary ('test', 'build', 'output'), which appears in every record and
+ *  vocabulary ('test', 'build', 'output') and DOMAIN_FIT_GENERIC_TERMS, which appears in every record and
  *  would make any description that uses it fit everything. */
 function subjectTerms(text: string): string[] {
-  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t) && !DOMAIN_FIT_GENERIC_TERMS.has(t));
 }
 
 /** The domains whose description fits `recordText`, best first: score
