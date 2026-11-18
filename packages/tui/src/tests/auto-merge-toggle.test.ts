@@ -47,6 +47,8 @@ function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot 
     codexWired: true,
     sparringPartner: { enabled: true },
     tdd: { enabled: true },
+    // the PR auto-merge row is disabled in hobby mode (acts only in work mode), so these fixtures run in work mode
+    mode: 'work',
     ...over,
   } as AgentRosterSnapshot;
 }

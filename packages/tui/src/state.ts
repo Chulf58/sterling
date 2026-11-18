@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -373,6 +373,9 @@ export interface SystemEntry {
   row: SystemRow;
   /** ENTER/SPACE; absent on a read-only entry */
   action?: SystemAction;
+  /** Set on a setting that does not apply right now: the row is shown dimmed with this reason,
+   *  holds no cursor index and emits no effect. */
+  disabled?: string;
 }
 /** The ids the older parallel lists carried, so a consumer can still ask for "the tdd row". */
 const LEGACY_VIEW_LISTS = {
@@ -1107,7 +1110,6 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
         lines.push({ text: clip(`${marker}Maintenance worker: config unreadable: ${worker.unreadable}`), kind: 'title', selected: i === ui.cursor });
       } else {
         lines.push({ text: clip(`${marker}Maintenance worker: ${saved ?? 'not set: worker will not start'}`), kind: 'title', selected: i === ui.cursor });
-        lines.push({ text: clip(`    claude CLI, when on PATH: ${MAINTENANCE_WORKER_CLAUDE_MODEL} ${MAINTENANCE_WORKER_CLAUDE_EFFORT}`), kind: 'meta' });
       }
       if (selector && selector.key === key) {
         if (selector.stage === 'model') {
@@ -1192,35 +1194,59 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
   // or a catalog/roster failure is visible above the roster, not lost.
   const catBanner = catalogBanner(snap.catalog, width);
   const banner = ui.notice ? [clip(`⚠ ${ui.notice}`), ...catBanner] : catBanner;
-  // THE ordered list. Cursor indexes are assigned in this order to the cursorable entries only:
-  // the agent rows, then the settings, then the read-only storage and custom-agent rows.
-  const entries: SystemEntry[] = rows.map((row) => ({ id: row.id, section: 'agents', cursorable: true, row, action: { kind: 'agent', key: row.key! } }));
+  // THE ordered list. Cursor indexes go, in list order, to the cursorable entries only: the agent
+  // rows, then the live settings. Headings, group labels, the read-only rows and the disabled
+  // settings hold none.
+  const entries: SystemEntry[] = [];
   const next = (): number => entries.filter((e) => e.cursorable).length;
+  const label = (id: string, section: SystemSection, text: string, kind: 'title' | 'meta'): void => {
+    entries.push({ id, section, cursorable: false, row: { id, lines: [{ text: clip(text), kind }] } });
+  };
+  label('sys:heading:agents', 'agents', 'Agents', 'title');
+  for (const row of rows) entries.push({ id: row.id, section: 'agents', cursorable: true, row, action: { kind: 'agent', key: row.key! } });
+  // custom agents are read-only: no cursor index, no action
+  for (const row of customAgentRows(snap, width)) entries.push({ id: row.id, section: 'agents', cursorable: false, row });
+  label('sys:heading:settings', 'settings', 'Settings', 'title');
   const setting = (row: SystemRow, action: SystemAction): void => {
     entries.push({ id: row.id, section: 'settings', cursorable: true, row, action });
   };
+  // A setting that does not apply now stays on screen: dimmed, with the reason, no cursor index, no effect.
+  const disabled = (row: SystemRow, reason: string): void => {
+    const lines = row.lines.map((l) => ({ text: clip(`${l.text.replace(/^(› | {2})/, '  ')}  (${reason})`), kind: 'meta' }));
+    entries.push({ id: row.id, section: 'settings', cursorable: false, row: { ...row, lines }, disabled: reason });
+  };
+  label('sys:group:sparring', 'settings', '  ── Sparring', 'meta');
   const sparring = sparringPartnerRows(snap, ui, width, next());
-  setting(sparring[0], { kind: 'toggle', effect: { type: 'sparring_toggle', enabled: !(snap.sparringPartner?.enabled ?? true) } });
+  setting(sparring[0], { kind: 'toggle', effect: { type: 'sparring_toggle', enabled: flipTo(snap.sparringPartner?.enabled, true) } });
   setting(sparring[1], { kind: 'edit', uiPatch: { sparringModelEdit: snap.sparringPartner?.model ?? '' } });
-  setting(tddToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'tdd_toggle', enabled: !(snap.tdd?.enabled ?? true) } });
-  // project mode: an invalid value flips to hobby, the default flow — a visible, deliberate write, never a guess
-  setting(modeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'mode_toggle', mode: (snap.mode ?? 'hobby') === 'hobby' ? 'work' : 'hobby' } });
-  // handoff files: an invalid value flips to off, the default
-  setting(handoffToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'handoff_toggle', enabled: (snap.handoff ?? false) === false } });
-  // PR auto-merge: an invalid or unknown value flips to OFF, the side that never merges
-  setting(autoMergeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'auto_merge_toggle', enabled: (snap.autoMergeOnClean ?? true) === false } });
-  // the Overpass rows, offered in work mode on OpenCode only; anything that is not a plain OFF flips to OFF, never to routing
+  label('sys:group:workflow', 'settings', '  ── Workflow', 'meta');
+  setting(tddToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'tdd_toggle', enabled: flipTo(snap.tdd?.enabled, true) } });
+  // project mode: hobby goes to work; work, an invalid value and an unreadable config go to hobby, the default flow
+  setting(modeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'mode_toggle', mode: (snap.mode === undefined ? 'hobby' : snap.mode) === 'hobby' ? 'work' : 'hobby' } });
+  setting(handoffToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'handoff_toggle', enabled: flipTo(snap.handoff, false) } });
+  if ((snap.mode === undefined ? 'hobby' : snap.mode) === 'hobby') disabled(autoMergeToggleRow(snap, ui, width, Number.NaN), 'acts only in work mode');
+  else setting(autoMergeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'auto_merge_toggle', enabled: flipTo(snap.autoMergeOnClean, true) } });
+  label('sys:group:overpass', 'settings', '  ── Overpass', 'meta');
   if (overpassOffered(snap)) {
     const [op, provider, bypass] = overpassToggleRows(snap, ui, width, next());
     const current = overpassView.provider !== null && OVERPASS_PROVIDER_RE.test(overpassView.provider) ? overpassView.provider : '';
-    setting(op, { kind: 'toggle', effect: { type: 'overpass_toggle', enabled: overpassView.enabled === false } });
+    setting(op, { kind: 'toggle', effect: { type: 'overpass_toggle', enabled: flipTo(overpassView.enabled, false) } });
     setting(provider, { kind: 'edit', uiPatch: { overpassProviderEdit: current } });
-    setting(bypass, { kind: 'toggle', effect: { type: 'overpass_bypass_toggle', enabled: overpassView.conductorBypass === false } });
+    setting(bypass, { kind: 'toggle', effect: { type: 'overpass_bypass_toggle', enabled: flipTo(overpassView.conductorBypass, false) } });
+  } else {
+    for (const row of overpassToggleRows(snap, ui, width, Number.NaN)) disabled(row, 'work mode on OpenCode only');
   }
-  // read-only entries: they take no cursor index and no action
+  label('sys:group:storage', 'settings', '  ── Storage', 'meta');
   entries.push({ id: 'sys:storage', section: 'settings', cursorable: false, row: storageRow(snap, width) });
-  for (const row of customAgentRows(snap, width)) entries.push({ id: row.id, section: 'agents', cursorable: false, row });
   return { entries, banner };
+}
+
+/** The one rule for an on/off setting: unset flips from the setting's default; exactly ON turns OFF;
+ *  exactly OFF turns ON; anything else (an invalid value, an unreadable config) turns OFF, never ON on a
+ *  guess. The project mode follows the same rule with hobby as its OFF side. */
+function flipTo(value: unknown, defaultOn: boolean): boolean {
+  if (value === undefined) return !defaultOn;
+  return value === false;
 }
 
 /** The entries that hold a cursor index, in cursor order (the reducer's and the reveal's view of the list). */
@@ -1239,7 +1265,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   // While a selector is open the view FOCUSES on the key under edit — the other rows (and their
   // config values) are hidden so the open picker's offered set is the only model/effort text on screen.
   const entries = selector ? all.filter((e) => e.action?.kind === 'agent' && e.row.key === selector.key) : all;
-  const byIds = (ids: readonly string[]): SystemRow[] => entries.filter((e) => ids.includes(e.id)).map((e) => e.row);
+  // the older lists hold the live (cursorable) rows only; a disabled setting is in `entries`
+  const byIds = (ids: readonly string[]): SystemRow[] => entries.filter((e) => e.cursorable && ids.includes(e.id)).map((e) => e.row);
   return {
     entries,
     banner,
@@ -1250,8 +1277,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     handoffRows: byIds(LEGACY_VIEW_LISTS.handoffRows),
     autoMergeRows: byIds(LEGACY_VIEW_LISTS.autoMergeRows),
     overpassRows: byIds(LEGACY_VIEW_LISTS.overpassRows),
-    storageRows: byIds(LEGACY_VIEW_LISTS.storageRows),
-    customRows: entries.filter((e) => e.section === 'agents' && e.action === undefined).map((e) => e.row),
+    storageRows: entries.filter((e) => e.id === 'sys:storage').map((e) => e.row),
+    customRows: entries.filter((e) => e.id.startsWith('sys:custom:')).map((e) => e.row),
   };
 }
 

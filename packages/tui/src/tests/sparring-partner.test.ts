@@ -73,6 +73,7 @@ interface RosterAgent {
 /** Extended for this slice with codexWired + sparringPartner (see the CONTRACT
  *  comment above) — the two new fields the System tab's sparring rows read. */
 interface AgentRosterSnapshot {
+  mode?: string;
   agents: RosterAgent[];
   hostInstalled?: string[];
   configModels: Record<string, { model: string; effort: string }>;
@@ -167,6 +168,8 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
     catalog: freshCatalog(),
     codexWired: true,
     sparringPartner: { enabled: true, model: undefined },
+    // the PR auto-merge row is disabled in hobby mode (acts only in work mode), so these fixtures run in work mode
+    mode: 'work',
     ...over,
   };
 }

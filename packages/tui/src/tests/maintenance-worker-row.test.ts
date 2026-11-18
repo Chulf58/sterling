@@ -4,7 +4,6 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
-import { MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL } from '@sterling/schemas';
 import { initialUi, buildSystemTab, reduce, SYSTEM_TAB, type AgentRosterSnapshot, type OverpassView, type UiState, type UiEvent, type Effect } from '../state.js';
 import { openDashboard } from '../controller.js';
 
@@ -64,11 +63,11 @@ function drive(snap: AgentRosterSnapshot, ui: UiState, names: string[]): { ui: U
   }
 }
 
-test('worker row, Overpass off, no model: reads "not set: worker will not start" and names the claude CLI model', () => {
-  assert.deepEqual(texts(snapshot()), [
-    '  Maintenance worker: not set: worker will not start',
-    `    claude CLI, when on PATH: ${MAINTENANCE_WORKER_CLAUDE_MODEL} ${MAINTENANCE_WORKER_CLAUDE_EFFORT}`,
-  ]);
+// Changed 2026-11-18 (System tab redesign, item 2): the row no longer carries the 'claude CLI, when on PATH:
+// <model> <effort>' line. Those two values are fixed constants of the worker, not configuration, and the tab
+// cannot tell whether the claude CLI is on PATH, so the line claimed more than the tab knows. The title is unchanged.
+test('worker row, Overpass off, no model: reads "not set: worker will not start" and nothing else', () => {
+  assert.deepEqual(texts(snapshot()), ['  Maintenance worker: not set: worker will not start']);
   assert.equal(workerRow(snapshot()).agents?.length, 0, 'no agent governs it');
 });
 
@@ -102,7 +101,7 @@ test('worker row, Overpass off: ENTER opens a model picker of OpenCode reference
   const snap = snapshot();
   const opened = drive(snap, st({ cursor: WORKER_CURSOR }), ['ENTER']);
   assert.deepEqual(opened.ui.selector, { key: 'maintenance-worker', stage: 'model', highlight: 0 });
-  assert.deepEqual(texts(snap, opened.ui).slice(2), ['  › anthropic/claude-opus-5-5 Opus 5.5', '    openai/gpt-6.1-sol Sol 6.1']);
+  assert.deepEqual(texts(snap, opened.ui).slice(1), ['  › anthropic/claude-opus-5-5 Opus 5.5', '    openai/gpt-6.1-sol Sol 6.1']);
   const picked = drive(snap, st({ cursor: WORKER_CURSOR }), ['ENTER', 'DOWN', 'ENTER']);
   assert.deepEqual(picked.effects, [{ type: 'worker_model', from: undefined, to: 'openai/gpt-6.1-sol' }]);
   assert.equal(picked.ui.selector, undefined);

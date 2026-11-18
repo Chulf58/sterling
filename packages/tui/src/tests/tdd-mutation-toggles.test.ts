@@ -82,6 +82,7 @@ interface RosterAgent {
  *  travel too since baseSnapshot must stay a valid AgentRosterSnapshot for
  *  the already-landed sparring-partner slice. */
 interface AgentRosterSnapshot {
+  mode?: string;
   agents: RosterAgent[];
   hostInstalled?: string[];
   configModels: Record<string, { model: string; effort: string }>;
@@ -175,6 +176,8 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
     codexWired: true,
     sparringPartner: { enabled: true, model: undefined },
     tdd: { enabled: true },
+    // the PR auto-merge row is disabled in hobby mode (acts only in work mode), so these fixtures run in work mode
+    mode: 'work',
     ...over,
   };
 }
@@ -446,7 +449,9 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     const baseSnap = baseSnapshot();
     // Every non-banner row on the tab, so bannerRowCount below can subtract them: config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) + 1 PR auto-merge (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean) + 1 read-only storage row (board 6ca1a3c5), which is drawn but takes no cursor stop.
     const totalSelectableRows = (stateMod.buildSystemTab as unknown as (s: AgentRosterSnapshot, u: UiState) => { entries: unknown[] })(baseSnap, st()).entries.length;
-    const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport
+    // Changed 2026-11-18 (System tab redesign, item 2): the 'Agents' heading sits above the first agent row, so the
+    // bannerless control needs a window one line taller (3, was 2); the roster is still taller than the viewport.
+    const maxBodyLines = 3; // total SYS_TAB rows exceed this — the roster is taller than the viewport
     const vp = { maxBodyLines, width: 80 };
     const lastRowCursor = at(baseSnap, SYS.autoMerge); // the PR auto-merge row — the last selectable row on the tab
 

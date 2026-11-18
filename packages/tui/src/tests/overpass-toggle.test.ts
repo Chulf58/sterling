@@ -110,17 +110,22 @@ test('overpass rows: an invalid present config reads INVALID or UNKNOWN in the r
   assert.deepEqual(unreadable, ['  Overpass: UNKNOWN (config unreadable)', '  Overpass provider: UNKNOWN (config unreadable)', '  Conductor bypass: UNKNOWN (config unreadable)']);
 });
 
-test('overpass rows: existing cursor positions do not move — the clamp still ends at the auto-merge row when the rows are hidden', () => {
+// Changed 2026-11-18 (System tab redesign, item 2): the PR auto-merge row is disabled in hobby mode, so the clamp
+// ends at the last LIVE row: the auto-merge row when the Overpass rows are not offered but the mode is work, the
+// handoff files row in hobby mode.
+test('overpass rows: existing cursor positions do not move — the clamp still ends at the last live row when the Overpass rows are not offered', () => {
   const { store, cleanup } = storeFixture();
   try {
-    for (const snap of [snapshot({ mode: 'hobby' }), snapshot({ host: undefined })]) {
-      const clamped = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.autoMerge) }), key('DOWN'), undefined, undefined, snap);
-      assert.equal(clamped.ui.cursor, at(snap, SYS.autoMerge));
+    for (const [snap, last, effect] of [
+      [snapshot({ host: undefined }), SYS.autoMerge, 'auto_merge_toggle'],
+      [snapshot({ mode: 'hobby' }), SYS.handoff, 'handoff_toggle'],
+    ] as const) {
+      const clamped = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, last) }), key('DOWN'), undefined, undefined, snap);
+      assert.equal(clamped.ui.cursor, at(snap, last));
       const end = reduce(store, st({ tab: SYS_TAB, cursor: 0 }), key('END'), undefined, undefined, snap);
-      assert.equal(end.ui.cursor, at(snap, SYS.autoMerge));
-      // ENTER on the auto-merge row still emits the same effect
-      const enter = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.autoMerge) }), key('ENTER'), undefined, undefined, snap);
-      assert.deepEqual(enter.effects.map((e: Effect) => e.type), ['auto_merge_toggle']);
+      assert.equal(end.ui.cursor, at(snap, last));
+      const enter = reduce(store, st({ tab: SYS_TAB, cursor: at(snap, last) }), key('ENTER'), undefined, undefined, snap);
+      assert.deepEqual(enter.effects.map((e: Effect) => e.type), [effect]);
     }
   } finally {
     cleanup();
@@ -152,9 +157,11 @@ test('overpass rows: the dashboard state draws them after the auto-merge row and
   try {
     const dash = buildDashboardState(store, st({ tab: SYS_TAB }), 80, undefined, undefined, undefined, undefined, snapshot());
     const ids = dash.rows.map((r) => r.id);
-    assert.equal(ids.indexOf('sys:overpass'), ids.indexOf('sys:pr_auto_merge') + 1);
+    // Changed 2026-11-18 (System tab redesign, item 2): group labels now sit between the groups, so the rows
+    // keep their order but are no longer adjacent.
+    assert.ok(ids.indexOf('sys:overpass') > ids.indexOf('sys:pr_auto_merge'));
     assert.equal(ids.indexOf('sys:overpass_bypass'), ids.indexOf('sys:overpass') + 2);
-    assert.equal(ids.indexOf('sys:storage'), ids.indexOf('sys:overpass_bypass') + 1);
+    assert.ok(ids.indexOf('sys:storage') > ids.indexOf('sys:overpass_bypass'));
   } finally {
     cleanup();
   }
@@ -268,14 +275,15 @@ test('overpass provider: ESCAPE cancels the edit; an invalid saved id opens an e
   }
 });
 
-test('overpass rows: when the mode leaves work the cursor clamps back to the auto-merge row', () => {
+test('overpass rows: when the mode leaves work the cursor clamps back to the last live row', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby' });
-    // the cursor was on the bypass row while the mode was work; the rows are gone now
+    // the cursor was on the bypass row while the mode was work; the rows are gone now, and in hobby mode the
+    // auto-merge row is disabled too (2026-11-18, System tab redesign item 2), so the clamp lands on the handoff row
     const r = reduce(store, st({ tab: SYS_TAB, cursor: at(snapshot({ mode: 'work' }), SYS.overpassBypass) }), key('ENTER'), undefined, undefined, snap);
-    assert.deepEqual(r.effects.map((e: Effect) => e.type), ['auto_merge_toggle']);
-    assert.equal(r.ui.cursor, at(snap, SYS.autoMerge));
+    assert.deepEqual(r.effects.map((e: Effect) => e.type), ['handoff_toggle']);
+    assert.equal(r.ui.cursor, at(snap, SYS.handoff));
   } finally {
     cleanup();
   }
@@ -450,10 +458,13 @@ test('controller: the rows are hidden without the OpenCode host, and in hobby mo
     const ctl = openDashboard(f.storePath, opts);
     try {
       await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
-      assert.equal(rowIds(ctl).some((id) => id.startsWith('sys:overpass')), false, `${JSON.stringify(opts)} ${mode}`);
+      // Changed 2026-11-18 (System tab redesign, item 2): the rows stay on screen, disabled with the reason
+      const overpassText = ctl.state(VP).rows.filter((r) => r.id.startsWith('sys:overpass')).map((r) => r.lines[0].text);
+      assert.equal(overpassText.length, 3, `${JSON.stringify(opts)} ${mode}`);
+      for (const t of overpassText) assert.match(t, /\(work mode on OpenCode only\)$/);
       for (let i = 0; i < 40; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
       await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
-      assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).overpass, undefined, 'the last cursor stop is still the auto-merge row');
+      assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).overpass, undefined, 'a disabled Overpass row is never a cursor stop, so nothing is written to overpass');
     } finally {
       ctl.close();
       rmSync(f.dir, { recursive: true, force: true });

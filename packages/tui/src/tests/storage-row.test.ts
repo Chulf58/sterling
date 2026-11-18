@@ -28,7 +28,7 @@ function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot 
     codexWired: true,
     sparringPartner: { enabled: true },
     tdd: { enabled: true },
-    mode: 'hobby',
+    mode: 'work', // the auto-merge row is disabled in hobby mode
     handoff: false,
     ...over,
   };

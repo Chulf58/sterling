@@ -38,11 +38,10 @@ test('controller: the TDD toggle on the System tab writes config.tdd.enabled thr
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     assert.equal(ctl.roster()?.tdd?.enabled, true, 'the roster loads on System-tab activation');
-    // config.models defaults fill the top rows; the PR auto-merge row is last
-    // (DOWN clamps on it), the handoff files row sits above it, the mode row
-    // above that and the tdd row above that.
+    // config.models defaults fill the top rows. This fixture is in hobby mode, where the PR auto-merge row is
+    // disabled (2026-11-18, System tab redesign item 2), so the handoff files row is the last stop (DOWN clamps
+    // on it), the mode row sits above it and the tdd row above that.
     for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
-    await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
@@ -66,9 +65,10 @@ for (const mode of ['hobby', 'work']) {
     try {
       await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
       assert.equal(ctl.roster()?.handoff, false, 'no handoff key and nothing tracked reads off, in work mode too');
-      // the PR auto-merge row is last; the handoff files row sits above it
+      // work mode: the PR auto-merge row is last and the handoff files row sits above it. Hobby mode: the auto-merge
+      // row is disabled (2026-11-18, System tab redesign item 2), so the handoff files row is the last stop itself.
       for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
-      await ctl.handle({ kind: 'key', name: 'UP' }, VP);
+      if (mode === 'work') await ctl.handle({ kind: 'key', name: 'UP' }, VP);
       await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
       let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
       assert.deepEqual(written.handoff, { enabled: true }, 'config.handoff.enabled written');

@@ -72,7 +72,6 @@ const OFF_ROWS = [
   '  Scout: claude-sonnet-5 low',
   '  Sparring: claude-fable-5-1 high',
   '  Maintenance worker: not set: worker will not start',
-  '    claude CLI, when on PATH: claude-sonnet-5-5 medium',
 ];
 
 test('Overpass off: the agent rows are exactly the pre-Overpass rows, whatever the view carries', () => {
@@ -439,8 +438,7 @@ test('implementor-hard row: model and effort with Overpass off, its own tier wit
     '› Implementor: claude-sonnet-5-5 high',
     '  Implementor-hard: claude-opus-5-5 high',
     '  Maintenance worker: not set: worker will not start',
-    '    claude CLI, when on PATH: claude-sonnet-5-5 medium',
-  ]);
+    ]);
   assert.deepEqual(rowTexts(hardSnap({ overpass: on({ implementor: { tier: 'agentic-high' }, 'implementor-hard': { tier: 'agentic-premium-max', effort: 'xhigh' } }) })), [
     // Changed 2026-10-24: the implementor's tier-only entry shows its default effort, marked '(default)'.
     '› Implementor: agentic-high (Overpass) medium (default)',

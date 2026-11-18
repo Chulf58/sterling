@@ -7,10 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { buildDashboardState, initialUi, reduce, SYSTEM_TAB, type AgentRosterSnapshot, type Effect, type OverpassView, type UiEvent, type UiState } from '../state.js';
 
-// System tab redesign, item 1 (a refactor with no behaviour change): the tab is built from one ordered
-// entry list. This snapshot was generated from the code BEFORE the refactor and pins what the screen draws
-// (every row's text and selection marker) and what ENTER does (effects and the UI patch) at every cursor
-// index, for representative fixtures. Regenerate only on a deliberate change:
+// System tab: what the screen draws (every row's text and selection marker) and what ENTER/SPACE do (effects and
+// the UI patch) at every cursor index, for representative fixtures.
+// Item 1 of the redesign (a refactor) generated it from the code before the refactor and matched it byte for byte.
+// Item 2 (2026-11-18) regenerated it deliberately. The visible changes it captures: 'Agents' and 'Settings'
+// headings; group labels (Sparring, Workflow, Overpass, Storage) in the Settings section; the Overpass rows
+// listed in every fixture, dimmed with '(work mode on OpenCode only)' when not offered; the PR auto-merge row
+// dimmed with '(acts only in work mode)' in hobby mode and no longer a cursor stop there; the Maintenance worker
+// row without its 'claude CLI, when on PATH' line. Regenerate only on a deliberate change:
 //   UPDATE_SYSTEM_SNAPSHOT=1 node --test packages/tui/dist/tests/system-tab-snapshot.test.js
 const SNAPSHOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'tests', 'system-tab-snapshot.json');
 
