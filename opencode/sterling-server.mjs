@@ -22817,16 +22817,17 @@ function writeOwnership(root, own, fs) {
 `, fs);
   else rmSync8(path, { force: true });
 }
-function refuseTracked(root) {
+function isTracked(root) {
   let out;
   try {
     out = execFileSync("git", ["ls-files", "--", PROJECT_CONFIG_REL], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
-    if (/not a git repository/i.test(String(e.stderr ?? ""))) return;
+    if (/not a git repository/i.test(String(e.stderr ?? ""))) return false;
     throw new Error(`could not check whether git tracks ${PROJECT_CONFIG_REL} (${String(e.stderr || e.message).trim()})`);
   }
-  if (out.trim()) throw new Error(`${PROJECT_CONFIG_REL} is tracked by git, and Sterling writes it only while it is untracked (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config), so the Overpass agent models were not changed; untrack it (git rm --cached ${PROJECT_CONFIG_REL} and commit)`);
+  return out.trim() !== "";
 }
+var TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on their own configured models. Subagent dispatches still route through Overpass.`;
 var pick2 = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(entry, k)).map((k) => [k, entry[k]]));
 var ownedText = (entry) => JSON.stringify(entry === void 0 || entry === null ? null : pick2(entry, OWNED_KEYS));
 var sameOwned = (a, b) => ownedText(a) === ownedText(b);
@@ -22928,7 +22929,7 @@ function convergeOverlay(root, res, { fs } = {}) {
     if (ownChanged) writeOwnership(root, own, fs);
     return { changed: false, notes };
   }
-  refuseTracked(root);
+  if (isTracked(root)) return { changed: false, notes, skippedTracked: true };
   if (Object.keys(agents).length || config.agent !== void 0) config.agent = agents;
   writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent, ...recoveryNotes.length ? { notes: recoveryNotes } : {} } }, fs);
   writeText(path, projectConfigText(config), fs);
@@ -29169,7 +29170,11 @@ function createSterlingServer(deps = {}) {
       let res = null;
       await fenced("overpass", root, () => {
         res = projectOverpass(root);
-        const { notes } = convergeOverlay(root, res);
+        const { notes, skippedTracked } = convergeOverlay(root, res);
+        if (skippedTracked) {
+          logLine(root, `overpass: ${TRACKED_OVERLAY_NOTICE}`);
+          if (res.effective) addNotice(root, TRACKED_OVERLAY_NOTICE, now());
+        }
         for (const note of notes) {
           logLine(root, `overpass: ${note}`);
           addNotice(root, `Sterling Overpass: ${note}.`, now());

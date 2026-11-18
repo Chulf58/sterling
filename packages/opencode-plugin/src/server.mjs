@@ -74,7 +74,7 @@ import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { modelListItems } from './dispatch-model.mjs';
-import { availabilityLine, availableAgainLine, convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, readInventory, requestEffort, workerRequestEffort } from './overpass.mjs';
+import { availabilityLine, availableAgainLine, convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, TRACKED_OVERLAY_NOTICE, projectOverpass, readInventory, requestEffort, workerRequestEffort } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
@@ -423,7 +423,11 @@ export function createSterlingServer(deps = {}) {
       let res = null;
       await fenced('overpass', root, () => {
         res = projectOverpass(root);
-        const { notes } = convergeOverlay(root, res);
+        const { notes, skippedTracked } = convergeOverlay(root, res);
+        if (skippedTracked) {
+          logLine(root, `overpass: ${TRACKED_OVERLAY_NOTICE}`);
+          if (res.effective) addNotice(root, TRACKED_OVERLAY_NOTICE, now());
+        }
         for (const note of notes) {
           logLine(root, `overpass: ${note}`);
           addNotice(root, `Sterling Overpass: ${note}.`, now());

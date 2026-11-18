@@ -421,17 +421,27 @@ function writeOwnership(root, own, fs) {
   else rmSync(path, { force: true });
 }
 
-/** Throws when git tracks .opencode/opencode.json: Sterling writes that file only while it is untracked. */
-function refuseTracked(root) {
+/**
+ * True when git tracks .opencode/opencode.json (Sterling writes that file only while it is
+ * untracked); throws when git cannot say.
+ */
+function isTracked(root) {
   let out;
   try {
     out = execFileSync('git', ['ls-files', '--', PROJECT_CONFIG_REL], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
-    if (/not a git repository/i.test(String(e.stderr ?? ''))) return;
+    if (/not a git repository/i.test(String(e.stderr ?? ''))) return false;
     throw new Error(`could not check whether git tracks ${PROJECT_CONFIG_REL} (${String(e.stderr || e.message).trim()})`);
   }
-  if (out.trim()) throw new Error(`${PROJECT_CONFIG_REL} is tracked by git, and Sterling writes it only while it is untracked (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config), so the Overpass agent models were not changed; untrack it (git rm --cached ${PROJECT_CONFIG_REL} and commit)`);
+  return out.trim() !== '';
 }
+
+/**
+ * The notice for a tracked opencode.json while Overpass is on: the overlay write is
+ * skipped and nothing else changes (decision
+ * overpass-with-a-tracked-opencode-opencode-json-keep-routing).
+ */
+export const TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on their own configured models. Subagent dispatches still route through Overpass.`;
 
 const pick = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(entry, k)).map((k) => [k, entry[k]]));
 // The owned fields of an agent entry, in a fixed key order, as text; an absent entry is null.
@@ -491,8 +501,8 @@ function settlePending(own, agents) {
  * Brings .opencode/opencode.json's Sterling-owned agent entries in line with `res`.
  * Writes nothing when nothing changes. Returns { changed, notes }: `notes` names an entry
  * whose ownership was dropped because the user changed or removed it. Throws on an
- * unreadable opencode.json or ownership file, a tracked opencode.json that needs a write,
- * or a failed write. `fs` ({ writeFile, rename }) is writeFileAtomic's test seam.
+ * unreadable opencode.json or ownership file, or a failed write. A tracked opencode.json
+ * that needs a write is left alone and returns `skippedTracked: true`. `fs` ({ writeFile, rename }) is writeFileAtomic's test seam.
  *
  * A change to opencode.json is committed in three steps: the ownership file first gets a
  * `pending` record (the entries before, the entries after, the ownership after), then
@@ -582,7 +592,9 @@ export function convergeOverlay(root, res, { fs } = {}) {
     if (ownChanged) writeOwnership(root, own, fs);
     return { changed: false, notes };
   }
-  refuseTracked(root);
+  // Nothing is written: ownership and any pending record stay as they were, so a later
+  // call (after the file is untracked) settles and writes as usual.
+  if (isTracked(root)) return { changed: false, notes, skippedTracked: true };
   if (Object.keys(agents).length || config.agent !== undefined) config.agent = agents;
   // Recovery notes ride in the pending record until this write completes, so a failure below cannot lose them.
   writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent, ...(recoveryNotes.length ? { notes: recoveryNotes } : {}) } }, fs);

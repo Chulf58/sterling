@@ -702,15 +702,38 @@ test('overlay: a failed undo, then a hand-changed variant on the tier entry, lea
   }
 });
 
-test('overlay: a git-tracked opencode.json is refused, as the installer refuses it', () => {
+test('overlay: a git-tracked opencode.json is not written and the skip is reported, not thrown', () => {
   const p = makeProject(ON, { agent: {} });
   try {
     const git = (...args) => spawnSync('git', args, { cwd: p.dir, encoding: 'utf8' });
     git('init', '-q');
     git('add', OC_REL);
-    assert.throws(() => overpass.convergeOverlay(p.dir, resOn()), /is tracked by git/);
+    const out = overpass.convergeOverlay(p.dir, resOn());
+    assert.equal(out.skippedTracked, true);
+    assert.equal(out.changed, false);
     assert.deepEqual(readOc(p.dir), { agent: {} });
+    assert.equal(existsSync(join(p.dir, overpass.OVERLAY_REL)), false, 'no ownership or pending record is written');
   } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: with a tracked opencode.json the notice is informational and dispatches still route', async () => {
+  const p = makeProject(ON, { agent: {} });
+  const git = (...args) => spawnSync('git', args, { cwd: p.dir, encoding: 'utf8' });
+  git('init', '-q');
+  git('add', OC_REL);
+  const s = await setup(p.dir);
+  try {
+    await s.prompt('ses_root');
+    assert.deepEqual(readOc(p.dir), { agent: {} }, 'no file write');
+    const said = notices(p.dir);
+    assert.match(said, /conductor and Plan run on their own configured models/);
+    assert.match(said, /Subagent dispatches still route through Overpass/);
+    assert.doesNotMatch(said, /untrack|git rm|failed/i);
+    assert.equal((await s.dispatch({ model: 'anthropic/claude-opus-5-5' })).args.model, 'overpass/agentic-auto', 'dispatch model replacement still happens');
+  } finally {
+    await s.cleanup();
     p.cleanup();
   }
 });
