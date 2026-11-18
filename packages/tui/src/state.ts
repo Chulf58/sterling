@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_CLAUDE_EFFORT, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -196,7 +196,9 @@ export interface SparringPartnerView {
 export interface AgentRosterSnapshot {
   agents: RosterAgent[];
   /** opencode_model is the role's OpenCode-only override (<provider>/<model>). */
-  configModels: Record<string, { model: string; effort: string; opencode_model?: string }>;
+  configModels: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }>;
+  /** Antigravity CLI is installed: the model picker then offers the agy-only ids. */
+  agy?: boolean;
   catalog: CatalogStatusView;
   /** config.sparring_partner, read at the same activation-only cadence as the
    *  rest of the snapshot. Additive-optional (decision foreign_34d61f60's idiom, as
@@ -423,10 +425,14 @@ export const MODEL_VALUE_RE = /^claude-/;
 
 /** The model picker's options for one key: every catalog entry, then, when the
  *  key carries an OpenCode override, one option that clears it. */
-type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' };
-function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string } | undefined): ModelOption[] {
+type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' } | { kind: 'agy'; id: string } | { kind: 'agy_clear' };
+function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string; agy_model?: string } | undefined, agy = false): ModelOption[] {
   const opts: ModelOption[] = entries.map((entry) => ({ kind: 'entry', entry }));
   if (config?.opencode_model) opts.push({ kind: 'clear' });
+  // every agy id is offered as the role's Antigravity-only override (issue #306) once
+  // agy is installed (snapshot.agy) or the role already carries one
+  if (agy || config?.agy_model) for (const id of AGY_MODEL_IDS) opts.push({ kind: 'agy', id });
+  if (config?.agy_model) opts.push({ kind: 'agy_clear' });
   return opts;
 }
 
@@ -608,6 +614,16 @@ export interface OpenCodeModelEffect {
   effort: string;
   agents: string[];
 }
+/** The System-tab Antigravity override commit (issue #306): sets (`to`) or clears
+ *  (`to` absent) config.models[key].agy_model and re-renders the agy agent files. */
+export interface AgyModelEffect {
+  type: 'agy_model';
+  key: string;
+  from?: string;
+  to?: string;
+  model: string;
+  effort: string;
+}
 /** System tab, sparring-partner toggle row (board a0714d0b): flips
  *  config.sparring_partner.enabled. Advisory-only (article interaction a) — the
  *  toggle only silences the automatic consult moments, it never gates. */
@@ -708,6 +724,7 @@ export type Effect =
   | QuitEffect
   | ModelSwapEffect
   | OpenCodeModelEffect
+  | AgyModelEffect
   | SparringToggleEffect
   | SparringModelEffect
   | TddToggleEffect
@@ -1112,6 +1129,7 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     if (!agentNames.every((name) => name === key)) for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
     // While Overpass is effective the saved override is kept but not applied: it is shown
     // dimmed like the saved model, and plain 'OpenCode:' while it governs the role.
+    if (config.agy_model) lines.push({ text: clip(`    Antigravity: ${config.agy_model}`), kind: 'body' });
     if (config.opencode_model) {
       lines.push(overpassEffective
         ? { text: clip(`    saved OpenCode: ${config.opencode_model}`), kind: 'meta' }
@@ -1124,10 +1142,12 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
       } else if (selector.stage === 'model') {
         // a non-anthropic entry is offered as the OpenCode override only, and
         // says so; a set override adds a last option that clears it
-        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
+        modelOptions(snap.catalog.entries, config, snap.agy).forEach((o, oi) => {
           const m = oi === selector.highlight ? '› ' : '  ';
           const text = o.kind === 'clear'
             ? 'OpenCode: use the Claude model'
+            : o.kind === 'agy_clear' ? 'Antigravity: inherit'
+            : o.kind === 'agy' ? `${o.id} (Antigravity only)`
             : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
           lines.push({ text: clip(`  ${m}${text}`), kind: 'option', selected: oi === selector.highlight });
         });
@@ -2118,7 +2138,7 @@ function reduceNodes(
     sel.stage === 'tier' ? overpassTierOptions(roster!.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key as OverpassRole).length
     : sel.stage === 'role_effort' ? OVERPASS_EFFORT_OPTIONS.length
     : sel.stage === 'model' && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster!.catalog.entries, roster!.maintenanceWorker?.opencodeModel).length
-    : sel.stage === 'model' ? modelOptions(roster!.catalog.entries, roster!.configModels[sel.key]).length
+    : sel.stage === 'model' ? modelOptions(roster!.catalog.entries, roster!.configModels[sel.key], roster!.agy).length
     : effortOptions(sel.key).length;
 
   /** The open System picker with its highlight scrolled into view: the
@@ -2502,11 +2522,21 @@ function reduceNodes(
             }
             if (sel.stage === 'model') {
               const keyConfig = roster.configModels[sel.key];
-              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              const option = modelOptions(roster.catalog.entries, keyConfig, roster.agy)[sel.highlight];
               // an OpenCode-only pick or the clear option commits at once: the
               // OpenCode agent file carries no effort, and the Claude model and
               // effort are left as they are (decision
               // opencode-only-model-override-per-role-for-openai-picks)
+              // an Antigravity pick or its clear option commits at once as well: agy
+              // carries the effort in the id, and the Claude pin is left as it is
+              if (option?.kind === 'agy' || option?.kind === 'agy_clear') {
+                if (!keyConfig) return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no config entry` }, effects };
+                if (!roster.agents.some((a) => AGENT_MODEL_KEY[a.name] === sel.key)) {
+                  return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no agent, so an Antigravity model would govern nothing` }, effects };
+                }
+                effects.push({ type: 'agy_model', key: sel.key, from: keyConfig.agy_model, to: option.kind === 'agy' ? option.id : undefined, model: keyConfig.model, effort: keyConfig.effort });
+                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+              }
               if (option && keyConfig && (option.kind === 'clear' || isOpenCodeOnlyEntry(option.entry))) {
                 const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
                 const to = option.kind === 'clear' ? undefined : `${option.entry.vendor}/${option.entry.id}`;

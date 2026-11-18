@@ -169,7 +169,7 @@ function templateDescription(frontmatter, label) {
  * One agy agent file: agy frontmatter, the Sterling stamp and the template's agy render.
  * Pure; `nodePath` and `root` are absolute.
  */
-export function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath }) {
+export function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath, agyModel }) {
   const tools = AGY_TOOLS[name];
   if (!tools) throw new Error(`agy agent ${label}: '${name}' is not in the agy roster (P5)`);
   const rendered = normalize(renderAgyText(templateContent, label));
@@ -185,7 +185,7 @@ export function renderAgyAgent(templateContent, label, name, { root, nodePath = 
     '---',
     `name: ${name}`,
     `description: ${yamlString(description)}`,
-    'model: inherit',
+    `model: ${agyModel ?? 'inherit'}`,
     `mainAgent: ${conductor}`,
     `subagent: ${!conductor}`,
     'tools:',
@@ -242,7 +242,7 @@ export function trackedFiles(projectDir, paths, runGit = git) {
 }
 
 /** Write or check every agy agent file. Rows: created | matches | refreshed | refused. */
-export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath = process.execPath }) {
+export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath = process.execPath, agyModels = {} }) {
   const rows = [];
   for (const name of AGY_ROSTER) {
     const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
@@ -252,7 +252,7 @@ export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePat
       continue;
     }
     const templatePath = join(pluginRoot, 'agent-templates', `${name}.md`);
-    const content = renderAgyAgent(readFileSync(templatePath, 'utf8'), `agent-templates/${name}.md`, name, { root, nodePath });
+    const content = renderAgyAgent(readFileSync(templatePath, 'utf8'), `agent-templates/${name}.md`, name, { root, nodePath, agyModel: agyModels[name] });
     let disk = null;
     if (existsSync(path)) {
       if (!statSync(path).isFile()) {
@@ -279,6 +279,26 @@ export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePat
     rows.push({ item: rel, status: disk === null ? 'created' : 'refreshed' });
   }
   return rows;
+}
+
+/**
+ * config.models.<role>.agy_model for each role that sets one: { <role>: <agy model id> }.
+ * The config schema (AGY_MODEL_IDS) refuses an unlisted id when the config is written, so
+ * here a value that is not a plain model id throws (P5) rather than reaching a frontmatter line.
+ */
+export function agyModelsOf(projectDir) {
+  const configPath = join(storeRootFor(projectDir), '.sterling', 'config.json');
+  if (!existsSync(configPath)) return {};
+  const models = JSON.parse(readFileSync(configPath, 'utf8')).models;
+  const out = {};
+  if (models === null || typeof models !== 'object') return out;
+  for (const [role, entry] of Object.entries(models)) {
+    const id = entry?.agy_model;
+    if (id === undefined) continue;
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
+    out[role] = id;
+  }
+  return out;
 }
 
 /** The project name GEMINI.md's heading carries: config.project_name, else the folder name. */
@@ -443,7 +463,7 @@ export function setupAgy({ projectDir, pluginRoot, env = process.env, home = hom
   // block do not depend on the server and still run.
   const server = probeServer({ root, env });
   if (server.readOnly) {
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath }));
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: agyModelsOf(projectDir) }));
   } else {
     const remedy = resolve(root) !== resolve(pluginRoot)
       ? `install this Sterling into agy (agy plugin install ${fwd(resolve(pluginRoot))}), then rerun /sterling:update`

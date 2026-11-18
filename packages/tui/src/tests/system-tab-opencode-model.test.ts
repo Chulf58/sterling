@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import {
   buildSystemTab, initialUi, reduce, SYSTEM_TAB,
-  type AgentRosterSnapshot, type CatalogEntry, type Effect, type OpenCodeModelEffect, type UiEvent, type UiState,
+  type AgentRosterSnapshot, type CatalogEntry, type Effect, type OpenCodeModelEffect, type AgyModelEffect, type UiEvent, type UiState,
 } from '../state.js';
 
 // The System tab's OpenCode-only model override (decision
@@ -104,4 +104,37 @@ test('END in the model picker reaches the clear option when an override is set',
   const r = drive(snapshot({ model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' }), 0, ['ENTER', 'END', 'ENTER']);
   assert.equal(overrideOf(r.effects)?.to, undefined, 'the last option clears the override');
   assert.equal(overrideOf(r.effects)?.from, 'openai/gpt-5.6-terra');
+});
+
+// The System tab's Antigravity-only model override (GitHub issue #306): with agy
+// installed the picker offers every agy id after the catalog; a pick commits at
+// once as an agy_model effect, and a set override adds a clear option.
+const agyOf = (effects: Effect[]) => effects.find((e): e is AgyModelEffect => e.type === 'agy_model');
+
+test('an agy pick sets agy_model only: no model_swap, no opencode_model, no effort stage', () => {
+  const roster = { ...snapshot(), agy: true };
+  // entries: 0 opus, 1 terra; agy ids start at 2
+  const r = drive(roster, 0, ['ENTER', 'DOWN', 'DOWN', 'ENTER']);
+  assert.equal(r.effects.some((e) => e.type === 'model_swap' || e.type === 'opencode_model'), false);
+  assert.deepEqual(agyOf(r.effects), { type: 'agy_model', key: 'implementor', from: undefined, to: 'claude-opus-5-5-low', model: 'claude-sonnet-5-5', effort: 'high' });
+  assert.equal(r.ui.selector, undefined);
+});
+
+test('a set agy_model shows on the row and END reaches the clear option, which clears it', () => {
+  const roster = { ...snapshot({ model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gpt-oss-120b-medium' }), agy: true };
+  const row = buildSystemTab(roster, { ...initialUi, tab: SYSTEM_TAB, cursor: 0 }).rows.find((x) => x.key === 'implementor')!;
+  assert.ok(row.lines.some((l) => l.text === '    Antigravity: gpt-oss-120b-medium'), JSON.stringify(row.lines));
+  const r = drive(roster, 0, ['ENTER', 'END', 'ENTER']);
+  assert.deepEqual(agyOf(r.effects), { type: 'agy_model', key: 'implementor', from: 'gpt-oss-120b-medium', to: undefined, model: 'claude-sonnet-5-5', effort: 'high' });
+});
+
+test('without agy installed and no override the picker offers no agy ids', () => {
+  const r = drive(snapshot(), 0, ['ENTER', 'END', 'ENTER']);
+  assert.equal(agyOf(r.effects), undefined);
+});
+
+test('an agy pick on a key with no agent is refused with a notice', () => {
+  const r = drive({ ...snapshot(), agy: true }, 1, ['ENTER', 'DOWN', 'DOWN', 'ENTER']);
+  assert.equal(r.effects.length, 0);
+  assert.match(r.ui.notice ?? '', /Antigravity model refused: 'scout' has no agent/);
 });
