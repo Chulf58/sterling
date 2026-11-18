@@ -13050,7 +13050,7 @@ function fail(message, code = 1) {
 }
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync5, renameSync as renameSync4, mkdirSync as mkdirSync7, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync5, renameSync as renameSync4, mkdirSync as mkdirSync7 } from "node:fs";
 import { dirname as dirname7, join as join13 } from "node:path";
 
 // scripts/hooks/lib/broker-client.mjs

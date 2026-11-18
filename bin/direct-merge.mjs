@@ -13714,7 +13714,7 @@ init_dist();
 import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2, writeFileSync as writeFileSync2, renameSync, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2, writeFileSync as writeFileSync2, renameSync, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join12 } from "node:path";
 init_dist();
 init_dist2();

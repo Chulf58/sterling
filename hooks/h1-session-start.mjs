@@ -13337,7 +13337,7 @@ function walkUpPluginRoot(moduleUrl) {
 }
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync8, existsSync as existsSync8, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync6, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { readFileSync as readFileSync8, existsSync as existsSync8, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync6 } from "node:fs";
 import { dirname as dirname10, join as join14 } from "node:path";
 init_dist();
 init_dist2();
@@ -14707,7 +14707,7 @@ import { join as join18 } from "node:path";
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash as createHash3, randomUUID as randomUUID6 } from "node:crypto";
-import { closeSync as closeSync5, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync7, openSync as openSync5, readSync as readSync3, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { closeSync as closeSync4, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync7, openSync as openSync4, readSync as readSync3, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync5 } from "node:fs";
 import { join as join17 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -14735,7 +14735,7 @@ function readBounded2(path, maxBytes, noun) {
   if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
   let fd;
   try {
-    fd = openSync5(path, FS2.O_RDONLY | (FS2.O_NOFOLLOW ?? 0) | (FS2.O_NONBLOCK ?? 0));
+    fd = openSync4(path, FS2.O_RDONLY | (FS2.O_NOFOLLOW ?? 0) | (FS2.O_NONBLOCK ?? 0));
   } catch (e) {
     return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
   }
@@ -14764,7 +14764,7 @@ function readBounded2(path, maxBytes, noun) {
     return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
   } finally {
     try {
-      closeSync5(fd);
+      closeSync4(fd);
     } catch {
     }
   }
@@ -16114,7 +16114,7 @@ import { existsSync as existsSync11 } from "node:fs";
 import { join as join23, resolve as resolve9 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync6, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync6, writeSync as writeSync2, closeSync as closeSync6, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync6, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync as unlinkSync2, constants } from "node:fs";
 import { join as join22, resolve as resolve8 } from "node:path";
 
 // scripts/lib/store-path.mjs
@@ -17511,7 +17511,7 @@ CLONE AGENT SYNC (${t.label}): this project's installed agents were behind the c
 }
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync7, existsSync as existsSync18, mkdirSync as mkdirSync12, openSync as openSync7, readFileSync as readFileSync19, readdirSync as readdirSync7, readSync as readSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { closeSync as closeSync6, existsSync as existsSync18, mkdirSync as mkdirSync12, openSync as openSync6, readFileSync as readFileSync19, readdirSync as readdirSync7, readSync as readSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname14, join as join30 } from "node:path";
 
@@ -17628,13 +17628,13 @@ function walUserVersion(dbPath) {
   return committed;
 }
 function probeSchemaVersion(dbPath) {
-  const fd = openSync7(dbPath, "r");
+  const fd = openSync6(dbPath, "r");
   const header = Buffer.alloc(100);
   let bytesRead;
   try {
     bytesRead = readSync4(fd, header, 0, header.length, 0);
   } finally {
-    closeSync7(fd);
+    closeSync6(fd);
   }
   if (bytesRead < header.length || header.subarray(0, 16).toString("latin1") !== "SQLite format 3\0") {
     throw new Error(`'${dbPath}' is not a valid SQLite database file`);
@@ -17648,7 +17648,7 @@ import { existsSync as existsSync20, readFileSync as readFileSync21 } from "node
 import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { closeSync as closeSync8, existsSync as existsSync19, mkdirSync as mkdirSync13, openSync as openSync8, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync8, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync11, appendFileSync } from "node:fs";
+import { closeSync as closeSync7, existsSync as existsSync19, mkdirSync as mkdirSync13, openSync as openSync7, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync8, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync11, appendFileSync } from "node:fs";
 import { dirname as dirname15, isAbsolute as isAbsolute3, join as join31, resolve as resolve13, sep as sep3 } from "node:path";
 init_dist2();
 

@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -13820,7 +13820,7 @@ import { existsSync as existsSync8 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync5, mkdirSync as mkdirSync6, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { readFileSync as readFileSync8, writeFileSync as writeFileSync5, mkdirSync as mkdirSync6, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { join as join12, dirname as dirname8 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs

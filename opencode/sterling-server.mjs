@@ -13868,7 +13868,7 @@ import { isAbsolute as isAbsolute5, resolve as resolve14 } from "node:path";
 // scripts/hooks/lib/common.mjs
 init_dist();
 init_dist2();
-import { readFileSync as readFileSync8, existsSync as existsSync7, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync6, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { readFileSync as readFileSync8, existsSync as existsSync7, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync6 } from "node:fs";
 import { dirname as dirname7, join as join12 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
@@ -14936,7 +14936,7 @@ function ownsHere(root, workingTrees = workingTreesAt(root)) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, mkdirSync as mkdirSync8, existsSync as existsSync9, renameSync as renameSync4, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, mkdirSync as mkdirSync8, existsSync as existsSync9, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
 import { join as join15, dirname as dirname8 } from "node:path";
 
 // scripts/hooks/lib/dispatch-prompt.mjs
@@ -18317,7 +18317,7 @@ var CONDUCTOR_AGENT = "sterling/conductor";
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync6, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync6, readFileSync as readFileSync13, renameSync as renameSync6, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync6, writeFileSync as writeFileSync7, appendFileSync as appendFileSync2 } from "node:fs";
+import { closeSync as closeSync5, existsSync as existsSync11, mkdirSync as mkdirSync10, openSync as openSync5, readFileSync as readFileSync13, renameSync as renameSync6, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync6, writeFileSync as writeFileSync7, appendFileSync as appendFileSync2 } from "node:fs";
 import { dirname as dirname10, isAbsolute as isAbsolute3, join as join19, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 init_dist2();
@@ -18999,7 +18999,7 @@ function launchWorker(opts) {
         })
       );
       rotateIfLarge(paths.log);
-      logFd = openSync6(paths.log, "a");
+      logFd = openSync5(paths.log, "a");
       stage = "spawn";
       const child = opts.spawn(
         process.execPath,
@@ -19015,7 +19015,7 @@ function launchWorker(opts) {
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
-      if (logFd !== void 0) closeSync6(logFd);
+      if (logFd !== void 0) closeSync5(logFd);
       if (!launched) releaseLock(paths, token);
     }
   } catch (e) {
@@ -21927,7 +21927,7 @@ init_agent_distribution();
 init_agent_fences();
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync15, readdirSync as readdirSync4, mkdirSync as mkdirSync11, openSync as openSync7, writeSync as writeSync2, closeSync as closeSync7, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync7, readFileSync as readFileSync15, readdirSync as readdirSync4, mkdirSync as mkdirSync11, openSync as openSync6, writeSync as writeSync2, closeSync as closeSync6, unlinkSync, constants } from "node:fs";
 import { join as join23, resolve as resolve11 } from "node:path";
 
 // scripts/lib/store-path.mjs
@@ -24141,7 +24141,7 @@ import { join as join43 } from "node:path";
 init_dist2();
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync8, existsSync as existsSync23, mkdirSync as mkdirSync17, openSync as openSync8, readFileSync as readFileSync22, readdirSync as readdirSync7, readSync as readSync3, writeFileSync as writeFileSync11 } from "node:fs";
+import { closeSync as closeSync7, existsSync as existsSync23, mkdirSync as mkdirSync17, openSync as openSync7, readFileSync as readFileSync22, readdirSync as readdirSync7, readSync as readSync3, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname16, join as join34 } from "node:path";
 
 // scripts/lib/project-identity.mjs
@@ -24247,13 +24247,13 @@ function walUserVersion(dbPath) {
   return committed;
 }
 function probeSchemaVersion(dbPath) {
-  const fd = openSync8(dbPath, "r");
+  const fd = openSync7(dbPath, "r");
   const header = Buffer.alloc(100);
   let bytesRead;
   try {
     bytesRead = readSync3(fd, header, 0, header.length, 0);
   } finally {
-    closeSync8(fd);
+    closeSync7(fd);
   }
   if (bytesRead < header.length || header.subarray(0, 16).toString("latin1") !== "SQLite format 3\0") {
     throw new Error(`'${dbPath}' is not a valid SQLite database file`);
@@ -25291,7 +25291,7 @@ init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash as createHash8, randomUUID as randomUUID9 } from "node:crypto";
-import { closeSync as closeSync9, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync19, openSync as openSync9, readSync as readSync4, renameSync as renameSync10, unlinkSync as unlinkSync5, writeFileSync as writeFileSync14 } from "node:fs";
+import { closeSync as closeSync8, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync19, openSync as openSync8, readSync as readSync4, renameSync as renameSync10, unlinkSync as unlinkSync5, writeFileSync as writeFileSync14 } from "node:fs";
 import { join as join39 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -25322,7 +25322,7 @@ function readBounded2(path, maxBytes, noun) {
   if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
   let fd;
   try {
-    fd = openSync9(path, FS2.O_RDONLY | (FS2.O_NOFOLLOW ?? 0) | (FS2.O_NONBLOCK ?? 0));
+    fd = openSync8(path, FS2.O_RDONLY | (FS2.O_NOFOLLOW ?? 0) | (FS2.O_NONBLOCK ?? 0));
   } catch (e) {
     return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
   }
@@ -25351,7 +25351,7 @@ function readBounded2(path, maxBytes, noun) {
     return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
   } finally {
     try {
-      closeSync9(fd);
+      closeSync8(fd);
     } catch {
     }
   }

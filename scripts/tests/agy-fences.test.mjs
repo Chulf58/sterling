@@ -150,12 +150,15 @@ test('GEMINI.md: the agy render of the target template fits agy\'s 24,000-byte c
   assert.ok(Buffer.byteLength(out) < 24000, `GEMINI.md render is ${Buffer.byteLength(out)} bytes`);
   assert.ok(!out.includes('@AGENTS.md'), 'agy loads AGENTS.md itself; GEMINI.md must not import it');
   assert.ok(out.includes('written as `GEMINI.md`'), 'the agy form says what the shared heading means');
+  assert.ok(out.includes('`sterling-ro` server, started with `--read-only`'), 'GEMINI.md names the read-only server');
+  assert.ok(!out.includes('not in place yet'), 'GEMINI.md no longer says the read-only guard is missing');
 });
 
 test('agy render of the conductor names the agy tools and states the measured limits', () => {
   const rel = 'agent-templates/conductor.md';
   const out = renderAgyText(readFileSync(join(repoRoot, rel), 'utf8'), rel, ALL);
-  for (const needle of ['agy --agent conductor', 'call_mcp_tool', 'invoke_subagent', 'send_message', 'ask_question', 'run_command', 'not in place yet', 'No Stop block']) {
+  for (const needle of ['agy --agent conductor', 'call_mcp_tool', 'invoke_subagent', 'send_message', 'ask_question', 'run_command', '`sterling-ro` server, started with `--read-only`', 'No Stop block']) {
     assert.ok(out.includes(needle), `conductor agy render lacks ${needle}`);
   }
+  assert.ok(!out.includes('not in place yet'), 'the conductor no longer says the read-only guard is missing');
 });

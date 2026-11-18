@@ -10,7 +10,7 @@ import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as rea
 import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync, openSync, closeSync } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -6376,7 +6376,7 @@ function parseSterlingDelivery(text) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync5, statSync as statSync2, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync5, statSync as statSync2, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");

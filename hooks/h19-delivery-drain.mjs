@@ -10,7 +10,7 @@ import { readFileSync as readFileSync6, readdirSync, rmSync as rmSync3, statSync
 import { join as join7, resolve as resolve3, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync, openSync, closeSync } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -6273,7 +6273,7 @@ function recordAgyStopContinue() {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync2, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync2, existsSync as existsSync5, renameSync as renameSync3, openSync, closeSync } from "node:fs";
 import { join as join5, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
   return join5(cwd, ".sterling", "transient", "delivery");

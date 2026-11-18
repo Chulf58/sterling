@@ -10,7 +10,7 @@ import { existsSync as existsSync13 } from "node:fs";
 import { join as join17 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -14385,7 +14385,7 @@ function scanLiveState(root, { repair }) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7, existsSync as existsSync8, renameSync as renameSync5, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7, existsSync as existsSync8, renameSync as renameSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { join as join12, dirname as dirname9 } from "node:path";
 function deliveryDir(cwd) {
   return join12(cwd, ".sterling", "transient", "delivery");
@@ -15188,7 +15188,7 @@ function markBoardReadyNoticed(root, sessionId, hash) {
 }
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync11, readdirSync as readdirSync3, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync5, readFileSync as readFileSync11, readdirSync as readdirSync3, mkdirSync as mkdirSync9, openSync as openSync4, writeSync as writeSync2, closeSync as closeSync4, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
