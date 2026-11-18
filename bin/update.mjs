@@ -10339,7 +10339,7 @@ function fitDomains(recordText, domains, opts2 = {}) {
     if (!descTerms.length)
       continue;
     const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
-    if (matched.length < Math.min(minTerms, descTerms.length))
+    if (matched.length < minTerms)
       continue;
     fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
   }
