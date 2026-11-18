@@ -8,23 +8,31 @@
 //    roster and names), rendered from agent-templates/<name>.md through renderAgyText.
 //    The frontmatter is agy's: model inherit; the conductor mainAgent: true and
 //    subagent: false, the workers the reverse; tools: a list of agy built-in registry
-//    names per role (AGY_TOOLS); and mcpServers with ONE entry named `sterling` on every
-//    agent, so agy runs one shared server per session (measured: agent-scoped servers are
-//    deduplicated by name and start with cwd = the workspace). The server is
-//    <process.execPath> <root>/mcp/sterling-mcp.mjs --project . (agyMcpRoot picks the root).
-//    The body's first line is `STERLING-ROLE: <name>`, which agy's session-start hook reads
-//    back to know the running role (user-ruled 2026-11-18); a Sterling stamp follows it.
+//    names per role (AGY_TOOLS); and mcpServers with ONE entry: `sterling` on the writing
+//    roles, `sterling-ro` on the read-only ones (AGY_READ_ONLY_ROLES). The server is
+//    <process.execPath> <root>/mcp/sterling-mcp.mjs --project . (agyMcpRoot picks the root),
+//    plus --read-only for `sterling-ro`, where every store-write tool refuses (decision
+//    antigravity-cli-agy-read-only-role-guard-read-the-agent-role). Measured on agy 1.5.11:
+//    an agent reaches only the servers it declares, and agent-scoped servers are deduplicated
+//    by entry NAME and start with cwd = the workspace, so the two entries need distinct names
+//    and a session runs at most one of each. Before any agent file is written, that server
+//    must report read-only mode (probeMcpServer, --capabilities); an older one, such as an
+//    agy copy older than the Sterling running setup, refuses the agent files with the remedy.
+//    The Sterling stamp is the first body line.
 //    A file Sterling did not write, one edited since, or one git tracks is refused.
 // 2. GEMINI.md at the project root: the agy render of templates/target-claude-md.md, with
 //    no @AGENTS.md import (agy loads AGENTS.md on its own) and under agy's 24,000-byte
 //    per-file cap. It is written only when absent, like CLAUDE.md: a differing GEMINI.md
-//    is left alone, and stamp-contract inserts new contract bullets into it.
+//    is left alone, and stamp-contract inserts new contract bullets into it. A root too long
+//    for the cap is written as the short link ~/.gemini/sterling-root; while GEMINI.md names
+//    that link, every run points it at the current root, and both setup and stamp-contract
+//    fill the root in that form (geminiRootFor).
 // 3. A managed block in .git/info/exclude keeps both out of git. Unlike CLAUDE.md,
 //    GEMINI.md carries this machine's absolute Sterling path ({{STERLING_ROOT}}), so it is
 //    per-user; a GEMINI.md that git tracks, or one Sterling did not write, is not listed.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { renderAgyText } from './agent-fences.mjs';
@@ -40,6 +48,10 @@ export const AGY_CONDUCTOR = 'conductor';
 // agy reads at most this many bytes of a workspace AGENTS.md or GEMINI.md (finding c588c43d, from the docs).
 export const GEMINI_MD_MAX_BYTES = 24_000;
 export const AGY_MCP_SERVER_NAME = 'sterling';
+/** The MCP entry the read-only roles declare: the same server started with --read-only. */
+export const AGY_MCP_READ_ONLY_SERVER_NAME = 'sterling-ro';
+/** The roles that never write the store; on agy they declare AGY_MCP_READ_ONLY_SERVER_NAME. */
+export const AGY_READ_ONLY_ROLES = new Set(['reviewer', 'researcher', 'scout', 'sparring', 'preflight']);
 const EXCLUDE_BEGIN = '# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)';
 const EXCLUDE_END = '# <<< sterling agy';
 const HEADER_RE = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -115,6 +127,36 @@ export function agyMcpRoot({ pluginRoot, env = process.env, home = homedir(), in
   return { root: resolve(pluginRoot), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd(agyCopy)})` };
 }
 
+/**
+ * Whether the server at <root>/mcp/sterling-mcp.mjs enforces --read-only: { readOnly: true }
+ * or { readOnly: false, reason }. It runs that exact file with --capabilities, which a server
+ * with read-only mode answers with one JSON line and exit 0 before it opens anything. A server
+ * from before read-only mode fails its usage check on the unknown flag (exit 2). agy keeps its
+ * own copy of Sterling and has no update command, so a newer Sterling can run setup while agy's
+ * copy is older; asking the file the entry will launch is the one signal that cannot drift from
+ * it (a version number can, on a clone whose mcp/ bundle was not rebuilt). A server that has
+ * not answered within `timeoutMs` is killed with SIGKILL, which it cannot ignore, and counts as
+ * not enforcing read-only. The answer needs only the bundle loaded (well under a second
+ * measured), so 10 s leaves room for a cold disk while keeping a stuck server from holding up
+ * init or sync for long.
+ */
+export const MCP_PROBE_TIMEOUT_MS = 10_000;
+export function probeMcpServer({ root, env = process.env, timeoutMs = MCP_PROBE_TIMEOUT_MS }) {
+  const server = join(root, 'mcp', 'sterling-mcp.mjs');
+  const r = spawnSync(process.execPath, [server, '--capabilities'], { encoding: 'utf8', env, timeout: timeoutMs, killSignal: 'SIGKILL' });
+  if (r.error?.code === 'ETIMEDOUT') return { readOnly: false, reason: `${fwd(server)} --capabilities did not answer within ${timeoutMs} ms and was killed` };
+  if (r.error) return { readOnly: false, reason: `${fwd(server)} --capabilities could not run (${r.error.message})` };
+  if (r.status !== 0) return { readOnly: false, reason: `${fwd(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
+  let caps = null;
+  try {
+    caps = JSON.parse(r.stdout.trim().split('\n').pop() ?? '');
+  } catch {
+    caps = null;
+  }
+  if (caps?.sterling_mcp?.read_only !== true) return { readOnly: false, reason: `${fwd(server)} --capabilities does not report read_only: ${r.stdout.trim().slice(0, 200) || '(no output)'}` };
+  return { readOnly: true };
+}
+
 const yamlString = (s) => JSON.stringify(s);
 
 function templateDescription(frontmatter, label) {
@@ -124,8 +166,8 @@ function templateDescription(frontmatter, label) {
 }
 
 /**
- * One agy agent file: agy frontmatter, then `STERLING-ROLE: <name>`, the Sterling stamp and
- * the template's agy render. Pure; `nodePath` and `root` are absolute.
+ * One agy agent file: agy frontmatter, the Sterling stamp and the template's agy render.
+ * Pure; `nodePath` and `root` are absolute.
  */
 export function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath }) {
   const tools = AGY_TOOLS[name];
@@ -138,6 +180,7 @@ export function renderAgyAgent(templateContent, label, name, { root, nodePath = 
   if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
   const conductor = name === AGY_CONDUCTOR;
   const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const readOnly = AGY_READ_ONLY_ROLES.has(name);
   const fm = [
     '---',
     `name: ${name}`,
@@ -148,18 +191,20 @@ export function renderAgyAgent(templateContent, label, name, { root, nodePath = 
     'tools:',
     ...tools.map((t) => `  - ${t}`),
     '# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.',
+    ...(readOnly ? ['# A read-only role declares sterling-ro, the Sterling server started with --read-only, which refuses every store-write tool.'] : []),
     'mcpServers:',
-    `  - name: ${AGY_MCP_SERVER_NAME}`,
+    `  - name: ${readOnly ? AGY_MCP_READ_ONLY_SERVER_NAME : AGY_MCP_SERVER_NAME}`,
     `    command: ${yamlString(fwd(nodePath))}`,
     '    args:',
     `      - ${yamlString(fwd(join(root, 'mcp', 'sterling-mcp.mjs')))}`,
     `      - ${yamlString('--project')}`,
     `      - ${yamlString('.')}`,
+    ...(readOnly ? [`      - ${yamlString('--read-only')}`] : []),
     '---',
   ].join('\n');
-  const content = `${fm}\nSTERLING-ROLE: ${name}\n${body}`;
+  const content = `${fm}\n${body}`;
   const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
-  return `${fm}\nSTERLING-ROLE: ${name}\n${header}\n${body}`;
+  return `${fm}\n${header}\n${body}`;
 }
 
 /** The content an agy agent file had before its stamp line was added, for the edited-since check. */
@@ -260,24 +305,88 @@ export function renderGeminiMd({ pluginRoot, root, projectName }) {
   const dead = findDeadTerms(text);
   if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(', ')} (P5)`);
   const bytes = Buffer.byteLength(text, 'utf8');
-  if (bytes > GEMINI_MD_MAX_BYTES) throw new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`);
+  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
   return text;
 }
 
-/** GEMINI.md, written only when absent (the CLAUDE.md rule). Row status: created | matches | differs | refused. */
-export function ensureGeminiMd({ projectDir, pluginRoot, root }) {
+/** The short stable path GEMINI.md uses for a Sterling root too long to fit agy's cap: a per-user link to the root. */
+export function geminiRootAlias(home) {
+  return join(home, '.gemini', 'sterling-root');
+}
+
+/** Point the alias at root (replacing a stale link). Throws (P5) when something that is not a link sits there. */
+function ensureRootAlias(alias, root) {
+  let st = null;
+  try { st = lstatSync(alias); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  if (st) {
+    if (!st.isSymbolicLink()) throw new Error(`${fwd(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
+    if (resolve(dirname(alias), readlinkSync(alias)) === resolve(root)) return;
+    unlinkSync(alias);
+  }
+  mkdirSync(dirname(alias), { recursive: true });
+  symlinkSync(root, alias, 'junction');
+}
+
+/** True when GEMINI.md `text` names the Sterling root through the short per-user link. */
+export function geminiUsesRootAlias(text, home = homedir()) {
+  return String(text).includes(`${fwd(geminiRootAlias(home))}/`);
+}
+
+/**
+ * The Sterling root as GEMINI.md `text` writes it: the short link when the document already
+ * uses it, else `root`. setupAgy and stamp-contract both fill {{STERLING_ROOT}} with this, so
+ * a GEMINI.md written through the link stays in step with both.
+ */
+export function geminiRootFor(text, { root, home = homedir() }) {
+  return geminiUsesRootAlias(text, home) ? fwd(geminiRootAlias(home)) : fwd(root);
+}
+
+/**
+ * GEMINI.md, written only when absent (the CLAUDE.md rule). Row status: created | matches |
+ * differs | refused. A new GEMINI.md goes through the short link when the root does not fit
+ * agy's cap. Whenever the document on disk names the link, edited or not, the link is pointed
+ * at the current root; GEMINI.md itself is never rewritten.
+ */
+export function ensureGeminiMd({ projectDir, pluginRoot, root, home = homedir() }) {
   const path = join(projectDir, GEMINI_MD);
+  const alias = geminiRootAlias(home);
+  const existing = existsSync(path) ? normalize(readFileSync(path, 'utf8')) : null;
+  const keepAlias = () => {
+    try {
+      ensureRootAlias(alias, root);
+      return null;
+    } catch (err) {
+      return refusal(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd(alias)}, which could not be pointed at ${fwd(root)}: ${err.message}`, 'fix the cause named, then rerun /sterling:update');
+    }
+  };
+  if (existing !== null && geminiUsesRootAlias(existing, home)) {
+    const refused = keepAlias();
+    if (refused) return refused;
+  }
+  const projectName = projectNameOf(projectDir);
   let want;
+  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
   try {
-    want = renderGeminiMd({ pluginRoot, root, projectName: projectNameOf(projectDir) });
+    try {
+      want = renderGeminiMd({ pluginRoot, root: aliased ? alias : root, projectName });
+    } catch (err) {
+      if (!err.overCap || aliased) throw err;
+      // agy cuts GEMINI.md past its cap and the root is filled in 13 times: a long root goes through a short per-user link.
+      want = renderGeminiMd({ pluginRoot, root: alias, projectName });
+      aliased = true;
+    }
   } catch (err) {
     return refusal(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, 'fix the cause named, then rerun /sterling:update');
   }
-  if (!existsSync(path)) {
+  if (existing === null) {
+    if (aliased) {
+      const refused = keepAlias();
+      if (refused) return refused;
+    }
     writeFileAtomic(path, want);
     return { item: GEMINI_MD, status: 'created', detail: 'from templates/target-claude-md.md (agy render)' };
   }
-  if (normalize(readFileSync(path, 'utf8')) === want) return { item: GEMINI_MD, status: 'matches', detail: 'generated content, unmodified' };
+  if (existing === want) return { item: GEMINI_MD, status: 'matches', detail: 'generated content, unmodified' };
   return { item: GEMINI_MD, status: 'differs', detail: 'left untouched — merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)' };
 }
 
@@ -314,7 +423,7 @@ export function ensureAgyExcluded({ projectDir, gemini }) {
  * Steps 1-3 for one project. Returns { skipped } when agy is absent, else { root, rows }
  * with every row { item, status, detail?, refused?, instruction? }.
  */
-export function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeAgy, nodePath = process.execPath, runGit = git }) {
+export function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeAgy, probeServer = probeMcpServer, nodePath = process.execPath, runGit = git }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
   // The test preload sets this so a test run never writes agy files into a fixture by accident.
   if (env.STERLING_AGY_SETUP_DISABLE === '1') return { skipped: 'Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)' };
@@ -329,10 +438,21 @@ export function setupAgy({ projectDir, pluginRoot, env = process.env, home = hom
     return { root, rows };
   }
   const { tracked } = inventory;
-  rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath }));
+  // The read-only roles' entries start this server with --read-only: never write them for a
+  // server that would ignore the flag. The agent files are refused; GEMINI.md and the exclude
+  // block do not depend on the server and still run.
+  const server = probeServer({ root, env });
+  if (server.readOnly) {
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath }));
+  } else {
+    const remedy = resolve(root) !== resolve(pluginRoot)
+      ? `install this Sterling into agy (agy plugin install ${fwd(resolve(pluginRoot))}), then rerun /sterling:update`
+      : `rebuild or reinstall the Sterling at ${fwd(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
+    rows.push(refusal(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
+  }
   const gemini = tracked.includes(GEMINI_MD)
     ? { item: GEMINI_MD, status: 'matches', detail: 'tracked by git — the project keeps its own; left untouched' }
-    : ensureGeminiMd({ projectDir, pluginRoot, root });
+    : ensureGeminiMd({ projectDir, pluginRoot, root, home });
   rows.push(gemini);
   const geminiRule = tracked.includes(GEMINI_MD) ? 'no' : ['created', 'matches'].includes(gemini.status) ? 'exclude' : 'keep';
   rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));

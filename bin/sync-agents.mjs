@@ -9735,7 +9735,7 @@ function formatOpenCodeRows(result) {
 // scripts/lib/agy-setup.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync4, readFileSync as readFileSync11, statSync as statSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync11, readlinkSync, statSync as statSync4, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute2, join as join15, resolve as resolve8 } from "node:path";
 var AGY_AGENTS_DIR = ".agents/agents";
@@ -9743,6 +9743,8 @@ var GEMINI_MD = "GEMINI.md";
 var AGY_CONDUCTOR = "conductor";
 var GEMINI_MD_MAX_BYTES = 24e3;
 var AGY_MCP_SERVER_NAME = "sterling";
+var AGY_MCP_READ_ONLY_SERVER_NAME = "sterling-ro";
+var AGY_READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
 var EXCLUDE_BEGIN2 = "# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)";
 var EXCLUDE_END2 = "# <<< sterling agy";
 var HEADER_RE2 = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -9790,6 +9792,22 @@ function agyMcpRoot({ pluginRoot: pluginRoot2, env = process.env, home = homedir
   if (existsSync10(join15(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
   return { root: resolve8(pluginRoot2), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd4(agyCopy)})` };
 }
+var MCP_PROBE_TIMEOUT_MS = 1e4;
+function probeMcpServer({ root, env = process.env, timeoutMs = MCP_PROBE_TIMEOUT_MS }) {
+  const server = join15(root, "mcp", "sterling-mcp.mjs");
+  const r = spawnSync5(process.execPath, [server, "--capabilities"], { encoding: "utf8", env, timeout: timeoutMs, killSignal: "SIGKILL" });
+  if (r.error?.code === "ETIMEDOUT") return { readOnly: false, reason: `${fwd4(server)} --capabilities did not answer within ${timeoutMs} ms and was killed` };
+  if (r.error) return { readOnly: false, reason: `${fwd4(server)} --capabilities could not run (${r.error.message})` };
+  if (r.status !== 0) return { readOnly: false, reason: `${fwd4(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
+  let caps = null;
+  try {
+    caps = JSON.parse(r.stdout.trim().split("\n").pop() ?? "");
+  } catch {
+    caps = null;
+  }
+  if (caps?.sterling_mcp?.read_only !== true) return { readOnly: false, reason: `${fwd4(server)} --capabilities does not report read_only: ${r.stdout.trim().slice(0, 200) || "(no output)"}` };
+  return { readOnly: true };
+}
 var yamlString = (s) => JSON.stringify(s);
 function templateDescription(frontmatter, label) {
   const line = frontmatter.match(/^description:\s*(.+)$/m)?.[1];
@@ -9807,6 +9825,7 @@ function renderAgyAgent(templateContent, label, name, { root, nodePath = process
   if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
   const conductor = name === AGY_CONDUCTOR;
   const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const readOnly = AGY_READ_ONLY_ROLES.has(name);
   const fm = [
     "---",
     `name: ${name}`,
@@ -9817,21 +9836,21 @@ function renderAgyAgent(templateContent, label, name, { root, nodePath = process
     "tools:",
     ...tools.map((t) => `  - ${t}`),
     "# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.",
+    ...readOnly ? ["# A read-only role declares sterling-ro, the Sterling server started with --read-only, which refuses every store-write tool."] : [],
     "mcpServers:",
-    `  - name: ${AGY_MCP_SERVER_NAME}`,
+    `  - name: ${readOnly ? AGY_MCP_READ_ONLY_SERVER_NAME : AGY_MCP_SERVER_NAME}`,
     `    command: ${yamlString(fwd4(nodePath))}`,
     "    args:",
     `      - ${yamlString(fwd4(join15(root, "mcp", "sterling-mcp.mjs")))}`,
     `      - ${yamlString("--project")}`,
     `      - ${yamlString(".")}`,
+    ...readOnly ? [`      - ${yamlString("--read-only")}`] : [],
     "---"
   ].join("\n");
   const content = `${fm}
-STERLING-ROLE: ${name}
 ${body}`;
   const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha2563(templateContent)} content_hash=${sha2563(content)} -->`;
   return `${fm}
-STERLING-ROLE: ${name}
 ${header}
 ${body}`;
 }
@@ -9911,22 +9930,69 @@ function renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName }) {
   const dead = findDeadTerms(text);
   if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
   const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > GEMINI_MD_MAX_BYTES) throw new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`);
+  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
   return text;
 }
-function ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root }) {
-  const path = join15(projectDir, GEMINI_MD);
-  let want;
+function geminiRootAlias(home) {
+  return join15(home, ".gemini", "sterling-root");
+}
+function ensureRootAlias(alias, root) {
+  let st = null;
   try {
-    want = renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName: projectNameOf(projectDir) });
+    st = lstatSync6(alias);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (st) {
+    if (!st.isSymbolicLink()) throw new Error(`${fwd4(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
+    if (resolve8(dirname4(alias), readlinkSync(alias)) === resolve8(root)) return;
+    unlinkSync4(alias);
+  }
+  mkdirSync4(dirname4(alias), { recursive: true });
+  symlinkSync(root, alias, "junction");
+}
+function geminiUsesRootAlias(text, home = homedir4()) {
+  return String(text).includes(`${fwd4(geminiRootAlias(home))}/`);
+}
+function ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root, home = homedir4() }) {
+  const path = join15(projectDir, GEMINI_MD);
+  const alias = geminiRootAlias(home);
+  const existing = existsSync10(path) ? normalize4(readFileSync11(path, "utf8")) : null;
+  const keepAlias = () => {
+    try {
+      ensureRootAlias(alias, root);
+      return null;
+    } catch (err) {
+      return refusal2(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd4(alias)}, which could not be pointed at ${fwd4(root)}: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+    }
+  };
+  if (existing !== null && geminiUsesRootAlias(existing, home)) {
+    const refused2 = keepAlias();
+    if (refused2) return refused2;
+  }
+  const projectName = projectNameOf(projectDir);
+  let want;
+  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
+  try {
+    try {
+      want = renderGeminiMd({ pluginRoot: pluginRoot2, root: aliased ? alias : root, projectName });
+    } catch (err) {
+      if (!err.overCap || aliased) throw err;
+      want = renderGeminiMd({ pluginRoot: pluginRoot2, root: alias, projectName });
+      aliased = true;
+    }
   } catch (err) {
     return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
   }
-  if (!existsSync10(path)) {
+  if (existing === null) {
+    if (aliased) {
+      const refused2 = keepAlias();
+      if (refused2) return refused2;
+    }
     writeFileAtomic(path, want);
     return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
   }
-  if (normalize4(readFileSync11(path, "utf8")) === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
+  if (existing === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
   return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
 }
 function ensureAgyExcluded({ projectDir, gemini }) {
@@ -9952,7 +10018,7 @@ function ensureAgyExcluded({ projectDir, gemini }) {
 `);
   return { item: label, status: "created", detail: lines.join(" ") };
 }
-function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, nodePath = process.execPath, runGit = git2 }) {
+function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, probeServer = probeMcpServer, nodePath = process.execPath, runGit = git2 }) {
   if (!isAbsolute2(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
   const found = probe({ env, home });
@@ -9965,8 +10031,14 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
     return { root, rows };
   }
   const { tracked } = inventory;
-  rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
-  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root });
+  const server = probeServer({ root, env });
+  if (server.readOnly) {
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
+  } else {
+    const remedy = resolve8(root) !== resolve8(pluginRoot2) ? `install this Sterling into agy (agy plugin install ${fwd4(resolve8(pluginRoot2))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd4(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
+  }
+  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root, home });
   rows.push(gemini);
   const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
   rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));

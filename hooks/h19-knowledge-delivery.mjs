@@ -10,7 +10,7 @@ import { statSync as statSync5 } from "node:fs";
 import { join as join15 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
@@ -14064,7 +14064,7 @@ function hazardLaneMode(input2, root) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7, existsSync as existsSync8, renameSync as renameSync5, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7, existsSync as existsSync8, renameSync as renameSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { join as join14, dirname as dirname9 } from "node:path";
 function deliveryDir(cwd) {
   return join14(cwd, ".sterling", "transient", "delivery");
@@ -14075,8 +14075,8 @@ function claimLegacyInjectionRungNotice(cwd, rawRung) {
   const marker = join14(transient, "legacy-injection-rung-noticed");
   mkdirSync7(transient, { recursive: true });
   try {
-    const fd = openSync4(marker, "wx");
-    closeSync4(fd);
+    const fd = openSync3(marker, "wx");
+    closeSync3(fd);
   } catch (error) {
     if (error?.code === "EEXIST") return null;
     throw error;

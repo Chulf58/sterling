@@ -15,9 +15,7 @@
 // time on 2026-09-19 (rebuild-over-patch: three same-day regex fix rounds were each found wrong by an outside reviewer) —
 // three whole-string regexes replaced by the fragmenter/tokenizer below.
 import { basename, isAbsolute, resolve, sep } from 'node:path';
-import { readStdin, deny, allow, queueAgyWarningOnce } from './lib/common.mjs';
-import { agyRoleVerdict, storeWriteToolNames, unenforcedWarning } from './lib/agy-role-guard.mjs';
-import { walkUpPluginRoot } from './lib/plugin-root-walk.mjs';
+import { readStdin, deny, allow } from './lib/common.mjs';
 import { DB_FILE_RE, storeShellWriteShape } from './lib/store-shell-verdict.mjs';
 
 let input;
@@ -143,26 +141,6 @@ if (tool === 'Bash' || tool === 'PowerShell') {
         'Read-only SELECTs, Sterling scripts, the node --test store suites and schemas outside the sterling_ prefix are fine.'
     );
   }
-  allow();
-}
-
-// ── agy read-only role channel ────────────────────────────────────────────────
-// Registered only in the agy hooks.json (call_mcp_tool), so it never runs on Claude Code or OpenCode, where
-// the agent's own tool grant keeps a read-only role from the store. FAILS OPEN, unlike the rest of this hook
-// (user-ruled 2026-11-18, decision antigravity-cli-agy-read-only-role-guard-read-the-agent-role): a role that
-// cannot be read allows the call and warns once per conversation. See lib/agy-role-guard.mjs.
-if (input.host === 'agy' && typeof tool === 'string' && tool.startsWith('mcp__')) {
-  const verdict = agyRoleVerdict({
-    toolName: tool,
-    conversationId: input.session_id,
-    writeTools: () => {
-      const root = walkUpPluginRoot(import.meta.url);
-      if (!root) throw new Error('no plugin root above this hook');
-      return storeWriteToolNames(root);
-    },
-  });
-  if (verdict.action === 'deny') deny(verdict.reason);
-  if (verdict.action === 'warn') queueAgyWarningOnce('role-guard-unenforced', unenforcedWarning(verdict.cause));
   allow();
 }
 

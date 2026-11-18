@@ -11,6 +11,7 @@ import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, 
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
 import { WorkerGuard, guardWorkerTools, rootField, type WorkerPolicyArgs } from './worker-policy.js';
+import { guardReadOnlyTools, ReadOnlyBootError } from './read-only.js';
 import { SterlingTools, busyRefusal, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface, BOARD_READINESS_STATES } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -539,12 +540,17 @@ function openStoreArg(storePath: string): { store: MountedStores; config: Sterli
  * next call opens a new one. `checkoutRoot` (--checkout) is the git checkout the
  * session works in: in a linked worktree it differs from projectRoot and carries
  * HEAD, file checks and the session-event register (SterlingTools checkoutRoot);
- * absent, it is the project root.
+ * absent, it is the project root. `readOnly` (--read-only, read-only.ts) makes
+ * every tool in `writeTools` refuse; an empty list refuses boot before any
+ * store opens, and a listed name no tool here carries refuses boot too.
  */
 export function createSterlingServer(
   target: string | { projectRoot: string; checkoutRoot?: string },
-  opts: { workerPolicy?: WorkerPolicyArgs } = {}
+  opts: { workerPolicy?: WorkerPolicyArgs; readOnly?: { writeTools: readonly string[] } } = {}
 ): { server: McpServer; store: MountedStores; tools: SterlingTools; toolWrappers: readonly string[] } {
+  if (opts.readOnly && opts.readOnly.writeTools.length === 0) {
+    throw new ReadOnlyBootError('--read-only needs a non-empty store-write tool list; refusing to serve a read-only role an unguarded server');
+  }
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
   if (typeof target === 'string') {
     opened = openStoreArg(target);
@@ -621,6 +627,11 @@ export function createSterlingServer(
   // toolWrappers records the install order, outermost first, so a test can
   // pin it (worker-policy-busy.test.ts).
   const toolWrappers: string[] = [];
+  // Read-only mode is installed first, so its refusal replaces the handler
+  // before any other wrapper sees a call.
+  const readOnlyWrites = opts.readOnly ? new Set(opts.readOnly.writeTools) : null;
+  const readOnlySeen = readOnlyWrites ? guardReadOnlyTools(server, readOnlyWrites) : null;
+  if (readOnlySeen) toolWrappers.push('read_only');
   if (opts.workerPolicy) {
     guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store, tools));
     toolWrappers.push('worker_policy');
@@ -1482,6 +1493,13 @@ export function createSterlingServer(
 
   // handoff_write / handoff_read were removed with the staged pipeline
   // (decision sterling-claude-code-scale-down-boundary, d3e63e16).
+
+  // A listed write tool that no registration matched means the list and the
+  // server disagree (a renamed tool would then go unrefused under its new name).
+  const unmatched = readOnlyWrites ? [...readOnlyWrites].filter((n) => !readOnlySeen?.has(n)) : [];
+  if (unmatched.length) {
+    throw new ReadOnlyBootError(`--read-only: the store-write tool list names ${unmatched.join(', ')}, which this server does not register; the list and the server disagree`);
+  }
 
   return { server, store, tools, toolWrappers };
 }

@@ -13,8 +13,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isAgyInput, normalizeAgyInput, agyExitEnvelope, agyInjectEnvelope, AGY_PRETOOLUSE_KEYS } from '../hooks/lib/common.mjs';
-import { agyRoleVerdict, rolesInConversationBytes, CONVERSATIONS_DIR_ENV, storeWriteToolNames } from '../hooks/lib/agy-role-guard.mjs';
-import { storeWriteTools } from '../lib/opencode-install.mjs';
 import { agyHooksShapeViolations, versionParityViolations } from '../lib/agy-plugin-surface.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -371,82 +369,6 @@ test('Stop: one continue per user turn, where a turn starts at invocationNum 0; 
     assert.deepEqual(stop(h, { executionNum: 2 }), { decision: 'allow' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── the read-only role guard (H15 on call_mcp_tool) ────────────────────────
-
-/** A conversation db shaped like the measured record: ...\x0dSystem Prompt\x12 <varint length> <agent.md body>... */
-function conversationBytes(body) {
-  const b = Buffer.from(body, 'utf8');
-  const len = [];
-  let n = b.length;
-  while (n > 0x7f) {
-    len.push((n & 0x7f) | 0x80);
-    n >>>= 7;
-  }
-  len.push(n);
-  return Buffer.concat([Buffer.from('SQLite format 3\0junk\x0a\x08Assistant', 'latin1'), Buffer.from('\x0dSystem Prompt\x12', 'latin1'), Buffer.from(len), b, Buffer.from('\x1a\x04tail', 'latin1')]);
-}
-const agentBody = (role) => `STERLING-ROLE: ${role}\n\n# Role & owned judgment\n\n${'You review a finished diff. '.repeat(20)}`;
-
-test('role marker parsing: anchored on the System Prompt record, with one- and two-byte lengths', () => {
-  assert.deepEqual(rolesInConversationBytes(conversationBytes(agentBody('reviewer'))), ['reviewer']);
-  assert.deepEqual(rolesInConversationBytes(conversationBytes('STERLING-ROLE: scout\nshort')), ['scout']);
-  // A role merely quoted in the conversation does not count.
-  assert.deepEqual(rolesInConversationBytes(Buffer.from('the user said STERLING-ROLE: reviewer here', 'latin1')), []);
-  assert.deepEqual(rolesInConversationBytes(conversationBytes('You are an agent.\nSTERLING-ROLE: reviewer')), []);
-});
-
-test('one store-write tool list: the agy role guard and the OpenCode permissions read the same names from the implementor template', () => {
-  const agyNames = [...storeWriteToolNames(root)];
-  const openCode = storeWriteTools(root);
-  // An independent read of the source both use: every mcp__sterling__<tool> in implementor.md's disallowedTools.
-  const fm = readFileSync(join(root, 'agent-templates', 'implementor.md'), 'utf8').match(/^---\n([\s\S]*?)\n---\n/)[1];
-  const expected = [...new Set([...fm.match(/^disallowedTools:\s*(.+)$/m)[1].matchAll(/mcp__sterling__(\w+)/g)].map((m) => m[1]))];
-  assert.ok(expected.length >= 29, `the template lists ${expected.length} store-write tools`);
-  assert.deepEqual(agyNames, expected);
-  assert.deepEqual(openCode, expected.map((t) => `sterling_${t}`));
-  for (const write of ['knowledge_create', 'knowledge_update', 'board_add', 'config_set']) assert.ok(agyNames.includes(write), write);
-  for (const read of ['knowledge_get', 'knowledge_query', 'board_query', 'knowledge_preflight']) assert.ok(!agyNames.includes(read), read);
-});
-
-test('H15 under agy denies a store write by a read-only role, allows a writing role, and fails open with one warning per conversation', () => {
-  const dir = project();
-  const convs = mkdtempSync(join(tmpdir(), 'agy-convs-'));
-  try {
-    const h15 = join(HOOKS, 'h15-store-guard.mjs');
-    const env = { [CONVERSATIONS_DIR_ENV]: convs };
-    const call = (conv, toolName = 'knowledge_create', server = 'sterling') =>
-      agy('PreToolUse', dir, { conversationId: conv, lastUserInput: '', ...tool('call_mcp_tool', { ServerName: server, ToolName: toolName, Arguments: { type: 'decision' } }) });
-    const ids = { reviewer: 'aaaaaaaa-0000-4000-8000-000000000001', implementor: 'aaaaaaaa-0000-4000-8000-000000000002', librarian: 'aaaaaaaa-0000-4000-8000-000000000003', nomarker: 'aaaaaaaa-0000-4000-8000-000000000004', missing: 'aaaaaaaa-0000-4000-8000-000000000005' };
-    for (const role of ['reviewer', 'implementor', 'librarian']) writeFileSync(join(convs, `${ids[role]}.db`), conversationBytes(agentBody(role)));
-    writeFileSync(join(convs, `${ids.nomarker}.db`), conversationBytes('# An agent body without the marker\n'));
-
-    const denied = run(h15, call(ids.reviewer), dir, env);
-    assert.equal(denied.code, 0, denied.stderr);
-    assert.equal(JSON.parse(denied.stdout).decision, 'deny');
-    assert.match(JSON.parse(denied.stdout).reason, /reviewer agent is read-only/);
-    for (const role of ['implementor', 'librarian']) assert.deepEqual(JSON.parse(run(h15, call(ids[role]), dir, env).stdout), { decision: 'allow' }, role);
-    // A read by a read-only role, and a non-Sterling server, are not its business.
-    assert.deepEqual(JSON.parse(run(h15, call(ids.reviewer, 'knowledge_get'), dir, env).stdout), { decision: 'allow' });
-    assert.deepEqual(JSON.parse(run(h15, call(ids.reviewer, 'knowledge_create', 'other'), dir, env).stdout), { decision: 'allow' });
-
-    for (const key of ['missing', 'nomarker']) {
-      const first = run(h15, call(ids[key]), dir, env);
-      assert.deepEqual(JSON.parse(first.stdout), { decision: 'allow' }, key);
-      const second = run(h15, call(ids[key]), dir, env);
-      assert.deepEqual(JSON.parse(second.stdout), { decision: 'allow' }, key);
-      const warnings = agyNotices(dir)
-        .map((n) => JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'notices', n), 'utf8')))
-        .filter((q) => q.session_id === ids[key]);
-      assert.equal(warnings.length, 1, `${key}: one warning per conversation`);
-      assert.match(warnings[0].text, /read-only roles are unenforced on agy: /);
-    }
-    assert.match(agyRoleVerdict({ toolName: 'mcp__sterling__knowledge_create', conversationId: ids.missing, dir: convs, writeTools: () => new Set(['knowledge_create']) }).cause, /could not be read \(ENOENT\)/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(convs, { recursive: true, force: true });
   }
 });
 

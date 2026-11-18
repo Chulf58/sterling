@@ -38,7 +38,7 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
 import { renderAgyText } from './lib/agent-fences.mjs';
-import { GEMINI_MD, agyMcpRoot } from './lib/agy-setup.mjs';
+import { GEMINI_MD, agyMcpRoot, geminiRootFor } from './lib/agy-setup.mjs';
 import {
   AGENTS_TEMPLATE_REL,
   CLAUDE_TEMPLATE_REL,
@@ -184,15 +184,22 @@ const variants = historicalVariants({
   currentBlocks: current,
 });
 // The CLAUDE.md-layer bullets as GEMINI.md carries them: the agy render of the same template,
-// with the Sterling root setupAgy writes into GEMINI.md. A lead the agy render leaves out
+// with the Sterling root as setupAgy writes it into that GEMINI.md (geminiRootFor: the short
+// per-user link when the document uses it, else the root). A lead the agy render leaves out
 // has no GEMINI.md form and is not stamped there.
-const agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root.replace(/\\/g, '/');
-const agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll('{{STERLING_ROOT}}', () => agyRoot);
-const agyCurrent = new Map(
-  TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL)
-    .map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block])
-    .filter(([, block]) => block !== undefined),
-);
+const agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root;
+const agyBlocksByRoot = new Map();
+function agyCurrentFor(rootText) {
+  if (!agyBlocksByRoot.has(rootText)) {
+    const agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll('{{STERLING_ROOT}}', () => rootText);
+    agyBlocksByRoot.set(rootText, new Map(
+      TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL)
+        .map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block])
+        .filter(([, block]) => block !== undefined),
+    ));
+  }
+  return agyBlocksByRoot.get(rootText);
+}
 
 const registry = new ProjectRegistry(registryPath());
 let projects;
@@ -449,6 +456,7 @@ for (const { p, dir: repo } of work) {
   // GEMINI.md, the agy form of CLAUDE.md, gets the CLAUDE.md-layer bullets in their agy
   // wording (agyCurrent). A lead the CLAUDE.md pass refused for its layer is not repeated.
   if (gemini) {
+    const agyCurrent = agyCurrentFor(geminiRootFor(gemini.original, { root: agyRoot }));
     const geminiPass = [];
     stampLeads({
       files: new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, gemini]]),

@@ -11,7 +11,7 @@ import { spawn } from "node:child_process";
 import { resolve as resolve5 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname6, join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -13107,7 +13107,7 @@ var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "per
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync4, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync4, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync4, rmdirSync, statSync as statSync5, writeFileSync as writeFileSync4, appendFileSync } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync3, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync4, rmdirSync, statSync as statSync5, writeFileSync as writeFileSync4, appendFileSync } from "node:fs";
 import { dirname as dirname7, isAbsolute, join as join11, resolve as resolve4, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14216,7 +14216,7 @@ function launchWorker(opts) {
         })
       );
       rotateIfLarge(paths.log);
-      logFd = openSync4(paths.log, "a");
+      logFd = openSync3(paths.log, "a");
       stage = "spawn";
       const child = opts.spawn(
         process.execPath,
@@ -14232,7 +14232,7 @@ function launchWorker(opts) {
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
-      if (logFd !== void 0) closeSync4(logFd);
+      if (logFd !== void 0) closeSync3(logFd);
       if (!launched) releaseLock(paths, token2);
     }
   } catch (e) {
