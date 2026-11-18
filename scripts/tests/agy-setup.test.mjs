@@ -108,12 +108,19 @@ test('agent.md ownership: a re-run matches, an edited, a foreign or a tracked fi
 });
 
 test('GEMINI.md: the agy render under 24,000 bytes, no @AGENTS.md import, written only when absent', () => {
-  const text = renderGeminiMd({ pluginRoot: repo, root: '/x/sterling', projectName: 'demo' });
-  assert.ok(Buffer.byteLength(text) <= GEMINI_MD_MAX_BYTES, `${Buffer.byteLength(text)} bytes`);
+  // The FILLED render: {{STERLING_ROOT}} is replaced by an absolute path several times, so
+  // the size depends on the root. This checkout's real path must fit.
+  const text = renderGeminiMd({ pluginRoot: repo, root: repo, projectName: 'demo' });
+  assert.ok(Buffer.byteLength(text) <= GEMINI_MD_MAX_BYTES, `${Buffer.byteLength(text)} bytes with the root ${repo}`);
+  assert.ok(text.includes(`node "${repo}/bin/rotation-note.mjs"`), 'the real root is filled in');
+  // A root of about 200 characters does not fit today (measured 2026-11-18: 24,121 bytes).
+  // It must refuse loudly with the byte count, never write a GEMINI.md agy would cut.
+  const longRoot = `/home/${'u'.repeat(194)}`;
+  assert.equal(longRoot.length, 200);
+  assert.throws(() => renderGeminiMd({ pluginRoot: repo, root: longRoot, projectName: 'demo' }), /is \d+ bytes, over agy's 24000-byte cap/);
   assert.doesNotMatch(text, /^@AGENTS\.md/m);
   assert.doesNotMatch(text, /\{\{[A-Z_]+\}\}/);
   assert.match(text, /# CLAUDE\.md — demo \(Sterling layer\)/);
-  assert.match(text, /node "\/x\/sterling\/bin\/rotation-note\.mjs"/);
   const dir = gitProject();
   mkdirSync(join(dir, '.sterling'));
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'demo' }));
