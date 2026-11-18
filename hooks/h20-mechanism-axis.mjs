@@ -10,7 +10,8 @@ import { existsSync as existsSync12 } from "node:fs";
 import { join as join17 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { createHash as createHash3 } from "node:crypto";
 import { join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -13441,12 +13442,14 @@ function hookRoots(from) {
 }
 
 // scripts/hooks/lib/common.mjs
-function readStdin() {
+function readStdin(options = {}) {
   let input2 = JSON.parse(readFileSync6(0, "utf8"));
-  if (isAgyInput(input2)) input2 = adoptAgyInput(input2);
+  const agyRaw = isAgyInput(input2) ? input2 : null;
+  if (agyRaw) input2 = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input2.cwd);
   if (roots) input2.cwd = roots.checkoutRoot;
   input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  if (agyRaw) settleAgyInput(agyRaw, input2, roots !== null);
   return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -13588,6 +13591,8 @@ var AGY_EVENTS = {
   PostToolUse: "PostToolUse",
   Stop: "Stop"
 };
+var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
+var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, stopTurnFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
 function isAgyInput(raw) {
   return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
 }
@@ -13642,7 +13647,7 @@ function agyToolCall(name, rawArgs) {
       return { tool_name: name, tool_input: a };
   }
 }
-function normalizeAgyInput(raw) {
+function normalizeAgyInput(raw, { agyEveryInvocation = false } = {}) {
   const event = raw.hookEventName;
   const input2 = {
     hook_event_name: AGY_EVENTS[event] ?? event,
@@ -13657,8 +13662,10 @@ function normalizeAgyInput(raw) {
     if (subagent) return { input: input2, skip: "subagent conversation" };
   } else if (event === "PreInvocation") {
     input2.prompt = raw.lastUserInput;
-    if (subagent) return { input: input2, skip: "subagent conversation" };
-    if (raw.invocationNum !== 0) return { input: input2, skip: "not the first model call of the prompt" };
+    if (subagent || raw.invocationNum !== 0) {
+      if (!agyEveryInvocation) return { input: input2, skip: subagent ? "subagent conversation" : "not the first model call of the prompt" };
+      input2.agy_queue_only = true;
+    }
   } else if (event === "Stop") {
     input2.stop_hook_active = raw.continuationActive === true;
     if (subagent) return { input: input2, skip: "subagent conversation" };
@@ -13674,7 +13681,7 @@ function normalizeAgyInput(raw) {
   return { input: input2, skip: null };
 }
 function agyContextTexts(out) {
-  const text = out.trim();
+  const text = String(out ?? "").trim();
   if (!text) return [];
   let parsed;
   try {
@@ -13689,21 +13696,20 @@ function agyContextTexts(out) {
   if (typeof parsed.systemMessage === "string" && parsed.systemMessage.trim()) texts.push(parsed.systemMessage);
   return texts;
 }
-function agyEnvelope({ event, continuationActive = false, out = "", err = "", code = 0 }) {
+function agyInjectEnvelope(texts) {
+  return JSON.stringify(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+}
+function agyExitEnvelope({ event, code = 0, err = "", emitted = false, stopContinue = true }) {
   const json = (o) => ({ text: JSON.stringify(o), code: 0 });
   if (code === 2) {
-    const reason = err.trim() || "A Sterling hook blocked this without giving a reason.";
+    const reason = String(err).trim() || "A Sterling hook blocked this without giving a reason.";
     if (event === "PreToolUse") return json({ decision: "deny", reason });
-    if (event === "Stop") return continuationActive ? json({ decision: "allow" }) : json({ decision: "continue", reason });
+    if (event === "Stop") return stopContinue ? json({ decision: "continue", reason }) : json({ decision: "allow" });
     return { text: "", code };
   }
   if (code !== 0) return { text: "", code };
-  const texts = agyContextTexts(out);
-  if (event === "SessionStart" || event === "PreInvocation") {
-    return json(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
-  }
-  if (event === "PreToolUse") return json(texts.length ? { decision: "allow", reason: texts.join("\n\n") } : { decision: "allow" });
-  if (event === "Stop") return json({ decision: "allow" });
+  if (event === "PreToolUse" || event === "Stop") return json({ decision: "allow" });
+  if (emitted) return { text: "", code: 0 };
   return json({});
 }
 function writeAllSync(fd, text) {
@@ -13718,25 +13724,57 @@ function writeAllSync(fd, text) {
     }
   }
 }
-function adoptAgyInput(raw) {
-  const { input: input2, skip } = normalizeAgyInput(raw);
-  const out = [];
-  const err = [];
+function agyKey(conversationId) {
+  return String(conversationId ?? "").replace(/[^A-Za-z0-9-]/g, "_").slice(0, 128) || "unknown";
+}
+function agyStateDir(checkout) {
+  return join10(checkout, ".sterling", "transient", "agy");
+}
+function queueAgyNotice(checkout, conversationId, text) {
+  const dir = join10(checkout, ".sterling", "transient", "notices");
+  mkdirSync5(dir, { recursive: true });
+  const target = join10(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const tmp = `${target}.tmp`;
+  writeFileSync3(tmp, JSON.stringify({ text: String(text), session_id: String(conversationId) }), { flag: "wx" });
+  renameSync2(tmp, target);
+  return target;
+}
+function agyStdoutWrite(chunk) {
+  const texts = agyContextTexts(chunk);
+  if (!texts.length) return;
+  if ((agy.event === "SessionStart" || agy.event === "PreInvocation") && !agy.emitted) {
+    writeAllSync(1, agyInjectEnvelope(texts));
+    agy.emitted = true;
+    return;
+  }
+  if (!agy.checkout) return;
+  for (const t of texts) queueAgyNotice(agy.checkout, agy.conversationId, t);
+}
+function adoptAgyInput(raw, options = {}) {
+  const { input: input2, skip } = normalizeAgyInput(raw, options);
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip, lastUserInput: raw.lastUserInput });
   const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
   process.stdout.write = (chunk, encoding, callback) => {
-    out.push(text(chunk));
     const done = typeof encoding === "function" ? encoding : callback;
-    if (typeof done === "function") process.nextTick(done, null);
+    let failure = null;
+    try {
+      agyStdoutWrite(text(chunk));
+    } catch (e) {
+      failure = e;
+    }
+    if (typeof done === "function") process.nextTick(done, failure);
+    else if (failure) throw failure;
     return true;
   };
   const writeErr = process.stderr.write.bind(process.stderr);
   process.stderr.write = (chunk, ...rest) => {
-    err.push(text(chunk));
+    agy.errText.push(text(chunk));
     return writeErr(chunk, ...rest);
   };
   process.on("exit", (code) => {
-    const envelope = agyEnvelope({ event: raw.hookEventName, continuationActive: raw.continuationActive === true, out: out.join(""), err: err.join(""), code });
     try {
+      const stopContinue = agy.event === "Stop" && code === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
       if (envelope.text) writeAllSync(1, envelope.text);
       process.exitCode = envelope.code;
     } catch (e) {
@@ -13745,20 +13783,56 @@ function adoptAgyInput(raw) {
       process.exitCode = 1;
     }
   });
-  if (skip) allow();
   return input2;
+}
+function agyStopTurn(checkout, conversationId, lastUserInput) {
+  return {
+    file: join10(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`),
+    turn: createHash3("sha256").update(String(lastUserInput ?? "")).digest("hex")
+  };
+}
+function settleAgyInput(raw, input2, inProject) {
+  agy.checkout = inProject ? input2.cwd : null;
+  if (agy.event === "Stop" && agy.checkout) {
+    const { file, turn } = agyStopTurn(agy.checkout, raw.conversationId, raw.lastUserInput);
+    agy.stopTurnFile = file;
+    agy.stopTurn = turn;
+    try {
+      agy.stopAlreadyContinued = JSON.parse(readFileSync6(file, "utf8")).turn === turn;
+    } catch (e) {
+      if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
+    }
+    if (agy.stopAlreadyContinued) input2.stop_hook_active = true;
+  }
+  if (agy.skip) allow();
+}
+function recordAgyStopContinue() {
+  if (agy.stopAlreadyContinued) return false;
+  if (!agy.stopTurnFile) {
+    process.stderr.write("Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n");
+    return false;
+  }
+  try {
+    mkdirSync5(agyStateDir(agy.checkout), { recursive: true });
+    writeFileSync3(agy.stopTurnFile, JSON.stringify({ turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() }));
+    return true;
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${e && e.message || e}).
+`);
+    return false;
+  }
 }
 
 // scripts/hooks/lib/board-ready.mjs
-import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
+import { createHash as createHash5 } from "node:crypto";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync9, writeFileSync as writeFileSync6 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
 import { join as join11, resolve as resolve5, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { randomBytes, createHash as createHash3 } from "node:crypto";
+import { randomBytes, createHash as createHash4 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -14032,7 +14106,7 @@ function liveFileName(key) {
   return `${LIVE_PREFIX}${key}.json`;
 }
 function agentIdHash(agentId) {
-  return createHash3("sha256").update(String(agentId), "utf8").digest("base64url");
+  return createHash4("sha256").update(String(agentId), "utf8").digest("base64url");
 }
 function recordAgentIds(record) {
   return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
@@ -14071,7 +14145,7 @@ function warnStateFile(file, text) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash4("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 function isNonEmptyString(v) {
   return typeof v === "string" && v !== "";
@@ -14101,7 +14175,7 @@ function validateRecordShape(r) {
   if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
   if (typeof r.prompt === "string") {
     const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash3("sha256").update(r.prompt, "utf8").digest("hex");
+    const sha = createHash4("sha256").update(r.prompt, "utf8").digest("hex");
     if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
   } else if (r.prompt !== null) {
     return { ok: false, reason: "prompt-type" };
@@ -14148,7 +14222,7 @@ function checkDispatchStateContainment(root, { create }) {
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
-    mkdirSync5(dir, { recursive: true });
+    mkdirSync6(dir, { recursive: true });
     return { ok: true, availability: "ok" };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
@@ -14172,7 +14246,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join11(dir, from), join11(dir, to));
+    renameSync3(join11(dir, from), join11(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -14253,7 +14327,7 @@ function scanLiveState(root, { repair }) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, existsSync as existsSync7, renameSync as renameSync3, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync8, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
 import { join as join12, dirname as dirname8 } from "node:path";
 function deliveryDir(cwd) {
   return join12(cwd, ".sterling", "transient", "delivery");
@@ -14355,10 +14429,10 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync6(dirname8(path), { recursive: true });
+  mkdirSync7(dirname8(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync4(tmp, JSON.stringify(guard));
-  renameSync3(tmp, path);
+  writeFileSync5(tmp, JSON.stringify(guard));
+  renameSync4(tmp, path);
 }
 var DENY_RULING_TYPES = ["decision", "anti_pattern"];
 function subQuestionText(q) {
@@ -15028,7 +15102,7 @@ function boardReadyNotice(readiness, outgoing, live, ceiling, cap = BOARD_GROUP_
   if (!pending.length) return null;
   const shown = pending.slice(0, cap).map(({ r, tag: tag2 }) => `${r.name}${tag2}`);
   const more = pending.length > cap ? `, \u2026 ${pending.length - cap} more` : "";
-  const hash = createHash4("sha256").update(all.map(({ r }) => r.id).sort().join("\n")).digest("hex").slice(0, 16);
+  const hash = createHash5("sha256").update(all.map(({ r }) => r.id).sort().join("\n")).digest("hex").slice(0, 16);
   return {
     line: `BOARD READY: ${shown.join(", ")}${more} \u2014 ${lanesText(live, ceiling)}; fill free lanes up to the ceiling (a ceiling, never a quota).`,
     hash
@@ -15050,12 +15124,12 @@ function boardReadyNoticeDue(root, sessionId, hash) {
 function markBoardReadyNoticed(root, sessionId, hash) {
   const p = noticePath(root, sessionId);
   if (!p) return;
-  mkdirSync7(join13(p, ".."), { recursive: true });
-  writeFileSync5(p, JSON.stringify({ hash }));
+  mkdirSync8(join13(p, ".."), { recursive: true });
+  writeFileSync6(p, JSON.stringify({ hash }));
 }
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync10, readdirSync as readdirSync3, mkdirSync as mkdirSync8, openSync as openSync4, writeSync as writeSync2, closeSync as closeSync4, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync5, readFileSync as readFileSync10, readdirSync as readdirSync3, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -15275,14 +15349,14 @@ function readProjectConfig(cwd) {
 }
 
 // scripts/hooks/lib/advisory-counter.mjs
-import { appendFileSync, existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync11 } from "node:fs";
+import { appendFileSync, existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync11 } from "node:fs";
 import { join as join15 } from "node:path";
 function recordAdvisoryFire(root, hook, sessionId) {
   try {
     if (!root || !hook) return;
     if (!existsSync10(join15(root, ".sterling"))) return;
     const dir = join15(root, ".sterling", "transient");
-    mkdirSync9(dir, { recursive: true });
+    mkdirSync10(dir, { recursive: true });
     let session = typeof sessionId === "string" && sessionId ? sessionId : null;
     if (!session) {
       try {

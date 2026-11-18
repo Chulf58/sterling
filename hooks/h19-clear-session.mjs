@@ -9,7 +9,9 @@ var __export = (target, all) => {
 import { rmSync } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3, writeSync } from "node:fs";
+import { readFileSync as readFileSync2, existsSync as existsSync3, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5853,12 +5855,14 @@ function hookRoots(from) {
 }
 
 // scripts/hooks/lib/common.mjs
-function readStdin() {
+function readStdin(options = {}) {
   let input2 = JSON.parse(readFileSync2(0, "utf8"));
-  if (isAgyInput(input2)) input2 = adoptAgyInput(input2);
+  const agyRaw = isAgyInput(input2) ? input2 : null;
+  if (agyRaw) input2 = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input2.cwd);
   if (roots) input2.cwd = roots.checkoutRoot;
   input2.storeRoot = roots ? roots.storeRoot : input2.cwd;
+  if (agyRaw) settleAgyInput(agyRaw, input2, roots !== null);
   return input2;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -5977,6 +5981,8 @@ var AGY_EVENTS = {
   PostToolUse: "PostToolUse",
   Stop: "Stop"
 };
+var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
+var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, stopTurnFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
 function isAgyInput(raw) {
   return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
 }
@@ -6031,7 +6037,7 @@ function agyToolCall(name, rawArgs) {
       return { tool_name: name, tool_input: a };
   }
 }
-function normalizeAgyInput(raw) {
+function normalizeAgyInput(raw, { agyEveryInvocation = false } = {}) {
   const event = raw.hookEventName;
   const input2 = {
     hook_event_name: AGY_EVENTS[event] ?? event,
@@ -6046,8 +6052,10 @@ function normalizeAgyInput(raw) {
     if (subagent) return { input: input2, skip: "subagent conversation" };
   } else if (event === "PreInvocation") {
     input2.prompt = raw.lastUserInput;
-    if (subagent) return { input: input2, skip: "subagent conversation" };
-    if (raw.invocationNum !== 0) return { input: input2, skip: "not the first model call of the prompt" };
+    if (subagent || raw.invocationNum !== 0) {
+      if (!agyEveryInvocation) return { input: input2, skip: subagent ? "subagent conversation" : "not the first model call of the prompt" };
+      input2.agy_queue_only = true;
+    }
   } else if (event === "Stop") {
     input2.stop_hook_active = raw.continuationActive === true;
     if (subagent) return { input: input2, skip: "subagent conversation" };
@@ -6063,7 +6071,7 @@ function normalizeAgyInput(raw) {
   return { input: input2, skip: null };
 }
 function agyContextTexts(out) {
-  const text = out.trim();
+  const text = String(out ?? "").trim();
   if (!text) return [];
   let parsed;
   try {
@@ -6078,21 +6086,20 @@ function agyContextTexts(out) {
   if (typeof parsed.systemMessage === "string" && parsed.systemMessage.trim()) texts.push(parsed.systemMessage);
   return texts;
 }
-function agyEnvelope({ event, continuationActive = false, out = "", err = "", code = 0 }) {
+function agyInjectEnvelope(texts) {
+  return JSON.stringify(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+}
+function agyExitEnvelope({ event, code = 0, err = "", emitted = false, stopContinue = true }) {
   const json = (o) => ({ text: JSON.stringify(o), code: 0 });
   if (code === 2) {
-    const reason = err.trim() || "A Sterling hook blocked this without giving a reason.";
+    const reason = String(err).trim() || "A Sterling hook blocked this without giving a reason.";
     if (event === "PreToolUse") return json({ decision: "deny", reason });
-    if (event === "Stop") return continuationActive ? json({ decision: "allow" }) : json({ decision: "continue", reason });
+    if (event === "Stop") return stopContinue ? json({ decision: "continue", reason }) : json({ decision: "allow" });
     return { text: "", code };
   }
   if (code !== 0) return { text: "", code };
-  const texts = agyContextTexts(out);
-  if (event === "SessionStart" || event === "PreInvocation") {
-    return json(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
-  }
-  if (event === "PreToolUse") return json(texts.length ? { decision: "allow", reason: texts.join("\n\n") } : { decision: "allow" });
-  if (event === "Stop") return json({ decision: "allow" });
+  if (event === "PreToolUse" || event === "Stop") return json({ decision: "allow" });
+  if (emitted) return { text: "", code: 0 };
   return json({});
 }
 function writeAllSync(fd, text) {
@@ -6107,25 +6114,57 @@ function writeAllSync(fd, text) {
     }
   }
 }
-function adoptAgyInput(raw) {
-  const { input: input2, skip } = normalizeAgyInput(raw);
-  const out = [];
-  const err = [];
+function agyKey(conversationId) {
+  return String(conversationId ?? "").replace(/[^A-Za-z0-9-]/g, "_").slice(0, 128) || "unknown";
+}
+function agyStateDir(checkout) {
+  return join4(checkout, ".sterling", "transient", "agy");
+}
+function queueAgyNotice(checkout, conversationId, text) {
+  const dir = join4(checkout, ".sterling", "transient", "notices");
+  mkdirSync(dir, { recursive: true });
+  const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const tmp = `${target}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ text: String(text), session_id: String(conversationId) }), { flag: "wx" });
+  renameSync(tmp, target);
+  return target;
+}
+function agyStdoutWrite(chunk) {
+  const texts = agyContextTexts(chunk);
+  if (!texts.length) return;
+  if ((agy.event === "SessionStart" || agy.event === "PreInvocation") && !agy.emitted) {
+    writeAllSync(1, agyInjectEnvelope(texts));
+    agy.emitted = true;
+    return;
+  }
+  if (!agy.checkout) return;
+  for (const t of texts) queueAgyNotice(agy.checkout, agy.conversationId, t);
+}
+function adoptAgyInput(raw, options = {}) {
+  const { input: input2, skip } = normalizeAgyInput(raw, options);
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip, lastUserInput: raw.lastUserInput });
   const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
   process.stdout.write = (chunk, encoding, callback) => {
-    out.push(text(chunk));
     const done = typeof encoding === "function" ? encoding : callback;
-    if (typeof done === "function") process.nextTick(done, null);
+    let failure = null;
+    try {
+      agyStdoutWrite(text(chunk));
+    } catch (e) {
+      failure = e;
+    }
+    if (typeof done === "function") process.nextTick(done, failure);
+    else if (failure) throw failure;
     return true;
   };
   const writeErr = process.stderr.write.bind(process.stderr);
   process.stderr.write = (chunk, ...rest) => {
-    err.push(text(chunk));
+    agy.errText.push(text(chunk));
     return writeErr(chunk, ...rest);
   };
   process.on("exit", (code) => {
-    const envelope = agyEnvelope({ event: raw.hookEventName, continuationActive: raw.continuationActive === true, out: out.join(""), err: err.join(""), code });
     try {
+      const stopContinue = agy.event === "Stop" && code === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
       if (envelope.text) writeAllSync(1, envelope.text);
       process.exitCode = envelope.code;
     } catch (e) {
@@ -6134,14 +6173,50 @@ function adoptAgyInput(raw) {
       process.exitCode = 1;
     }
   });
-  if (skip) allow();
   return input2;
+}
+function agyStopTurn(checkout, conversationId, lastUserInput) {
+  return {
+    file: join4(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`),
+    turn: createHash("sha256").update(String(lastUserInput ?? "")).digest("hex")
+  };
+}
+function settleAgyInput(raw, input2, inProject) {
+  agy.checkout = inProject ? input2.cwd : null;
+  if (agy.event === "Stop" && agy.checkout) {
+    const { file, turn } = agyStopTurn(agy.checkout, raw.conversationId, raw.lastUserInput);
+    agy.stopTurnFile = file;
+    agy.stopTurn = turn;
+    try {
+      agy.stopAlreadyContinued = JSON.parse(readFileSync2(file, "utf8")).turn === turn;
+    } catch (e) {
+      if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
+    }
+    if (agy.stopAlreadyContinued) input2.stop_hook_active = true;
+  }
+  if (agy.skip) allow();
+}
+function recordAgyStopContinue() {
+  if (agy.stopAlreadyContinued) return false;
+  if (!agy.stopTurnFile) {
+    process.stderr.write("Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n");
+    return false;
+  }
+  try {
+    mkdirSync(agyStateDir(agy.checkout), { recursive: true });
+    writeFileSync(agy.stopTurnFile, JSON.stringify({ turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() }));
+    return true;
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${e && e.message || e}).
+`);
+    return false;
+  }
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { join as join4, dirname as dirname3 } from "node:path";
+import { join as join5, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
-  return join4(cwd, ".sterling", "transient", "delivery");
+  return join5(cwd, ".sterling", "transient", "delivery");
 }
 function sanitizeSessionId(sessionId) {
   let encoded;
@@ -6164,7 +6239,7 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join4(deliveryDir(cwd), component);
+  return join5(deliveryDir(cwd), component);
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;

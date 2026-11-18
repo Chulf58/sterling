@@ -45,6 +45,15 @@
         ]
       },
       {
+        "matcher": "call_mcp_tool",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h15-store-guard.mjs"
+          }
+        ]
+      },
+      {
         "matcher": "invoke_subagent",
         "hooks": [
           {
@@ -69,11 +78,33 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "read_file|view_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h19-knowledge-delivery.mjs"
+          }
+        ]
+      },
+      {
         "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
         "hooks": [
           {
             "type": "command",
             "command": "node --disable-warning=ExperimentalWarning ./hooks/h7-file-touch.mjs"
+          },
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h19-knowledge-delivery.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --disable-warning=ExperimentalWarning ./hooks/h19-bash-delivery.mjs"
           }
         ]
       },

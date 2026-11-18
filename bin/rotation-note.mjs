@@ -7,7 +7,7 @@ var __export = (target, all) => {
 };
 
 // scripts/rotation-note.mjs
-import { existsSync as existsSync7, mkdirSync as mkdirSync7, writeFileSync as writeFileSync5, readFileSync as readFileSync8 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync8, writeFileSync as writeFileSync6, readFileSync as readFileSync8 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { dirname as dirname7 } from "node:path";
 
@@ -13050,7 +13050,7 @@ function fail(message, code = 1) {
 }
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync5, renameSync as renameSync4, mkdirSync as mkdirSync7, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/broker-client.mjs
@@ -13458,6 +13458,7 @@ function openStore(dir) {
   const p = join13(cwd2, ".sterling", "sterling.db");
   return existsSync6(p) ? new SterlingStore(p) : null;
 }
+var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
 
 // scripts/rotation-note.mjs
 function arg2(name) {
@@ -13625,8 +13626,8 @@ try {
 } catch (e) {
   fail2(e.message);
 }
-mkdirSync7(dirname7(notePath), { recursive: true });
-writeFileSync5(notePath, JSON.stringify(note, null, 2) + "\n");
+mkdirSync8(dirname7(notePath), { recursive: true });
+writeFileSync6(notePath, JSON.stringify(note, null, 2) + "\n");
 process.stdout.write(
   `rotation note written (single slot \u2014 this supersedes any prior note).
 next_slice: ${note.next_slice}
