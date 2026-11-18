@@ -514,6 +514,37 @@ test('in-place edit after the apply keeps the file, so the new ops are not lost'
   }
 });
 
+test('a read error on the final content check keeps the receipt: applied, file_removed false, the error reported', linuxOnly, async () => {
+  const h = await harness();
+  const origReadSync = cjsFs.readSync as (...a: unknown[]) => unknown;
+  try {
+    const id = h.decision();
+    const draft = h.draft('eio.json', [{ op: 'update', id, body: { rationale: 'landed' } }]);
+    // Once the op has landed, the next read of the draft is the final check before the unlink.
+    cjsFs.readSync = function (this: unknown, ...a: unknown[]) {
+      if ((h.store.get(id) as Loose | undefined)?.rationale === 'landed') throw new Error('EIO: injected read failure');
+      return origReadSync.apply(this, a);
+    };
+    syncBuiltinESMExports();
+    let res;
+    try {
+      res = await h.apply({ path: 'eio.json' });
+    } finally {
+      cjsFs.readSync = origReadSync;
+      syncBuiltinESMExports();
+    }
+    assert.notEqual(res.isError, true, text(res));
+    assert.equal(h.get(id).rationale, 'landed', 'the applied write stands');
+    assert.equal(existsSync(draft), true, 'the draft is kept');
+    const receipt = JSON.parse(text(res)) as Loose;
+    assert.equal((receipt.applied as unknown[]).length, 1);
+    assert.equal(receipt.file_removed, false);
+    assert.match(String(receipt.file_remove_error), /EIO: injected read failure/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('on a platform other than Linux the tool refuses, naming the platform', async () => {
   const h = await harness();
   const real = Object.getOwnPropertyDescriptor(process, 'platform')!;

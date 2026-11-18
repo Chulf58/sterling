@@ -42337,8 +42337,12 @@ function createSterlingServer(target, opts = {}) {
     const movedNow = draftMoved(repoRoot, draft);
     if (movedNow)
       return keep(`not removed: ${movedNow}`);
-    if (!readAllAt(draft.leafFd).equals(bytes))
-      return keep(`not removed: ${label} changed after it was read, so it may hold ops that were not applied`);
+    try {
+      if (!readAllAt(draft.leafFd).equals(bytes))
+        return keep(`not removed: ${label} changed after it was read, so it may hold ops that were not applied`);
+    } catch (e) {
+      return keep(`the final content check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     try {
       unlinkSync3(viaFd(draft.dirFds[draft.dirFds.length - 1], draft.leaf));
     } catch (e) {

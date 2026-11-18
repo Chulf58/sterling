@@ -825,7 +825,12 @@ export function createSterlingServer(
     if (movedNow) return keep(`not removed: ${movedNow}`);
     // The content check is the last one before the unlink, so the window it
     // leaves (see PinnedDraft) is as small as Node allows.
-    if (!readAllAt(draft.leafFd).equals(bytes)) return keep(`not removed: ${label} changed after it was read, so it may hold ops that were not applied`);
+    // A failed re-read must not lose the receipt: every op is already written.
+    try {
+      if (!readAllAt(draft.leafFd).equals(bytes)) return keep(`not removed: ${label} changed after it was read, so it may hold ops that were not applied`);
+    } catch (e) {
+      return keep(`the final content check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     try {
       unlinkSync(viaFd(draft.dirFds[draft.dirFds.length - 1], draft.leaf));
     } catch (e) {
