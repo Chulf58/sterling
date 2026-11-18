@@ -16970,11 +16970,13 @@ var OPENER_TEMPLATES = { windows: "opener-win.bat", linux: "opener-linux.sh" };
 var OPENERS = {
   windows: [
     { file: "claude-code.bat", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.bat", mode: "agy", tool: "agy", app: "Antigravity" }
   ],
   linux: [
     { file: "claude-code.sh", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.sh", mode: "agy", tool: "agy", app: "Antigravity" }
   ]
 };
 var RETIRED_LAUNCHERS = {
@@ -16992,6 +16994,7 @@ var LAUNCHER_GITIGNORE_ENTRIES = [
 ];
 var LAUNCHER_HOST_ENV = "STERLING_LAUNCHER_HOST";
 var LAUNCHER_OPENCODE_ENV = "STERLING_LAUNCHER_OPENCODE";
+var LAUNCHER_AGY_ENV = "STERLING_LAUNCHER_AGY";
 var lf2 = (s2) => s2.replace(/\r\n/g, "\n");
 var ensureExecutable = (path, warns2) => {
   try {
@@ -17036,9 +17039,14 @@ function launcherTools({ env = process.env, home = homedir7(), claude } = {}) {
   if (forced && forced !== "found" && forced !== "absent") {
     throw new Error(`${LAUNCHER_OPENCODE_ENV} must be 'found' or 'absent' (got '${forced}')`);
   }
+  const forcedAgy = env[LAUNCHER_AGY_ENV];
+  if (forcedAgy && forcedAgy !== "found" && forcedAgy !== "absent") {
+    throw new Error(`${LAUNCHER_AGY_ENV} must be 'found' or 'absent' (got '${forcedAgy}')`);
+  }
   return {
     claude: claude ?? onPath("claude", env),
-    opencode: forced ? forced === "found" : onPath("opencode", env) || executableFile(join28(home, ".opencode", "bin", "opencode"))
+    opencode: forced ? forced === "found" : onPath("opencode", env) || executableFile(join28(home, ".opencode", "bin", "opencode")),
+    agy: forcedAgy ? forcedAgy === "found" : onPath("agy", env) || executableFile(join28(home, ".local", "bin", "agy"))
   };
 }
 function launcherHistoryLoader(pluginRoot2) {
@@ -17076,7 +17084,7 @@ function renderOpener(pluginRoot2, target2, host, opener) {
 function ensureLaunchers(target2, pluginRoot2, {
   splitPercent,
   host,
-  tools = { claude: true, opencode: true },
+  tools = { claude: true, opencode: true, agy: true },
   history = launcherHistoryLoader(pluginRoot2),
   installedCopy: installedCopy2 = isInstalledCopy(pluginRoot2),
   checkText = (_label, text) => text,
@@ -17104,7 +17112,7 @@ function ensureLaunchers(target2, pluginRoot2, {
   const cloneLauncher = installedCopy2 && existing !== null ? cloneLauncherTarget2(existing) : null;
   if (existing === null) {
     writeFileSync8(enginePath, expected, { mode: 493 });
-    items2.push({ item: ENGINE_NAME, status: "created", detail: `tmux sessions ${session}-claude and ${session}-opencode, ${splitPercent}% TUI pane` });
+    items2.push({ item: ENGINE_NAME, status: "created", detail: `tmux sessions ${session}-claude, ${session}-opencode and ${session}-agy, ${splitPercent}% TUI pane` });
   } else if (lf2(existing) === lf2(expected)) {
     items2.push({ item: ENGINE_NAME, status: "matches", detail: "generated content unchanged" });
   } else if (cloneLauncher) {

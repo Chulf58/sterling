@@ -13647,11 +13647,13 @@ var ENGINE_NAME = "sterling-launch.sh";
 var OPENERS = {
   windows: [
     { file: "claude-code.bat", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.bat", mode: "agy", tool: "agy", app: "Antigravity" }
   ],
   linux: [
     { file: "claude-code.sh", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.sh", mode: "agy", tool: "agy", app: "Antigravity" }
   ]
 };
 var LAUNCHER_GITIGNORE_ENTRIES = [
