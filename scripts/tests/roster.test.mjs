@@ -201,7 +201,7 @@ test('skills ship with live file references and pass the skill linter', () => {
 // agents (researcher, scout, librarian) must still carry tools:.
 const STORE_WRITE_TOOLS = [
   'knowledge_create', 'knowledge_split', 'knowledge_extract', 'knowledge_retire', 'knowledge_supersede',
-  'knowledge_update', 'knowledge_append', 'knowledge_edit', 'knowledge_line_ref_fix', 'knowledge_array_remove', 'knowledge_promote',
+  'knowledge_update', 'knowledge_append', 'knowledge_edit', 'knowledge_line_ref_fix', 'knowledge_array_remove', 'knowledge_apply_drafts', 'knowledge_promote',
   'knowledge_move',
   'knowledge_link', 'board_add', 'board_remove', 'board_update', 'board_edit', 'maintenance_remove',
   // Board task claims (decision board-task-claims-for-parallel-sessions-claim-generation-ren).
@@ -262,6 +262,23 @@ test('the rendered librarian carves out the server-printed cross-store remedy', 
   const content = readFileSync(join(TPL, 'librarian.md'), 'utf8');
   const { installedContent } = renderInstalledAgent(content, 'librarian.md', { ...OPTS, ...CFG });
   assert.match(installedContent, /when a cross-store refusal prints its own remedy[\s\S]*write without `resolves`, verify, then `maintenance_remove`/);
+});
+
+// GitHub #290: knowledge_apply_drafts applies a drafts file of record updates
+// server-side. The store writers hold it (the librarian by its allowlist, the
+// conductor by inheriting every tool); the implementors deny it, and no
+// read-only allowlist agent grants it.
+test('knowledge_apply_drafts: the librarian grants it under both prefixes, the implementors deny it, the read-only agents never grant it', () => {
+  const fmLine = (file, key) => (fmOf(readFileSync(join(TPL, file), 'utf8')).match(new RegExp(`^${key}:\\s*(.+)$`, 'm'))?.[1] ?? '').split(',').map((t) => t.trim());
+  const names = ['mcp__sterling__knowledge_apply_drafts', 'mcp__plugin_sterling_sterling__knowledge_apply_drafts'];
+  for (const n of names) assert.ok(fmLine('librarian.md', 'tools').includes(n), `librarian.md grants ${n}`);
+  for (const file of ['implementor.md', 'implementor-hard.md']) {
+    for (const n of names) assert.ok(fmLine(file, 'disallowedTools').includes(n), `${file} denies ${n}`);
+  }
+  for (const file of ['researcher.md', 'scout.md', 'reviewer.md', 'sparring.md', 'preflight.md']) {
+    assert.ok(!fmLine(file, 'tools').some((t) => t.endsWith('__knowledge_apply_drafts')), `${file} does not grant knowledge_apply_drafts`);
+  }
+  assert.doesNotMatch(fmOf(readFileSync(join(TPL, 'conductor.md'), 'utf8')), /^(tools|disallowedTools):/m, 'the conductor inherits every tool, knowledge_apply_drafts included');
 });
 
 // GitHub #128: the conductor hands the librarian drafted board and queue

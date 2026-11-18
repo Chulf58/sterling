@@ -3,14 +3,14 @@
 // including spawned agents — see the message and self-correct (§5.2).
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, existsSync, lstatSync, realpathSync, openSync, closeSync, fstatSync, readSync, unlinkSync, constants as fsConstants } from 'node:fs';
+import { join, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { z, ZodError } from 'zod';
 import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, BOARD_REMOVAL_OUTCOMES, handoffEvidenceSchema, RETIRED_REASONS } from '@sterling/schemas';
 import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
-import { WorkerGuard, guardWorkerTools, type WorkerPolicyArgs } from './worker-policy.js';
+import { WorkerGuard, guardWorkerTools, rootField, type WorkerPolicyArgs } from './worker-policy.js';
 import { SterlingTools, busyRefusal, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface, BOARD_READINESS_STATES } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -318,6 +318,172 @@ const strict = <T extends z.ZodRawShape>(shape: T, hints: Readonly<Record<string
   return advertised as unknown as typeof enforced;
 };
 
+/** The one folder knowledge_apply_drafts reads, relative to the project root. */
+export const DRAFTS_DIR = '.sterling/drafts';
+
+/**
+ * A drafts file held open by descriptor (GitHub #290 task-end review). The
+ * containment rule binds the DESCRIPTORS, never a pathname checked once and
+ * used later:
+ * - The project root is opened by name (a symlinked project root is ordinary
+ *   and is followed). Every component below it (.sterling, drafts, any
+ *   subfolder, the file) is opened relative to the descriptor of the one
+ *   above, through /proc/self/fd/<fd>/<name>, with O_NOFOLLOW, so a symlink at
+ *   any of them is refused and nothing is re-resolved by absolute path
+ *   (anti-pattern descriptor-pin-defeated-at-acquisition-when-the-directory-fd-is-opened-by-absolute-path).
+ * - The content is read from the file's descriptor. After the read, and again
+ *   before the delete, the chain is walked afresh from the project root and
+ *   every folder must be the same inode as the one held, and the file name in
+ *   the held folder must still be the inode that was read; otherwise the read
+ *   is refused, or the file is kept.
+ * - Identity does not cover an in-place edit (same inode), so the bytes read
+ *   are kept and the whole file is read again through the same descriptor,
+ *   from offset 0, before the apply (a difference refuses with nothing
+ *   applied) and before the delete (a difference keeps the file).
+ * - The delete goes through /proc/self/fd/<folder fd>/<name>, so it can only
+ *   remove an entry of the held folder, never a file elsewhere.
+ * NOT guaranteed: Node has no unlinkat, so a same-user process that replaces
+ * the file's name inside the held folder, or edits the file, between the last
+ * check and the unlink gets its replacement or edit removed (still inside
+ * that folder).
+ * Sterling's threat model is same-user and cooperative; this closes the swaps
+ * that made the tool read or delete outside the drafts folder, nothing more.
+ * Linux only: /proc/self/fd does not exist on native Windows or macOS, where
+ * the tool refuses.
+ */
+interface PinnedDraft {
+  /** project root, .sterling, drafts, any subfolders: one descriptor each */
+  dirFds: number[];
+  dirIds: { dev: number; ino: number }[];
+  names: string[];
+  leaf: string;
+  leafFd: number;
+  leafId: { dev: number; ino: number };
+  label: string;
+}
+
+const PINNED_DIR = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+// O_NONBLOCK so a FIFO planted as the draft cannot hang the open.
+const PINNED_LEAF = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK;
+const viaFd = (fd: number, name: string) => `/proc/self/fd/${fd}/${name}`;
+const fileId = (fd: number) => {
+  const st = fstatSync(fd);
+  return { dev: st.dev, ino: st.ino };
+};
+const errCode = (e: unknown) => (e as NodeJS.ErrnoException)?.code;
+
+/** The whole file behind `fd`, read by position from offset 0 so the
+ *  descriptor's own offset never matters, until end of file. */
+function readAllAt(fd: number): Buffer {
+  const chunks: Buffer[] = [];
+  let pos = 0;
+  for (;;) {
+    const buf = Buffer.alloc(Math.max(65536, fstatSync(fd).size - pos));
+    const n = readSync(fd, buf, 0, buf.length, pos);
+    if (n === 0) return Buffer.concat(chunks);
+    chunks.push(buf.subarray(0, n));
+    pos += n;
+  }
+}
+
+function draftsRefusal(repoRoot: string, why: string): Error {
+  return new Error(
+    `knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${join(repoRoot, DRAFTS_DIR).replace(/\\/g, '/')}). Nothing was written.`
+  );
+}
+
+function closeDraft(d: PinnedDraft): void {
+  for (const fd of [d.leafFd, ...d.dirFds]) closeSync(fd);
+}
+
+/** Opens a drafts file the way PinnedDraft describes, or refuses. `path` is
+ *  relative to the drafts folder, or an absolute path inside it. */
+function openDraft(repoRoot: string, path: string): PinnedDraft {
+  if (process.platform !== 'linux') {
+    throw draftsRefusal(repoRoot, `this tool pins the drafts folder through /proc/self/fd, which exists only on Linux (run Sterling under WSL on Windows); platform '${process.platform}' is refused`);
+  }
+  // Without /proc mounted every /proc/self/fd/<fd>/<name> open fails ENOENT,
+  // which would otherwise read as a missing drafts folder.
+  if (!existsSync('/proc/self/fd')) {
+    throw draftsRefusal(repoRoot, 'this tool pins the drafts folder through /proc/self/fd, and /proc/self/fd is not available in this process (is /proc mounted?)');
+  }
+  const base = join(repoRoot, DRAFTS_DIR);
+  const inside = (b: string) => {
+    const rel = relative(b, isAbsolute(path) ? path : resolve(b, path));
+    return rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel) ? undefined : rel;
+  };
+  const rel = inside(base) ?? (isAbsolute(path) ? inside(join(realpathSync(repoRoot), DRAFTS_DIR)) : undefined);
+  if (rel === undefined) throw draftsRefusal(repoRoot, `'${path}' resolves outside the drafts folder`);
+  const parts = [...DRAFTS_DIR.split('/'), ...rel.split(sep)];
+  const names = parts.slice(0, -1);
+  const leaf = parts[parts.length - 1];
+  const label = parts.join('/');
+  const dirFds: number[] = [];
+  let leafFd: number | undefined;
+  try {
+    dirFds.push(openSync(repoRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY));
+    for (const [i, name] of names.entries()) {
+      try {
+        dirFds.push(openSync(viaFd(dirFds[dirFds.length - 1], name), PINNED_DIR));
+      } catch (e) {
+        const at = parts.slice(0, i + 1).join('/');
+        if (errCode(e) === 'ENOENT') throw draftsRefusal(repoRoot, i < 2 ? `the drafts folder ${DRAFTS_DIR}/ does not exist` : `'${path}' does not exist`);
+        if (errCode(e) === 'ELOOP' || errCode(e) === 'ENOTDIR') throw draftsRefusal(repoRoot, `${at} is not a real directory (a symlink or a file)`);
+        throw e;
+      }
+    }
+    try {
+      leafFd = openSync(viaFd(dirFds[dirFds.length - 1], leaf), PINNED_LEAF);
+    } catch (e) {
+      if (errCode(e) === 'ENOENT') throw draftsRefusal(repoRoot, `'${path}' does not exist`);
+      if (errCode(e) === 'ELOOP') throw draftsRefusal(repoRoot, `'${path}' is a symlink, which could point outside the drafts folder; a drafts file must be a regular file`);
+      throw e;
+    }
+    if (!fstatSync(leafFd).isFile()) throw draftsRefusal(repoRoot, `'${path}' is not a regular file`);
+    return { dirFds, dirIds: dirFds.map(fileId), names, leaf, leafFd, leafId: fileId(leafFd), label };
+  } catch (e) {
+    for (const fd of leafFd === undefined ? dirFds : [leafFd, ...dirFds]) closeSync(fd);
+    throw e;
+  }
+}
+
+/** Why the held draft no longer matches its path, or undefined when it does:
+ *  the chain is walked afresh from the project root by descriptor, each folder
+ *  must be the inode held, and the name in the held folder must still be the
+ *  file that was read. */
+function draftMoved(repoRoot: string, d: PinnedDraft): string | undefined {
+  const fresh: number[] = [];
+  try {
+    fresh.push(openSync(repoRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY));
+    for (const name of d.names) fresh.push(openSync(viaFd(fresh[fresh.length - 1], name), PINNED_DIR));
+    const changed = fresh.findIndex((fd, i) => {
+      const id = fileId(fd);
+      return id.dev !== d.dirIds[i].dev || id.ino !== d.dirIds[i].ino;
+    });
+    if (changed >= 0) return `${d.names.slice(0, changed).join('/') || 'the project root'} is no longer the folder that was opened`;
+  } catch (e) {
+    return `the drafts folder path no longer leads through real directories (${errCode(e) ?? (e as Error).message})`;
+  } finally {
+    for (const fd of fresh) closeSync(fd);
+  }
+  let now;
+  try {
+    now = lstatSync(viaFd(d.dirFds[d.dirFds.length - 1], d.leaf));
+  } catch (e) {
+    return `${d.label} is gone from the drafts folder (${errCode(e) ?? (e as Error).message})`;
+  }
+  if (now.dev !== d.leafId.dev || now.ino !== d.leafId.ino) return `${d.label} was replaced in the drafts folder`;
+  return undefined;
+}
+
+/** The size of a stored field value, for the apply receipt. */
+function measureField(value: unknown): Record<string, number | string> {
+  if (typeof value === 'string') return { chars: value.length, utf8_bytes: Buffer.byteLength(value, 'utf8') };
+  if (Array.isArray(value)) return { entries: value.length };
+  if (value === undefined) return { absent: 'not set after the write' };
+  return { json_chars: JSON.stringify(value).length };
+}
+
 /** The one-line boot warning for a mounted domain whose store could not be
  *  read (a pre-v2 store, any other read failure), the sibling of the store's
  *  missingDomainWarning. */
@@ -498,6 +664,215 @@ export function createSterlingServer(
     "a project name from this machine's project registry (/sterling:projects); reads that project's user board read-only instead of this one. A name that is no longer registered is followed through this board's hand-off trackers to the project their receiver is now (renamed, or moved with list-projects.mjs --move); refused when no registered project matches";
   const ID_EXACT_DESTROY = 'the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused';
   const RESOLVES_FULL_IDS = 'full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted';
+  const RESOLVES_RECORD_CHAIN =
+    'open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write';
+  const RESTAMP_HINT =
+    '. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance';
+
+  // The arguments of the four in-place write tools, without `projection`. Each
+  // tool's input schema is built from its object below, and knowledge_apply_drafts
+  // checks each drafted op against the same object, so an op takes exactly the
+  // arguments its single-op tool takes. The op schemas are never served, so the
+  // shared zod instances never become a $ref in a served schema.
+  const updateArgs = {
+    id: z.string().describe(ID_LADDER),
+    // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
+    body: z.object({}).passthrough().optional().describe('the partial patch; exactly one of body or fields'),
+    fields: z.object({}).passthrough().optional().describe('alias of body, the name knowledge_create uses; exactly one of body or fields'),
+    resolves: z.array(z.string()).optional().describe(RESOLVES_RECORD_CHAIN + RESTAMP_HINT),
+    expected_version: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('CAS token: the version you read. A stale value refuses naming both versions, with nothing written'),
+  };
+  const appendArgs = {
+    id: z.string().describe(ID_LADDER),
+    field: z.string(),
+    entries: z.array(z.unknown()),
+    resolves: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write' +
+          RESTAMP_HINT
+      ),
+  };
+  const editArgs = {
+    id: z.string().describe(ID_LADDER),
+    field: z.string(),
+    find: z.string(),
+    replace: z.string(),
+    resolves: z.array(z.string()).optional().describe(RESOLVES_RECORD_CHAIN),
+  };
+  const arrayRemoveArgs = {
+    id: z.string().describe('the EXACT full uuid — this call destroys, so no slug and no 8-char prefix is accepted'),
+    selector: z.string().describe("arr[key=value] — knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
+    expected_version: z
+      .number()
+      .int()
+      .positive()
+      .describe('REQUIRED: the version you read — a stale token refuses naming both versions, with nothing written'),
+    resolves: z.array(z.string()).optional().describe(RESOLVES_RECORD_CHAIN),
+  };
+  type UpdateArgs = z.infer<z.ZodObject<typeof updateArgs>>;
+  type AppendArgs = z.infer<z.ZodObject<typeof appendArgs>>;
+  type EditArgs = z.infer<z.ZodObject<typeof editArgs>>;
+  type ArrayRemoveArgs = z.infer<z.ZodObject<typeof arrayRemoveArgs>>;
+
+  // The handlers of those tools, before projection: the single-op tool and a
+  // drafted op both call these, so the two cannot diverge.
+  const applyUpdate = ({ id, body, fields, resolves, expected_version }: UpdateArgs) => {
+    if (body !== undefined && fields !== undefined) {
+      throw new Error("knowledge_update takes the payload as body or fields, not both: you passed both. Send one of them; nothing was written.");
+    }
+    const payload = body ?? fields;
+    if (payload === undefined) {
+      throw new Error('knowledge_update takes the payload as body (or fields): neither was passed. Nothing was written.');
+    }
+    return tools.knowledgeUpdateResult(id, payload, resolves, expected_version);
+  };
+  const applyAppend = ({ id, field, entries, resolves }: AppendArgs) => tools.knowledgeAppend(id, field, entries, resolves);
+  const applyEdit = ({ id, field, find, replace, resolves }: EditArgs) => tools.knowledgeEdit(id, field, find, replace, resolves);
+  const applyArrayRemove = ({ id, selector, expected_version, resolves }: ArrayRemoveArgs) =>
+    tools.knowledgeArrayRemove(id, selector, expected_version, resolves);
+
+  // knowledge_apply_drafts (GitHub #290): the drafted ops a file may hold. No
+  // create: records are created by the conductor directly (decision
+  // conductor-creates-records-directly-librarian-stays-update-only).
+  const DRAFT_OPS = {
+    update: { schema: z.object({ op: z.literal('update'), ...updateArgs }).strict(), tool: 'knowledge_update' },
+    append: { schema: z.object({ op: z.literal('append'), ...appendArgs }).strict(), tool: 'knowledge_append' },
+    edit: { schema: z.object({ op: z.literal('edit'), ...editArgs }).strict(), tool: 'knowledge_edit' },
+    array_remove: { schema: z.object({ op: z.literal('array_remove'), ...arrayRemoveArgs }).strict(), tool: 'knowledge_array_remove' },
+  } as const;
+  type DraftOp =
+    | ({ op: 'update' } & UpdateArgs)
+    | ({ op: 'append' } & AppendArgs)
+    | ({ op: 'edit' } & EditArgs)
+    | ({ op: 'array_remove' } & ArrayRemoveArgs);
+
+  const runDraftOp = (op: DraftOp) => {
+    switch (op.op) {
+      case 'update': {
+        const { op: _op, ...args } = op;
+        return { result: applyUpdate(args), fields: Object.keys(args.body ?? args.fields ?? {}) };
+      }
+      case 'append': {
+        const { op: _op, ...args } = op;
+        return { result: applyAppend(args), fields: [rootField(args.field)] };
+      }
+      case 'edit': {
+        const { op: _op, ...args } = op;
+        return { result: applyEdit(args), fields: [rootField(args.field)] };
+      }
+      case 'array_remove': {
+        const { op: _op, ...args } = op;
+        return { result: applyArrayRemove(args), fields: [rootField(args.selector)] };
+      }
+    }
+  };
+
+  const applyDrafts = (path: string, dryRun: boolean) => {
+    const draft = openDraft(repoRoot, path);
+    try {
+      return applyPinnedDraft(draft, dryRun);
+    } finally {
+      closeDraft(draft);
+    }
+  };
+
+  const applyPinnedDraft = (draft: PinnedDraft, dryRun: boolean) => {
+    const label = draft.label;
+    const bytes = readAllAt(draft.leafFd);
+    const moved = draftMoved(repoRoot, draft);
+    if (moved) throw draftsRefusal(repoRoot, `${label} changed while it was read: ${moved}`);
+    if (!readAllAt(draft.leafFd).equals(bytes)) throw draftsRefusal(repoRoot, `${label} changed after it was read (its content was edited in place)`);
+    const ops = parseDraftOps(bytes.toString('utf8'), label);
+    if (dryRun) {
+      return {
+        path: label,
+        dry_run: true,
+        ops: ops.map((op, index) => {
+          const record = tools.knowledgeGet(op.id) as Record<string, unknown>;
+          return { index, op: op.op, id: record.id, version: record.version };
+        }),
+      };
+    }
+    const applied: Record<string, unknown>[] = [];
+    for (const [index, op] of ops.entries()) {
+      let ran: ReturnType<typeof runDraftOp>;
+      try {
+        ran = runDraftOp(op);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const done = applied.length ? `Ops 0-${index - 1} were written and stay written: ${JSON.stringify(applied)}. The drafts file was kept. Re-running it applies those ops again (an append duplicates its entries), so remove the applied ops from the file first.` : 'No earlier op was written. The drafts file was kept.';
+        const rest = index + 1 < ops.length ? ` Ops ${index + 1}-${ops.length - 1} were not attempted.` : '';
+        throw new Error(`knowledge_apply_drafts: op ${index} (${op.op} '${op.id}') in ${label} was refused by ${DRAFT_OPS[op.op].tool}: ${message} ${done}${rest}`);
+      }
+      const record = ran.result.record as unknown as Record<string, unknown>;
+      const written = Object.fromEntries(ran.fields.map((f) => [f, measureField(record[f])]));
+      applied.push({ index, op: op.op, id: record.id, version: record.version, written, ...(ran.result.warnings.length ? { warnings: ran.result.warnings } : {}) });
+    }
+    // Every op landed, so the drafts file has served its purpose and is removed
+    // (P4: transient state is removed by the event that ends its life), through
+    // the held folder and only while it is still the file that was read (see
+    // PinnedDraft for what this does not exclude). A failed or withheld removal
+    // is reported, never swallowed, and does not undo the writes.
+    const keep = (why: string) => ({ path: label, applied, file_removed: false, file_remove_error: `${why}; every op was written, so remove the file by hand before anything re-runs it` });
+    const movedNow = draftMoved(repoRoot, draft);
+    if (movedNow) return keep(`not removed: ${movedNow}`);
+    // The content check is the last one before the unlink, so the window it
+    // leaves (see PinnedDraft) is as small as Node allows.
+    // A failed re-read must not lose the receipt: every op is already written.
+    try {
+      if (!readAllAt(draft.leafFd).equals(bytes)) return keep(`not removed: ${label} changed after it was read, so it may hold ops that were not applied`);
+    } catch (e) {
+      return keep(`the final content check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      unlinkSync(viaFd(draft.dirFds[draft.dirFds.length - 1], draft.leaf));
+    } catch (e) {
+      return keep(e instanceof Error ? e.message : String(e));
+    }
+    return { path: label, applied, file_removed: true };
+  };
+
+  const parseDraftOps = (text: string, label: string): DraftOp[] => {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`knowledge_apply_drafts: ${label} is not valid JSON (${e instanceof Error ? e.message : String(e)}). Nothing was written.`);
+    }
+    if (!Array.isArray(raw) || raw.length === 0) {
+      throw new Error(`knowledge_apply_drafts: ${label} must hold a non-empty JSON array of operations. Nothing was written.`);
+    }
+    const problems: string[] = [];
+    const ops: DraftOp[] = [];
+    raw.forEach((entry, index) => {
+      const name = (entry as { op?: unknown } | null)?.op;
+      if (name === 'create') {
+        problems.push(`op ${index}: op 'create' is refused — this tool never creates a record; the conductor creates records directly with knowledge_create (decision conductor-creates-records-directly-librarian-stays-update-only)`);
+        return;
+      }
+      if (typeof name !== 'string' || !Object.hasOwn(DRAFT_OPS, name)) {
+        problems.push(`op ${index}: op must be one of ${Object.keys(DRAFT_OPS).join(', ')}, got ${JSON.stringify(name)}`);
+        return;
+      }
+      const parsed = DRAFT_OPS[name as keyof typeof DRAFT_OPS].schema.safeParse(entry);
+      if (!parsed.success) {
+        problems.push(`op ${index} (${name}): ${parsed.error.issues.map((i) => `${i.path.join('.') || '(op)'}: ${i.message}${i.code === 'unrecognized_keys' ? ` ${JSON.stringify(i.keys)}` : ''}`).join('; ')}`);
+        return;
+      }
+      ops.push(parsed.data as DraftOp);
+    });
+    if (problems.length) {
+      throw new Error(`knowledge_apply_drafts: ${label} has ${problems.length} malformed op(s), so nothing was written: ${problems.join(' | ')}`);
+    }
+    return ops;
+  };
 
   server.registerTool(
     'knowledge_create',
@@ -696,34 +1071,9 @@ export function createSterlingServer(
     {
       description:
         "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` (or its alias `fields`, the name knowledge_create uses; pass exactly one) is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
-      inputSchema: strict({
-        id: z.string().describe(ID_LADDER),
-        // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
-        body: z.object({}).passthrough().optional().describe('the partial patch; exactly one of body or fields'),
-        fields: z.object({}).passthrough().optional().describe('alias of body, the name knowledge_create uses; exactly one of body or fields'),
-        resolves: z
-          .array(z.string())
-          .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance'),
-        expected_version: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe('CAS token: the version you read. A stale value refuses naming both versions, with nothing written'),
-        projection: z.enum(['full', 'digest']).optional(),
-      }),
+      inputSchema: strict({ ...updateArgs, projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, body, fields, resolves, expected_version, projection }) => {
-      if (body !== undefined && fields !== undefined) {
-        throw new Error("knowledge_update takes the payload as body or fields, not both: you passed both. Send one of them; nothing was written.");
-      }
-      const payload = body ?? fields;
-      if (payload === undefined) {
-        throw new Error('knowledge_update takes the payload as body (or fields): neither was passed. Nothing was written.');
-      }
-      return json(tools.writeProjected(tools.knowledgeUpdateResult(id, payload, resolves, expected_version), projection));
-    }
+    ({ projection, ...args }) => json(tools.writeProjected(applyUpdate(args), projection))
   );
 
   server.registerTool(
@@ -731,18 +1081,9 @@ export function createSterlingServer(
     {
       description:
         "Append entries to an array field (history, files, current_ac, live_test_refs, …) without retransmitting it; same versioned write path as knowledge_update. `field` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field \"live_test_refs[ac_id=AC4].test_paths\", entries [\"tests/x.test.mjs\"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
-      inputSchema: strict({
-        id: z.string().describe(ID_LADDER),
-        field: z.string(),
-        entries: z.array(z.unknown()),
-        resolves: z
-          .array(z.string())
-          .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write. To re-stamp baselines after a verified change that has no matching reconcile item: board_add source:"system", system_reason:"reconcile_needed", feature_link: this record, file_keys: only the verified paths, then read the file_keys of the returned item (board_add folds into an open reconcile_needed item for the record and unions file_keys) and pass its id here only if every listed path is verified; the listed paths advance'),
-        projection: z.enum(['full', 'digest']).optional(),
-      }),
+      inputSchema: strict({ ...appendArgs, projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection))
+    ({ projection, ...args }) => json(tools.writeProjected(applyAppend(args), projection))
   );
 
   server.registerTool(
@@ -750,19 +1091,9 @@ export function createSterlingServer(
     {
       description:
         "Replace one passage inside a string field without retransmitting it. `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count; extend find to disambiguate. `field` may be an array-element selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field \"files[path=scripts/prep.mjs].unverified\", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field \"files[path=skills/drain/SKILL.md].entry\", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:\"full\" returns the whole stored record.",
-      inputSchema: strict({
-        id: z.string().describe(ID_LADDER),
-        field: z.string(),
-        find: z.string(),
-        replace: z.string(),
-        resolves: z
-          .array(z.string())
-          .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write'),
-        projection: z.enum(['full', 'digest']).optional(),
-      }),
+      inputSchema: strict({ ...editArgs, projection: z.enum(['full', 'digest']).optional() }),
     },
-    ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection))
+    ({ projection, ...args }) => json(tools.writeProjected(applyEdit(args), projection))
   );
 
   server.registerTool(
@@ -788,23 +1119,22 @@ export function createSterlingServer(
     {
       description:
         "Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. \"files[path=scripts/prep.mjs]\". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says \"removed 1 of N identical elements\". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED — a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:\"full\" returns the whole stored record.",
+      inputSchema: strict({ ...arrayRemoveArgs, projection: z.enum(['full', 'digest']).optional() }),
+    },
+    ({ projection, ...args }) => json(tools.writeProjected(applyArrayRemove(args), projection))
+  );
+
+  server.registerTool(
+    'knowledge_apply_drafts',
+    {
+      description:
+        `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute). Every component below the project root (.sterling, drafts, any subfolder, the file) must be a real directory or regular file, never a symlink, else the call is refused; each is opened through the descriptor of the one above, the content is read from the file's descriptor, and the read is refused if the path no longer leads to that file afterwards or the file's content changed (re-read through the same descriptor). Linux (and WSL) only: other platforms are refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written; the file is kept, and the refusal lists the written ops (re-running the file re-applies them, so remove them from it first). When every op applied, the file is deleted through the held drafts folder, only while the path still leads to the file that was read and its content is still the bytes that were applied, and the receipt says file_removed:true; otherwise, or when the delete fails, the file is kept and the receipt says file_removed:false with file_remove_error, and the writes stand. Not excluded: a same-user process replacing or editing the file inside the drafts folder between that last check and the delete (Node has no unlinkat), which removes the replacement or edit, never a file outside the folder. dry_run:true checks the file and resolves each op's record, writing and deleting nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}], file_removed, file_remove_error?}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
       inputSchema: strict({
-        id: z.string().describe('the EXACT full uuid — this call destroys, so no slug and no 8-char prefix is accepted'),
-        selector: z.string().describe("arr[key=value] — knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
-        expected_version: z
-          .number()
-          .int()
-          .positive()
-          .describe('REQUIRED: the version you read — a stale token refuses naming both versions, with nothing written'),
-        resolves: z
-          .array(z.string())
-          .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write'),
-        projection: z.enum(['full', 'digest']).optional(),
+        path: z.string().min(1).describe(`the drafts file: relative to ${DRAFTS_DIR}/, or an absolute path inside it`),
+        dry_run: z.boolean().optional().describe('check the file and resolve every record without writing'),
       }),
     },
-    ({ id, selector, expected_version, resolves, projection }) =>
-      json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection))
+    ({ path, dry_run }) => json(applyDrafts(path, dry_run === true))
   );
 
   server.registerTool(
