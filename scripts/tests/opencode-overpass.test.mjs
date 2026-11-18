@@ -702,15 +702,149 @@ test('overlay: a failed undo, then a hand-changed variant on the tier entry, lea
   }
 });
 
-test('overlay: a git-tracked opencode.json is refused, as the installer refuses it', () => {
+test('overlay: a git-tracked opencode.json is not written and the skip is reported, not thrown', () => {
   const p = makeProject(ON, { agent: {} });
   try {
     const git = (...args) => spawnSync('git', args, { cwd: p.dir, encoding: 'utf8' });
     git('init', '-q');
     git('add', OC_REL);
-    assert.throws(() => overpass.convergeOverlay(p.dir, resOn()), /is tracked by git/);
+    const out = overpass.convergeOverlay(p.dir, resOn());
+    assert.equal(out.skippedTracked, true);
+    assert.equal(out.changed, false);
     assert.deepEqual(readOc(p.dir), { agent: {} });
+    assert.equal(existsSync(join(p.dir, overpass.OVERLAY_REL)), false, 'no ownership or pending record is written');
   } finally {
+    p.cleanup();
+  }
+});
+
+const trackOc = (dir, ...more) => {
+  const git = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  git('init', '-q');
+  git('add', OC_REL, ...more);
+  return git;
+};
+const noticeEntries = (dir) => {
+  const f = join(dir, server.NOTICES_REL);
+  return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : [];
+};
+
+test('overlay: a file that becomes tracked after Sterling wrote the overlay keeps its entries and ownership, and names them', () => {
+  const p = makeProject(ON, { agent: { plan: { model: 'anthropic/claude-opus-5-5' } } });
+  try {
+    overpass.convergeOverlay(p.dir, resOn());
+    const git = trackOc(p.dir);
+    const fileBefore = readFileSync(join(p.dir, OC_REL), 'utf8');
+    const ownBefore = readFileSync(join(p.dir, overpass.OVERLAY_REL), 'utf8');
+    const out = overpass.convergeOverlay(p.dir, resOff);
+    assert.equal(out.skippedTracked, true);
+    assert.deepEqual(out.stranded.map((e) => e.name).sort(), ['plan', 'sterling/conductor']);
+    const text = overpass.strandedNotice(out.stranded);
+    assert.match(text, /agent\.plan \(model "overpass\/agentic-high"; before Overpass: model "anthropic\/claude-opus-5-5"/);
+    assert.doesNotMatch(text, /untrack|git rm|failed/i);
+    assert.equal(readFileSync(join(p.dir, OC_REL), 'utf8'), fileBefore, 'the tracked file is not written');
+    assert.equal(readFileSync(join(p.dir, overpass.OVERLAY_REL), 'utf8'), ownBefore, 'ownership is kept for the restore');
+    git('rm', '-q', '--cached', OC_REL);
+    overpass.convergeOverlay(p.dir, resOff);
+    assert.equal(readOc(p.dir).agent.plan.model, 'anthropic/claude-opus-5-5', 'untracked again: the normal restore proceeds');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: off with a tracked opencode.json and nothing of Sterling in it is silent', () => {
+  const p = makeProject({ mode: 'work' }, { agent: {} });
+  try {
+    trackOc(p.dir);
+    assert.deepEqual(overpass.convergeOverlay(p.dir, resOff), { changed: false, notes: [] });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: a tracked file that already holds the tier models gets no ownership record and still reports the skip', () => {
+  const held = { agent: { plan: { model: 'overpass/agentic-high' }, 'sterling/conductor': { model: 'overpass/agentic-conductor' } } };
+  const p = makeProject(ON, held);
+  try {
+    trackOc(p.dir);
+    const out = overpass.convergeOverlay(p.dir, resOn());
+    assert.equal(out.skippedTracked, true);
+    assert.equal(existsSync(join(p.dir, overpass.OVERLAY_REL)), false, 'no ownership is created for a tracked file');
+    assert.deepEqual(readOc(p.dir), held);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: Overpass turned off after the file became tracked says what to restore, in the plugin', async () => {
+  const p = makeProject(ON, { agent: { plan: { model: 'anthropic/claude-opus-5-5' } } });
+  const s = await setup(p.dir);
+  try {
+    await s.prompt('ses_root');
+    assert.equal(readOc(p.dir).agent.plan.model, 'overpass/agentic-high');
+    trackOc(p.dir);
+    writeConfig(p.dir, { mode: 'work', overpass: { enabled: false } });
+    await s.prompt('ses_root');
+    assert.equal(readOc(p.dir).agent.plan.model, 'overpass/agentic-high', 'never written while tracked');
+    const said = notices(p.dir);
+    assert.match(said, /still holds models Sterling wrote: .*agent\.plan .*anthropic\/claude-opus-5-5/);
+    assert.doesNotMatch(said, /untrack|git rm|failed/i);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('overlay: a tracked config session is not told to switch the conductor or Plan model', async () => {
+  const p = makeProject(ON, { agent: {} });
+  trackOc(p.dir);
+  const s = await setup(p.dir);
+  try {
+    await s.step('ses_c', 'sterling/conductor', OPUS);
+    const text = await s.prompt('ses_c');
+    assert.doesNotMatch(text, /pick \S+ in \/models|STERLING OVERPASS: Overpass is ON/);
+    await s.step('ses_p', 'plan', OPUS);
+    assert.doesNotMatch(await s.prompt('ses_p'), /pick \S+ in \/models/);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('overlay: repeated prompts with a tracked config leave one keyed notice', async () => {
+  const p = makeProject(ON, { agent: {} });
+  trackOc(p.dir);
+  const s = await setup(p.dir);
+  try {
+    const shown = [];
+    for (let i = 0; i < 3; i++) shown.push(await s.prompt('ses_root'));
+    const entries = noticeEntries(p.dir).filter((n) => /tracked by git/.test(n.text));
+    assert.ok(entries.length > 0 && entries.every((n) => n.key === 'overpass-tracked-overlay'), 'every re-minted notice carries the key');
+    assert.equal(entries.filter((n) => !n.shown_at).length <= 1, true, 'at most one unshown copy waits');
+    const copies = shown.join('\n').match(/tracked by git/g) ?? [];
+    assert.equal(copies.length, 1, `the session is shown it once: ${JSON.stringify(shown)}`);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('overlay: with a tracked opencode.json the notice is informational and dispatches still route', async () => {
+  const p = makeProject(ON, { agent: {} });
+  const git = (...args) => spawnSync('git', args, { cwd: p.dir, encoding: 'utf8' });
+  git('init', '-q');
+  git('add', OC_REL);
+  const s = await setup(p.dir);
+  try {
+    await s.prompt('ses_root');
+    assert.deepEqual(readOc(p.dir), { agent: {} }, 'no file write');
+    const said = notices(p.dir);
+    assert.match(said, /conductor and Plan run on their own configured models/);
+    assert.match(said, /Subagent dispatches still route through Overpass/);
+    assert.doesNotMatch(said, /untrack|git rm|failed/i);
+    assert.equal((await s.dispatch({ model: 'anthropic/claude-opus-5-5' })).args.model, 'overpass/agentic-auto', 'dispatch model replacement still happens');
+  } finally {
+    await s.cleanup();
     p.cleanup();
   }
 });
