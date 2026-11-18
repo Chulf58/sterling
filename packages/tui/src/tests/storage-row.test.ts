@@ -20,6 +20,8 @@ const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over })
 function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
   return {
     agents: [],
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: { implementor: { model: 'claude-opus-5-5', effort: 'medium' } },
     catalog: { present: true, stale: false, staleDate: null, entries: [] },
     codexWired: true,

@@ -4380,23 +4380,23 @@ var require_core = __commonJS({
       return this;
     };
     Promise2.callback = function(fn) {
-      return new Promise2((resolve11, reject) => {
+      return new Promise2((resolve12, reject) => {
         fn((error, arg) => {
           if (error) {
             reject(error);
           } else {
-            resolve11(arg);
+            resolve12(arg);
           }
         });
       });
     };
     Promise2.callbackAll = function(fn) {
-      return new Promise2((resolve11, reject) => {
+      return new Promise2((resolve12, reject) => {
         fn((error, ...args) => {
           if (error) {
             reject(error);
           } else {
-            resolve11(args);
+            resolve12(args);
           }
         });
       });
@@ -4449,19 +4449,19 @@ var require_core = __commonJS({
       setTimeout(() => this.resolve(value), timeout);
     };
     Promise2.resolveTimeout = Promise2.fulfillTimeout = function(timeout, value) {
-      return new Promise2((resolve11) => setTimeout(() => resolve11(value), timeout));
+      return new Promise2((resolve12) => setTimeout(() => resolve12(value), timeout));
     };
     Promise2.prototype.rejectTimeout = function(timeout, error) {
       setTimeout(() => this.reject(error), timeout);
     };
     Promise2.rejectTimeout = function(timeout, error) {
-      return new Promise2((resolve11, reject) => setTimeout(() => reject(error), timeout));
+      return new Promise2((resolve12, reject) => setTimeout(() => reject(error), timeout));
     };
     Promise2.resolveNextTick = Promise2.fulfillNextTick = function(value) {
-      return new Promise2((resolve11) => nextTick(() => resolve11(value)));
+      return new Promise2((resolve12) => nextTick(() => resolve12(value)));
     };
     Promise2.rejectNextTick = function(error) {
-      return new Promise2((resolve11, reject) => nextTick(() => reject(error)));
+      return new Promise2((resolve12, reject) => nextTick(() => reject(error)));
     };
     Promise2.dormant = function(fn) {
       var promise = new Promise2();
@@ -4482,10 +4482,10 @@ var require_core = __commonJS({
       if (thenable instanceof Promise2) {
         return thenable;
       }
-      return new Promise2((resolve11, reject) => {
+      return new Promise2((resolve12, reject) => {
         thenable.then(
           (value) => {
-            resolve11(value);
+            resolve12(value);
           },
           (error) => {
             reject(error);
@@ -4580,10 +4580,10 @@ var require_core = __commonJS({
         window.requestAnimationFrame(() => this.reject(error));
       };
       Promise2.resolveAtAnimationFrame = function(value) {
-        return new Promise2((resolve11) => window.requestAnimationFrame(() => resolve11(value)));
+        return new Promise2((resolve12) => window.requestAnimationFrame(() => resolve12(value)));
       };
       Promise2.rejectAtAnimationFrame = function(error) {
-        return new Promise2((resolve11, reject) => window.requestAnimationFrame(() => reject(error)));
+        return new Promise2((resolve12, reject) => window.requestAnimationFrame(() => reject(error)));
       };
     }
   }
@@ -5039,11 +5039,11 @@ var require_wrapper = __commonJS({
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
-      return new Promise2((resolve11, reject) => {
+      return new Promise2((resolve12, reject) => {
         if (typeof asyncFnOrPromise === "function") {
           asyncFnOrPromise = asyncFnOrPromise();
         }
-        Promise2.resolve(asyncFnOrPromise).then(resolve11, reject);
+        Promise2.resolve(asyncFnOrPromise).then(resolve12, reject);
         setTimeout(() => reject(new Error("Timeout")), timeout);
       });
     };
@@ -5065,13 +5065,13 @@ var require_wrapper = __commonJS({
       return oneTry();
     };
     Promise2.onceEvent = (emitter, eventName) => {
-      return new Promise2((resolve11) => emitter.once(eventName, resolve11));
+      return new Promise2((resolve12) => emitter.once(eventName, resolve12));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve11) => emitter.once(eventName, (...args) => resolve11(args)));
+      return new Promise2((resolve12) => emitter.once(eventName, (...args) => resolve12(args)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
-      return new Promise2((resolve11, reject) => {
+      return new Promise2((resolve12, reject) => {
         var altRejects;
         var resolve_ = (...args) => {
           emitter.removeListener("error", reject_);
@@ -5080,7 +5080,7 @@ var require_wrapper = __commonJS({
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve11(_internalAllArgs ? args : args[0]);
+          resolve12(_internalAllArgs ? args : args[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5128,7 +5128,7 @@ var require_decorators = __commonJS({
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args) => {
-          return new Promise2((resolve11, reject) => {
+          return new Promise2((resolve12, reject) => {
             nodeAsyncFn.call(thisBinding, ...args, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
@@ -5136,14 +5136,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve11(cbArgs);
+                resolve12(cbArgs);
               }
             });
           });
         };
       }
       return function(...args) {
-        return new Promise2((resolve11, reject) => {
+        return new Promise2((resolve12, reject) => {
           nodeAsyncFn.call(this, ...args, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
@@ -5151,7 +5151,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve11(cbArgs);
+              resolve12(cbArgs);
             }
           });
         });
@@ -5160,7 +5160,7 @@ var require_decorators = __commonJS({
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args) => {
-          return new Promise2((resolve11, reject) => {
+          return new Promise2((resolve12, reject) => {
             nodeAsyncFn.call(thisBinding, ...args, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
@@ -5168,14 +5168,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve11(cbArg);
+                resolve12(cbArg);
               }
             });
           });
         };
       }
       return function(...args) {
-        return new Promise2((resolve11, reject) => {
+        return new Promise2((resolve12, reject) => {
           nodeAsyncFn.call(this, ...args, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
@@ -5183,7 +5183,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve11(cbArg);
+              resolve12(cbArg);
             }
           });
         });
@@ -5876,9 +5876,9 @@ var require_misc3 = __commonJS({
           listener(exitCode, timeout);
           return Promise2.dummy;
         }
-        return new Promise2((resolve11) => {
+        return new Promise2((resolve12) => {
           listener(exitCode, timeout, () => {
-            resolve11();
+            resolve12();
           });
         });
       };
@@ -5886,11 +5886,11 @@ var require_misc3 = __commonJS({
       setTimeout(() => process.exit(exitCode), timeout);
     };
     Promise2.resolveSafeTimeout = function(timeout, value) {
-      return new Promise2((resolve11) => {
+      return new Promise2((resolve12) => {
         setTimeout(() => {
           setTimeout(() => {
             setTimeout(() => {
-              setTimeout(() => resolve11(value), 0);
+              setTimeout(() => resolve12(value), 0);
             }, timeout / 2);
           }, timeout / 2);
         }, 0);
@@ -6065,7 +6065,7 @@ var require_detectTerminal = __commonJS({
     };
     function getParentProcess(pid) {
       var parentPid, appName;
-      return new Promise2((resolve11, reject) => {
+      return new Promise2((resolve12, reject) => {
         exec("ps -h -o ppid -p " + pid, (error, stdout) => {
           if (error) {
             reject(error);
@@ -6082,7 +6082,7 @@ var require_detectTerminal = __commonJS({
               return;
             }
             appName = stdout_.trim();
-            resolve11({ pid: parentPid, appName });
+            resolve12({ pid: parentPid, appName });
           });
         });
       });
@@ -6900,7 +6900,7 @@ var require_dotPath = __commonJS({
       throw new TypeError("[tree.dotPath]: the path argument should be a string or an array");
     }
     dotPath.toPathArray = toPathArray;
-    function walk(object, pathArray, maxOffset = 0) {
+    function walk2(object, pathArray, maxOffset = 0) {
       var index, indexMax, key, pointer = object;
       for (index = 0, indexMax = pathArray.length + maxOffset; index < indexMax; index++) {
         key = pathArray[index];
@@ -6929,7 +6929,7 @@ var require_dotPath = __commonJS({
       }
       return pointer;
     }
-    dotPath.get = (object, path) => walk(object, toPathArray(path));
+    dotPath.get = (object, path) => walk2(object, toPathArray(path));
     dotPath.set = (object, path, value) => {
       if (!object || typeof object !== "object") {
         return;
@@ -7025,7 +7025,7 @@ var require_dotPath = __commonJS({
       if (typeof key === "object" || key === "__proto__") {
         throw new Error(PROTO_POLLUTION_MESSAGE);
       }
-      var pointer = walk(object, pathArray, -1);
+      var pointer = walk2(object, pathArray, -1);
       if (!pointer || typeof pointer !== "object" || !Object.hasOwn(pointer, key)) {
         return false;
       }
@@ -8013,7 +8013,7 @@ var require_xterm2 = __commonJS({
       }
     };
     var handler = {};
-    handler.mouseX11Protocol = function(basename6, buffer) {
+    handler.mouseX11Protocol = function(basename8, buffer) {
       var code = buffer[0];
       var result = {
         data: {
@@ -8024,25 +8024,25 @@ var require_xterm2 = __commonJS({
       };
       if (code & 32) {
         if (code & 64) {
-          result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+          result.name = basename8 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
         } else {
           switch (code & 3) {
             case 0:
-              result.name = basename6 + "_LEFT_BUTTON_PRESSED";
+              result.name = basename8 + "_LEFT_BUTTON_PRESSED";
               break;
             case 1:
-              result.name = basename6 + "_MIDDLE_BUTTON_PRESSED";
+              result.name = basename8 + "_MIDDLE_BUTTON_PRESSED";
               break;
             case 2:
-              result.name = basename6 + "_RIGHT_BUTTON_PRESSED";
+              result.name = basename8 + "_RIGHT_BUTTON_PRESSED";
               break;
             case 3:
-              result.name = basename6 + "_BUTTON_RELEASED";
+              result.name = basename8 + "_BUTTON_RELEASED";
               break;
           }
         }
       } else if (code & 64) {
-        result.name = basename6 + "_MOTION";
+        result.name = basename8 + "_MOTION";
       }
       result.eaten = 3;
       result.data.code = code;
@@ -8050,7 +8050,7 @@ var require_xterm2 = __commonJS({
       result.data.y = buffer[2] - 32;
       return result;
     };
-    handler.mouseSGRProtocol = function(basename6, buffer) {
+    handler.mouseSGRProtocol = function(basename8, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^(-?[0-9]*);?([0-9]*);?([0-9]*)(M|m)/);
       if (!matches || matches[3].length === 0) {
@@ -8076,7 +8076,7 @@ var require_xterm2 = __commonJS({
       if (code & 32) {
         switch (code & 3) {
           case 0:
-            result.name = basename6 + "_DRAG";
+            result.name = basename8 + "_DRAG";
             result.data.left = true;
             result.data.right = false;
             result.data.xFrom = this.state.button.left.x;
@@ -8085,7 +8085,7 @@ var require_xterm2 = __commonJS({
           // Doesn't seem to exist, middle drag does not discriminate from motion
           //case 1 :
           case 2:
-            result.name = basename6 + "_DRAG";
+            result.name = basename8 + "_DRAG";
             result.data.left = false;
             result.data.right = true;
             result.data.xFrom = this.state.button.right.x;
@@ -8093,27 +8093,27 @@ var require_xterm2 = __commonJS({
             break;
           case 3:
           default:
-            result.name = basename6 + "_MOTION";
+            result.name = basename8 + "_MOTION";
             break;
         }
       } else if (code & 64) {
-        result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename8 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename6 + "_LEFT_BUTTON";
+            result.name = basename8 + "_LEFT_BUTTON";
             this.state.button.left = pressed ? result.data : null;
             break;
           case 1:
-            result.name = basename6 + "_MIDDLE_BUTTON";
+            result.name = basename8 + "_MIDDLE_BUTTON";
             this.state.button.middle = pressed ? result.data : null;
             break;
           case 2:
-            result.name = basename6 + "_RIGHT_BUTTON";
+            result.name = basename8 + "_RIGHT_BUTTON";
             this.state.button.right = pressed ? result.data : null;
             break;
           case 3:
-            result.name = basename6 + "_OTHER_BUTTON";
+            result.name = basename8 + "_OTHER_BUTTON";
             this.state.button.other = pressed ? result.data : null;
             break;
         }
@@ -8122,7 +8122,7 @@ var require_xterm2 = __commonJS({
       result.data.code = code;
       return result;
     };
-    handler.cursorLocation = function(basename6, paramString) {
+    handler.cursorLocation = function(basename8, paramString) {
       var params = paramString.split(";");
       return {
         name: "CURSOR_LOCATION",
@@ -8132,7 +8132,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.colorRegister = function(basename6, paramString) {
+    handler.colorRegister = function(basename8, paramString) {
       var matches = paramString.match(/^([0-9]*);rgb:([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8147,7 +8147,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.screenSize = function(basename6, paramString) {
+    handler.screenSize = function(basename8, paramString) {
       var params = paramString.split(";"), width = parseInt(params[1], 10), height = parseInt(params[0], 10), resized = this.root.width !== width || this.root.height !== height;
       this.root.width = width;
       this.root.height = height;
@@ -8160,7 +8160,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.clipboard = function(basename6, paramString) {
+    handler.clipboard = function(basename8, paramString) {
       var matches = paramString.match(/^([cps][0-7]*);(.*)/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8173,14 +8173,14 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.xtgettcap = function(basename6, paramString) {
-      console.log("handler.xtgettcap: ", basename6, paramString);
+    handler.xtgettcap = function(basename8, paramString) {
+      console.log("handler.xtgettcap: ", basename8, paramString);
       var matches = paramString.match(/^([0-9a-fA-F]*)=([0-9a-fA-F]*)/);
       if (!matches) {
         return {
           name: "TERMINFO",
           data: {
-            valid: basename6 !== "XTGETTCAP_INVALID",
+            valid: basename8 !== "XTGETTCAP_INVALID",
             key: Buffer.from(paramString, "hex").toString(),
             error: "Not found"
           }
@@ -8189,14 +8189,14 @@ var require_xterm2 = __commonJS({
       return {
         name: "TERMINFO",
         data: {
-          valid: basename6 !== "XTGETTCAP_INVALID",
+          valid: basename8 !== "XTGETTCAP_INVALID",
           key: Buffer.from(matches[1], "hex").toString(),
           value: Buffer.from(matches[2], "hex").toString()
         }
       };
     };
-    handler.terminalUnitId = function(basename6, paramString) {
-      console.log("handler.terminalUnitId: ", basename6, paramString);
+    handler.terminalUnitId = function(basename8, paramString) {
+      console.log("handler.terminalUnitId: ", basename8, paramString);
       return {
         name: "TERMINAL_UNIT_ID",
         data: {
@@ -8868,7 +8868,7 @@ var require_konsole2 = __commonJS({
     });
     var keymap = Object.create(xterm.keymap);
     var handler = Object.create(xterm.handler);
-    handler.mouseSGRProtocol = function mouseSGRProtocol(basename6, buffer) {
+    handler.mouseSGRProtocol = function mouseSGRProtocol(basename8, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^([0-9]*);([0-9]*);([0-9]*)(.)/);
       code = parseInt(matches[1], 10);
@@ -8884,34 +8884,34 @@ var require_konsole2 = __commonJS({
       result.data.y = parseInt(matches[3], 10);
       result.eaten = matches[0].length;
       if (code & 32) {
-        result.name = basename6 + "_MOTION";
+        result.name = basename8 + "_MOTION";
       } else if (code & 64) {
-        result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename8 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename6 + "_LEFT_BUTTON";
+            result.name = basename8 + "_LEFT_BUTTON";
             if (this.state.button.left === pressed) {
               result.disable = true;
             }
             this.state.button.left = pressed;
             break;
           case 1:
-            result.name = basename6 + "_MIDDLE_BUTTON";
+            result.name = basename8 + "_MIDDLE_BUTTON";
             if (this.state.button.middle === pressed) {
               result.disable = true;
             }
             this.state.button.middle = pressed;
             break;
           case 2:
-            result.name = basename6 + "_RIGHT_BUTTON";
+            result.name = basename8 + "_RIGHT_BUTTON";
             if (this.state.button.right === pressed) {
               result.disable = true;
             }
             this.state.button.right = pressed;
             break;
           case 3:
-            result.name = basename6 + "_OTHER_BUTTON";
+            result.name = basename8 + "_OTHER_BUTTON";
             if (this.state.button.other === pressed) {
               result.disable = true;
             }
@@ -9601,13 +9601,13 @@ var require_NextGenEvents = __commonJS({
       return this.addListener(eventName, fn, options);
     };
     NextGenEvents.prototype.waitFor = function(eventName) {
-      return new Promise((resolve11) => {
-        this.addListener(eventName, (firstArg) => resolve11(firstArg), { once: true });
+      return new Promise((resolve12) => {
+        this.addListener(eventName, (firstArg) => resolve12(firstArg), { once: true });
       });
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
-      return new Promise((resolve11) => {
-        this.addListener(eventName, (...args) => resolve11(args), { once: true });
+      return new Promise((resolve12) => {
+        this.addListener(eventName, (...args) => resolve12(args), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9751,8 +9751,8 @@ var require_NextGenEvents = __commonJS({
       return NextGenEvents.emitEvent(event2);
     };
     NextGenEvents.prototype.waitForEmit = function(...args) {
-      return new Promise((resolve11) => {
-        this.emit(...args, (interrupt) => resolve11(interrupt));
+      return new Promise((resolve12) => {
+        this.emit(...args, (interrupt) => resolve12(interrupt));
       });
     };
     NextGenEvents.createEvent = function(emitter, ...args) {
@@ -10119,13 +10119,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForFirst = function(emitters, eventName) {
-      return new Promise((resolve11) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve11(firstArg));
+      return new Promise((resolve12) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve12(firstArg));
       });
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
-      return new Promise((resolve11) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args) => resolve11(args));
+      return new Promise((resolve12) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args) => resolve12(args));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10155,13 +10155,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForLast = function(emitters, eventName) {
-      return new Promise((resolve11) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve11(firstArg));
+      return new Promise((resolve12) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve12(firstArg));
       });
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
-      return new Promise((resolve11) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args) => resolve11(args));
+      return new Promise((resolve12) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args) => resolve12(args));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10210,8 +10210,8 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForEmit = function(emitters, ...args) {
-      return new Promise((resolve11) => {
-        NextGenEvents.groupEmit(emitters, ...args, (interrupt) => resolve11(interrupt));
+      return new Promise((resolve12) => {
+        NextGenEvents.groupEmit(emitters, ...args, (interrupt) => resolve12(interrupt));
       });
     };
     NextGenEvents.groupDefineStates = function(emitters, ...args) {
@@ -18780,10 +18780,10 @@ var require_packer_sync = __commonJS({
 var require_png_sync = __commonJS({
   "node_modules/pngjs/lib/png-sync.js"(exports) {
     "use strict";
-    var parse = require_parser_sync();
+    var parse2 = require_parser_sync();
     var pack = require_packer_sync();
     exports.read = function(buffer, options) {
-      return parse(buffer, options || {});
+      return parse2(buffer, options || {});
     };
     exports.write = function(png, options) {
       return pack(png, options);
@@ -20523,7 +20523,7 @@ var require_decoder = __commonJS({
           }).bind(this);
           xhr.send(null);
         },
-        parse: function parse(data) {
+        parse: function parse2(data) {
           var maxResolutionInPixels = this.opts.maxResolutionInMP * 1e3 * 1e3;
           var offset = 0, length = data.length;
           function readUint16() {
@@ -39067,15 +39067,16 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { appendFileSync, mkdirSync as mkdirSync12 } from "node:fs";
-import { dirname as dirname13, join as join25 } from "node:path";
+import { appendFileSync, mkdirSync as mkdirSync13 } from "node:fs";
+import { dirname as dirname14, join as join28 } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync17, writeFileSync as writeFileSync8, existsSync as existsSync13 } from "node:fs";
-import { basename as basename5, dirname as dirname10, join as join22 } from "node:path";
+import { readFileSync as readFileSync19, writeFileSync as writeFileSync9, existsSync as existsSync16, readdirSync as readdirSync7 } from "node:fs";
+import { basename as basename7, dirname as dirname11, join as join25 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
+import { homedir as homedir9 } from "node:os";
 
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
@@ -43125,15 +43126,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd3 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd3)) {
+  const fwd4 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd4)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd3.startsWith("/")) {
+  if (fwd4.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd3.split("/")) {
+  for (const seg of fwd4.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -44276,11 +44277,36 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var AGY_MODEL_IDS = [
+  "claude-opus-5-5-low",
+  "claude-opus-5-5-medium",
+  "claude-opus-5-5-high",
+  "claude-sonnet-5-5-low",
+  "claude-sonnet-5-5-medium",
+  "claude-sonnet-5-5-high",
+  "gemini-3.8-flash-low",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-high",
+  "gemini-4-argon-low",
+  "gemini-4-argon-medium",
+  "gemini-4-argon-high",
+  "gemini-4-carbon-low",
+  "gemini-4-carbon-medium",
+  "gemini-4-carbon-high",
+  "gemini-4-hydrogen-low",
+  "gemini-4-hydrogen-medium",
+  "gemini-4-hydrogen-high",
+  "gemini-4-hydrogen-xhigh",
+  "gemini-pro-orchestrator",
+  "gemini-pro-orchestrator-argon",
+  "gpt-oss-120b-medium"
+];
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
   hard_task: modelPin.optional(),
-  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
+  agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -48253,11 +48279,11 @@ var DEBT_OWNER_HOP_CAP = 32;
 function resolveDebtOwner(link, get, aliases) {
   if (!link)
     return void 0;
-  let canonical = link;
+  let canonical2 = link;
   for (const a of aliases)
     if (a.historical_id === link)
-      canonical = a.canonical_id;
-  let record = get(canonical);
+      canonical2 = a.canonical_id;
+  let record = get(canonical2);
   const seen = /* @__PURE__ */ new Set();
   while (record && record.status === "superseded") {
     if (seen.size >= DEBT_OWNER_HOP_CAP || seen.has(record.id) || !record.superseded_by)
@@ -51645,7 +51671,7 @@ var SterlingStore = class _SterlingStore {
       old.close();
     } catch {
     }
-    const refusal3 = () => new Error("SterlingStore: this connection was retired after a failed ROLLBACK left its transaction state unknown, so it refuses every read and write; reopen the store. Nothing was read or written.", { cause: rollbackError });
+    const refusal4 = () => new Error("SterlingStore: this connection was retired after a failed ROLLBACK left its transaction state unknown, so it refuses every read and write; reopen the store. Nothing was read or written.", { cause: rollbackError });
     this.db = new Proxy(old, {
       get(target, prop) {
         if (prop === "close")
@@ -51654,7 +51680,7 @@ var SterlingStore = class _SterlingStore {
         if (typeof value !== "function")
           return value;
         return () => {
-          throw refusal3();
+          throw refusal4();
         };
       }
     });
@@ -52605,14 +52631,21 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
-function modelOptions(entries, config) {
+function modelOptions(entries, config, agy = false) {
   const opts = entries.map((entry) => ({ kind: "entry", entry }));
   if (config?.opencode_model)
     opts.push({ kind: "clear" });
+  if (agy || config?.agy_model)
+    for (const id of AGY_MODEL_IDS)
+      opts.push({ kind: "agy", id });
+  if (config?.agy_model)
+    opts.push({ kind: "agy_clear" });
   return opts;
 }
 function systemKeys(snap) {
-  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k)), MAINTENANCE_WORKER_ROLE];
+  const installed = /* @__PURE__ */ new Set([...snap.agents.map((a) => a.name), ...snap.hostInstalled ?? []]);
+  const isInstalled = (k) => [...installed].some((n) => AGENT_MODEL_KEY[n] === k);
+  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), MAINTENANCE_WORKER_ROLE];
 }
 function workerModelOptions(entries, current) {
   const opts = entries.map((e) => ({ kind: "entry", ref: `${e.vendor ?? "anthropic"}/${e.id}`, label: e.label }));
@@ -52840,6 +52873,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     if (!agentNames.every((name) => name === key))
       for (const name of agentNames)
         lines.push({ text: clip2(`    ${name}`), kind: "body" });
+    if (config.agy_model)
+      lines.push({ text: clip2(`    Antigravity: ${config.agy_model}`), kind: "body" });
     if (config.opencode_model) {
       lines.push(overpassEffective ? { text: clip2(`    saved OpenCode: ${config.opencode_model}`), kind: "meta" } : { text: clip2(`    OpenCode: ${config.opencode_model}`), kind: "body" });
     }
@@ -52847,9 +52882,9 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
       if (selector.stage === "tier" || selector.stage === "role_effort") {
         lines.push(...overpassPickerLines(key));
       } else if (selector.stage === "model") {
-        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
+        modelOptions(snap.catalog.entries, config, snap.agy).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : o.kind === "agy_clear" ? "Antigravity: inherit" : o.kind === "agy" ? `${o.id} (Antigravity only)` : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
           lines.push({ text: clip2(`  ${m}${text}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
@@ -52871,7 +52906,17 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
   const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows };
+  const customRows = selector ? [] : customAgentRows(snap, width);
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows, customRows };
+}
+function customAgentRows(snap, width) {
+  return (snap.customAgents ?? []).map((a, i) => ({
+    id: `sys:custom:${a.source}:${i}`,
+    key: `custom:${a.source}:${a.name}`,
+    drift: false,
+    agents: [a.name],
+    lines: [{ text: clipEllipsis(`  ${a.name} (${a.source}): ${a.error !== void 0 ? `\u26A0 ${a.error}` : a.model ?? "inherit/default"}  read-only`, width), kind: "meta" }]
+  }));
 }
 function catalogBanner(catalog, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -53218,7 +53263,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows, ...view.customRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -53498,7 +53543,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
-  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
+  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key], roster.agy).length : effortOptions(sel.key).length;
   const revealPicker = (next) => {
     const sel = next.selector;
     if (!sel || !roster || !Number.isFinite(maxBodyLines))
@@ -53530,7 +53575,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
   };
   const clickSystem = (state, index, line1) => {
     const row = state.rows[index];
-    if (row.type !== "system" || row.id === "sys:storage" || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
+    if (row.type !== "system" || row.id === "sys:storage" || row.id.startsWith("sys:custom:") || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
       return { ui, effects };
     const enter = { kind: "key", name: "ENTER" };
     const sel = ui.selector;
@@ -53778,7 +53823,16 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
             }
             if (sel.stage === "model") {
               const keyConfig = roster.configModels[sel.key];
-              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              const option = modelOptions(roster.catalog.entries, keyConfig, roster.agy)[sel.highlight];
+              if (option?.kind === "agy" || option?.kind === "agy_clear") {
+                if (!keyConfig)
+                  return { ui: { ...ui, selector: void 0, notice: `Antigravity model refused: '${sel.key}' has no config entry` }, effects };
+                if (!roster.agents.some((a) => AGENT_MODEL_KEY[a.name] === sel.key)) {
+                  return { ui: { ...ui, selector: void 0, notice: `Antigravity model refused: '${sel.key}' has no agent, so an Antigravity model would govern nothing` }, effects };
+                }
+                effects.push({ type: "agy_model", key: sel.key, from: keyConfig.agy_model, to: option.kind === "agy" ? option.id : void 0, model: keyConfig.model, effort: keyConfig.effort });
+                return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+              }
               if (option && keyConfig && (option.kind === "clear" || isOpenCodeOnlyEntry(option.entry))) {
                 const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
                 const to = option.kind === "clear" ? void 0 : `${option.entry.vendor}/${option.entry.id}`;
@@ -54471,8 +54525,25 @@ function renderPortableText(text, label) {
 function renderOpenCodeFullText(text, label) {
   return render(text, label, ["sterling-only", "opencode-only"]);
 }
+function renderAgyText(text, label) {
+  return render(text, label, ["sterling-only", "agy-only"]);
+}
 
 // scripts/lib/agent-distribution.mjs
+var DEAD_TERM_PATTERNS = [
+  { term: "Forge", re: /\bforge\b/i },
+  { term: "Quatermain/Quartermain(e)", re: /qua(?:rt?|t)ermaine?/i },
+  { term: "wave", re: /\bwaves?\b/i },
+  { term: "brainstormer", re: /brainstormers?/i }
+];
+function findDeadTerms(text) {
+  const hits = [];
+  for (const { term: term2, re } of DEAD_TERM_PATTERNS) {
+    const m = text.match(re);
+    if (m) hits.push({ term: term2, match: m[0] });
+  }
+  return hits;
+}
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
   return createHash2("sha256").update(normalize(text), "utf8").digest("hex");
@@ -54898,8 +54969,8 @@ function readStoreWriteToolNames(pluginRoot) {
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync15, readdirSync as readdirSync5, realpathSync as realpathSync6, rmSync as rmSync4, statSync as statSync6, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { basename as basename4, dirname as dirname9, isAbsolute, join as join20, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync13, mkdirSync as mkdirSync8, readFileSync as readFileSync15, readdirSync as readdirSync5, realpathSync as realpathSync6, rmSync as rmSync4, statSync as statSync6, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { basename as basename4, dirname as dirname9, isAbsolute, join as join21, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/js-yaml/dist/js-yaml.mjs
@@ -55969,6 +56040,11 @@ var CHOMPING_CLIP = CHOMPING_MODE.CLIP;
 var CHOMPING_STRIP = CHOMPING_MODE.STRIP;
 var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
 
+// scripts/lib/installed-copy.mjs
+import { existsSync as existsSync10 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { join as join18 } from "node:path";
+
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync9, readFileSync as readFileSync13, readdirSync as readdirSync4, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
@@ -56241,22 +56317,49 @@ return { openCodeCacheKey, openCodeLoadedSterling };`
 )(createHash3, existsSync9, readFileSync13, readdirSync4, join17, homedir6);
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
+function canonical(p) {
+  try {
+    return realpathSync4(p);
+  } catch (err) {
+    if (err?.code === "ENOENT") return resolve7(p);
+    throw err;
+  }
+}
+function installHostOf(root, { env = process.env, home = homedir6() } = {}) {
+  const real = canonical(root);
+  for (const { host: host2, dir } of installRoots(env, home)) {
+    if (real.startsWith(canonical(dir) + sep2)) return host2;
+  }
+  return null;
+}
+
+// scripts/lib/installed-copy.mjs
+function isInstalledCopy(root, { env = process.env, home = homedir7() } = {}) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
+  }
+  if (!existsSync10(join18(root, ".git"))) return true;
+  return installHostOf(root, { env, home }) !== null;
+}
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync11, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
-import { basename as basename3, dirname as dirname8, join as join19, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync12, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
+import { basename as basename3, dirname as dirname8, join as join20, resolve as resolve8 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync10, readFileSync as readFileSync14 } from "node:fs";
-import { join as join18 } from "node:path";
-var CONFIG_REL3 = join18(".sterling", "config.json");
-var STORE_DB_REL = join18(".sterling", "sterling.db");
+import { existsSync as existsSync11, readFileSync as readFileSync14 } from "node:fs";
+import { join as join19 } from "node:path";
+var CONFIG_REL3 = join19(".sterling", "config.json");
+var STORE_DB_REL = join19(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync11(join19(dir, CONFIG_REL3)) || existsSync11(join19(dir, STORE_DB_REL)));
+}
 function storeBackend(root) {
-  const dbExists = () => existsSync10(join18(root, STORE_DB_REL));
+  const dbExists = () => existsSync11(join19(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync14(join18(root, CONFIG_REL3), "utf8");
+    text = readFileSync14(join19(root, CONFIG_REL3), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -56272,7 +56375,7 @@ function storeBackend(root) {
 
 // scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git2 = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const git3 = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
       return realpathSync5(p);
@@ -56280,7 +56383,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
       return null;
     }
   };
-  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
@@ -56288,7 +56391,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   const commonReal = real(resolve8(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
   const settings = {};
   if (!core.error && core.status === 0) {
     for (const line of core.stdout.split("\n")) {
@@ -56302,6 +56405,40 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   else if (basename3(commonReal) === ".git") mainRoot = dirname8(commonReal);
   if (!mainRoot || mainRoot === worktree) return null;
   return { worktree, mainRoot };
+}
+function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
+  if (!linkedWorktree) return target;
+  const configRel = join20(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync12(join20(linkedWorktree.mainRoot, configRel)) && existsSync12(join20(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync5(join20(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve8(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync5(p);
+  } catch {
+    return p;
+  }
 }
 
 // scripts/lib/opencode-agents.mjs
@@ -56434,7 +56571,7 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname9(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname9(dir)) {
-    if (existsSync12(join20(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync13(join21(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname9(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -56517,19 +56654,19 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join20(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join21(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join20(projectDir, rel);
-    const templateContent = readFileSync15(join20(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join21(projectDir, rel);
+    const templateContent = readFileSync15(join21(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync12(path) ? readFileSync15(path, "utf8") : null;
+    const raw = existsSync13(path) ? readFileSync15(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -56565,7 +56702,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync12(join20(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync13(join21(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -56573,7 +56710,7 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeMod
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync12(join20(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync13(join21(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -56610,20 +56747,415 @@ function restoreFullAgentFiles(writes, fs = {}) {
   if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
 }
 
+// packages/tui/dist/custom-agents.js
+import { existsSync as existsSync15, readdirSync as readdirSync6, readFileSync as readFileSync17 } from "node:fs";
+import { basename as basename6, join as join23 } from "node:path";
+
+// scripts/lib/agy-setup.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { createHash as createHash4 } from "node:crypto";
+import { existsSync as existsSync14, lstatSync as lstatSync7, mkdirSync as mkdirSync9, readFileSync as readFileSync16, readlinkSync, statSync as statSync7, symlinkSync, unlinkSync as unlinkSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { basename as basename5, dirname as dirname10, isAbsolute as isAbsolute2, join as join22, resolve as resolve10 } from "node:path";
+var AGY_AGENTS_DIR = ".agents/agents";
+var GEMINI_MD = "GEMINI.md";
+var AGY_CONDUCTOR = "conductor";
+var GEMINI_MD_MAX_BYTES = 24e3;
+var AGY_MCP_SERVER_NAME = "sterling";
+var AGY_MCP_READ_ONLY_SERVER_NAME = "sterling-ro";
+var AGY_READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
+var EXCLUDE_BEGIN = "# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)";
+var EXCLUDE_END = "# <<< sterling agy";
+var HEADER_RE2 = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
+var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
+var SHELL = ["run_command", "command_status"];
+var EDIT = ["write_file", "edit_file", "multi_replace_file_content"];
+var WEB = ["search_web", "read_url_content"];
+var DISPATCH = ["invoke_subagent", "send_message"];
+var AGY_TOOLS = {
+  conductor: [...READ, ...SHELL, ...EDIT, ...WEB, ...DISPATCH, "ask_question"],
+  implementor: [...READ, ...SHELL, ...EDIT, ...WEB],
+  "implementor-hard": [...READ, ...SHELL, ...EDIT, ...WEB],
+  researcher: [...READ, ...SHELL, ...WEB],
+  scout: [...READ],
+  reviewer: [...READ, ...SHELL],
+  sparring: [...READ, ...SHELL],
+  librarian: ["read_file", "grep_search"],
+  preflight: [...READ]
+};
+var AGY_ROSTER = Object.keys(AGY_TOOLS);
+var CONDUCTOR_DESCRIPTION = "Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Started with `agy --agent conductor` from .agents/agents/conductor/agent.md (written by /sterling:init and sync-agents); never invoked as a subagent.";
+var fwd3 = (p) => p.replace(/\\/g, "/");
+var normalize4 = (s2) => s2.replace(/\r\n/g, "\n");
+var sha2562 = (text) => createHash4("sha256").update(text).digest("hex");
+function agyPluginCopy({ env = process.env, home = homedir8() } = {}) {
+  return join22(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
+}
+function probeAgy({ env = process.env, home = homedir8() } = {}) {
+  const forced = env.STERLING_AGY_PROBE;
+  if (forced === "ok") return { installed: true, version: "forced" };
+  if (forced === "absent") return { installed: false, reason: "STERLING_AGY_PROBE=absent" };
+  if (forced) throw new Error(`STERLING_AGY_PROBE must be 'ok' or 'absent' (got '${forced}')`);
+  let r = spawnSync4("agy", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const homeBin = join22(home, ".local", "bin", "agy");
+  if (r.error?.code === "ENOENT" && existsSync14(homeBin)) r = spawnSync4(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `agy` on PATH or in ~/.local/bin" : `agy --version could not run (${r.error.message})` };
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
+  if (r.status !== 0 || !m) return { installed: false, reason: `agy --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
+  return { installed: true, version: m[0] };
+}
+function agyMcpRoot({ pluginRoot, env = process.env, home = homedir8(), installed }) {
+  const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
+  if (!isInstalled) return { root: resolve10(pluginRoot), why: "the Sterling clone running this" };
+  const agyCopy = agyPluginCopy({ env, home });
+  if (existsSync14(join22(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
+  return { root: resolve10(pluginRoot), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd3(agyCopy)})` };
+}
+var MCP_PROBE_TIMEOUT_MS = 1e4;
+function probeMcpServer({ root, env = process.env, timeoutMs: timeoutMs2 = MCP_PROBE_TIMEOUT_MS }) {
+  const server = join22(root, "mcp", "sterling-mcp.mjs");
+  const r = spawnSync4(process.execPath, [server, "--capabilities"], { encoding: "utf8", env, timeout: timeoutMs2, killSignal: "SIGKILL" });
+  if (r.error?.code === "ETIMEDOUT") return { readOnly: false, reason: `${fwd3(server)} --capabilities did not answer within ${timeoutMs2} ms and was killed` };
+  if (r.error) return { readOnly: false, reason: `${fwd3(server)} --capabilities could not run (${r.error.message})` };
+  if (r.status !== 0) return { readOnly: false, reason: `${fwd3(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
+  let caps = null;
+  try {
+    caps = JSON.parse(r.stdout.trim().split("\n").pop() ?? "");
+  } catch {
+    caps = null;
+  }
+  if (caps?.sterling_mcp?.read_only !== true) return { readOnly: false, reason: `${fwd3(server)} --capabilities does not report read_only: ${r.stdout.trim().slice(0, 200) || "(no output)"}` };
+  return { readOnly: true };
+}
+var yamlString = (s2) => JSON.stringify(s2);
+function templateDescription(frontmatter, label) {
+  const line = frontmatter.match(/^description:\s*(.+)$/m)?.[1];
+  if (!line) throw new Error(`agy agent ${label}: no description in the template frontmatter (P5)`);
+  return /^(["']).*\1$/.test(line) ? line.slice(1, -1) : line;
+}
+function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath, agyModel }) {
+  const tools = AGY_TOOLS[name];
+  if (!tools) throw new Error(`agy agent ${label}: '${name}' is not in the agy roster (P5)`);
+  const rendered = normalize4(renderAgyText(templateContent, label));
+  const m = rendered.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error(`agy agent ${label}: missing frontmatter block (P5)`);
+  const [, frontmatter, body] = m;
+  const leftover = body.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
+  const conductor = name === AGY_CONDUCTOR;
+  const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const readOnly = AGY_READ_ONLY_ROLES.has(name);
+  const fm = [
+    "---",
+    `name: ${name}`,
+    `description: ${yamlString(description)}`,
+    `model: ${agyModel ?? "inherit"}`,
+    `mainAgent: ${conductor}`,
+    `subagent: ${!conductor}`,
+    "tools:",
+    ...tools.map((t) => `  - ${t}`),
+    "# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.",
+    ...readOnly ? ["# A read-only role declares sterling-ro, the Sterling server started with --read-only, which refuses every store-write tool."] : [],
+    "mcpServers:",
+    `  - name: ${readOnly ? AGY_MCP_READ_ONLY_SERVER_NAME : AGY_MCP_SERVER_NAME}`,
+    `    command: ${yamlString(fwd3(nodePath))}`,
+    "    args:",
+    `      - ${yamlString(fwd3(join22(root, "mcp", "sterling-mcp.mjs")))}`,
+    `      - ${yamlString("--project")}`,
+    `      - ${yamlString(".")}`,
+    ...readOnly ? [`      - ${yamlString("--read-only")}`] : [],
+    "---"
+  ].join("\n");
+  const content = `${fm}
+${body}`;
+  const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha2562(templateContent)} content_hash=${sha2562(content)} -->`;
+  return `${fm}
+${header}
+${body}`;
+}
+function unstamped(disk, headerLine) {
+  return disk.replace(`${headerLine}
+`, "");
+}
+function refusal2(item, what, remedy) {
+  return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
+}
+function git2(projectDir, args) {
+  return spawnSync4("git", args, { cwd: projectDir, encoding: "utf8" });
+}
+function insideGitCheckout(dir) {
+  for (let d = resolve10(dir); ; d = dirname10(d)) {
+    if (existsSync14(join22(d, ".git"))) return true;
+    if (dirname10(d) === d) return false;
+  }
+}
+function trackedFiles(projectDir, paths, runGit = git2) {
+  const ls = runGit(projectDir, ["ls-files", "--", ...paths]);
+  if (!ls.error && ls.status === 0) return { tracked: ls.stdout.split("\n").filter(Boolean) };
+  if (!insideGitCheckout(projectDir)) return { tracked: [] };
+  const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || "").trim().split("\n")[0] || "no message"}`;
+  return { failed: why };
+}
+function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath = process.execPath, agyModels = {} }) {
+  const rows = [];
+  for (const name of AGY_ROSTER) {
+    const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
+    const path = join22(projectDir, rel);
+    if (tracked.includes(rel)) {
+      rows.push(refusal2(rel, `${rel} is tracked by git, and the Sterling agy agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
+      continue;
+    }
+    const templatePath = join22(pluginRoot, "agent-templates", `${name}.md`);
+    const content = renderAgyAgent(readFileSync16(templatePath, "utf8"), `agent-templates/${name}.md`, name, { root, nodePath, agyModel: agyModels[name] });
+    let disk = null;
+    if (existsSync14(path)) {
+      if (!statSync7(path).isFile()) {
+        rows.push(refusal2(rel, `${rel} exists and is not a file`, "move it aside, then rerun /sterling:update"));
+        continue;
+      }
+      disk = normalize4(readFileSync16(path, "utf8"));
+      const h = disk.match(HEADER_RE2);
+      if (!h || h[1] !== name) {
+        rows.push(refusal2(rel, `${rel} carries no Sterling agy header (a file Sterling did not write)`, "rename or remove it, then rerun /sterling:update"));
+        continue;
+      }
+      if (sha2562(unstamped(disk, h[0])) !== h[3]) {
+        rows.push(refusal2(rel, `${rel} was edited after Sterling wrote it`, "move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update"));
+        continue;
+      }
+    }
+    if (disk === content) {
+      rows.push({ item: rel, status: "matches" });
+      continue;
+    }
+    mkdirSync9(dirname10(path), { recursive: true });
+    writeFileAtomic(path, content);
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+  }
+  return rows;
+}
+function agyModelsOf(projectDir) {
+  const configPath2 = join22(storeRootFor(projectDir), ".sterling", "config.json");
+  if (!existsSync14(configPath2)) return {};
+  const models = JSON.parse(readFileSync16(configPath2, "utf8")).models;
+  const out = {};
+  if (models === null || typeof models !== "object") return out;
+  for (const [role, entry] of Object.entries(models)) {
+    const id = entry?.agy_model;
+    if (id === void 0) continue;
+    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
+    out[role] = id;
+  }
+  return out;
+}
+function projectNameOf(projectDir) {
+  const configPath2 = join22(storeRootFor(projectDir), ".sterling", "config.json");
+  if (!existsSync14(configPath2)) return basename5(projectDir);
+  const name = JSON.parse(readFileSync16(configPath2, "utf8")).project_name;
+  return typeof name === "string" && name ? name : basename5(projectDir);
+}
+function renderGeminiMd({ pluginRoot, root, projectName }) {
+  const rel = "templates/target-claude-md.md";
+  const text = renderAgyText(readFileSync16(join22(pluginRoot, rel), "utf8"), rel).replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll("{{STERLING_ROOT}}", () => fwd3(root));
+  if (/^@AGENTS\.md\s*$/m.test(text)) throw new Error(`${GEMINI_MD}: the agy render of ${rel} imports @AGENTS.md; agy loads AGENTS.md itself (P5)`);
+  const leftover = text.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) throw new Error(`${GEMINI_MD}: the agy render of ${rel} keeps the token ${leftover[0]} (P5)`);
+  const dead = findDeadTerms(text);
+  if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
+  return text;
+}
+function geminiRootAlias(home) {
+  return join22(home, ".gemini", "sterling-root");
+}
+function ensureRootAlias(alias, root) {
+  let st = null;
+  try {
+    st = lstatSync7(alias);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (st) {
+    if (!st.isSymbolicLink()) throw new Error(`${fwd3(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
+    if (resolve10(dirname10(alias), readlinkSync(alias)) === resolve10(root)) return;
+    unlinkSync5(alias);
+  }
+  mkdirSync9(dirname10(alias), { recursive: true });
+  symlinkSync(root, alias, "junction");
+}
+function geminiUsesRootAlias(text, home = homedir8()) {
+  return String(text).includes(`${fwd3(geminiRootAlias(home))}/`);
+}
+function ensureGeminiMd({ projectDir, pluginRoot, root, home = homedir8() }) {
+  const path = join22(projectDir, GEMINI_MD);
+  const alias = geminiRootAlias(home);
+  const existing = existsSync14(path) ? normalize4(readFileSync16(path, "utf8")) : null;
+  const keepAlias = () => {
+    try {
+      ensureRootAlias(alias, root);
+      return null;
+    } catch (err) {
+      return refusal2(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd3(alias)}, which could not be pointed at ${fwd3(root)}: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+    }
+  };
+  if (existing !== null && geminiUsesRootAlias(existing, home)) {
+    const refused = keepAlias();
+    if (refused) return refused;
+  }
+  const projectName = projectNameOf(projectDir);
+  let want;
+  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
+  try {
+    try {
+      want = renderGeminiMd({ pluginRoot, root: aliased ? alias : root, projectName });
+    } catch (err) {
+      if (!err.overCap || aliased) throw err;
+      want = renderGeminiMd({ pluginRoot, root: alias, projectName });
+      aliased = true;
+    }
+  } catch (err) {
+    return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+  }
+  if (existing === null) {
+    if (aliased) {
+      const refused = keepAlias();
+      if (refused) return refused;
+    }
+    writeFileAtomic(path, want);
+    return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
+  }
+  if (existing === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
+  return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
+}
+function ensureAgyExcluded({ projectDir, gemini }) {
+  const label = ".git/info/exclude (agy)";
+  const gp = git2(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
+  if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
+  const excludePath = resolve10(projectDir, gp.stdout.trim());
+  const current = existsSync14(excludePath) ? normalize4(readFileSync16(excludePath, "utf8")) : "";
+  const begin = current.indexOf(EXCLUDE_BEGIN);
+  const end = current.indexOf(EXCLUDE_END);
+  const listed = begin !== -1 && end > begin && current.slice(begin, end).split("\n").includes(`/${GEMINI_MD}`);
+  const excludeGemini = gemini === "exclude" || gemini === "keep" && listed;
+  const lines = [...AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`), ...excludeGemini ? [`/${GEMINI_MD}`] : []];
+  const want = [EXCLUDE_BEGIN, ...lines, EXCLUDE_END].join("\n");
+  if (begin !== -1 && end > begin) {
+    if (current.slice(begin, end + EXCLUDE_END.length) === want) return { item: label, status: "matches", detail: lines.join(" ") };
+    writeFileSync7(excludePath, current.slice(0, begin) + want + current.slice(end + EXCLUDE_END.length));
+    return { item: label, status: "refreshed", detail: lines.join(" ") };
+  }
+  mkdirSync9(dirname10(excludePath), { recursive: true });
+  const sep3 = current === "" || current.endsWith("\n") ? "" : "\n";
+  writeFileSync7(excludePath, `${current}${sep3}${want}
+`);
+  return { item: label, status: "created", detail: lines.join(" ") };
+}
+function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir8(), installed, probe = probeAgy, probeServer = probeMcpServer, nodePath = process.execPath, runGit = git2 }) {
+  if (!isAbsolute2(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
+  if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
+  const found = probe({ env, home });
+  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
+  const { root, why } = agyMcpRoot({ pluginRoot, env, home, installed });
+  const rows = [{ item: "Sterling MCP server", status: "matches", detail: `${fwd3(join22(root, "mcp", "sterling-mcp.mjs"))} (${why})` }];
+  const inventory = trackedFiles(projectDir, [AGY_AGENTS_DIR, GEMINI_MD], runGit);
+  if (inventory.failed) {
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/, ${GEMINI_MD}, .git/info/exclude (agy)`, `git ls-files failed in ${fwd3(projectDir)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
+    return { root, rows };
+  }
+  const { tracked } = inventory;
+  const server = probeServer({ root, env });
+  if (server.readOnly) {
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: agyModelsOf(projectDir) }));
+  } else {
+    const remedy = resolve10(root) !== resolve10(pluginRoot) ? `install this Sterling into agy (agy plugin install ${fwd3(resolve10(pluginRoot))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd3(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
+  }
+  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot, root, home });
+  rows.push(gemini);
+  const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
+  rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));
+  return { root, rows };
+}
+
+// packages/tui/dist/custom-agents.js
+var STERLING_ROLES = /* @__PURE__ */ new Set([...Object.keys(AGENT_MODEL_KEY), ...AGY_ROSTER]);
+var STERLING_STAMP_RE = /<!--\s*sterling-(?:full|agy|generated)\b/;
+function walk(dir, found, errors, source) {
+  let entries;
+  try {
+    entries = readdirSync6(dir, { withFileTypes: true });
+  } catch (err) {
+    errors.push({ name: dir, source, error: `cannot read folder: ${err.message}` });
+    return;
+  }
+  for (const e of entries) {
+    const p = join23(dir, e.name);
+    if (e.isDirectory())
+      walk(p, found, errors, source);
+    else if (e.isFile())
+      found.push(p);
+  }
+}
+function parse(path, fallbackName, source) {
+  let text;
+  try {
+    text = readFileSync17(path, "utf8");
+  } catch (err) {
+    return { name: fallbackName, source, error: `cannot read file: ${err.message}` };
+  }
+  if (STERLING_STAMP_RE.test(text))
+    return null;
+  const normalized = text.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n"))
+    return { name: fallbackName, source };
+  const end = normalized.indexOf("\n---", 4);
+  if (end === -1)
+    return { name: fallbackName, source, error: "frontmatter is not closed" };
+  const block = normalized.slice(4, end);
+  const unquote = (v) => v?.trim().replace(/^(["'])(.*)\1$/, "$2") || void 0;
+  const name = unquote(block.match(/^name:[ \t]*(.*)$/m)?.[1]) ?? fallbackName;
+  const model = unquote(block.match(/^model:[ \t]*(.*)$/m)?.[1]);
+  return model === void 0 ? { name, source } : { name, source, model };
+}
+function discoverCustomAgents(projectRoot) {
+  const out = [];
+  const hosts = [
+    ["claude", join23(projectRoot, ".claude", "agents"), (p) => p.endsWith(".md") ? basename6(p, ".md") : null],
+    ["opencode", join23(projectRoot, ".opencode", "agents"), (p) => p.endsWith(".md") ? basename6(p, ".md") : null],
+    ["agy", join23(projectRoot, ...AGY_AGENTS_DIR.split("/")), (p) => basename6(p) === "agent.md" ? basename6(join23(p, "..")) : null]
+  ];
+  for (const [source, dir, nameOf] of hosts) {
+    if (!existsSync15(dir))
+      continue;
+    const files = [];
+    walk(dir, files, out, source);
+    for (const f of files) {
+      const fallback = nameOf(f);
+      if (fallback === null || STERLING_ROLES.has(fallback))
+        continue;
+      const agent = parse(f, fallback, source);
+      if (agent !== null && !STERLING_ROLES.has(agent.name))
+        out.push(agent);
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+}
+
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, renameSync as renameSync5, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync18, renameSync as renameSync5, rmSync as rmSync5, writeFileSync as writeFileSync8 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join21 } from "node:path";
+import { join as join24 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host2 = hostname2()) {
   const safeHost = String(host2).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join21(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join24(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync9(join21(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync10(join24(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
-  writeFileSync7(tmp, JSON.stringify({ type, record_id: recordId, at }));
+  writeFileSync8(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync5(tmp, path);
 }
 
@@ -56632,9 +57164,9 @@ var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 var LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join22(dirname10(storePath2), "config.json");
-  const projectRoot = dirname10(dirname10(storePath2));
-  const agentsDir = join22(projectRoot, ".claude", "agents");
+  const configPath2 = join25(dirname11(storePath2), "config.json");
+  const projectRoot = dirname11(dirname11(storePath2));
+  const agentsDir = join25(projectRoot, ".claude", "agents");
   const selectionCheckout = options.checkoutRoot && options.checkoutRoot !== projectRoot ? options.checkoutRoot : void 0;
   function resolveProjectHeadSha() {
     try {
@@ -56653,7 +57185,7 @@ function openDashboard(storePath2, options = {}) {
   let domainsAvailable = true;
   if (!routed) {
     try {
-      const config = parseConfig(JSON.parse(readFileSync17(configPath2, "utf8")));
+      const config = parseConfig(JSON.parse(readFileSync19(configPath2, "utf8")));
       mounts = resolveDomainMounts(config);
     } catch {
       mounts = [];
@@ -56669,7 +57201,7 @@ function openDashboard(storePath2, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename5(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename7(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -56812,9 +57344,21 @@ function openDashboard(storePath2, options = {}) {
     return false;
   }
   let roster;
+  function hostAgentFileExists(name) {
+    if (existsSync16(join25(projectRoot, ...AGY_AGENTS_DIR.split("/"), name, "agent.md")))
+      return true;
+    const walk2 = (dir) => {
+      try {
+        return readdirSync7(dir, { withFileTypes: true }).some((e) => e.isDirectory() ? walk2(join25(dir, e.name)) : e.name === `${name}.md`);
+      } catch {
+        return false;
+      }
+    };
+    return walk2(join25(projectRoot, ".opencode", "agents"));
+  }
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync17(join22(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync19(join25(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -56830,7 +57374,7 @@ function openDashboard(storePath2, options = {}) {
   }
   function readRawMode() {
     try {
-      const raw = JSON.parse(readFileSync17(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync19(configPath2, "utf8"));
       return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
     } catch (err) {
       ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
@@ -56840,7 +57384,7 @@ function openDashboard(storePath2, options = {}) {
   function readRawStorage() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync17(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync19(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -56852,7 +57396,7 @@ function openDashboard(storePath2, options = {}) {
   function readHandoff() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync17(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync19(configPath2, "utf8"));
     } catch {
       return { handoff: null };
     }
@@ -56873,7 +57417,7 @@ function openDashboard(storePath2, options = {}) {
   function readAutoMergeOnClean() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync17(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync19(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -56891,7 +57435,7 @@ function openDashboard(storePath2, options = {}) {
   function readOverpass() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync17(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync19(configPath2, "utf8"));
     } catch {
       return { enabled: null, provider: null, conductorBypass: null, effective: false };
     }
@@ -56941,7 +57485,7 @@ function openDashboard(storePath2, options = {}) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
     try {
-      config = parseConfig(JSON.parse(readFileSync17(configPath2, "utf8")));
+      config = parseConfig(JSON.parse(readFileSync19(configPath2, "utf8")));
     } catch {
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
@@ -56952,10 +57496,12 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync13(join22(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync16(join25(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
+    const hostInstalled = Object.keys(AGENT_MODEL_KEY).filter((name) => !agents.some((a) => a.name === name) && hostAgentFileExists(name));
+    const customAgents = discoverCustomAgents(projectRoot);
     let catalog = { present: false, stale: false, staleDate: null, entries: [] };
     try {
       store.bootstrapCatalogIfAbsent(config, nowISO);
@@ -56974,12 +57520,12 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+    return { agents, hostInstalled, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir9() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
   }
   function readMaintenanceWorker() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync17(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync19(configPath2, "utf8"));
     } catch (err) {
       return { opencodeModel: null, unreadable: `${err.message.split("\n")[0]}` };
     }
@@ -57030,7 +57576,7 @@ function openDashboard(storePath2, options = {}) {
   async function applySwap(e) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      const original = readFileSync17(configPath2);
+      const original = readFileSync19(configPath2);
       const raw = JSON.parse(original.toString("utf8"));
       if (refuseOverpassModelEdit(e.key, raw))
         return;
@@ -57048,12 +57594,12 @@ function openDashboard(storePath2, options = {}) {
       }
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join22(agentsDir, `${name}.md`);
-        if (!existsSync13(p))
+        const p = join25(agentsDir, `${name}.md`);
+        if (!existsSync16(p))
           continue;
-        const content = readFileSync17(p, "utf8");
+        const content = readFileSync19(p, "utf8");
         const hdr = parseInstalledHeader(content);
-        writeFileSync8(p, setInstalledModelEffort(content, {
+        writeFileSync9(p, setInstalledModelEffort(content, {
           model: e.to.model,
           effort: e.to.effort,
           pluginVersion: hdr?.pluginVersion ?? "0.0.0",
@@ -57099,7 +57645,7 @@ function openDashboard(storePath2, options = {}) {
     try {
       if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
         throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync17(configPath2);
+      configBefore = readFileSync19(configPath2);
       const raw = JSON.parse(configBefore.toString("utf8"));
       if (refuseOverpassModelEdit(e.key, raw))
         return;
@@ -57167,6 +57713,74 @@ function openDashboard(storePath2, options = {}) {
     }
     ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
   }
+  function applyAgyModel(e) {
+    const fail = (msg) => {
+      ui = { ...ui, notice: `Antigravity model for '${e.key}' not changed \u2014 ${msg}; config.json is as it was` };
+    };
+    let configBefore;
+    let configAfter;
+    try {
+      if (e.to !== void 0 && !AGY_MODEL_IDS.includes(e.to))
+        throw new Error(`'${e.to}' is not a known agy model id`);
+      configBefore = readFileSync19(configPath2);
+      const raw = JSON.parse(configBefore.toString("utf8"));
+      if (refuseOverpassModelEdit(e.key, raw))
+        return;
+      raw.models = raw.models ?? {};
+      const { agy_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === void 0 ? rest : { ...rest, agy_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + "\n";
+    } catch (err) {
+      fail(err.message);
+      return;
+    }
+    try {
+      replaceConfigFile(configPath2, configAfter, configBefore, options.configWriteFs);
+    } catch (err) {
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${err.message}`);
+      return;
+    }
+    let outcome;
+    try {
+      const r = setupAgy({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() });
+      const refused = (r.rows ?? []).filter((x) => x.refused);
+      if (refused.length)
+        throw new Error(`agy agent file(s) refused: ${refused.map((x) => x.detail).join("; ")}`);
+      outcome = r.skipped ?? "the agy agent files were re-rendered";
+    } catch (err) {
+      try {
+        replaceConfigFile(configPath2, configBefore.toString("utf8"), Buffer.from(configAfter), options.configWriteFs);
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${err.message}) and config.json was not restored: ${restoreErr.message}` };
+        return;
+      }
+      fail(err.message);
+      return;
+    }
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      store.create({
+        id: randomUUID7(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: `Antigravity model: ${e.key} ${e.from ?? "inherit"}\u2192${e.to ?? "inherit"} (System tab)`,
+        statement: `config.models['${e.key}'].agy_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the agy agents for this role now run ${e.to ?? "inherit"}, and Claude Code keeps ${e.model}.`,
+        rationale: "Antigravity model override changed from the TUI System tab (GitHub issue #306, mirroring decision openai-models-in-the-system-tab-each-role-gets-an-optional-opencode-only-model-override: only the agy agent files are re-rendered).",
+        alternatives_rejected: []
+      }, { operation_id: randomUUID7() });
+    } catch (err) {
+      ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? "inherit"}, but recording the decision failed \u2014 ${err.message}` };
+      return;
+    }
+    ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? "inherit"} (${outcome}); Claude Code keeps ${e.model}.` };
+  }
   async function applyEffects(all) {
     const effects = all.filter((e) => {
       if (e.type !== "model_swap" && e.type !== "opencode_model" && e.type !== "select")
@@ -57188,6 +57802,9 @@ function openDashboard(storePath2, options = {}) {
       await applySwap(e);
     for (const e of overrides)
       applyOpenCodeModel(e);
+    for (const e of effects)
+      if (e.type === "agy_model")
+        applyAgyModel(e);
     const workerModels = effects.filter((e) => e.type === "worker_model");
     for (const e of workerModels)
       applyWorkerModel(e);
@@ -57959,17 +58576,17 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync16, readFileSync as readFileSync19, readdirSync as readdirSync8, statSync as statSync8 } from "node:fs";
-import { homedir as homedir7 } from "node:os";
-import { join as join24 } from "node:path";
+import { existsSync as existsSync19, readFileSync as readFileSync21, readdirSync as readdirSync10, statSync as statSync9 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { join as join27 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync10, readFileSync as readFileSync18, writeFileSync as writeFileSync9, rmSync as rmSync6, rmdirSync, renameSync as renameSync6, existsSync as existsSync14, lstatSync as lstatSync7, readdirSync as readdirSync6, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
-import { join as join23, resolve as resolve10, dirname as dirname11, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync20, writeFileSync as writeFileSync10, rmSync as rmSync6, rmdirSync, renameSync as renameSync6, existsSync as existsSync17, lstatSync as lstatSync8, readdirSync as readdirSync8, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
+import { join as join26, resolve as resolve11, dirname as dirname12, isAbsolute as isAbsolute3 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { randomBytes, createHash as createHash4 } from "node:crypto";
+import { randomBytes, createHash as createHash5 } from "node:crypto";
 function registerPath(root) {
-  return join23(root, ".sterling", "transient", "dispatch-register.json");
+  return join26(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -57991,10 +58608,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync14(p)) return { availability: "absent", arr: [] };
+  if (!existsSync17(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync18(p, "utf8");
+    raw = readFileSync20(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -58024,32 +58641,32 @@ var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join23(root, ".sterling", "transient", "dispatch-state");
+  return join26(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash4("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash5("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync, existsSync as existsSync15, statSync as statSync7, readdirSync as readdirSync7 } from "node:fs";
+import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync, existsSync as existsSync18, statSync as statSync8, readdirSync as readdirSync9 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync15(flat)) return flat;
+  if (existsSync18(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
-    for (const d of readdirSync7(wfRoot)) {
+    for (const d of readdirSync9(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync15(candidate)) return candidate;
+      if (existsSync18(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync15(path)) return null;
+  if (!existsSync18(path)) return null;
   const fd = openSync4(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -58083,7 +58700,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync7(path).size > TAIL_BYTES;
+  const exhausted = statSync8(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
@@ -60459,7 +61076,7 @@ function roundOf(e) {
 }
 function readCurrentSessionId(projectRoot) {
   try {
-    const parsed = JSON.parse(readFileSync19(join24(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync21(join27(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
     return typeof parsed?.session_id === "string" && parsed.session_id ? parsed.session_id : null;
   } catch {
     return null;
@@ -60519,7 +61136,7 @@ function transcriptState(projectRoot, sessionId, agentId, now, claudeConfigDir) 
   try {
     if (endsOnHandback(path))
       return "finished";
-    return now - statSync8(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? "fresh" : "quiet";
+    return now - statSync9(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? "fresh" : "quiet";
   } catch {
     return "quiet";
   }
@@ -60545,15 +61162,15 @@ function lastTurnEntry(tail) {
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join24(dir, `live-${key}.json`);
+  let file = join27(dir, `live-${key}.json`);
   try {
-    if (!existsSync16(file)) {
-      const done = readdirSync8(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
+    if (!existsSync19(file)) {
+      const done = readdirSync10(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join24(dir, done);
+      file = join27(dir, done);
     }
-    const rec = JSON.parse(readFileSync19(file, "utf8"));
+    const rec = JSON.parse(readFileSync21(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
   } catch {
     return null;
@@ -60561,7 +61178,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync19(join24(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync21(join27(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -60571,7 +61188,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync19(join24(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync21(join27(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -60579,23 +61196,23 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join24(claudeConfigDir, "projects");
+  const projects = join27(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync16(join24(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync19(join27(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
     try {
-      all = readdirSync8(projects);
+      all = readdirSync10(projects);
     } catch {
       return null;
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join24(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join27(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join24(homedir7(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join27(homedir10(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -60620,7 +61237,7 @@ function displayModel(ref) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync19(join24(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync21(join27(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -60628,14 +61245,14 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync19(join24(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync21(join27(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
   }
 }
 function defaultOpenCodeDbPath(env = process.env) {
-  return join24(env.XDG_DATA_HOME || join24(homedir7(), ".local", "share"), "opencode", "opencode.db");
+  return join27(env.XDG_DATA_HOME || join27(homedir10(), ".local", "share"), "opencode", "opencode.db");
 }
 function isOpenCodeSessionId(agentId) {
   return /^ses_[0-9A-Za-z]+$/.test(agentId);
@@ -60643,7 +61260,7 @@ function isOpenCodeSessionId(agentId) {
 var CATALOG_KEY = "models-dev:catalog";
 var OPENCODE_DB_BUSY_MS = 50;
 function openOpenCodeDb(path) {
-  if (!existsSync16(path))
+  if (!existsSync19(path))
     throw new Error(`no OpenCode database at ${path}`);
   return openForeignDbReadOnly(path, OPENCODE_DB_BUSY_MS);
 }
@@ -60748,7 +61365,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
       return { model: null, pct: null, tokens: null };
     let stamp;
     try {
-      const st = statSync8(path);
+      const st = statSync9(path);
       stamp = `${st.size}:${st.mtimeMs}`;
     } catch {
       return { model: null, pct: null, tokens: null };
@@ -60971,8 +61588,8 @@ function composeCards(view, width, maxHeight, tick, neonEdge) {
 }
 
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync20, rmSync as rmSync7, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname12 } from "node:path";
+import { mkdirSync as mkdirSync12, readFileSync as readFileSync22, rmSync as rmSync7, writeFileSync as writeFileSync11 } from "node:fs";
+import { dirname as dirname13 } from "node:path";
 function pidIsAlive2(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
     return false;
@@ -60985,7 +61602,7 @@ function pidIsAlive2(pid) {
 }
 function procStartTime2(pid) {
   try {
-    const stat = readFileSync20(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync22(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
     return fields[19] ?? null;
   } catch {
@@ -60998,12 +61615,12 @@ function ownerStillHolds(storedToken, currentToken) {
   return storedToken === currentToken;
 }
 function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = procStartTime2) {
-  mkdirSync11(dirname12(lockPath2), { recursive: true });
+  mkdirSync12(dirname13(lockPath2), { recursive: true });
   const token = startTimeOf(pid);
   const content = token ? `${pid} ${token}` : String(pid);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      writeFileSync10(lockPath2, content, { flag: "wx" });
+      writeFileSync11(lockPath2, content, { flag: "wx" });
       return null;
     } catch (e) {
       if (e.code !== "EEXIST")
@@ -61011,7 +61628,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = pro
     }
     let parts;
     try {
-      parts = readFileSync20(lockPath2, "utf8").trim().split(/\s+/);
+      parts = readFileSync22(lockPath2, "utf8").trim().split(/\s+/);
     } catch {
       continue;
     }
@@ -61022,19 +61639,19 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = pro
     if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
       return owner2;
     try {
-      const cur = readFileSync20(lockPath2, "utf8").trim().split(/\s+/)[0];
+      const cur = readFileSync22(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
         rmSync7(lockPath2, { force: true });
     } catch {
     }
   }
   try {
-    const owner2 = Number(readFileSync20(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync22(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 !== pid && isAlive(owner2))
       return owner2;
   } catch {
     try {
-      writeFileSync10(lockPath2, content, { flag: "wx" });
+      writeFileSync11(lockPath2, content, { flag: "wx" });
     } catch {
     }
   }
@@ -61042,7 +61659,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = pro
 }
 function releaseTuiLock(lockPath2, pid) {
   try {
-    const owner2 = Number(readFileSync20(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync22(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
       rmSync7(lockPath2, { force: true });
   } catch {
@@ -61080,18 +61697,18 @@ try {
   console.error(`sterling-tui: ${err.message}`);
   process.exit(2);
 }
-var lockPath = join25(dirname13(storePath), "transient", "tui.lock");
+var lockPath = join28(dirname14(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
 var profileEnv = process.env.STERLING_TUI_PROFILE;
-var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join25(dirname13(storePath), "transient", "tui-profile.log") : profileEnv;
-var github = createGithubPoller({ root: dirname13(dirname13(storePath)) });
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join28(dirname14(storePath), "transient", "tui-profile.log") : profileEnv;
+var github = createGithubPoller({ root: dirname14(dirname14(storePath)) });
 var ctl = openLaunchDashboard(launch, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
-  mkdirSync12(dirname13(profilePath), { recursive: true });
+  mkdirSync13(dirname14(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
 }
 function profiled(kind, work, extra = () => ({})) {
@@ -61107,7 +61724,7 @@ function profiled(kind, work, extra = () => ({})) {
 }
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
-var subagents = createSubagentTracker(dirname13(dirname13(storePath)), { host });
+var subagents = createSubagentTracker(dirname14(dirname14(storePath)), { host });
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {

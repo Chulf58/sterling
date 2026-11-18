@@ -5561,7 +5561,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, MAINTENANCE_WORKER_CLAUDE_MODEL, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, MAINTENANCE_WORKER_CLAUDE_MODEL, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5574,11 +5574,36 @@ var init_config = __esm({
     }).strict();
     OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
     CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    AGY_MODEL_IDS = [
+      "claude-opus-5-5-low",
+      "claude-opus-5-5-medium",
+      "claude-opus-5-5-high",
+      "claude-sonnet-5-5-low",
+      "claude-sonnet-5-5-medium",
+      "claude-sonnet-5-5-high",
+      "gemini-3.8-flash-low",
+      "gemini-3.8-flash-medium",
+      "gemini-3.8-flash-high",
+      "gemini-4-argon-low",
+      "gemini-4-argon-medium",
+      "gemini-4-argon-high",
+      "gemini-4-carbon-low",
+      "gemini-4-carbon-medium",
+      "gemini-4-carbon-high",
+      "gemini-4-hydrogen-low",
+      "gemini-4-hydrogen-medium",
+      "gemini-4-hydrogen-high",
+      "gemini-4-hydrogen-xhigh",
+      "gemini-pro-orchestrator",
+      "gemini-pro-orchestrator-argon",
+      "gpt-oss-120b-medium"
+    ];
     agentModelEntry = external_exports.object({
       model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
       effort: effortLevel,
       hard_task: modelPin.optional(),
-      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
+      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
+      agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
     }).strict();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
@@ -19793,7 +19818,7 @@ function templateDescription(frontmatter, label) {
   if (!line) throw new Error(`agy agent ${label}: no description in the template frontmatter (P5)`);
   return /^(["']).*\1$/.test(line) ? line.slice(1, -1) : line;
 }
-function renderAgyAgent(templateContent, label, name4, { root, nodePath = process.execPath }) {
+function renderAgyAgent(templateContent, label, name4, { root, nodePath = process.execPath, agyModel }) {
   const tools = AGY_TOOLS[name4];
   if (!tools) throw new Error(`agy agent ${label}: '${name4}' is not in the agy roster (P5)`);
   const rendered = normalize6(renderAgyText(templateContent, label));
@@ -19809,7 +19834,7 @@ function renderAgyAgent(templateContent, label, name4, { root, nodePath = proces
     "---",
     `name: ${name4}`,
     `description: ${yamlString(description)}`,
-    "model: inherit",
+    `model: ${agyModel ?? "inherit"}`,
     `mainAgent: ${conductor}`,
     `subagent: ${!conductor}`,
     "tools:",
@@ -19856,7 +19881,7 @@ function trackedFiles(projectDir, paths, runGit = git2) {
   const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || "").trim().split("\n")[0] || "no message"}`;
   return { failed: why };
 }
-function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath }) {
+function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath, agyModels = {} }) {
   const rows = [];
   for (const name4 of AGY_ROSTER) {
     const rel = `${AGY_AGENTS_DIR}/${name4}/agent.md`;
@@ -19866,7 +19891,7 @@ function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, n
       continue;
     }
     const templatePath = join32(pluginRoot2, "agent-templates", `${name4}.md`);
-    const content = renderAgyAgent(readFileSync24(templatePath, "utf8"), `agent-templates/${name4}.md`, name4, { root, nodePath });
+    const content = renderAgyAgent(readFileSync24(templatePath, "utf8"), `agent-templates/${name4}.md`, name4, { root, nodePath, agyModel: agyModels[name4] });
     let disk = null;
     if (existsSync18(path)) {
       if (!statSync10(path).isFile()) {
@@ -19893,6 +19918,20 @@ function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, n
     rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
   }
   return rows;
+}
+function agyModelsOf(projectDir) {
+  const configPath2 = join32(storeRootFor(projectDir), ".sterling", "config.json");
+  if (!existsSync18(configPath2)) return {};
+  const models = JSON.parse(readFileSync24(configPath2, "utf8")).models;
+  const out = {};
+  if (models === null || typeof models !== "object") return out;
+  for (const [role, entry] of Object.entries(models)) {
+    const id = entry?.agy_model;
+    if (id === void 0) continue;
+    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
+    out[role] = id;
+  }
+  return out;
 }
 function projectNameOf(projectDir) {
   const configPath2 = join32(storeRootFor(projectDir), ".sterling", "config.json");
@@ -20012,7 +20051,7 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
   const { tracked } = inventory;
   const server = probeServer({ root, env });
   if (server.readOnly) {
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath, agyModels: agyModelsOf(projectDir) }));
   } else {
     const remedy = resolve10(root) !== resolve10(pluginRoot2) ? `install this Sterling into agy (agy plugin install ${fwd8(resolve10(pluginRoot2))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd8(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
     rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));

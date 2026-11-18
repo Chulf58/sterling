@@ -5037,11 +5037,36 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var AGY_MODEL_IDS = [
+  "claude-opus-5-5-low",
+  "claude-opus-5-5-medium",
+  "claude-opus-5-5-high",
+  "claude-sonnet-5-5-low",
+  "claude-sonnet-5-5-medium",
+  "claude-sonnet-5-5-high",
+  "gemini-3.8-flash-low",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-high",
+  "gemini-4-argon-low",
+  "gemini-4-argon-medium",
+  "gemini-4-argon-high",
+  "gemini-4-carbon-low",
+  "gemini-4-carbon-medium",
+  "gemini-4-carbon-high",
+  "gemini-4-hydrogen-low",
+  "gemini-4-hydrogen-medium",
+  "gemini-4-hydrogen-high",
+  "gemini-4-hydrogen-xhigh",
+  "gemini-pro-orchestrator",
+  "gemini-pro-orchestrator-argon",
+  "gpt-oss-120b-medium"
+];
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
   hard_task: modelPin.optional(),
-  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
+  agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -9814,7 +9839,7 @@ function templateDescription(frontmatter, label) {
   if (!line) throw new Error(`agy agent ${label}: no description in the template frontmatter (P5)`);
   return /^(["']).*\1$/.test(line) ? line.slice(1, -1) : line;
 }
-function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath }) {
+function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath, agyModel }) {
   const tools = AGY_TOOLS[name];
   if (!tools) throw new Error(`agy agent ${label}: '${name}' is not in the agy roster (P5)`);
   const rendered = normalize4(renderAgyText(templateContent, label));
@@ -9830,7 +9855,7 @@ function renderAgyAgent(templateContent, label, name, { root, nodePath = process
     "---",
     `name: ${name}`,
     `description: ${yamlString(description)}`,
-    "model: inherit",
+    `model: ${agyModel ?? "inherit"}`,
     `mainAgent: ${conductor}`,
     `subagent: ${!conductor}`,
     "tools:",
@@ -9877,7 +9902,7 @@ function trackedFiles(projectDir, paths, runGit = git2) {
   const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || "").trim().split("\n")[0] || "no message"}`;
   return { failed: why };
 }
-function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath }) {
+function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath, agyModels = {} }) {
   const rows = [];
   for (const name of AGY_ROSTER) {
     const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
@@ -9887,7 +9912,7 @@ function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, n
       continue;
     }
     const templatePath = join15(pluginRoot2, "agent-templates", `${name}.md`);
-    const content = renderAgyAgent(readFileSync11(templatePath, "utf8"), `agent-templates/${name}.md`, name, { root, nodePath });
+    const content = renderAgyAgent(readFileSync11(templatePath, "utf8"), `agent-templates/${name}.md`, name, { root, nodePath, agyModel: agyModels[name] });
     let disk = null;
     if (existsSync10(path)) {
       if (!statSync4(path).isFile()) {
@@ -9914,6 +9939,20 @@ function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, n
     rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
   }
   return rows;
+}
+function agyModelsOf(projectDir) {
+  const configPath2 = join15(storeRootFor(projectDir), ".sterling", "config.json");
+  if (!existsSync10(configPath2)) return {};
+  const models = JSON.parse(readFileSync11(configPath2, "utf8")).models;
+  const out = {};
+  if (models === null || typeof models !== "object") return out;
+  for (const [role, entry] of Object.entries(models)) {
+    const id = entry?.agy_model;
+    if (id === void 0) continue;
+    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
+    out[role] = id;
+  }
+  return out;
 }
 function projectNameOf(projectDir) {
   const configPath2 = join15(storeRootFor(projectDir), ".sterling", "config.json");
@@ -10033,7 +10072,7 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
   const { tracked } = inventory;
   const server = probeServer({ root, env });
   if (server.readOnly) {
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath, agyModels: agyModelsOf(projectDir) }));
   } else {
     const remedy = resolve8(root) !== resolve8(pluginRoot2) ? `install this Sterling into agy (agy plugin install ${fwd4(resolve8(pluginRoot2))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd4(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
     rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));

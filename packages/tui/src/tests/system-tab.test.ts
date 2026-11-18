@@ -135,6 +135,7 @@ interface RosterAgent {
 }
 interface AgentRosterSnapshot {
   agents: RosterAgent[];
+  hostInstalled?: string[];
   configModels: Record<string, { model: string; effort: string }>;
   catalog: CatalogStatusView;
 }
@@ -204,6 +205,10 @@ interface SystemArityStateMod {
 const SR = stateMod as unknown as SystemArityStateMod;
 
 // ---- fixtures --------------------------------------------------------------
+// Changed 2026-11-18 (issue #307, user ruling "Installed roles + custom"): the tab lists a
+// governed role only while an agent file for it is installed in a host folder, and adds
+// read-only custom-agent rows; the intent below (governed rows come from AGENT_MODEL_KEY,
+// never every registry entry) is unchanged, and these fixtures install every governed role.
 // GOVERNED roster agents only (main.ts's buildSystemTab source: Object.keys(AGENT_MODEL_KEY)) —
 // NOT every registry.json entry. Route A (decision
 // conductor-instructions-via-main-session-agent-route-a) added 'conductor' to the
@@ -636,10 +641,11 @@ test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_sw
 // Changed 2026-10-23 (board 07ee17a9): the config-only classifiers key this test swapped is gone. The same
 // guarantee is kept on a config.models key whose agent is not installed (the snapshot lists no agent for
 // it): the swap still emits the effect with no governed agents.
-test('AC5 commit (agentless key): a swap on a key whose agent is not installed emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
+test('AC5 commit (agentless key): a swap on a key whose agent is installed only in another host folder emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
   const { store, cleanup } = storeFixture();
   try {
-    const snap = baseSnapshot({ agents: ROSTER_AGENTS.filter((n) => n !== 'librarian').map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })) });
+    // librarian is installed only in another host folder (hostInstalled), so its row is listed but no Claude agent file is governed
+    const snap = baseSnapshot({ agents: ROSTER_AGENTS.filter((n) => n !== 'librarian').map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })), hostInstalled: ['librarian'] });
     // librarian row (cursor 3: implementor=0, researcher=1, scout=2, librarian=3), no agent installed for it:
     // open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
     const res = drive(

@@ -820,3 +820,12 @@ test('issue_mirror (mirror ceiling): permissive and WITHOUT a default, so an abs
   }
   assert.deepEqual(unreadConfigKeys({ issue_mirror: { ceiling: 1500 } }), [], 'issue_mirror is a key the schema reads');
 });
+
+test('models.<role>.agy_model: accepts a listed agy id, refuses an unlisted one, absent by default (issue #306)', () => {
+  const set = parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gemini-4-hydrogen-xhigh' } } });
+  assert.equal(set.models.implementor.agy_model, 'gemini-4-hydrogen-xhigh');
+  assert.equal(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' } } }).models.implementor.agy_model, 'claude-opus-5-5-high');
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'gemini-9-made-up' } } }));
+  assert.equal(parseConfig({}).models.implementor.agy_model, undefined, 'absent by default');
+  assert.equal(parseConfig({}).models.reviewer.opencode_model, 'openai/gpt-6.1-sol', 'the opencode defaults are untouched');
+});
