@@ -134,11 +134,17 @@ export function agyMcpRoot({ pluginRoot, env = process.env, home = homedir(), in
  * from before read-only mode fails its usage check on the unknown flag (exit 2). agy keeps its
  * own copy of Sterling and has no update command, so a newer Sterling can run setup while agy's
  * copy is older; asking the file the entry will launch is the one signal that cannot drift from
- * it (a version number can, on a clone whose mcp/ bundle was not rebuilt).
+ * it (a version number can, on a clone whose mcp/ bundle was not rebuilt). A server that has
+ * not answered within `timeoutMs` is killed with SIGKILL, which it cannot ignore, and counts as
+ * not enforcing read-only. The answer needs only the bundle loaded (well under a second
+ * measured), so 10 s leaves room for a cold disk while keeping a stuck server from holding up
+ * init or sync for long.
  */
-export function probeMcpServer({ root, env = process.env }) {
+export const MCP_PROBE_TIMEOUT_MS = 10_000;
+export function probeMcpServer({ root, env = process.env, timeoutMs = MCP_PROBE_TIMEOUT_MS }) {
   const server = join(root, 'mcp', 'sterling-mcp.mjs');
-  const r = spawnSync(process.execPath, [server, '--capabilities'], { encoding: 'utf8', env, timeout: 30_000 });
+  const r = spawnSync(process.execPath, [server, '--capabilities'], { encoding: 'utf8', env, timeout: timeoutMs, killSignal: 'SIGKILL' });
+  if (r.error?.code === 'ETIMEDOUT') return { readOnly: false, reason: `${fwd(server)} --capabilities did not answer within ${timeoutMs} ms and was killed` };
   if (r.error) return { readOnly: false, reason: `${fwd(server)} --capabilities could not run (${r.error.message})` };
   if (r.status !== 0) return { readOnly: false, reason: `${fwd(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
   let caps = null;

@@ -9792,9 +9792,11 @@ function agyMcpRoot({ pluginRoot: pluginRoot2, env = process.env, home = homedir
   if (existsSync10(join15(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
   return { root: resolve8(pluginRoot2), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd4(agyCopy)})` };
 }
-function probeMcpServer({ root, env = process.env }) {
+var MCP_PROBE_TIMEOUT_MS = 1e4;
+function probeMcpServer({ root, env = process.env, timeoutMs = MCP_PROBE_TIMEOUT_MS }) {
   const server = join15(root, "mcp", "sterling-mcp.mjs");
-  const r = spawnSync5(process.execPath, [server, "--capabilities"], { encoding: "utf8", env, timeout: 3e4 });
+  const r = spawnSync5(process.execPath, [server, "--capabilities"], { encoding: "utf8", env, timeout: timeoutMs, killSignal: "SIGKILL" });
+  if (r.error?.code === "ETIMEDOUT") return { readOnly: false, reason: `${fwd4(server)} --capabilities did not answer within ${timeoutMs} ms and was killed` };
   if (r.error) return { readOnly: false, reason: `${fwd4(server)} --capabilities could not run (${r.error.message})` };
   if (r.status !== 0) return { readOnly: false, reason: `${fwd4(server)} --capabilities exited ${r.status}, so that server predates read-only mode` };
   let caps = null;

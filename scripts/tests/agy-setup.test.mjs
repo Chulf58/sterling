@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { load } from 'js-yaml';
 import { ProjectRegistry } from '@sterling/store';
 import {
@@ -557,4 +557,19 @@ test('GEMINI.md root link upkeep: an edited doc, a changed template and a long-t
   assert.equal(row.status, 'refused');
   assert.match(row.detail, /is not a link Sterling made/);
   assert.equal(readFileSync(path, 'utf8'), edited);
+});
+
+test('probeMcpServer: a server that ignores SIGTERM and never answers is killed at the timeout and reported as not read-only', () => {
+  const root = tmp('sterling-agy-probe-hang-');
+  mkdirSync(join(root, 'mcp'));
+  // Never answers and ignores SIGTERM; it ends itself after 60 s so a failed run leaves nothing behind for long.
+  writeFileSync(join(root, 'mcp', 'sterling-mcp.mjs'), "process.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\nsetTimeout(() => process.exit(0), 60_000);\n");
+  // The probe blocks its process, so it runs in a child the test can bound.
+  const script = `import(${JSON.stringify(pathToFileURL(join(repo, 'scripts', 'lib', 'agy-setup.mjs')).href)}).then(({ probeMcpServer }) => { const t = Date.now(); const r = probeMcpServer({ root: ${JSON.stringify(root)}, timeoutMs: 1000 }); console.log(JSON.stringify({ ...r, ms: Date.now() - t })); });`;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15_000, killSignal: 'SIGKILL' });
+  assert.equal(run.status, 0, `the probe did not return within 15 s (signal ${run.signal}): ${run.stderr}`);
+  const r = JSON.parse(run.stdout);
+  assert.equal(r.readOnly, false);
+  assert.match(r.reason, /--capabilities did not answer within 1000 ms and was killed/);
+  assert.ok(r.ms < 5000, `returned after ${r.ms} ms`);
 });
