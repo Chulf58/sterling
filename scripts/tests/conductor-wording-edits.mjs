@@ -411,6 +411,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "Promotion is a backstop for a record that was scoped wrong, not the normal path.",
     after: "Promotion is a backstop for a record that was scoped wrong, not the normal path.\n\nWhen the user brings in an outside party's answer (a colleague's reply, a vendor's email, another team's ruling), write it as a `decision` or `research_finding` in the same turn, so it never lives only in chat. Quote the source and name who said it, and mark it as the outside party's words, not the user's and not yours (the AGENTS.md rule \"Source attribution\"). GitHub #299 found such answers kept only in conversation; user-ruled 2026-11-17 through the question form, \"Add the rule (Recommended)\".",
   },
+  {
+    commit: 'GitHub #290',
+    date: '2026-11-17',
+    reason: "the librarian applies a long draft from a .sterling/drafts/ file with the new knowledge_apply_drafts tool, because a file reader cuts lines at 2,000 characters (user-ruled 2026-11-17, \"New apply-drafts tool\")",
+    before: "applies your drafted updates to existing records verbatim (element removals through `knowledge_array_remove` included)",
+    after: "applies your drafted updates to existing records verbatim (element removals through `knowledge_array_remove` included; a long draft goes in a `.sterling/drafts/` file it applies with `knowledge_apply_drafts`, since a file reader cuts lines at 2,000 characters)",
+  },
+  {
+    commit: 'conductor-on-target',
+    date: '2026-11-17',
+    reason: "new sentences: past the review cap, and findings reproducing only with hand-built inputs, go to the user / residual risk (user-ruled 2026-11-17, \"Tighter conductor rules\")",
+    before: " Work mode has its own shape below.",
+    after: " **Past that cap, the next review or fix round is put to the user through the question form and never started on your own judgment** (user-stated 2026-11-17 that a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\"). A review finding that reproduces only with hand-built inputs the real system has not been seen to produce is recorded as residual risk, not fixed, unless the user chooses otherwise through the question form (same ruling, 2026-11-17, \"Tighter conductor rules\"). Work mode has its own shape below.",
+  },
+  {
+    commit: 'conductor-on-target',
+    date: '2026-11-17',
+    reason: "new paragraph: no new mechanism without a user ruling (user-ruled 2026-11-17, \"Tighter conductor rules\")",
+    before: "\n\n## Brief quality is your product",
+    after: "\n\nNo new mechanism (a tool, hook, gate, script or schema) is added without a user ruling through the question form; a finding that seems to need one is boarded, not built (user-ruled 2026-11-17, \"Tighter conductor rules\", because a Sol conductor \"tends to overengineer and do sidequests instead of staying on target\").\n\n## Brief quality is your product",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
@@ -540,6 +561,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: 'mcp__plugin_sterling_sterling__board_takeover, mcp__sterling__maintenance_remove',
     after: 'mcp__plugin_sterling_sterling__board_takeover, mcp__sterling__board_adopt, mcp__plugin_sterling_sterling__board_adopt, mcp__sterling__maintenance_remove',
   },
+  {
+    commit: 'GitHub #290',
+    date: '2026-11-17',
+    reason: "new MCP tool knowledge_apply_drafts (applies a drafts file of record updates server-side) is denied to the implementor under both prefixes; store writes stay the conductor's and the librarian's",
+    before: "mcp__sterling__knowledge_array_remove, mcp__plugin_sterling_sterling__knowledge_array_remove, mcp__sterling__knowledge_promote",
+    after: "mcp__sterling__knowledge_array_remove, mcp__plugin_sterling_sterling__knowledge_array_remove, mcp__sterling__knowledge_apply_drafts, mcp__plugin_sterling_sterling__knowledge_apply_drafts, mcp__sterling__knowledge_promote",
+  },
 ];
 
 export const LIBRARIAN_WORDING_EDITS = [
@@ -584,6 +612,27 @@ export const LIBRARIAN_WORDING_EDITS = [
     reason: 'the worked example showed a same-state refresh for a co-tenant item; an already-paid item closes with maintenance_remove and no knowledge write',
     before: "Right move — a minimal baseline refresh that explicitly claims the item on the same write (ids abbreviated here for readability only; the real call carries the FULL uuid, and `resolves` accepts nothing shorter):\n\n```json\nknowledge_update { \"id\": \"9c2f…\", \"body\": { \"state\": \"active\" }, \"resolves\": [\"m-441…\"] }\n```\n\n`\"active\"` here is the state the article already had when you read it; a dormant article keeps `\"dormant\"`. Then `maintenance_query` and report: `m-441… → drained (article 9c2f… now at version 7); queue now 3 open`. The article id is the SAME id it was in the work order — the version is what moved.",
     after: "Right move — the item is already paid, so close it with no knowledge write (ids abbreviated here for readability only; the real call carries the FULL uuid, and `maintenance_remove` accepts nothing shorter):\n\n```json\nmaintenance_remove { \"id\": \"m-441…\" }\n```\n\nThen `maintenance_query` and report: `m-441… → closed already-paid, no article write; queue now 3 open`. A genuinely behind item instead gets the conductor's drafted correction applied verbatim with `resolves`.",
+  },
+  {
+    commit: 'GitHub #290',
+    date: '2026-11-17',
+    reason: "the librarian holds the new knowledge_apply_drafts tool under both prefixes, so a drafted value over the 2,000-character line limit of its file reader reaches the store byte-exact",
+    before: "mcp__sterling__knowledge_array_remove, mcp__plugin_sterling_sterling__knowledge_array_remove, mcp__sterling__knowledge_schema",
+    after: "mcp__sterling__knowledge_array_remove, mcp__plugin_sterling_sterling__knowledge_array_remove, mcp__sterling__knowledge_apply_drafts, mcp__plugin_sterling_sterling__knowledge_apply_drafts, mcp__sterling__knowledge_schema",
+  },
+  {
+    commit: 'GitHub #290',
+    date: '2026-11-17',
+    reason: "the role names knowledge_apply_drafts among the record updates the librarian applies",
+    before: "and element removals with `knowledge_array_remove`), and conductor-drafted board",
+    after: "and element removals with `knowledge_array_remove`; a drafts file of such updates with `knowledge_apply_drafts`), and conductor-drafted board",
+  },
+  {
+    commit: 'GitHub #290',
+    date: '2026-11-17',
+    reason: "rubric item 2 says how to apply a drafts file: through knowledge_apply_drafts, never by reading the file, and stop without re-running on a refused op",
+    before: "so a drafted fix to a stale `files[].role` no longer needs a full-array retransmit under the truncation hazard.",
+    after: "so a drafted fix to a stale `files[].role` no longer needs a full-array retransmit under the truncation hazard. **A work order that names a drafts file** (`.sterling/drafts/<name>.json`, a JSON array of `update`/`append`/`edit`/`array_remove` ops) is applied with `knowledge_apply_drafts { path: \"<name>.json\" }`, never by reading the file and re-sending its values: a file reader can cut a line at 2,000 characters, and the server reads the file whole. Each op runs through the same code as its single-op tool. In the receipt, each op's `written` gives the stored length of every field it touched; compare it with the work order when the order gives lengths. A malformed file writes nothing. When every op applied, the server deletes the file (`file_removed: true`); `file_removed: false` means the writes stand but the delete failed, so report its `file_remove_error`. A refused op stops the run, the ops before it stay written and the file is kept: STOP and report which ops landed and the refusal; never re-run the file, because it would apply those ops again.",
   },
 ];
 
