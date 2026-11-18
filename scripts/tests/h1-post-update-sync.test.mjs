@@ -289,3 +289,57 @@ test('stale-server guard reads mcp/.build-id beside the bundled server when mcp/
     decoy.kill();
   }
 });
+
+// ── Antigravity CLI (agy) session start (board 792619d3 review fix) ─────────
+// H1 under agy input (lib/common.mjs normalises it with host 'agy') runs the
+// post-update sync with host 'agy': a skipped agy setup is a failure and an agy
+// agent file written is a restart. The context arrives as injectSteps.
+function runH1Agy(project, pluginRoot, env = {}) {
+  const home = env.HOME ?? tmp('sterling-h1pu-home-');
+  const log = join(tmp('sterling-h1pu-log-'), 'calls.log');
+  const id = 'c0ffee00-0000-4000-8000-0000000000a1';
+  const r = spawnSync(process.execPath, [seam.hookPath], {
+    input: JSON.stringify({ hookEventName: 'SessionStart', cwd: project, conversationId: id, workspacePaths: [project], transcriptPath: join(project, 't.jsonl'), artifactDirectoryPath: project, modelName: 'gemini', lastUserInput: 'hello' }),
+    encoding: 'utf8',
+    cwd: project,
+    timeout: 60_000,
+    env: { ...process.env, NO_COLOR: '1', STERLING_NO_BANNER: '1', STERLING_CURRENCY_DISABLE: '1', STERLING_PLUGIN_ROOT: pluginRoot, FIXTURE_LOG: log, ...env, HOME: home },
+  });
+  let out = null;
+  try {
+    out = JSON.parse(r.stdout);
+  } catch {
+    // callers assert on the parsed output
+  }
+  return { code: r.status, stderr: r.stderr, stdout: r.stdout, text: (out?.injectSteps ?? []).map((s) => s.systemMessage?.systemMessage ?? '').join('\n') };
+}
+
+function agySyncPlugin(stdout) {
+  const plugin = makePluginRoot();
+  writeFileSync(join(plugin, 'scripts', 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', stdout, 'FIXTURE_SYNC_EXIT'));
+  return plugin;
+}
+
+test('agy session start: a skipped agy setup fails the post-update sync (no marker); the same output under Claude Code syncs', () => {
+  const plugin = agySyncPlugin('Antigravity CLI (agy): skipped — the project has no .agents directory\n');
+  const project = makeProject({ syncedVersion: '0.0.1' });
+  const r = runH1Agy(project, plugin);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.text, /POST-UPDATE SYNC FAILED \(agy session start\)/, r.stdout.slice(0, 600));
+  assert.match(r.text, /sync-agents did not refresh the agy agents/);
+  assert.equal(markerOf(project), '0.0.1', 'no marker: the next agy session start retries');
+  const cc = runH1(project, plugin);
+  assert.equal(cc.code, 0, cc.stderr);
+  assert.equal(markerOf(project), VERSION, 'Claude Code keeps host claude, where an agy skip is not its business');
+  assert.match(cc.ctx, /POST-UPDATE SYNC \(H1\)/);
+});
+
+test('agy session start: an agy agent file written is a restart, in agy words', () => {
+  const plugin = agySyncPlugin('Antigravity CLI (agy) refreshed: .agents/agents/reviewer/agent.md\n');
+  const project = makeProject({ syncedVersion: '0.0.1' });
+  const r = runH1Agy(project, plugin);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.text, /POST-UPDATE SYNC \(agy session start\)/);
+  assert.match(r.text, /RESTART REQUIRED — agy reads project agents/);
+  assert.equal(markerOf(project), VERSION);
+});

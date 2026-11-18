@@ -1,7 +1,7 @@
 {
   "name": "@chulf58/sterling",
   "type": "module",
-  "version": "0.19.151",
+  "version": "0.19.152",
   "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
   "publishConfig": {
     "access": "public"
@@ -10,11 +10,13 @@
     "./server": "./opencode/sterling-server.mjs"
   },
   "files": [
+    ".antigravity-plugin/",
     ".claude-plugin/",
     "agent-templates/",
     "bin/",
     "commands/",
     "hooks/",
+    "hooks.json",
     "mcp/",
     "opencode/sterling-server.mjs",
     "opencode/sterling-tui/package.json",

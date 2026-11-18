@@ -12483,6 +12483,12 @@ var init_dist2 = __esm({
   }
 });
 
+// scripts/lib/atomic-write.mjs
+var init_atomic_write = __esm({
+  "scripts/lib/atomic-write.mjs"() {
+  }
+});
+
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync7 } from "node:fs";
@@ -13363,6 +13369,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -13377,7 +13384,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -13395,7 +13406,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -13446,6 +13457,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -13459,6 +13475,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -13467,7 +13486,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -13478,7 +13497,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -13647,11 +13667,13 @@ var ENGINE_NAME = "sterling-launch.sh";
 var OPENERS = {
   windows: [
     { file: "claude-code.bat", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.bat", mode: "agy", tool: "agy", app: "Antigravity" }
   ],
   linux: [
     { file: "claude-code.sh", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.sh", mode: "agy", tool: "agy", app: "Antigravity" }
   ]
 };
 var LAUNCHER_GITIGNORE_ENTRIES = [
@@ -13683,8 +13705,8 @@ var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync11, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
-import { join as join16, dirname as dirname8, resolve as resolve7 } from "node:path";
+import { readFileSync as readFileSync11, writeFileSync as writeFileSync3, mkdirSync as mkdirSync6, rmSync as rmSync4, statSync as statSync5, renameSync as renameSync2 } from "node:fs";
+import { join as join16, dirname as dirname9, resolve as resolve7 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/working-tree.mjs
@@ -13692,8 +13714,8 @@ init_dist();
 import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync9, existsSync as existsSync7 } from "node:fs";
-import { join as join12 } from "node:path";
+import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2, writeFileSync as writeFileSync2, renameSync, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { dirname as dirname7, join as join12 } from "node:path";
 init_dist();
 init_dist2();
 
@@ -13701,6 +13723,7 @@ init_dist2();
 init_dist();
 
 // scripts/hooks/lib/common.mjs
+init_atomic_write();
 function projectRoot(from) {
   return resolveProjectRoots(from, isSterlingRoot)?.storeRoot ?? null;
 }
@@ -13814,6 +13837,7 @@ function loadConfig(cwd) {
   const p = join12(storeRootFor(cwd), ".sterling", "config.json");
   return existsSync7(p) ? JSON.parse(readFileSync9(p, "utf8")) : null;
 }
+var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
 
 // scripts/hooks/lib/working-tree.mjs
 function isForeignTree(record, root, workingTrees, storeRoot2 = root ? storeRootFor(root) : root) {
@@ -13905,7 +13929,7 @@ function observePaths(root, paths, storeRoot2) {
 
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname7, join as join15 } from "node:path";
+import { dirname as dirname8, join as join15 } from "node:path";
 var SESSION_EVENTS_REL = join15(".sterling", "transient", "session-events.json");
 
 // scripts/hooks/lib/settlement.mjs
@@ -14008,6 +14032,7 @@ import { spawnSync as spawnSync5 } from "node:child_process";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
   [".claude-plugin/plugin.json", [["version"]]],
+  [".antigravity-plugin/plugin.json", [["version"]]],
   ["package.json", [["version"]]],
   [LOCKFILE, [["version"], ["packages", "", "version"]]]
 ]);
@@ -14299,8 +14324,8 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname9, join as join19 } from "node:path";
+import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync7, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname10, join as join19 } from "node:path";
 
 // scripts/lib/gh-path.mjs
 import { existsSync as existsSync8 } from "node:fs";
@@ -14660,10 +14685,10 @@ var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join19(root, PR_LOOP_REL);
 var prLoopFile = (root, prNumber) => join19(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
-  mkdirSync6(dirname9(file), { recursive: true });
+  mkdirSync7(dirname10(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
-  writeFileSync3(tmp, JSON.stringify(value, null, 2) + "\n");
-  renameSync2(tmp, file);
+  writeFileSync4(tmp, JSON.stringify(value, null, 2) + "\n");
+  renameSync3(tmp, file);
 }
 function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE__ */ new Date()).toISOString(), beforeLegacyPublish = null }) {
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: "owed" };
@@ -14688,9 +14713,9 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   return state;
 }
 function writeExclusive(file, value, { beforePublish = null } = {}) {
-  mkdirSync6(dirname9(file), { recursive: true });
+  mkdirSync7(dirname10(file), { recursive: true });
   const tmp = `${file}.excl-${process.pid}`;
-  writeFileSync3(tmp, JSON.stringify(value, null, 2) + "\n");
+  writeFileSync4(tmp, JSON.stringify(value, null, 2) + "\n");
   try {
     if (beforePublish) beforePublish(value);
     linkSync2(tmp, file);
@@ -15359,10 +15384,18 @@ if (existsSync11(join21(target, pluginManifestRel))) {
         `direct-merge: version fields DIVERGED \u2014 ${pluginManifestRel} is ${branchPlugin}, package.json is ${branchPkg}. They move together in the same commit. Align them, commit, rerun.`
       );
     }
+    const agyManifestRel = ".antigravity-plugin/plugin.json";
+    const agyPath = join21(target, agyManifestRel);
+    const branchAgy = existsSync11(agyPath) ? readVersion(readFileSync14(agyPath, "utf8"), agyManifestRel) : null;
+    if (existsSync11(agyPath) && branchAgy !== branchPlugin) {
+      fail2(
+        `direct-merge: version fields DIVERGED \u2014 ${pluginManifestRel} is ${branchPlugin}, ${agyManifestRel} is ${branchAgy}. They move together in the same commit. Align them, commit, rerun.`
+      );
+    }
     if (basePlugin !== null && branchPlugin === basePlugin) {
       fail2(
         `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.
-The version is the clone-currency signal consumers read: bump BOTH ${pluginManifestRel} and package.json
+The version is the clone-currency signal consumers read: bump ${pluginManifestRel} and package.json (and .antigravity-plugin/plugin.json where it exists)
 (0.x rule: breaking \u2192 MINOR, additive \u2192 PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
       );
     }

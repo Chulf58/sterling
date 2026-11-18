@@ -97,7 +97,7 @@ test('the Claude render of the template is byte-identical to the template before
 });
 
 test('the template fences are valid and every claude-only block is paired, except the @AGENTS.md import', () => {
-  assert.deepEqual(validateFences(template(), 'target-claude-md.md'), []);
+  assert.deepEqual(validateFences(template(), 'target-claude-md.md', { allHosts: true }), []);
   const pairs = layer.hostBlockPairs(template());
   assert.equal(pairs.length, 14, 'the import plus the 13 lines the old phrase map rewrote');
   const unpaired = pairs.filter((p) => p.opencode.length === 0).map((p) => p.claude.join('\n'));

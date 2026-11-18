@@ -10,7 +10,8 @@ import { spawnSync as spawnSync2 } from "node:child_process";
 import { basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync2, existsSync as existsSync3 } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync, openSync, closeSync } from "node:fs";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5853,12 +5854,31 @@ function hookRoots(from) {
   return root ? { storeRoot: root, checkoutRoot: root } : null;
 }
 
+// scripts/lib/atomic-write.mjs
+import { randomUUID } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 // scripts/hooks/lib/common.mjs
-function readStdin() {
-  const input = JSON.parse(readFileSync2(0, "utf8"));
+function readStdin(options = {}) {
+  let input = JSON.parse(readFileSync3(0, "utf8"));
+  const agyRaw = isAgyInput(input) ? input : null;
+  if (agyRaw) input = adoptAgyInput(agyRaw, options);
   const roots = hookRoots(input.cwd);
   if (roots) input.cwd = roots.checkoutRoot;
   input.storeRoot = roots ? roots.storeRoot : input.cwd;
+  if (agyRaw) settleAgyInput(agyRaw, input, roots !== null);
   return input;
 }
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -5967,11 +5987,288 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   stderr: process.stderr,
   exit: (code) => process.exit(code)
 });
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+var AGY_EVENTS = {
+  SessionStart: "SessionStart",
+  PreInvocation: "UserPromptSubmit",
+  PreToolUse: "PreToolUse",
+  PostToolUse: "PostToolUse",
+  Stop: "Stop"
+};
+var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
+var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, queued: [], deferredGuards: [], stopFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
+function isAgyInput(raw) {
+  return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
+}
+function agyToolCall(name, rawArgs) {
+  const a = rawArgs !== null && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs : {};
+  switch (name) {
+    case "run_command":
+      return { tool_name: "Bash", tool_input: { command: a.CommandLine } };
+    case "read_file":
+    case "view_file":
+      return { tool_name: "Read", tool_input: { file_path: a.Path ?? a.AbsolutePath } };
+    case "write_file":
+    case "write_to_file":
+      return { tool_name: "Write", tool_input: { file_path: a.Path ?? a.TargetFile, content: a.Content ?? a.CodeContent } };
+    case "edit_file":
+    case "replace_file_content":
+      return {
+        tool_name: "Edit",
+        tool_input: { file_path: a.Path ?? a.TargetFile, old_string: a.Target ?? a.TargetContent, new_string: a.Replacement ?? a.ReplacementContent }
+      };
+    case "multi_replace_file_content":
+      return {
+        tool_name: "MultiEdit",
+        tool_input: {
+          file_path: a.TargetFile,
+          edits: (Array.isArray(a.ReplacementChunks) ? a.ReplacementChunks : []).map((c) => ({ old_string: c?.TargetContent, new_string: c?.ReplacementContent }))
+        }
+      };
+    case "invoke_subagent":
+      return { tool_name: "Task", tool_input: { prompt: a.Prompt, description: a.Role, subagent_type: a.TypeName } };
+    case "send_message":
+      return { tool_name: "SendMessage", tool_input: { to: a.Recipient, message: a.Message } };
+    case "ask_question":
+      return { tool_name: "AskUserQuestion", tool_input: a };
+    // From the docs only (neither was emitted in the measured turns).
+    case "search_web":
+      return { tool_name: "WebSearch", tool_input: { query: a.query } };
+    case "read_url_content":
+      return { tool_name: "WebFetch", tool_input: { url: a.Url } };
+    case "call_mcp_tool": {
+      let args = a.Arguments;
+      if (typeof args === "string") {
+        try {
+          args = JSON.parse(args);
+        } catch {
+          args = { Arguments: a.Arguments };
+        }
+      }
+      return { tool_name: `mcp__${a.ServerName}__${a.ToolName}`, tool_input: args !== null && typeof args === "object" ? args : {} };
+    }
+    default:
+      return { tool_name: name, tool_input: a };
+  }
+}
+function normalizeAgyInput(raw, { agyEveryInvocation = false } = {}) {
+  const event = raw.hookEventName;
+  const input = {
+    hook_event_name: AGY_EVENTS[event] ?? event,
+    session_id: raw.conversationId,
+    transcript_path: raw.transcriptPath,
+    cwd: typeof raw.cwd === "string" ? raw.cwd : Array.isArray(raw.workspacePaths) ? raw.workspacePaths[0] : void 0,
+    host: "agy"
+  };
+  const subagent = raw.lastUserInput === "";
+  if (event === "SessionStart") {
+    input.source = "startup";
+    if (subagent) return { input, skip: "subagent conversation" };
+  } else if (event === "PreInvocation") {
+    input.prompt = raw.lastUserInput;
+    if (subagent || raw.invocationNum !== 0) {
+      if (!agyEveryInvocation) return { input, skip: subagent ? "subagent conversation" : "not the first model call of the prompt" };
+      input.agy_queue_only = true;
+    }
+  } else if (event === "Stop") {
+    input.stop_hook_active = raw.continuationActive === true;
+    if (subagent) return { input, skip: "subagent conversation" };
+  } else if (event === "PreToolUse" || event === "PostToolUse") {
+    Object.assign(input, agyToolCall(raw.toolCall?.name, raw.toolCall?.args));
+    input.tool_use_id = raw.toolCall?.id;
+    if (event === "PostToolUse" && typeof raw.error === "string" && raw.error !== "") {
+      if (input.tool_name !== "Task") return { input, skip: "failed tool call" };
+      input.hook_event_name = "PostToolUseFailure";
+      input.error = raw.error;
+    }
+  }
+  return { input, skip: null };
+}
+function agyContextTexts(out) {
+  const text = String(out ?? "").trim();
+  if (!text) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [text];
+  }
+  if (parsed === null || typeof parsed !== "object") return [text];
+  const texts = [];
+  const ctx = parsed.hookSpecificOutput?.additionalContext;
+  if (typeof ctx === "string" && ctx.trim()) texts.push(ctx);
+  if (typeof parsed.systemMessage === "string" && parsed.systemMessage.trim()) texts.push(parsed.systemMessage);
+  return texts;
+}
+function agyInjectEnvelope(texts) {
+  return JSON.stringify(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+}
+function agyExitEnvelope({ event, code = 0, err = "", emitted = false, stopContinue = true }) {
+  const json = (o) => ({ text: JSON.stringify(o), code: 0 });
+  if (code === 2) {
+    const reason = String(err).trim() || "A Sterling hook blocked this without giving a reason.";
+    if (event === "PreToolUse") return json({ decision: "deny", reason });
+    if (event === "Stop") return stopContinue ? json({ decision: "continue", reason }) : json({ decision: "allow" });
+    return { text: "", code };
+  }
+  if (code !== 0) return { text: "", code };
+  if (event === "PreToolUse" || event === "Stop") return json({ decision: "allow" });
+  if (emitted) return { text: "", code: 0 };
+  return json({});
+}
+function writeAllSync(fd, text) {
+  const buf = Buffer.from(text, "utf8");
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += writeSync(fd, buf, off, buf.length - off);
+    } catch (e) {
+      if (e?.code !== "EAGAIN") throw e;
+      sleepMs(5);
+    }
+  }
+}
+function agyKey(conversationId) {
+  return String(conversationId ?? "").replace(/[^A-Za-z0-9-]/g, "_").slice(0, 128) || "unknown";
+}
+function agyStateDir(checkout) {
+  return join4(checkout, ".sterling", "transient", "agy");
+}
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname3(path), { recursive: true });
+  writeFileAtomic(path, JSON.stringify(value));
+}
+function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
+  const dir = join4(checkout, ".sterling", "transient", "notices");
+  mkdirSync(dir, { recursive: true });
+  const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const tmp = `${target}.tmp`;
+  const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
+  writeFileSync2(tmp, JSON.stringify(body), { flag: "wx" });
+  renameSync2(tmp, target);
+  return target;
+}
+function flushAgyQueue() {
+  if (!agy.checkout) return;
+  const texts = [...new Set(agy.queued)];
+  if (texts.length) {
+    queueAgyNotice(agy.checkout, agy.conversationId, texts.join("\n\n"), { guards: agy.deferredGuards });
+    return;
+  }
+  for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
+}
+function agyStdoutWrite(chunk) {
+  const texts = agyContextTexts(chunk);
+  if (!texts.length) return;
+  if ((agy.event === "SessionStart" || agy.event === "PreInvocation") && !agy.emitted) {
+    writeAllSync(1, agyInjectEnvelope(texts));
+    agy.emitted = true;
+    return;
+  }
+  agy.queued.push(...texts);
+}
+function adoptAgyInput(raw, options = {}) {
+  const { input, skip } = normalizeAgyInput(raw, options);
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip });
+  const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+  process.stdout.write = (chunk, encoding, callback) => {
+    const done = typeof encoding === "function" ? encoding : callback;
+    let failure = null;
+    try {
+      agyStdoutWrite(text(chunk));
+    } catch (e) {
+      failure = e;
+    }
+    if (typeof done === "function") process.nextTick(done, failure);
+    else if (failure) throw failure;
+    return true;
+  };
+  const writeErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => {
+    agy.errText.push(text(chunk));
+    return writeErr(chunk, ...rest);
+  };
+  process.on("exit", (code) => {
+    let effective = code;
+    try {
+      flushAgyQueue();
+    } catch (e) {
+      writeErr(`Sterling agy adapter: this hook's context could not be queued (${e && e.message || e}), so it is lost and nothing was marked delivered.
+`);
+      if (effective === 0) effective = 1;
+    }
+    try {
+      const stopContinue = agy.event === "Stop" && effective === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code: effective, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
+      if (envelope.text) writeAllSync(1, envelope.text);
+      process.exitCode = envelope.code;
+    } catch (e) {
+      writeErr(`Sterling agy adapter: the hook envelope could not be written (${e && e.message || e}), so agy proceeds as if no hook ran.
+`);
+      process.exitCode = 1;
+    }
+  });
+  return input;
+}
+function agyTurnFile(checkout, conversationId) {
+  return join4(agyStateDir(checkout), `turn-${agyKey(conversationId)}.json`);
+}
+function agyStopFile(checkout, conversationId) {
+  return join4(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`);
+}
+function recordAgyTurn(raw) {
+  const turn = Number.isInteger(raw.initialNumSteps) ? `steps-${raw.initialNumSteps}` : `at-${Date.now()}-${process.pid}`;
+  try {
+    writeJsonAtomic(agyTurnFile(agy.checkout, raw.conversationId), { turn });
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the user turn could not be recorded (${e && e.message || e}); this turn's Stop may not be continued.
+`);
+  }
+}
+function settleAgyInput(raw, input, inProject) {
+  agy.checkout = inProject ? input.cwd : null;
+  if (agy.event === "PreInvocation" && raw.invocationNum === 0 && raw.lastUserInput !== "" && agy.checkout) recordAgyTurn(raw);
+  if (agy.event === "Stop" && agy.checkout) {
+    let turn = "unknown";
+    try {
+      turn = JSON.parse(readFileSync3(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+    } catch (e) {
+      if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
+`);
+    }
+    agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
+    agy.stopTurn = turn;
+    try {
+      agy.stopAlreadyContinued = JSON.parse(readFileSync3(agy.stopFile, "utf8")).turn === turn;
+    } catch (e) {
+      if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
+    }
+    if (agy.stopAlreadyContinued) input.stop_hook_active = true;
+  }
+  if (agy.skip) allow();
+}
+function recordAgyStopContinue() {
+  if (agy.stopAlreadyContinued) return false;
+  if (!agy.stopFile) {
+    process.stderr.write("Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n");
+    return false;
+  }
+  try {
+    writeJsonAtomic(agy.stopFile, { turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() });
+    return true;
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${e && e.message || e}).
+`);
+    return false;
+  }
+}
 
 // scripts/hooks/lib/plan-lock.mjs
-import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join as join4 } from "node:path";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync as closeSync2, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync as openSync2, readSync, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join5 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
@@ -5987,7 +6284,7 @@ function isSterlingProject(cwd) {
   return isSterlingRoot(cwd);
 }
 function sterlingDirOf(cwd) {
-  return join4(cwd, ".sterling");
+  return join5(cwd, ".sterling");
 }
 function sanitizeForContext(value, max) {
   if (typeof value !== "string") return "";
@@ -6004,7 +6301,7 @@ function readBounded(path, maxBytes, noun) {
   if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
   let fd;
   try {
-    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+    fd = openSync2(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
   } catch (e) {
     return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
   }
@@ -6033,7 +6330,7 @@ function readBounded(path, maxBytes, noun) {
     return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
   } finally {
     try {
-      closeSync(fd);
+      closeSync2(fd);
     } catch {
     }
   }
@@ -6086,7 +6383,7 @@ function invalidReason(l) {
   return null;
 }
 function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join4(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
   if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
   const raw = read.text;
   let parsed;
@@ -6101,16 +6398,16 @@ function readLock(sterlingDir) {
   return { lock: parsed, raw };
 }
 function writeAtomicExclusive(dir, name, text) {
-  mkdirSync(dir, { recursive: true });
-  const tmp = join4(dir, `.tmp-${name}-${randomUUID()}`);
-  writeFileSync(tmp, text, { flag: "wx", mode: 384 });
-  renameSync(tmp, join4(dir, name));
+  mkdirSync2(dir, { recursive: true });
+  const tmp = join5(dir, `.tmp-${name}-${randomUUID2()}`);
+  writeFileSync3(tmp, text, { flag: "wx", mode: 384 });
+  renameSync3(tmp, join5(dir, name));
 }
 function writeLock(sterlingDir, lock) {
   writeAtomicExclusive(sterlingDir, LOCK_FILE, JSON.stringify(lock, null, 2) + "\n");
 }
 function writeMarker(sterlingDir, name, body) {
-  writeAtomicExclusive(join4(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
+  writeAtomicExclusive(join5(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
 }
 
 // scripts/hooks/h31-plan-lock.mjs

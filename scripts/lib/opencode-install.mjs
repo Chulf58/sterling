@@ -55,6 +55,7 @@
 //
 // OpenCode not installed, or not 2.x: one loud skip line, nothing written.
 
+import { readStoreWriteToolNames, implementorTemplatePath } from './store-write-tools.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -1333,10 +1334,8 @@ const STORE_WRITERS = new Set(['conductor', 'librarian']);
  * the dotted name the code tool shows (`sterling.knowledge_create`) does not bite.
  */
 export function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize(readFileSync(join(pluginRoot, 'agent-templates', 'implementor.md'), 'utf8')).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? '';
-  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? '';
-  const tools = [...new Set(list.split(',').map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join(pluginRoot, 'agent-templates', 'implementor.md'))} disallowedTools (P5)`);
+  const tools = readStoreWriteToolNames(pluginRoot).map((t) => `sterling_${t}`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(implementorTemplatePath(pluginRoot))} disallowedTools (P5)`);
   return tools;
 }
 

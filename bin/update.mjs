@@ -15363,7 +15363,8 @@ var init_agent_fences = __esm({
       "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
       "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
       "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+      "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
     };
     EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
   }
@@ -15604,6 +15605,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -15618,7 +15620,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -15636,7 +15642,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -15687,6 +15693,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -15700,6 +15711,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -15708,7 +15722,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -15719,7 +15733,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -15848,6 +15863,7 @@ function pinOf(spec) {
 var SHELL_SPECIAL = /["$`]/;
 function sterlingUpdateRemedy(host, { env = process.env, home = homedir(), root = null } = {}) {
   if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
+  if (host === "agy") return AGY_UPDATE_REMEDY;
   if (host === "opencode" || host === null) {
     const found = configuredSterlingSpec(env, home, root);
     const shipped = (why) => `\`opencode plugin update "${STERLING_GIT_SPEC}"\`${why ? ` (the shipped spec; ${why})` : ""}`;
@@ -15860,10 +15876,11 @@ function sterlingUpdateRemedy(host, { env = process.env, home = homedir(), root 
       const note = pin ? ` \u2014 but that spec is pinned to #${pin} and never updates; change it to "${STERLING_GIT_SPEC}" (a semver range) in the plugins list of opencode.json, then update` : "";
       opencode = `\`opencode plugin update "${found.spec}"\`${note}`;
     }
-    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code) or ${opencode} (OpenCode)`;
+    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code), ${opencode} (OpenCode) or ${AGY_UPDATE_REMEDY} (Antigravity CLI)`;
   }
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
+var AGY_UPDATE_REMEDY = "`agy plugin install <a directory holding the newer Sterling>` (agy has no plugin update command; the install replaces ~/.gemini/config/plugins/sterling)";
 function canonical(p) {
   try {
     return realpathSync(p);
@@ -16777,11 +16794,13 @@ var OPENER_TEMPLATES = { windows: "opener-win.bat", linux: "opener-linux.sh" };
 var OPENERS = {
   windows: [
     { file: "claude-code.bat", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.bat", mode: "agy", tool: "agy", app: "Antigravity" }
   ],
   linux: [
     { file: "claude-code.sh", mode: "claude", tool: "claude", app: "Claude Code" },
-    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" }
+    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" },
+    { file: "antigravity.sh", mode: "agy", tool: "agy", app: "Antigravity" }
   ]
 };
 var RETIRED_LAUNCHERS = {
@@ -16799,6 +16818,7 @@ var LAUNCHER_GITIGNORE_ENTRIES = [
 ];
 var LAUNCHER_HOST_ENV = "STERLING_LAUNCHER_HOST";
 var LAUNCHER_OPENCODE_ENV = "STERLING_LAUNCHER_OPENCODE";
+var LAUNCHER_AGY_ENV = "STERLING_LAUNCHER_AGY";
 var lf2 = (s2) => s2.replace(/\r\n/g, "\n");
 var ensureExecutable = (path, warns) => {
   try {
@@ -16843,9 +16863,14 @@ function launcherTools({ env = process.env, home = homedir3(), claude } = {}) {
   if (forced && forced !== "found" && forced !== "absent") {
     throw new Error(`${LAUNCHER_OPENCODE_ENV} must be 'found' or 'absent' (got '${forced}')`);
   }
+  const forcedAgy = env[LAUNCHER_AGY_ENV];
+  if (forcedAgy && forcedAgy !== "found" && forcedAgy !== "absent") {
+    throw new Error(`${LAUNCHER_AGY_ENV} must be 'found' or 'absent' (got '${forcedAgy}')`);
+  }
   return {
     claude: claude ?? onPath("claude", env),
-    opencode: forced ? forced === "found" : onPath("opencode", env) || executableFile(join12(home, ".opencode", "bin", "opencode"))
+    opencode: forced ? forced === "found" : onPath("opencode", env) || executableFile(join12(home, ".opencode", "bin", "opencode")),
+    agy: forcedAgy ? forcedAgy === "found" : onPath("agy", env) || executableFile(join12(home, ".local", "bin", "agy"))
   };
 }
 function launcherHistoryLoader(pluginRoot2) {
@@ -16883,7 +16908,7 @@ function renderOpener(pluginRoot2, target2, host, opener) {
 function ensureLaunchers(target2, pluginRoot2, {
   splitPercent,
   host,
-  tools = { claude: true, opencode: true },
+  tools = { claude: true, opencode: true, agy: true },
   history = launcherHistoryLoader(pluginRoot2),
   installedCopy = isInstalledCopy(pluginRoot2),
   checkText = (_label, text) => text,
@@ -16911,7 +16936,7 @@ function ensureLaunchers(target2, pluginRoot2, {
   const cloneLauncher = installedCopy && existing !== null ? cloneLauncherTarget(existing) : null;
   if (existing === null) {
     writeFileSync5(enginePath, expected, { mode: 493 });
-    items.push({ item: ENGINE_NAME, status: "created", detail: `tmux sessions ${session}-claude and ${session}-opencode, ${splitPercent}% TUI pane` });
+    items.push({ item: ENGINE_NAME, status: "created", detail: `tmux sessions ${session}-claude, ${session}-opencode and ${session}-agy, ${splitPercent}% TUI pane` });
   } else if (lf2(existing) === lf2(expected)) {
     items.push({ item: ENGINE_NAME, status: "matches", detail: "generated content unchanged" });
   } else if (cloneLauncher) {
@@ -17309,7 +17334,7 @@ function ownPluginRoot() {
   return null;
 }
 function installedCopyRefusal(host, { env = process.env, home = homedir7(), root = null } = {}) {
-  const by = host === "claude-code" ? "as a Claude Code plugin" : host === "opencode" ? "as an OpenCode plugin" : "as a plugin";
+  const by = host === "claude-code" ? "as a Claude Code plugin" : host === "opencode" ? "as an OpenCode plugin" : host === "agy" ? "as an Antigravity CLI plugin" : "as a plugin";
   return `Sterling is installed ${by} \u2014 update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 function machineStores(cwd) {
@@ -17377,19 +17402,19 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
       const { host, tools } = launcherSetup;
       const rows = [];
       const warns = [];
-      if (tools.claude || tools.opencode) {
+      if (tools.claude || tools.opencode || tools.agy) {
         const ratio = JSON.parse(readFileSync15(join21(repoPath2, ".sterling", "config.json"), "utf8")).tui_split_ratio;
         if (ratio !== void 0 && !(typeof ratio === "number" && ratio > 0 && ratio <= 1)) throw new Error(`tui_split_ratio in .sterling/config.json is ${JSON.stringify(ratio)}, not a number in (0, 1]`);
         const r = ensureLaunchers(repoPath2, cwd, { splitPercent: Math.round((ratio ?? 0.35) * 100), host, tools, history: launcherHistory, installedCopy: false });
         rows.push(...r.items);
         warns.push(...r.warns);
       }
-      if (tools.claude || tools.opencode) {
+      if (tools.claude || tools.opencode || tools.agy) {
         const retired = removeRetiredLaunchers(repoPath2, cwd, { history: launcherHistory });
         rows.push(...retired.items);
         warns.push(...retired.warns);
       } else {
-        warns.push("\u26A0 Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.");
+        warns.push("\u26A0 None of Claude Code, OpenCode or Antigravity CLI (agy) was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of them.");
       }
       const ignored = ensureLauncherIgnores(repoPath2);
       const out = rows.filter((r) => r.status !== "matches").map((r) => `${r.item}: ${r.status} \u2014 ${r.detail}`);

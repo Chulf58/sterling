@@ -32,7 +32,7 @@ function lock(v, { depVersion = '1.0.0', depIntegrity = 'sha512-aaa', workspaceV
 }
 
 test('candidates: package.json, plugin.json and package-lock.json', () => {
-  assert.deepEqual([...VERSION_ONLY_CANDIDATES].sort(), ['.claude-plugin/plugin.json', 'package-lock.json', 'package.json']);
+  assert.deepEqual([...VERSION_ONLY_CANDIDATES].sort(), ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package-lock.json', 'package.json']);
 });
 
 test('manifest: a lone version-line bump qualifies; an added field, a CRLF conversion or an unchanged version does not', () => {
