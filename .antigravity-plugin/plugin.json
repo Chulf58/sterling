@@ -1,5 +1,5 @@
 {
   "name": "sterling",
-  "version": "0.19.151",
+  "version": "0.19.152",
   "description": "Sterling for Antigravity CLI: a durable knowledge store and the hooks that consult and maintain it."
 }
