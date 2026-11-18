@@ -13697,7 +13697,7 @@ var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync11, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync5, renameSync } from "node:fs";
+import { readFileSync as readFileSync11, writeFileSync as writeFileSync3, mkdirSync as mkdirSync6, rmSync as rmSync4, statSync as statSync5, renameSync as renameSync2 } from "node:fs";
 import { join as join16, dirname as dirname8, resolve as resolve7 } from "node:path";
 init_dist2();
 
@@ -13706,7 +13706,7 @@ init_dist();
 import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2 } from "node:fs";
+import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2, writeFileSync as writeFileSync2, renameSync, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { join as join12 } from "node:path";
 init_dist();
 init_dist2();
@@ -13828,6 +13828,7 @@ function loadConfig(cwd) {
   const p = join12(storeRootFor(cwd), ".sterling", "config.json");
   return existsSync7(p) ? JSON.parse(readFileSync9(p, "utf8")) : null;
 }
+var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
 
 // scripts/hooks/lib/working-tree.mjs
 function isForeignTree(record, root, workingTrees, storeRoot2 = root ? storeRootFor(root) : root) {
@@ -14314,7 +14315,7 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync7, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname9, join as join19 } from "node:path";
 
 // scripts/lib/gh-path.mjs
@@ -14675,10 +14676,10 @@ var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join19(root, PR_LOOP_REL);
 var prLoopFile = (root, prNumber) => join19(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
-  mkdirSync6(dirname9(file), { recursive: true });
+  mkdirSync7(dirname9(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
-  writeFileSync3(tmp, JSON.stringify(value, null, 2) + "\n");
-  renameSync2(tmp, file);
+  writeFileSync4(tmp, JSON.stringify(value, null, 2) + "\n");
+  renameSync3(tmp, file);
 }
 function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE__ */ new Date()).toISOString(), beforeLegacyPublish = null }) {
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: "owed" };
@@ -14703,9 +14704,9 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   return state;
 }
 function writeExclusive(file, value, { beforePublish = null } = {}) {
-  mkdirSync6(dirname9(file), { recursive: true });
+  mkdirSync7(dirname9(file), { recursive: true });
   const tmp = `${file}.excl-${process.pid}`;
-  writeFileSync3(tmp, JSON.stringify(value, null, 2) + "\n");
+  writeFileSync4(tmp, JSON.stringify(value, null, 2) + "\n");
   try {
     if (beforePublish) beforePublish(value);
     linkSync2(tmp, file);
