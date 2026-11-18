@@ -23023,7 +23023,7 @@ function parseIntent(prompt) {
 var providerOf = (ref) => ref.slice(0, ref.indexOf("/"));
 var claudeRef = (entry) => `anthropic/${entry.model}`;
 function roleEntry(config, role) {
-  const models = config?.models;
+  const models = migrateStaleAgyModels(config).config?.models;
   if (models !== void 0 && !isObject2(models)) return { problem: `config.models is ${JSON.stringify(models)}, not an object` };
   const raw = models ?? {};
   const parsed = configSchema.shape.models.safeParse(Object.hasOwn(raw, role) ? { [role]: raw[role] } : {});

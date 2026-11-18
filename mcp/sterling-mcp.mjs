@@ -33228,6 +33228,11 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
       }
     }
   }
+  const staleBefore = new Set(migrateStaleAgyModels(raw).dropped.map((d) => `${d.role}\0${JSON.stringify(d.value)}`));
+  const introduced = migrateStaleAgyModels(mutated).dropped.find((d) => !staleBefore.has(`${d.role}\0${JSON.stringify(d.value)}`));
+  if (introduced) {
+    throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 models.${introduced.role}.agy_model: must be one of ${AGY_MODEL_IDS.join(", ")} (agy drops a subagent with any other model), got ${JSON.stringify(introduced.value)}. Nothing was written.`);
+  }
   const validation = configSchema.safeParse(normalizeRawConfig(mutated));
   if (!validation.success) {
     const issues = validation.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
