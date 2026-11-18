@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -14053,7 +14053,7 @@ import { spawn } from "node:child_process";
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync4, existsSync as existsSync8, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync10, renameSync as renameSync5, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync5, writeFileSync as writeFileSync6, appendFileSync } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync8, mkdirSync as mkdirSync7, openSync as openSync3, readFileSync as readFileSync10, renameSync as renameSync5, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync5, writeFileSync as writeFileSync6, appendFileSync } from "node:fs";
 import { dirname as dirname9, isAbsolute as isAbsolute3, join as join14, resolve as resolve6, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14671,7 +14671,7 @@ function launchWorker(opts) {
         })
       );
       rotateIfLarge(paths.log);
-      logFd = openSync4(paths.log, "a");
+      logFd = openSync3(paths.log, "a");
       stage = "spawn";
       const child = opts.spawn(
         process.execPath,
@@ -14687,7 +14687,7 @@ function launchWorker(opts) {
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
-      if (logFd !== void 0) closeSync4(logFd);
+      if (logFd !== void 0) closeSync3(logFd);
       if (!launched) releaseLock(paths, token);
     }
   } catch (e) {
@@ -14716,7 +14716,7 @@ var TOOLS_MISSING_RE = new RegExp(
 import { join as join16 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync11, writeFileSync as writeFileSync7, mkdirSync as mkdirSync8, existsSync as existsSync9, renameSync as renameSync6, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
+import { readFileSync as readFileSync11, writeFileSync as writeFileSync7, mkdirSync as mkdirSync8, existsSync as existsSync9, renameSync as renameSync6, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
 import { join as join15, dirname as dirname10 } from "node:path";
 function deliveryDir(cwd) {
   return join15(cwd, ".sterling", "transient", "delivery");
@@ -14727,8 +14727,8 @@ function claimLegacyInjectionRungNotice(cwd, rawRung) {
   const marker = join15(transient, "legacy-injection-rung-noticed");
   mkdirSync8(transient, { recursive: true });
   try {
-    const fd = openSync5(marker, "wx");
-    closeSync5(fd);
+    const fd = openSync4(marker, "wx");
+    closeSync4(fd);
   } catch (error) {
     if (error?.code === "EEXIST") return null;
     throw error;

@@ -45,15 +45,6 @@
         ]
       },
       {
-        "matcher": "call_mcp_tool",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node --disable-warning=ExperimentalWarning ./hooks/h15-store-guard.mjs"
-          }
-        ]
-      },
-      {
         "matcher": "invoke_subagent",
         "hooks": [
           {

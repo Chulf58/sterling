@@ -12,7 +12,7 @@ import { readFileSync as readFileSync17, writeFileSync as writeFileSync10, write
 import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
@@ -14494,11 +14494,11 @@ function isVersionOnlyInWorkingTree(root, baseSha, path) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync as fstatSync2, existsSync as existsSync8, statSync as statSync6, readdirSync as readdirSync3 } from "node:fs";
+import { openSync as openSync3, readSync as readSync2, closeSync as closeSync3, fstatSync as fstatSync2, existsSync as existsSync8, statSync as statSync6, readdirSync as readdirSync3 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync8(path)) return null;
-  const fd = openSync4(path, "r");
+  const fd = openSync3(path, "r");
   try {
     const size = fstatSync2(fd).size;
     const len = Math.min(size, bytes);
@@ -14506,7 +14506,7 @@ function readTail(path, bytes = TAIL_BYTES) {
     readSync2(fd, buf, 0, len, size - len);
     return buf.toString("utf8");
   } finally {
-    closeSync4(fd);
+    closeSync3(fd);
   }
 }
 function latestUsage(path) {
@@ -14666,7 +14666,7 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync7, mkdirSync as mkdirSync8, existsSync as existsSync10, renameSync as renameSync6, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync7, mkdirSync as mkdirSync8, existsSync as existsSync10, renameSync as renameSync6, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
 import { join as join18, dirname as dirname12 } from "node:path";
 function noticesDir(cwd) {
   return join18(cwd, ".sterling", "transient", "notices");
@@ -14686,7 +14686,7 @@ var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync6, writeSync as writeSync2, closeSync as closeSync6, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -14798,7 +14798,7 @@ var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number}
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync7, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync7, readFileSync as readFileSync15, renameSync as renameSync8, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
+import { closeSync as closeSync6, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync6, readFileSync as readFileSync15, renameSync as renameSync8, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
 import { dirname as dirname14, isAbsolute as isAbsolute3, join as join20, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -15346,7 +15346,7 @@ function launchWorker(opts) {
         })
       );
       rotateIfLarge(paths.log);
-      logFd = openSync7(paths.log, "a");
+      logFd = openSync6(paths.log, "a");
       stage = "spawn";
       const child = opts.spawn(
         process.execPath,
@@ -15362,7 +15362,7 @@ function launchWorker(opts) {
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
-      if (logFd !== void 0) closeSync7(logFd);
+      if (logFd !== void 0) closeSync6(logFd);
       if (!launched) releaseLock(paths, token);
     }
   } catch (e) {

@@ -1,6 +1,6 @@
 // Shared hook plumbing. Hooks import workspace packages at AUTHOR time; the
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
-import { readFileSync, existsSync, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, existsSync, writeSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
@@ -774,35 +774,6 @@ function flushAgyQueue() {
     return;
   }
   for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
-}
-
-/**
- * Queue a warning once per agy conversation, keyed by `name` (an exclusive
- * marker file decides the one winner). Returns true when this call queued it.
- * Outside a Sterling project, or when the marker or queue cannot be written,
- * the warning goes to stderr, which agy logs, and false is returned.
- */
-export function queueAgyWarningOnce(name, text) {
-  if (!agy.active || !agy.checkout) {
-    process.stderr.write(`${text}\n`);
-    return false;
-  }
-  try {
-    const dir = agyStateDir(agy.checkout);
-    mkdirSync(dir, { recursive: true });
-    closeSync(openSync(join(dir, `${name}-${agyKey(agy.conversationId)}`), 'wx'));
-  } catch (e) {
-    if (e?.code === 'EEXIST') return false;
-    process.stderr.write(`${text} (the once-per-conversation marker could not be written: ${(e && e.message) || e})\n`);
-    return false;
-  }
-  try {
-    queueAgyNotice(agy.checkout, agy.conversationId, text);
-    return true;
-  } catch (e) {
-    process.stderr.write(`${text} (it could not be queued for the model: ${(e && e.message) || e})\n`);
-    return false;
-  }
 }
 
 /** One stdout write of a hook on agy, handled per the event (see the header). */

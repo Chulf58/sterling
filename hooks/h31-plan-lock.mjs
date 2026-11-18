@@ -10,7 +10,7 @@ import { spawnSync as spawnSync2 } from "node:child_process";
 import { basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync, openSync, closeSync } from "node:fs";
+import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
@@ -6267,7 +6267,7 @@ function recordAgyStopContinue() {
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { closeSync as closeSync2, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync as openSync2, readSync, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { closeSync, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join5 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -6301,7 +6301,7 @@ function readBounded(path, maxBytes, noun) {
   if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
   let fd;
   try {
-    fd = openSync2(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
   } catch (e) {
     return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
   }
@@ -6330,7 +6330,7 @@ function readBounded(path, maxBytes, noun) {
     return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
   } finally {
     try {
-      closeSync2(fd);
+      closeSync(fd);
     } catch {
     }
   }
