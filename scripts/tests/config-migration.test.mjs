@@ -301,12 +301,12 @@ test('model defaults: absent opencode_model and hard_task are added and reported
     assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' });
     assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
     assert.deepEqual(after.models.reviewer, { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' }, 'a value the user set stays');
-    assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' }, 'a role with no entry gets the shipped default entry');
+    assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }, 'a role with no entry gets the shipped default entry');
     assert.deepEqual(after.models.researcher, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'other roles are not touched');
     assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'overpass-defaults-2026-10-23']);
     assert.equal(r.lines.length, 4);
     assert.match(r.lines[0], /^config migration: models\.implementor\.hard_task added as \{"model":"claude-opus-5-5"\}/);
-    assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra","agy_model":"claude-opus-5-5-high"\}/);
+    assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra"\}/);
     assert.match(r.lines[2], /^config migration: models\.implementor\.hard_task \{"model":"claude-opus-5-5"\} moved to models\.implementor-hard as \{"model":"claude-opus-5-5","effort":"high"\}/);
     assert.match(r.lines[3], /^config migration: overpass\.conductor_bypass set to true \(was unset\)/);
   } finally {
@@ -530,6 +530,29 @@ test('overpass reset: sync-agents prints the report and writes the reset into th
     assert.match(r.out, /config migration: overpass\.roles removed \(value was \{"implementor":\{"tier":"agentic-low"\}\}\)/);
     assert.match(r.out, /config migration: overpass\.conductor_bypass set to true \(was unset\)/);
     assert.deepEqual(JSON.parse(read(dir)).overpass, { enabled: true, conductor_bypass: true });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('stale agy_model: an exact id from v0.19.155 is dropped and reported, a valid value is kept, and a second run is a no-op (GitHub #310)', () => {
+  const dir = project(JSON.stringify({
+    mode: 'hobby',
+    models: {
+      sparring: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' },
+      scout: { model: 'claude-sonnet-5-5', effort: 'low', agy_model: 'flash' },
+    },
+  }, null, 2) + '\n');
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    const after = JSON.parse(read(dir));
+    assert.equal('agy_model' in after.models.sparring, false);
+    assert.equal(after.models.scout.agy_model, 'flash');
+    const line = r.lines.find((l) => l.includes('agy_model'));
+    assert.match(line, /^config migration: models\.sparring\.agy_model dropped \(agy accepts only inherit, flash_lite, flash or pro.*value was "claude-opus-5-5-high"/);
+    assert.equal(r.lines.filter((l) => l.includes('agy_model')).length, 1, 'one notice, naming the role');
+    assert.equal(migrateProjectConfig(dir).lines.some((l) => l.includes('agy_model')), false);
   } finally {
     cleanup(dir);
   }

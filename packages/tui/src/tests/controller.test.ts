@@ -598,10 +598,10 @@ test('controller: an agy_model set writes config.models.<key>.agy_model and the 
   const a = await agyFixture();
   const ctl = openDashboard(a.f.storePath, { agySetup: a.agySetup });
   try {
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    assert.equal(JSON.parse(readFileSync(a.f.configPath, 'utf8')).models.implementor.agy_model, 'claude-opus-5-5-high');
-    assert.match(readFileSync(a.agent('implementor'), 'utf8'), /^model: claude-opus-5-5-high$/m);
-    assert.match(ctl.ui().notice ?? '', /Antigravity model for 'implementor' set to claude-opus-5-5-high/);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    assert.equal(JSON.parse(readFileSync(a.f.configPath, 'utf8')).models.implementor.agy_model, 'pro');
+    assert.match(readFileSync(a.agent('implementor'), 'utf8'), /^model: pro$/m);
+    assert.match(ctl.ui().notice ?? '', /Antigravity model for 'implementor' set to pro/);
   } finally {
     ctl.close();
     a.cleanup();
@@ -613,14 +613,14 @@ test('controller: an agy render that refuses a sibling agent puts the already re
   const ctl = openDashboard(a.f.storePath, { agySetup: a.agySetup });
   try {
     // baseline render: every agy agent file exists, written with model: inherit
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'gemini-4-argon-low', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', from: 'gemini-4-argon-low', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'flash_lite', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', from: 'flash_lite', model: 'claude-sonnet-5-5', effort: 'high' }]);
     const implementorBefore = readFileSync(a.agent('implementor'));
     assert.match(implementorBefore.toString('utf8'), /^model: inherit$/m);
     // a locally edited sibling that comes after the implementor in the roster: setupAgy refuses it
     writeFileSync(a.agent('researcher'), readFileSync(a.agent('researcher'), 'utf8') + '\nmy own edit\n');
     const configBefore = readFileSync(a.f.configPath);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
     assert.ok(readFileSync(a.agent('implementor')).equals(implementorBefore), 'the implementor agent file is back to its old bytes');
     assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is back to its old bytes');
     assert.match(ctl.ui().notice ?? '', /not changed — .*edited after Sterling wrote it.*config\.json and the agy agent files are as they were/);
@@ -638,7 +638,7 @@ test('controller: an agy agent path that is a directory refuses the change befor
   try {
     mkdirSync(a.agent('implementor'), { recursive: true }); // agent.md is a directory
     const configBefore = readFileSync(a.f.configPath);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
     assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is unchanged');
     assert.equal(setupCalls, 0, 'setup did not run');
     assert.match(ctl.ui().notice ?? '', /not changed — cannot snapshot the agy agent files: .*implementor.*not a regular file/);
@@ -658,7 +658,7 @@ test('controller: a symlinked agy agent path is refused before any write, and th
     writeFileSync(target, 'target bytes\n');
     symlinkSync(target, a.agent('scout'));
     const configBefore = readFileSync(a.f.configPath);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'claude-opus-5-5-high', model: 'claude-sonnet-5-5', effort: 'high' }]);
+    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
     assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is unchanged');
     assert.equal(setupCalls, 0, 'setup did not run');
     assert.equal(lstatSync(a.agent('scout')).isSymbolicLink(), true, 'the link is still a link');
