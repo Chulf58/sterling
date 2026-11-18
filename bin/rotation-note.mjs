@@ -9,7 +9,7 @@ var __export = (target, all) => {
 // scripts/rotation-note.mjs
 import { existsSync as existsSync7, mkdirSync as mkdirSync8, writeFileSync as writeFileSync6, readFileSync as readFileSync8 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { dirname as dirname7 } from "node:path";
+import { dirname as dirname8 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync, readFileSync as readFileSync3, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync as lstatSync2, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
@@ -13051,7 +13051,7 @@ function fail(message, code = 1) {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync5, renameSync as renameSync4, mkdirSync as mkdirSync7, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
-import { join as join13 } from "node:path";
+import { dirname as dirname7, join as join13 } from "node:path";
 
 // scripts/hooks/lib/broker-client.mjs
 import { realpathSync as realpathSync6 } from "node:fs";
@@ -13626,7 +13626,7 @@ try {
 } catch (e) {
   fail2(e.message);
 }
-mkdirSync8(dirname7(notePath), { recursive: true });
+mkdirSync8(dirname8(notePath), { recursive: true });
 writeFileSync6(notePath, JSON.stringify(note, null, 2) + "\n");
 process.stdout.write(
   `rotation note written (single slot \u2014 this supersedes any prior note).

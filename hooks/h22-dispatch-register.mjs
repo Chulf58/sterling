@@ -11,8 +11,7 @@ import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join as join4 } from "node:path";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -6027,7 +6026,7 @@ var AGY_EVENTS = {
   Stop: "Stop"
 };
 var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
-var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, stopTurnFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
+var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, queued: [], deferredGuards: [], stopFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
 function isAgyInput(raw) {
   return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
 }
@@ -6165,14 +6164,30 @@ function agyKey(conversationId) {
 function agyStateDir(checkout) {
   return join4(checkout, ".sterling", "transient", "agy");
 }
-function queueAgyNotice(checkout, conversationId, text) {
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname3(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(value));
+  renameSync(tmp, path);
+}
+function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join4(checkout, ".sterling", "transient", "notices");
   mkdirSync(dir, { recursive: true });
   const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ text: String(text), session_id: String(conversationId) }), { flag: "wx" });
+  const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
+  writeFileSync(tmp, JSON.stringify(body), { flag: "wx" });
   renameSync(tmp, target);
   return target;
+}
+function flushAgyQueue() {
+  if (!agy.checkout) return;
+  const texts = [...new Set(agy.queued)];
+  if (texts.length) {
+    queueAgyNotice(agy.checkout, agy.conversationId, texts.join("\n\n"), { guards: agy.deferredGuards });
+    return;
+  }
+  for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
 }
 function agyStdoutWrite(chunk) {
   const texts = agyContextTexts(chunk);
@@ -6182,12 +6197,11 @@ function agyStdoutWrite(chunk) {
     agy.emitted = true;
     return;
   }
-  if (!agy.checkout) return;
-  for (const t of texts) queueAgyNotice(agy.checkout, agy.conversationId, t);
+  agy.queued.push(...texts);
 }
 function adoptAgyInput(raw, options = {}) {
   const { input: input2, skip } = normalizeAgyInput(raw, options);
-  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip, lastUserInput: raw.lastUserInput });
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip });
   const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
   process.stdout.write = (chunk, encoding, callback) => {
     const done = typeof encoding === "function" ? encoding : callback;
@@ -6207,9 +6221,17 @@ function adoptAgyInput(raw, options = {}) {
     return writeErr(chunk, ...rest);
   };
   process.on("exit", (code) => {
+    let effective = code;
     try {
-      const stopContinue = agy.event === "Stop" && code === 2 ? recordAgyStopContinue() : true;
-      const envelope = agyExitEnvelope({ event: agy.event, code, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
+      flushAgyQueue();
+    } catch (e) {
+      writeErr(`Sterling agy adapter: this hook's context could not be queued (${e && e.message || e}), so it is lost and nothing was marked delivered.
+`);
+      if (effective === 0) effective = 1;
+    }
+    try {
+      const stopContinue = agy.event === "Stop" && effective === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code: effective, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
       if (envelope.text) writeAllSync(1, envelope.text);
       process.exitCode = envelope.code;
     } catch (e) {
@@ -6220,20 +6242,36 @@ function adoptAgyInput(raw, options = {}) {
   });
   return input2;
 }
-function agyStopTurn(checkout, conversationId, lastUserInput) {
-  return {
-    file: join4(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`),
-    turn: createHash("sha256").update(String(lastUserInput ?? "")).digest("hex")
-  };
+function agyTurnFile(checkout, conversationId) {
+  return join4(agyStateDir(checkout), `turn-${agyKey(conversationId)}.json`);
+}
+function agyStopFile(checkout, conversationId) {
+  return join4(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`);
+}
+function recordAgyTurn(raw) {
+  const turn = Number.isInteger(raw.initialNumSteps) ? `steps-${raw.initialNumSteps}` : `at-${Date.now()}-${process.pid}`;
+  try {
+    writeJsonAtomic(agyTurnFile(agy.checkout, raw.conversationId), { turn });
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the user turn could not be recorded (${e && e.message || e}); this turn's Stop may not be continued.
+`);
+  }
 }
 function settleAgyInput(raw, input2, inProject) {
   agy.checkout = inProject ? input2.cwd : null;
+  if (agy.event === "PreInvocation" && raw.invocationNum === 0 && raw.lastUserInput !== "" && agy.checkout) recordAgyTurn(raw);
   if (agy.event === "Stop" && agy.checkout) {
-    const { file, turn } = agyStopTurn(agy.checkout, raw.conversationId, raw.lastUserInput);
-    agy.stopTurnFile = file;
+    let turn = "unknown";
+    try {
+      turn = JSON.parse(readFileSync2(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+    } catch (e) {
+      if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
+`);
+    }
+    agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync2(file, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync2(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -6243,13 +6281,12 @@ function settleAgyInput(raw, input2, inProject) {
 }
 function recordAgyStopContinue() {
   if (agy.stopAlreadyContinued) return false;
-  if (!agy.stopTurnFile) {
+  if (!agy.stopFile) {
     process.stderr.write("Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n");
     return false;
   }
   try {
-    mkdirSync(agyStateDir(agy.checkout), { recursive: true });
-    writeFileSync(agy.stopTurnFile, JSON.stringify({ turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() }));
+    writeJsonAtomic(agy.stopFile, { turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() });
     return true;
   } catch (e) {
     process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${e && e.message || e}).
@@ -6527,10 +6564,10 @@ function claimedResources(promptText, configuredNames) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync, readdirSync as readdirSync2, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join5, resolve as resolve3, dirname as dirname3, isAbsolute as isAbsolute2 } from "node:path";
+import { join as join5, resolve as resolve3, dirname as dirname4, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { randomBytes, createHash as createHash2 } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -6731,7 +6768,7 @@ function registerLockRoot() {
   return `/tmp/sterling-locks-${uid}`;
 }
 function registerLockPath(root) {
-  const hash = createHash2("sha256").update(realpathSync2(resolve3(root))).digest("hex");
+  const hash = createHash("sha256").update(realpathSync2(resolve3(root))).digest("hex");
   return join5(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
@@ -6810,7 +6847,7 @@ async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
   const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname3(lockPath));
+  ensureLockRoot(dirname4(lockPath));
   const db = new DatabaseSync4(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");
@@ -6920,7 +6957,7 @@ function liveFileName(key) {
   return `${LIVE_PREFIX}${key}.json`;
 }
 function agentIdHash(agentId) {
-  return createHash2("sha256").update(String(agentId), "utf8").digest("base64url");
+  return createHash("sha256").update(String(agentId), "utf8").digest("base64url");
 }
 function recordAgentIds(record) {
   return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
@@ -6959,7 +6996,7 @@ function warnStateFile(file, text) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 function dispatchState(record) {
   if (record?.terminal) return "terminal";
@@ -6971,7 +7008,7 @@ function promptFacts(rawPrompt) {
   const isString = typeof rawPrompt === "string";
   const source = isString ? rawPrompt : "";
   const prompt_bytes = Buffer.byteLength(source, "utf8");
-  const prompt_sha256 = createHash2("sha256").update(source, "utf8").digest("hex");
+  const prompt_sha256 = createHash("sha256").update(source, "utf8").digest("hex");
   const oversize = prompt_bytes > MAX_PROMPT_BYTES;
   return { prompt: isString && !oversize ? rawPrompt : null, prompt_bytes, prompt_sha256, ...oversize ? { oversize: true } : {} };
 }
@@ -7009,7 +7046,7 @@ function validateRecordShape(r) {
   if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
   if (typeof r.prompt === "string") {
     const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash2("sha256").update(r.prompt, "utf8").digest("hex");
+    const sha = createHash("sha256").update(r.prompt, "utf8").digest("hex");
     if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
   } else if (r.prompt !== null) {
     return { ok: false, reason: "prompt-type" };

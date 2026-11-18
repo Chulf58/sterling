@@ -13700,7 +13700,7 @@ var DOMAIN_MAP_PENDING_REL = join11(".sterling", "domain-map-pending");
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { readFileSync as readFileSync11, writeFileSync as writeFileSync3, mkdirSync as mkdirSync6, rmSync as rmSync4, statSync as statSync5, renameSync as renameSync2 } from "node:fs";
-import { join as join16, dirname as dirname8, resolve as resolve7 } from "node:path";
+import { join as join16, dirname as dirname9, resolve as resolve7 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/working-tree.mjs
@@ -13709,7 +13709,7 @@ import { join as join13 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync9, existsSync as existsSync7, writeSync as writeSync2, writeFileSync as writeFileSync2, renameSync, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { join as join12 } from "node:path";
+import { dirname as dirname7, join as join12 } from "node:path";
 init_dist();
 init_dist2();
 
@@ -13922,7 +13922,7 @@ function observePaths(root, paths, storeRoot2) {
 
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname7, join as join15 } from "node:path";
+import { dirname as dirname8, join as join15 } from "node:path";
 var SESSION_EVENTS_REL = join15(".sterling", "transient", "session-events.json");
 
 // scripts/hooks/lib/settlement.mjs
@@ -14318,7 +14318,7 @@ init_dist2();
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync7, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname9, join as join19 } from "node:path";
+import { dirname as dirname10, join as join19 } from "node:path";
 
 // scripts/lib/gh-path.mjs
 import { existsSync as existsSync8 } from "node:fs";
@@ -14678,7 +14678,7 @@ var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join19(root, PR_LOOP_REL);
 var prLoopFile = (root, prNumber) => join19(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
-  mkdirSync7(dirname9(file), { recursive: true });
+  mkdirSync7(dirname10(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync4(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync3(tmp, file);
@@ -14706,7 +14706,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   return state;
 }
 function writeExclusive(file, value, { beforePublish = null } = {}) {
-  mkdirSync7(dirname9(file), { recursive: true });
+  mkdirSync7(dirname10(file), { recursive: true });
   const tmp = `${file}.excl-${process.pid}`;
   writeFileSync4(tmp, JSON.stringify(value, null, 2) + "\n");
   try {

@@ -1,8 +1,7 @@
 // Shared hook plumbing. Hooks import workspace packages at AUTHOR time; the
 // ship step esbuild-bundles them so the runtime is standalone (invariant 4).
 import { readFileSync, existsSync, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
@@ -490,22 +489,29 @@ export function repoRel(toolPath, cwd) {
 //     after-write bookkeeping (h19-delivery-drain deleting what it drained) runs
 //     only after the envelope is really on stdout;
 //   • PreToolUse / PostToolUse / Stop: the text is QUEUED for this conversation
-//     as an `agy-*` file in the H10 notice directory (lib/delivery.mjs
-//     noticesDir), and the write callback fires only after the file is renamed
-//     into place, so H19's "mark delivered" bookkeeping runs only for text that
-//     is durably queued. h19-delivery-drain injects the queue at the
-//     conversation's NEXT PreInvocation, at any invocationNum;
+//     as one `agy-*` file in the H10 notice directory (lib/delivery.mjs
+//     noticesDir), written by the exit listener. QUEUED IS NOT DELIVERED: while
+//     the hook runs, every delivery-guard write (lib/delivery.mjs writeGuard,
+//     H19's "mark delivered") is deferred into that same file instead of
+//     touching the guard. h19-delivery-drain injects the queue at the
+//     conversation's NEXT PreInvocation, at any invocationNum, and merges the
+//     deferred marks into the guard only after its injectSteps envelope is on
+//     stdout. A hook that queues nothing applies its guard writes at exit;
 //   • the exit listener writes the event's neutral envelope ({"decision":"allow"}
 //     on PreToolUse and Stop, {} elsewhere) when nothing was written, and turns
 //     an exit-2 block into a JSON deny (PreToolUse) or continue (Stop) with exit
 //     0, because agy logs and ignores a non-zero exit (H15 would fail open).
 //
+// NOT DEFERRED: other after-write steps (H20's board-ready mark, the advisory
+// counters) still run when the hook writes, before the drain injects.
+//
 // STOP LOOP GUARD: agy keeps continuationActive false on a continued Stop
 // (phase E), so the adapter keeps its own state: one continue per conversation
-// and user turn (lastUserInput), recorded on disk. The next Stop of that turn
-// carries stop_hook_active true, so H10 releases as it does on Claude Code.
-// NOT GUARANTEED: a user who sends the identical prompt twice in a row gets no
-// second continue on the repeat turn.
+// and USER TURN, recorded on disk. A turn starts at a main conversation's
+// PreInvocation with invocationNum 0, which records the turn (its
+// initialNumSteps) for the Stop to read, so two identical prompts in a row are
+// two turns. The next Stop of a continued turn carries stop_hook_active true, so
+// H10 releases as it does on Claude Code.
 
 const AGY_EVENTS = {
   SessionStart: 'SessionStart',
@@ -519,7 +525,7 @@ const AGY_EVENTS = {
 export const AGY_PRETOOLUSE_KEYS = Object.freeze(['decision', 'reason', 'overwrite', 'permissionOverrides']);
 
 /** Per-process agy state: set by adoptAgyInput and settleAgyInput, read by the stdout shim and the exit listener. */
-const agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, stopTurnFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
+const agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, queued: [], deferredGuards: [], stopFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
 
 /** True for an agy hook payload: camelCase hookEventName and no Claude Code hook_event_name. */
 export function isAgyInput(raw) {
@@ -711,21 +717,64 @@ export function agyStateDir(checkout) {
   return join(checkout, '.sterling', 'transient', 'agy');
 }
 
+/** The events whose context agy cannot take from the hook itself, so it is queued for the next PreInvocation. */
+const AGY_QUEUE_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'Stop']);
+
+/** Write `value` as JSON to `path` by temp file and rename, creating the directory. */
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(value));
+  renameSync(tmp, path);
+}
+
 /**
  * Queue `text` for agy conversation `conversationId` in <checkout>'s notice
  * directory, as an immutable `agy-*.json` file in the H10 notice format
  * ({text, session_id}, lib/delivery.mjs publishNotice), written to a temp name
- * and renamed into place. h19-delivery-drain injects it at that conversation's
- * next PreInvocation. Throws when the file cannot be written.
+ * and renamed into place. `guards` ({path, guard} delivery-guard snapshots) ride
+ * along for h19-delivery-drain to merge once it has injected the text.
+ * h19-delivery-drain injects it at that conversation's next PreInvocation.
+ * Throws when the file cannot be written.
  */
-export function queueAgyNotice(checkout, conversationId, text) {
+export function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join(checkout, '.sterling', 'transient', 'notices');
   mkdirSync(dir, { recursive: true });
   const target = join(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ text: String(text), session_id: String(conversationId) }), { flag: 'wx' });
+  const body = { text: String(text), session_id: String(conversationId), ...(guards.length ? { guards } : {}) };
+  writeFileSync(tmp, JSON.stringify(body), { flag: 'wx' });
   renameSync(tmp, target);
   return target;
+}
+
+/**
+ * Asked by lib/delivery.mjs writeGuard: under agy, on an event whose text is
+ * queued, the guard write is DEFERRED into this process's queue entry and true
+ * is returned; the drain applies it after injecting. Otherwise false (write now).
+ * The last snapshot per path wins: each is the whole guard, which only grows.
+ */
+export function agyDeferGuardWrite(path, guard) {
+  if (!agy.active || !AGY_QUEUE_EVENTS.has(agy.event)) return false;
+  agy.deferredGuards = agy.deferredGuards.filter((g) => g.path !== path);
+  agy.deferredGuards.push({ path, guard: JSON.parse(JSON.stringify(guard)) });
+  return true;
+}
+
+/**
+ * At exit: write this process's queued text, with its deferred guard writes, as
+ * one queue entry; with no text, apply the guard writes directly (nothing waits
+ * on an injection). Outside a Sterling project there is no queue and nothing is
+ * kept. Throws when the entry cannot be written, and then nothing is marked.
+ */
+function flushAgyQueue() {
+  if (!agy.checkout) return;
+  const texts = [...new Set(agy.queued)];
+  if (texts.length) {
+    queueAgyNotice(agy.checkout, agy.conversationId, texts.join('\n\n'), { guards: agy.deferredGuards });
+    return;
+  }
+  for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
 }
 
 /**
@@ -766,21 +815,20 @@ function agyStdoutWrite(chunk) {
     agy.emitted = true;
     return;
   }
-  // A tool event, Stop, or a second write on an injection event: queue it.
-  // Outside a Sterling project there is no queue and no hook produces context.
-  if (!agy.checkout) return;
-  for (const t of texts) queueAgyNotice(agy.checkout, agy.conversationId, t);
+  // A tool event, Stop, or a second write on an injection event: queued at exit.
+  agy.queued.push(...texts);
 }
 
 /**
  * Take over this process's stdout and stderr for agy and return the normalized
- * input. A stdout write is handled synchronously (written or queued) before its
- * callback fires with the outcome, so the write-then-exit helpers settle as
- * usual; stderr is captured and still written, because agy logs it.
+ * input. A stdout write is handled synchronously (written, or held for the
+ * queue) before its callback fires with the outcome, so the write-then-exit
+ * helpers settle as usual; stderr is captured and still written, because agy
+ * logs it.
  */
 export function adoptAgyInput(raw, options = {}) {
   const { input, skip } = normalizeAgyInput(raw, options);
-  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip, lastUserInput: raw.lastUserInput });
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip });
   const text = (chunk) => (typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
   process.stdout.write = (chunk, encoding, callback) => {
     const done = typeof encoding === 'function' ? encoding : callback;
@@ -800,9 +848,16 @@ export function adoptAgyInput(raw, options = {}) {
     return writeErr(chunk, ...rest);
   };
   process.on('exit', (code) => {
+    let effective = code;
     try {
-      const stopContinue = agy.event === 'Stop' && code === 2 ? recordAgyStopContinue() : true;
-      const envelope = agyExitEnvelope({ event: agy.event, code, err: agy.errText.join(''), emitted: agy.emitted, stopContinue });
+      flushAgyQueue();
+    } catch (e) {
+      writeErr(`Sterling agy adapter: this hook's context could not be queued (${(e && e.message) || e}), so it is lost and nothing was marked delivered.\n`);
+      if (effective === 0) effective = 1;
+    }
+    try {
+      const stopContinue = agy.event === 'Stop' && effective === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code: effective, err: agy.errText.join(''), emitted: agy.emitted, stopContinue });
       if (envelope.text) writeAllSync(1, envelope.text);
       process.exitCode = envelope.code;
     } catch (e) {
@@ -813,27 +868,49 @@ export function adoptAgyInput(raw, options = {}) {
   return input;
 }
 
-/** The Stop loop-guard file for this conversation and the hash naming its user turn. */
-function agyStopTurn(checkout, conversationId, lastUserInput) {
-  return {
-    file: join(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`),
-    turn: createHash('sha256').update(String(lastUserInput ?? '')).digest('hex'),
-  };
+/** Where the current user turn of a conversation is recorded, and where its Stop continue is. */
+function agyTurnFile(checkout, conversationId) {
+  return join(agyStateDir(checkout), `turn-${agyKey(conversationId)}.json`);
+}
+function agyStopFile(checkout, conversationId) {
+  return join(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`);
 }
 
 /**
- * Called by readStdin once the roots are known. Records the checkout, sets
- * stop_hook_active from the loop-guard state, and exits a skipped event with
- * its neutral envelope.
+ * A main conversation's PreInvocation with invocationNum 0 starts a user turn:
+ * record it, named by initialNumSteps (the trajectory length at that call, which
+ * grows from turn to turn and is the same for every hook on the event). Without
+ * it, a unique stamp names the turn. A failed write is named on stderr; the Stop
+ * then compares against the previous turn and does not continue (no loop).
+ */
+function recordAgyTurn(raw) {
+  const turn = Number.isInteger(raw.initialNumSteps) ? `steps-${raw.initialNumSteps}` : `at-${Date.now()}-${process.pid}`;
+  try {
+    writeJsonAtomic(agyTurnFile(agy.checkout, raw.conversationId), { turn });
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the user turn could not be recorded (${(e && e.message) || e}); this turn's Stop may not be continued.\n`);
+  }
+}
+
+/**
+ * Called by readStdin once the roots are known. Records the checkout and a new
+ * user turn, sets stop_hook_active from the loop-guard state, and exits a
+ * skipped event with its neutral envelope.
  */
 function settleAgyInput(raw, input, inProject) {
   agy.checkout = inProject ? input.cwd : null;
+  if (agy.event === 'PreInvocation' && raw.invocationNum === 0 && raw.lastUserInput !== '' && agy.checkout) recordAgyTurn(raw);
   if (agy.event === 'Stop' && agy.checkout) {
-    const { file, turn } = agyStopTurn(agy.checkout, raw.conversationId, raw.lastUserInput);
-    agy.stopTurnFile = file;
+    let turn = 'unknown';
+    try {
+      turn = JSON.parse(readFileSync(agyTurnFile(agy.checkout, raw.conversationId), 'utf8')).turn ?? 'unknown';
+    } catch (e) {
+      if (e?.code !== 'ENOENT') process.stderr.write(`Sterling agy adapter: the user turn could not be read (${(e && e.message) || e}).\n`);
+    }
+    agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync(file, 'utf8')).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync(agy.stopFile, 'utf8')).turn === turn;
     } catch (e) {
       if (e?.code !== 'ENOENT') agy.stopAlreadyContinued = true; // unreadable state: never risk a continue loop
     }
@@ -850,13 +927,12 @@ function settleAgyInput(raw, input, inProject) {
  */
 function recordAgyStopContinue() {
   if (agy.stopAlreadyContinued) return false;
-  if (!agy.stopTurnFile) {
+  if (!agy.stopFile) {
     process.stderr.write('Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n');
     return false;
   }
   try {
-    mkdirSync(agyStateDir(agy.checkout), { recursive: true });
-    writeFileSync(agy.stopTurnFile, JSON.stringify({ turn: agy.stopTurn, at: new Date().toISOString() }));
+    writeJsonAtomic(agy.stopFile, { turn: agy.stopTurn, at: new Date().toISOString() });
     return true;
   } catch (e) {
     process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${(e && e.message) || e}).\n`);

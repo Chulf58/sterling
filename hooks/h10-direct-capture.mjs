@@ -6,15 +6,14 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID7, createHash as createHash7 } from "node:crypto";
+import { randomUUID as randomUUID7, createHash as createHash6 } from "node:crypto";
 import { spawn, spawnSync as spawnSync8 } from "node:child_process";
 import { readFileSync as readFileSync16, writeFileSync as writeFileSync9, writeSync as writeSync3, rmSync as rmSync7, existsSync as existsSync13, mkdirSync as mkdirSync12, renameSync as renameSync8 } from "node:fs";
 import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { createHash as createHash3 } from "node:crypto";
-import { join as join10 } from "node:path";
+import { dirname as dirname7, join as join10 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 
 // node_modules/zod/v3/external.js
@@ -13286,7 +13285,7 @@ var AGY_EVENTS = {
   Stop: "Stop"
 };
 var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
-var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, stopTurnFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
+var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, queued: [], deferredGuards: [], stopFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
 function isAgyInput(raw) {
   return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
 }
@@ -13424,14 +13423,30 @@ function agyKey(conversationId) {
 function agyStateDir(checkout) {
   return join10(checkout, ".sterling", "transient", "agy");
 }
-function queueAgyNotice(checkout, conversationId, text) {
+function writeJsonAtomic(path, value) {
+  mkdirSync5(dirname7(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync3(tmp, JSON.stringify(value));
+  renameSync2(tmp, path);
+}
+function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join10(checkout, ".sterling", "transient", "notices");
   mkdirSync5(dir, { recursive: true });
   const target = join10(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
-  writeFileSync3(tmp, JSON.stringify({ text: String(text), session_id: String(conversationId) }), { flag: "wx" });
+  const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
+  writeFileSync3(tmp, JSON.stringify(body), { flag: "wx" });
   renameSync2(tmp, target);
   return target;
+}
+function flushAgyQueue() {
+  if (!agy.checkout) return;
+  const texts = [...new Set(agy.queued)];
+  if (texts.length) {
+    queueAgyNotice(agy.checkout, agy.conversationId, texts.join("\n\n"), { guards: agy.deferredGuards });
+    return;
+  }
+  for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
 }
 function agyStdoutWrite(chunk) {
   const texts = agyContextTexts(chunk);
@@ -13441,12 +13456,11 @@ function agyStdoutWrite(chunk) {
     agy.emitted = true;
     return;
   }
-  if (!agy.checkout) return;
-  for (const t of texts) queueAgyNotice(agy.checkout, agy.conversationId, t);
+  agy.queued.push(...texts);
 }
 function adoptAgyInput(raw, options = {}) {
   const { input: input2, skip } = normalizeAgyInput(raw, options);
-  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip, lastUserInput: raw.lastUserInput });
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip });
   const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
   process.stdout.write = (chunk, encoding, callback) => {
     const done = typeof encoding === "function" ? encoding : callback;
@@ -13466,9 +13480,17 @@ function adoptAgyInput(raw, options = {}) {
     return writeErr(chunk, ...rest);
   };
   process.on("exit", (code) => {
+    let effective = code;
     try {
-      const stopContinue = agy.event === "Stop" && code === 2 ? recordAgyStopContinue() : true;
-      const envelope = agyExitEnvelope({ event: agy.event, code, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
+      flushAgyQueue();
+    } catch (e) {
+      writeErr(`Sterling agy adapter: this hook's context could not be queued (${e && e.message || e}), so it is lost and nothing was marked delivered.
+`);
+      if (effective === 0) effective = 1;
+    }
+    try {
+      const stopContinue = agy.event === "Stop" && effective === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code: effective, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
       if (envelope.text) writeAllSync(1, envelope.text);
       process.exitCode = envelope.code;
     } catch (e) {
@@ -13479,20 +13501,36 @@ function adoptAgyInput(raw, options = {}) {
   });
   return input2;
 }
-function agyStopTurn(checkout, conversationId, lastUserInput) {
-  return {
-    file: join10(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`),
-    turn: createHash3("sha256").update(String(lastUserInput ?? "")).digest("hex")
-  };
+function agyTurnFile(checkout, conversationId) {
+  return join10(agyStateDir(checkout), `turn-${agyKey(conversationId)}.json`);
+}
+function agyStopFile(checkout, conversationId) {
+  return join10(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`);
+}
+function recordAgyTurn(raw) {
+  const turn = Number.isInteger(raw.initialNumSteps) ? `steps-${raw.initialNumSteps}` : `at-${Date.now()}-${process.pid}`;
+  try {
+    writeJsonAtomic(agyTurnFile(agy.checkout, raw.conversationId), { turn });
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the user turn could not be recorded (${e && e.message || e}); this turn's Stop may not be continued.
+`);
+  }
 }
 function settleAgyInput(raw, input2, inProject) {
   agy.checkout = inProject ? input2.cwd : null;
+  if (agy.event === "PreInvocation" && raw.invocationNum === 0 && raw.lastUserInput !== "" && agy.checkout) recordAgyTurn(raw);
   if (agy.event === "Stop" && agy.checkout) {
-    const { file, turn } = agyStopTurn(agy.checkout, raw.conversationId, raw.lastUserInput);
-    agy.stopTurnFile = file;
+    let turn = "unknown";
+    try {
+      turn = JSON.parse(readFileSync6(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+    } catch (e) {
+      if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
+`);
+    }
+    agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync6(file, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync6(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -13502,13 +13540,12 @@ function settleAgyInput(raw, input2, inProject) {
 }
 function recordAgyStopContinue() {
   if (agy.stopAlreadyContinued) return false;
-  if (!agy.stopTurnFile) {
+  if (!agy.stopFile) {
     process.stderr.write("Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n");
     return false;
   }
   try {
-    mkdirSync5(agyStateDir(agy.checkout), { recursive: true });
-    writeFileSync3(agy.stopTurnFile, JSON.stringify({ turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() }));
+    writeJsonAtomic(agy.stopFile, { turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() });
     return true;
   } catch (e) {
     process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${e && e.message || e}).
@@ -13519,10 +13556,10 @@ function recordAgyStopContinue() {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join11, resolve as resolve5, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
+import { join as join11, resolve as resolve5, dirname as dirname8, isAbsolute as isAbsolute2 } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { randomBytes, createHash as createHash4 } from "node:crypto";
+import { randomBytes, createHash as createHash3 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -13718,7 +13755,7 @@ function registerLockRoot() {
   return `/tmp/sterling-locks-${uid2}`;
 }
 function registerLockPath(root) {
-  const hash = createHash4("sha256").update(realpathSync5(resolve5(root))).digest("hex");
+  const hash = createHash3("sha256").update(realpathSync5(resolve5(root))).digest("hex");
   return join11(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
@@ -13797,7 +13834,7 @@ async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs2 = opts.timeoutMs ?? 1e3;
   const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname7(lockPath));
+  ensureLockRoot(dirname8(lockPath));
   const db = new DatabaseSync4(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");
@@ -13892,10 +13929,10 @@ var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/settlement.mjs
-import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { readFileSync as readFileSync9, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, rmSync as rmSync5, statSync as statSync5, renameSync as renameSync4 } from "node:fs";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { join as join15, dirname as dirname9, resolve as resolve7 } from "node:path";
+import { join as join15, dirname as dirname10, resolve as resolve7 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 import { join as join12 } from "node:path";
@@ -14045,7 +14082,7 @@ function prefixOf(root) {
 
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname8, join as join14 } from "node:path";
+import { dirname as dirname9, join as join14 } from "node:path";
 var SESSION_EVENTS_REL = join14(".sterling", "transient", "session-events.json");
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
 var SQLITE_BUSY2 = 5;
@@ -14123,7 +14160,7 @@ function parseTouchesContent(raw) {
 }
 function hashFile(root, rel) {
   try {
-    return createHash5("sha256").update(readFileSync9(join15(root, rel))).digest("hex");
+    return createHash4("sha256").update(readFileSync9(join15(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -14230,7 +14267,7 @@ function readHeadReflog(root) {
   }
   return entries;
 }
-var reflogLineHash = (line) => createHash5("sha256").update(line).digest("hex");
+var reflogLineHash = (line) => createHash4("sha256").update(line).digest("hex");
 function reflogAnchor(entries, head) {
   const last = entries?.at(-1);
   return last && last.new === head ? reflogLineHash(last.line) : null;
@@ -14313,7 +14350,7 @@ function gitTouches(root, now) {
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   const p = join15(root, GIT_SETTLED_REL);
-  mkdirSync7(dirname9(p), { recursive: true });
+  mkdirSync7(dirname10(p), { recursive: true });
   if (ifAbsent) {
     try {
       writeFileSync5(p, JSON.stringify(snapshot), { flag: "wx" });
@@ -14490,7 +14527,7 @@ function fillPct(usage, windowSize) {
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync as existsSync8 } from "node:fs";
-import { dirname as dirname10, join as join17 } from "node:path";
+import { dirname as dirname11, join as join17 } from "node:path";
 import { fileURLToPath } from "node:url";
 function pluginRoot(moduleUrl) {
   const walked = walkUpPluginRoot(moduleUrl);
@@ -14498,10 +14535,10 @@ function pluginRoot(moduleUrl) {
   return process.env.STERLING_PLUGIN_ROOT || null;
 }
 function walkUpPluginRoot(moduleUrl) {
-  let dir = dirname10(fileURLToPath(moduleUrl));
+  let dir = dirname11(fileURLToPath(moduleUrl));
   for (let i = 0; i < 4; i++) {
     if (existsSync8(join17(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname10(dir);
+    dir = dirname11(dir);
   }
   return null;
 }
@@ -14616,7 +14653,7 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync11, writeFileSync as writeFileSync6, mkdirSync as mkdirSync8, existsSync as existsSync9, renameSync as renameSync5, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
-import { join as join18, dirname as dirname11 } from "node:path";
+import { join as join18, dirname as dirname12 } from "node:path";
 function noticesDir(cwd) {
   return join18(cwd, ".sterling", "transient", "notices");
 }
@@ -14649,7 +14686,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/work-pr.mjs
 import { existsSync as existsSync10, linkSync as linkSync2, mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync13, renameSync as renameSync6, unlinkSync as unlinkSync2, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname12, join as join19 } from "node:path";
+import { dirname as dirname13, join as join19 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
@@ -14745,10 +14782,10 @@ var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): P
 var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { createHash as createHash6, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync7, existsSync as existsSync11, mkdirSync as mkdirSync11, openSync as openSync7, readFileSync as readFileSync14, renameSync as renameSync7, rmSync as rmSync6, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync8, appendFileSync } from "node:fs";
-import { dirname as dirname13, isAbsolute as isAbsolute3, join as join20, resolve as resolve8, sep } from "node:path";
+import { dirname as dirname14, isAbsolute as isAbsolute3, join as join20, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -14823,10 +14860,10 @@ function workerPaths(root) {
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
-  let dir = dirname13(fileURLToPath2(moduleUrl));
+  let dir = dirname14(fileURLToPath2(moduleUrl));
   for (let i = 0; i < 5; i++) {
     if (existsSync11(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname13(dir);
+    dir = dirname14(dir);
   }
   return null;
 }
@@ -15050,12 +15087,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync11(dirname13(state), { recursive: true });
+  mkdirSync11(dirname14(state), { recursive: true });
   writeFileSync8(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync11(dirname13(log), { recursive: true });
+  mkdirSync11(dirname14(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -15237,7 +15274,7 @@ function launchWorker(opts) {
     readWorkerPrompt(pluginRoot2);
     const runner = join20(pluginRoot2, "bin", "maintenance-worker-run.mjs");
     if (!existsSync11(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync11(dirname13(paths.lock), { recursive: true });
+    mkdirSync11(dirname14(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
@@ -16108,7 +16145,7 @@ try {
   };
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
   const deferralNotedPath = join22(input.cwd, ".sterling", "transient", "deferral-noted.json");
-  const deferralKey = deferredPaths.length ? createHash7("sha256").update(JSON.stringify({ owners: [...deferredAgents].sort(), paths: [...deferredPaths].sort() })).digest("hex") : null;
+  const deferralKey = deferredPaths.length ? createHash6("sha256").update(JSON.stringify({ owners: [...deferredAgents].sort(), paths: [...deferredPaths].sort() })).digest("hex") : null;
   const deferralNoted = (() => {
     if (!deferralKey || !hasSession) return false;
     try {
@@ -16144,7 +16181,7 @@ try {
       return /* @__PURE__ */ new Set();
     }
   })();
-  const dispatchUnknownKey = (row) => createHash7("sha256").update(JSON.stringify([row.entry.agent_id, row.entry.round ?? null, row.entry.at ?? null])).digest("hex");
+  const dispatchUnknownKey = (row) => createHash6("sha256").update(JSON.stringify([row.entry.agent_id, row.entry.round ?? null, row.entry.at ?? null])).digest("hex");
   const pendingDispatchUnknownKeys = [];
   for (const row of bitingUnknown) {
     const key = dispatchUnknownKey(row);
@@ -16578,7 +16615,7 @@ try {
       if (lane === "concept") return "concept_family";
       return "article_demand";
     };
-    const fingerprint = createHash7("sha256").update(
+    const fingerprint = createHash6("sha256").update(
       JSON.stringify({
         remedy_version: REMEDY_VERSION,
         lanes: openLanes,

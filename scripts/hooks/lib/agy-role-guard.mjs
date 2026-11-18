@@ -20,6 +20,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { readStoreWriteToolNames } from '../../lib/store-write-tools.mjs';
 
 /** The roles that never write the store. */
 export const READ_ONLY_ROLES = new Set(['reviewer', 'researcher', 'scout', 'sparring', 'preflight']);
@@ -35,16 +36,12 @@ export function conversationsDir(env = process.env) {
 }
 
 /**
- * The store-write tool names, read from the implementor template's
- * disallowedTools: the one list of what a non-writing agent may not call, the
- * same source the OpenCode store-write permissions use
- * (scripts/lib/opencode-install.mjs storeWriteTools). Throws when it has none.
+ * The store-write tool names as a Set, from the one shared reader
+ * (scripts/lib/store-write-tools.mjs, which OpenCode's storeWriteTools uses too).
+ * Throws when it has none.
  */
 export function storeWriteToolNames(pluginRoot) {
-  const text = readFileSync(join(pluginRoot, 'agent-templates', 'implementor.md'), 'utf8').replace(/\r\n/g, '\n');
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? '';
-  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? '';
-  const names = new Set(list.split(',').map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean));
+  const names = new Set(readStoreWriteToolNames(pluginRoot));
   if (!names.size) throw new Error('agent-templates/implementor.md disallowedTools names no mcp__sterling__ tool');
   return names;
 }
