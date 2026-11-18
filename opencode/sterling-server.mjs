@@ -22817,15 +22817,20 @@ function writeOwnership(root, own, fs) {
 `, fs);
   else rmSync8(path, { force: true });
 }
-function refuseTracked(root) {
+function isTracked(root) {
   let out;
   try {
     out = execFileSync("git", ["ls-files", "--", PROJECT_CONFIG_REL], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
-    if (/not a git repository/i.test(String(e.stderr ?? ""))) return;
+    if (/not a git repository/i.test(String(e.stderr ?? ""))) return false;
     throw new Error(`could not check whether git tracks ${PROJECT_CONFIG_REL} (${String(e.stderr || e.message).trim()})`);
   }
-  if (out.trim()) throw new Error(`${PROJECT_CONFIG_REL} is tracked by git, and Sterling writes it only while it is untracked (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config), so the Overpass agent models were not changed; untrack it (git rm --cached ${PROJECT_CONFIG_REL} and commit)`);
+  return out.trim() !== "";
+}
+var TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on their own configured models. Subagent dispatches still route through Overpass.`;
+function strandedNotice(stranded) {
+  const parts = stranded.map(({ name, model, prior }) => `agent.${name} (model ${JSON.stringify(model)}; before Overpass: ${describeOwned(prior)})`);
+  return `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so it still holds models Sterling wrote: ${parts.join(", ")}. Put the earlier values back by hand if you do not want these.`;
 }
 var pick2 = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(entry, k)).map((k) => [k, entry[k]]));
 var ownedText = (entry) => JSON.stringify(entry === void 0 || entry === null ? null : pick2(entry, OWNED_KEYS));
@@ -22869,6 +22874,7 @@ function convergeOverlay(root, res, { fs } = {}) {
   const own = { agent: { ...settledOwn.agent } };
   const names = /* @__PURE__ */ new Set([...Object.keys(want), ...Object.keys(own.agent)]);
   let ownChanged = settled;
+  const stranded = [];
   const before = {};
   const after = {};
   const touch = (name, entry) => {
@@ -22917,6 +22923,7 @@ function convergeOverlay(root, res, { fs } = {}) {
       notes.push(`agent.${name}.model is ${JSON.stringify(entry.model)}, not the ${rec.wrote} Sterling wrote, so it is yours and stays`);
       continue;
     }
+    stranded.push({ name, model: rec.wrote, prior: rec.prior });
     const restored = { ...entry };
     delete restored.model;
     if (Object.hasOwn(rec.prior ?? {}, "model")) restored.model = rec.prior.model;
@@ -22924,11 +22931,12 @@ function convergeOverlay(root, res, { fs } = {}) {
     touch(name, rec.created && !Object.keys(restored).length ? void 0 : restored);
   }
   const changed = Object.keys(after).length > 0;
+  if (!changed && !ownChanged) return { changed: false, notes };
+  if (isTracked(root)) return { changed: false, notes: [], skippedTracked: true, stranded };
   if (!changed) {
-    if (ownChanged) writeOwnership(root, own, fs);
+    writeOwnership(root, own, fs);
     return { changed: false, notes };
   }
-  refuseTracked(root);
   if (Object.keys(agents).length || config.agent !== void 0) config.agent = agents;
   writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent, ...recoveryNotes.length ? { notes: recoveryNotes } : {} } }, fs);
   writeText(path, projectConfigText(config), fs);
@@ -29165,18 +29173,35 @@ function createSterlingServer(deps = {}) {
     const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     const sessionModels = createSessionModels();
     async function convergeOverpass(root) {
-      if (inWorkerChild(env)) return null;
+      if (inWorkerChild(env)) return { res: null, skipped: false };
       let res = null;
+      let skipped = false;
       await fenced("overpass", root, () => {
         res = projectOverpass(root);
-        const { notes } = convergeOverlay(root, res);
+        const { notes, skippedTracked, stranded } = convergeOverlay(root, res);
+        let said = "";
+        if (skippedTracked) {
+          skipped = true;
+          if (stranded.length) {
+            said = strandedNotice(stranded);
+            addNotice(root, said, now(), "overpass-tracked-stranded");
+          } else if (res.effective) {
+            said = TRACKED_OVERLAY_NOTICE;
+            addNotice(root, said, now(), "overpass-tracked-overlay");
+          }
+        }
+        if ((trackedLogged.get(root) ?? "") !== said) {
+          trackedLogged.set(root, said);
+          if (said) logLine(root, `overpass: ${said}`);
+        }
         for (const note of notes) {
           logLine(root, `overpass: ${note}`);
           addNotice(root, `Sterling Overpass: ${note}.`, now());
         }
       });
-      return res;
+      return { res, skipped };
     }
+    const trackedLogged = /* @__PURE__ */ new Map();
     async function onPrompt(input) {
       const seq = takePromptSeq();
       await onSelection(input);
@@ -29185,8 +29210,8 @@ function createSterlingServer(deps = {}) {
       await recordConductorSession(input, seq);
       const root = rootOf();
       if (!root) return;
-      const res = await convergeOverpass(root);
-      const seen = res && sessionModels.get(input?.sessionID);
+      const { res, skipped } = await convergeOverpass(root);
+      const seen = res && !skipped && sessionModels.get(input?.sessionID);
       const notice = seen ? mismatchNotice(res, seen.agent, seen.model) : "";
       if (notice && typeof input?.prompt?.text === "string") input.prompt.text = `${input.prompt.text}
 
