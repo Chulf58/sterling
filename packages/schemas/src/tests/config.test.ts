@@ -26,7 +26,7 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // to one silently misses projects that inherit from the other.
   assert.deepEqual(parseConfig({}).models, shipped.models, 'schema models defaults match templates/default-config.json');
   for (const [role, v] of Object.entries(shipped.models)) {
-    assert.match(v.model, /^claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
+    assert.match(v.model ?? '', /^claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
   }
   for (const role of Object.values(shipped.models)) {
     assert.notEqual(role.effort, 'max', 'max effort is never used for subagents (§7.2 hard rule)');

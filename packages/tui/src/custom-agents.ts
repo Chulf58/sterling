@@ -5,7 +5,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { CORE_SCHEMA, load } from 'js-yaml';
-import { AGENT_MODEL_KEY } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, discoveredAgentId } from '@sterling/schemas';
 import { AGY_AGENTS_DIR, AGY_ROSTER } from '../../../scripts/lib/agy-setup.mjs';
 
 export interface CustomAgent {
@@ -18,6 +18,18 @@ export interface CustomAgent {
   model?: string;
   /** Why the file could not be read or parsed; the row shows it instead of a model. */
   error?: string;
+}
+
+/** The host-qualified identity of a not yet adopted agent: `opencode:team/scout`. The same name
+ *  on two hosts is two identities; an adopted agent is known by its `custom-<slug>` key instead. */
+export function customAgentId(agent: Pick<CustomAgent, 'source' | 'name'>): string {
+  return discoveredAgentId(agent.source, agent.name);
+}
+
+/** The project-relative POSIX path of a discovered agent's file. */
+export function customAgentFile(agent: Pick<CustomAgent, 'source' | 'name'>): string {
+  if (agent.source === 'agy') return `${AGY_AGENTS_DIR}/${agent.name}/agent.md`;
+  return `${agent.source === 'claude' ? '.claude' : '.opencode'}/agents/${agent.name}.md`;
 }
 
 /** Where Sterling installs its own agents, relative to the project root. A file of a Sterling

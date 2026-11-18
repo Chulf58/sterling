@@ -63,6 +63,23 @@ const agentModelEntry = z.object({
   agy_model: z.enum(AGY_MODEL_IDS).optional(),
 }).strict();
 
+// An adopted custom agent's key (decision
+// custom-agents-are-adopted-into-a-source-folder-host-files-are-generated-projections):
+// `custom-` plus a slug. No governed role (AGENT_MODEL_KEY, OVERPASS_ROLES, the
+// maintenance worker) starts with `custom-`, so the namespace cannot collide with one; the
+// slug is the agent's path with `/` turned into `-` (customAgentSlug), and the SAME slug
+// from two different paths is refused at adoption (planAdoption), never merged.
+export const CUSTOM_AGENT_KEY_PREFIX = 'custom-';
+export const CUSTOM_AGENT_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+export const CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+export function isCustomAgentKey(key: string): boolean {
+  return CUSTOM_AGENT_KEY_RE.test(key);
+}
+
+// models.custom-<slug>: model and effort are both optional, absent meaning the host's own
+// default (inherit). A model or effort present is held to the governed entry's rules.
+const customAgentEntry = agentModelEntry.partial();
+
 // One pin per vendor, shared by sparring_partner.models and review.models.
 const vendorPins = z
   .object({
@@ -323,7 +340,20 @@ export const configSchema = z.object({
     // the roster is discovered from the installed agent files, so the schema
     // cannot list it. The pre-rename keys in RETIRED_MODEL_KEYS are dropped by
     // normalizeRawConfig before this parse, so a stale value cannot fail it.
-    .catchall(agentModelEntry)
+    // The catchall is the partial entry so an adopted custom agent (`custom-<slug>`) may
+    // omit model and effort; the refinement below keeps every OTHER key to the whole
+    // entry (model and effort required), as before.
+    .catchall(customAgentEntry)
+    .superRefine((models, ctx) => {
+      // A named role is always whole here (its own schema requires both fields).
+      for (const [key, entry] of Object.entries(models)) {
+        if (isCustomAgentKey(key)) continue;
+        const e = entry as { model?: unknown; effort?: unknown };
+        for (const field of ['model', 'effort'] as const) {
+          if (e[field] === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, field], message: 'Required' });
+        }
+      }
+    })
     .default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
