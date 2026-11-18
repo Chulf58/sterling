@@ -39072,7 +39072,7 @@ import { dirname as dirname14, join as join28 } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync19, writeFileSync as writeFileSync9, existsSync as existsSync16, rmSync as rmSync6 } from "node:fs";
+import { readFileSync as readFileSync19, writeFileSync as writeFileSync9, existsSync as existsSync16, rmSync as rmSync6, lstatSync as lstatSync8, chmodSync as chmodSync2 } from "node:fs";
 import { basename as basename6, dirname as dirname11, join as join25 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
@@ -59187,22 +59187,48 @@ function openDashboard(storePath2, options = {}) {
       fail(err.message);
       return;
     }
+    const agentsBefore = [];
+    try {
+      for (const name of AGY_ROSTER) {
+        const path = join25(projectRoot, ...AGY_AGENTS_DIR.split("/"), name, "agent.md");
+        let st;
+        try {
+          st = lstatSync8(path);
+        } catch (err) {
+          if (err.code !== "ENOENT")
+            throw err;
+        }
+        if (st === void 0)
+          agentsBefore.push({ path, bytes: null, mode: 420 });
+        else if (st.isSymbolicLink())
+          throw new Error(`${path} is a symlink, and the agy render would replace it with a plain file`);
+        else if (!st.isFile())
+          throw new Error(`${path} is not a regular file`);
+        else
+          agentsBefore.push({ path, bytes: readFileSync19(path), mode: Number(st.mode) & 511 });
+      }
+    } catch (err) {
+      fail(`cannot snapshot the agy agent files: ${err.message}`);
+      return;
+    }
+    const restoreAgents = () => {
+      for (const { path, bytes, mode } of agentsBefore) {
+        if (bytes === null)
+          rmSync6(path, { force: true });
+        else if (!existsSync16(path) || !readFileSync19(path).equals(bytes)) {
+          writeFileAtomic(path, bytes, { writeFile: (tmp, content) => {
+            writeFileSync9(tmp, content, { mode });
+            chmodSync2(tmp, mode);
+          } });
+        }
+      }
+    };
     try {
       replaceConfigFile(configPath2, configAfter, configBefore, options.configWriteFs);
     } catch (err) {
       fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${err.message}`);
       return;
     }
-    const agentPaths = AGY_ROSTER.map((name) => join25(projectRoot, ...AGY_AGENTS_DIR.split("/"), name, "agent.md"));
-    const agentsBefore = agentPaths.map((path) => ({ path, bytes: existsSync16(path) ? readFileSync19(path) : null }));
-    const restoreAgents = () => {
-      for (const { path, bytes } of agentsBefore) {
-        if (bytes === null)
-          rmSync6(path, { force: true });
-        else if (!existsSync16(path) || !readFileSync19(path).equals(bytes))
-          writeFileSync9(path, bytes);
-      }
-    };
     let outcome;
     try {
       const r = (options.agySetup ?? setupAgy)({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() });
@@ -60050,7 +60076,7 @@ import { homedir as homedir10 } from "node:os";
 import { join as join27 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync20, writeFileSync as writeFileSync10, rmSync as rmSync7, rmdirSync, renameSync as renameSync6, existsSync as existsSync17, lstatSync as lstatSync8, readdirSync as readdirSync7, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync20, writeFileSync as writeFileSync10, rmSync as rmSync7, rmdirSync, renameSync as renameSync6, existsSync as existsSync17, lstatSync as lstatSync9, readdirSync as readdirSync7, realpathSync as realpathSync7, chmodSync as chmodSync3 } from "node:fs";
 import { join as join26, resolve as resolve11, dirname as dirname12, isAbsolute as isAbsolute3 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash5 } from "node:crypto";
