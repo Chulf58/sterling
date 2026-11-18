@@ -12,7 +12,7 @@ import { resolve as resolve5 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync6, existsSync as existsSync5, writeSync, writeFileSync as writeFileSync3, renameSync as renameSync2, mkdirSync as mkdirSync5, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { join as join10 } from "node:path";
+import { dirname as dirname6, join as join10 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -13108,7 +13108,7 @@ var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "per
 import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync4, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync4, readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync4, rmdirSync, statSync as statSync5, writeFileSync as writeFileSync4, appendFileSync } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join11, resolve as resolve4, sep } from "node:path";
+import { dirname as dirname7, isAbsolute, join as join11, resolve as resolve4, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/conductor-identity.mjs
@@ -13420,10 +13420,10 @@ function workerPaths(root) {
   };
 }
 function pluginRootFrom(moduleUrl = new URL("../scripts/hooks/lib/maintenance-worker.mjs", import.meta.url).href) {
-  let dir = dirname6(fileURLToPath(moduleUrl));
+  let dir = dirname7(fileURLToPath(moduleUrl));
   for (let i = 0; i < 5; i++) {
     if (existsSync6(join11(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname6(dir);
+    dir = dirname7(dir);
   }
   return null;
 }
@@ -13971,12 +13971,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync6(dirname6(state), { recursive: true });
+  mkdirSync6(dirname7(state), { recursive: true });
   writeFileSync4(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync6(dirname6(log), { recursive: true });
+  mkdirSync6(dirname7(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -14158,7 +14158,7 @@ function launchWorker(opts) {
     readWorkerPrompt(pluginRoot2);
     const runner = join11(pluginRoot2, "bin", "maintenance-worker-run.mjs");
     if (!existsSync6(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync6(dirname6(paths.lock), { recursive: true });
+    mkdirSync6(dirname7(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token2 = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token2) return { launched: false, reason: "already_running" };
@@ -14481,7 +14481,7 @@ async function runWorker(opts) {
   }
   const runStartMs = nowMs();
   const runId = new Date(runStartMs).toISOString();
-  mkdirSync6(dirname6(paths.lock), { recursive: true });
+  mkdirSync6(dirname7(paths.lock), { recursive: true });
   writeFileSync4(paths.lock, JSON.stringify({ pid: process.pid, started_at: lock?.started_at ?? runId, trigger: opts.trigger, stage: "running", token: token2 }));
   rotateJournal(opts.root);
   const journal = (entry) => appendFileSync(paths.journal, JSON.stringify({ at: iso(), run: runId, ...entry }) + "\n");

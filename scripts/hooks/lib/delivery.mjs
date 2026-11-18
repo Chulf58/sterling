@@ -5,7 +5,7 @@
 // session's directory on compaction; a new session selects a new directory.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSync, closeSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { loadConfig } from './common.mjs';
+import { loadConfig, agyDeferGuardWrite } from './common.mjs';
 import { ownsHere } from './working-tree.mjs';
 import { stripSterlingDeliveryLine } from './dispatch-prompt.mjs';
 
@@ -365,6 +365,10 @@ export function readGuard(path) {
 export function writeGuard(path, guard) {
   // See readGuard: never create a shared fallback guard without a session id.
   if (!path) return;
+  // Antigravity CLI: a hook whose text is queued for the next PreInvocation has
+  // not delivered it yet, so its marks ride the queue entry and the drain merges
+  // them (mergeGuardMarks) after injecting (lib/common.mjs agyDeferGuardWrite).
+  if (agyDeferGuardWrite(path, guard)) return;
   mkdirSync(dirname(path), { recursive: true });
   // tmp+rename (torn-guard prevention, board 5e3d6ff4 fixer pass): NOT locked —
   // a lost update here costs at most one duplicate pointer/guard entry, and
@@ -372,6 +376,25 @@ export function writeGuard(path, guard) {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
+}
+
+/**
+ * Merge a deferred guard snapshot (an agy queue entry's `guards[]`, see
+ * lib/common.mjs agyDeferGuardWrite) into the guard at `path`, after the drain
+ * has injected the text it marks. Every guard field is a list that only grows,
+ * so the merge is a union: marks written since the snapshot are kept. A snapshot
+ * of another guard version is skipped (worst case one duplicate delivery).
+ */
+export function mergeGuardMarks(path, snapshot) {
+  if (!path || snapshot?.version !== DELIVERY_GUARD_VERSION) return;
+  const guard = readGuard(path);
+  for (const [key, list] of Object.entries(snapshot)) {
+    if (!Array.isArray(list)) continue;
+    const have = Array.isArray(guard[key]) ? guard[key] : [];
+    const seen = new Set(have.map((v) => JSON.stringify(v)));
+    guard[key] = [...have, ...list.filter((v) => !seen.has(JSON.stringify(v)))];
+  }
+  writeGuard(path, guard);
 }
 
 /** Record types the deny-once floor treats as a "ruling" — decision is the

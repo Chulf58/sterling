@@ -1,19 +1,22 @@
 // H19 prompt surface now drains only H10's independent immutable notices.
 import { readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { readStdin, allow, warnNonBlocking } from './lib/common.mjs';
-import { noticesDir } from './lib/delivery.mjs';
+import { noticesDir, deliveryDir, mergeGuardMarks } from './lib/delivery.mjs';
 import { ledgerPath, pruneUnhashed } from './lib/ledger.mjs';
 
 // Antigravity CLI (agy): this hook also drains the agy context queue, the
 // `agy-*` notices lib/common.mjs writes for what a PreToolUse or PostToolUse
 // hook would have injected on Claude Code. agy fires PreInvocation before EVERY
 // model call; on all but a main conversation's first call of a prompt the input
-// carries agy_queue_only, and only this conversation's agy-* notices drain.
+// carries agy_queue_only, and only this conversation's agy-* notices drain. An
+// agy entry's `guards` are the delivery marks its hook deferred (lib/common.mjs
+// agyDeferGuardWrite); they are merged only after this hook's envelope is out.
 const input = readStdin({ agyEveryInvocation: true });
 const queueOnly = input.agy_queue_only === true;
-// Another agy conversation's queue (a subagent running beside this one) is left
-// for that conversation to drain, unless it has sat for a day.
+// Another agy conversation's queue (a subagent running beside this one, or an agy
+// session beside a Claude Code one in the same checkout) is left for that
+// conversation to drain, whichever host drains here, unless it has sat for a day.
 const AGY_QUEUE_STALE_MS = 24 * 60 * 60 * 1000;
 try {
   if (!queueOnly) {
@@ -27,6 +30,7 @@ try {
   if (queueOnly) names = names.filter((n) => n.startsWith('agy-'));
   const files = [];
   const texts = [];
+  const guards = [];
   const hasSession = typeof input.session_id === 'string' && input.session_id.length > 0;
   for (const name of names) {
     const file = join(dir, name);
@@ -37,11 +41,12 @@ try {
       // session start, so in any other session it is stale: removed, never
       // delivered (decision h10-deferral-is-conductor-facing-degradations-stay-loud).
       if (hasSession && typeof notice.session_id === 'string' && notice.session_id !== input.session_id) {
-        if (input.host === 'agy' && name.startsWith('agy-') && Date.now() - statSync(file).mtimeMs < AGY_QUEUE_STALE_MS) continue;
+        if (name.startsWith('agy-') && Date.now() - statSync(file).mtimeMs < AGY_QUEUE_STALE_MS) continue;
         rmSync(file, { force: true });
         continue;
       }
       files.push(file);
+      if (Array.isArray(notice.guards)) guards.push(...notice.guards);
       const text = notice.text;
       if (typeof text === 'string' && text) texts.push(text);
       else texts.push('ⓘ STERLING: removed malformed immutable notice; its contents were unreadable.');
@@ -73,6 +78,16 @@ try {
   if (!texts.length) allow();
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: texts.join('\n\n') } }), (err) => {
     if (err) { process.stderr.write(`H19 notice drain: write failed: ${(err && err.message) || err}\n`); process.exit(0); }
+    // Delivered now: merge the marks the queued hooks deferred. Only a guard under
+    // this checkout's delivery directory is touched; a failed merge costs at most
+    // one repeated delivery, never the injected text.
+    const delivery = resolve(deliveryDir(input.cwd)) + sep;
+    for (const g of guards) {
+      try {
+        if (typeof g?.path === 'string' && resolve(g.path).startsWith(delivery)) mergeGuardMarks(g.path, g.guard);
+        else process.stderr.write(`H19 notice drain: skipped a queued guard outside ${delivery}: ${String(g?.path)}\n`);
+      } catch (e) { process.stderr.write(`H19 notice drain: merging delivered marks into ${String(g?.path)} failed: ${(e && e.message) || e}\n`); }
+    }
     for (const file of files) rmSync(file, { force: true, recursive: file === legacy });
     process.exit(0);
   });

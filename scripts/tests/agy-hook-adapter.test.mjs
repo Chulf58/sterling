@@ -8,17 +8,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isAgyInput, normalizeAgyInput, agyExitEnvelope, agyInjectEnvelope, AGY_PRETOOLUSE_KEYS } from '../hooks/lib/common.mjs';
-import { agyRoleVerdict, rolesInConversationBytes, CONVERSATIONS_DIR_ENV } from '../hooks/lib/agy-role-guard.mjs';
+import { agyRoleVerdict, rolesInConversationBytes, CONVERSATIONS_DIR_ENV, storeWriteToolNames } from '../hooks/lib/agy-role-guard.mjs';
+import { storeWriteTools } from '../lib/opencode-install.mjs';
 import { agyHooksShapeViolations, versionParityViolations } from '../lib/agy-plugin-surface.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 const COMMON = pathToFileURL(join(HOOKS, 'lib', 'common.mjs')).href;
+const DELIVERY = pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href;
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), 'agy-adapter-'));
@@ -59,7 +61,11 @@ function run(script, input, cwd, env = {}) {
 /** A throwaway hook that reads stdin through common.mjs and then runs `body`. */
 function harness(dir, body) {
   const p = join(dir, 'harness.mjs');
-  writeFileSync(p, `import { writeFileSync } from 'node:fs';\nimport { readStdin, allow, deny, exitAfterWrite } from ${JSON.stringify(COMMON)};\nconst input = readStdin();\n${body}\n`);
+  writeFileSync(
+    p,
+    `import { writeFileSync } from 'node:fs';\nimport { readStdin, allow, deny, exitAfterWrite } from ${JSON.stringify(COMMON)};\n` +
+      `import { guardPath, readGuard, writeGuard, markSubstanceDelivered } from ${JSON.stringify(DELIVERY)};\nconst input = readStdin();\n${body}\n`
+  );
   return p;
 }
 
@@ -241,33 +247,71 @@ test('PreInvocation: H10 notices drain only on invocationNum 0; this conversatio
   }
 });
 
-test('queued delivery: PreToolUse and PostToolUse context is queued, the envelope stays bare, and bookkeeping runs only once the entry is queued', () => {
+test('queued delivery: context is queued, NOT marked delivered until the drain has injected it', () => {
   const dir = project();
   try {
-    const marker = join(dir, 'marked');
+    // A hook shaped like H19: the payload, then its guard marks in onWritten.
     const h = harness(
       dir,
-      `exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: 'CTX-' + input.hook_event_name } }), 0, { onWritten: () => writeFileSync(${JSON.stringify(marker)}, 'x') });`
+      `const p = guardPath(input.cwd, input.agent_id, input.session_id);\n` +
+        `exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: 'CTX-' + input.hook_event_name } }), 0, {\n` +
+        `  onWritten: () => { const g = readGuard(p); markSubstanceDelivered(g, [{ identity: 'rec-' + input.hook_event_name, revision: 1 }]); writeGuard(p, g); },\n` +
+        `});`
     );
+    const guardFile = join(dir, '.sterling', 'transient', 'delivery', CONV, 'guard-conductor.json');
+    const marks = () => (existsSync(guardFile) ? JSON.parse(readFileSync(guardFile, 'utf8')).substance.map((e) => e.id).sort() : []);
     const pre = run(h, agy('PreToolUse', dir, tool('edit_file', { Path: join(dir, 'a.txt'), Target: 'a', Replacement: 'b' })), dir);
     assert.equal(pre.code, 0, pre.stderr);
     assert.equal(pre.stdout, '{"decision":"allow"}', 'no key outside decision/reason/overwrite/permissionOverrides, and no reason');
-    assert.ok(existsSync(marker));
-    rmSync(marker);
     const post = run(h, agy('PostToolUse', dir, { error: '', ...tool('read_file', { Path: join(dir, 'a.txt') }) }), dir);
     assert.equal(post.code, 0, post.stderr);
     assert.equal(post.stdout, '{}');
-    assert.ok(existsSync(marker));
+    assert.deepEqual(marks(), [], 'queued is not delivered: nothing is marked before the drain injects');
     const queued = agyNotices(dir).map((n) => JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'notices', n), 'utf8')));
     assert.deepEqual(queued.map((q) => q.text).sort(), ['CTX-PostToolUse', 'CTX-PreToolUse']);
-    assert.ok(queued.every((q) => q.session_id === CONV));
-    // A queue that cannot be written: no bookkeeping, a non-zero exit (logged by agy).
-    rmSync(marker);
+    assert.ok(queued.every((q) => q.session_id === CONV && q.guards.length === 1));
+
+    const drained = run(join(HOOKS, 'h19-delivery-drain.mjs'), agy('PreInvocation', dir, { invocationNum: 2, initialNumSteps: 5 }), dir);
+    assert.equal(drained.code, 0, drained.stderr);
+    const injected = JSON.parse(drained.stdout).injectSteps.map((x) => x.systemMessage.systemMessage).join('\n\n');
+    assert.match(injected, /CTX-PreToolUse/);
+    assert.match(injected, /CTX-PostToolUse/);
+    assert.deepEqual(marks(), ['rec-PostToolUse', 'rec-PreToolUse'], 'both hooks\' marks are merged once the text is injected');
+    assert.deepEqual(agyNotices(dir), []);
+
+    // A queue that cannot be written: a non-zero exit (logged by agy) and still nothing marked.
+    rmSync(join(dir, '.sterling', 'transient', 'delivery'), { recursive: true });
     rmSync(join(dir, '.sterling', 'transient', 'notices'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'transient', 'notices'), 'not a directory');
     const failed = run(h, agy('PostToolUse', dir, { error: '', ...tool('read_file', { Path: join(dir, 'a.txt') }) }), dir);
     assert.notEqual(failed.code, 0);
-    assert.ok(!existsSync(marker), 'nothing is marked delivered when the queue write failed');
+    assert.deepEqual(marks(), [], 'nothing is marked when the queue write failed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a Claude Code prompt in the same checkout keeps a live agy conversation\'s queue and drops only a day-old one', () => {
+  const dir = project();
+  try {
+    const notices = join(dir, '.sterling', 'transient', 'notices');
+    mkdirSync(notices, { recursive: true });
+    const live = join(notices, `agy-${CONV}-1.json`);
+    writeFileSync(live, JSON.stringify({ text: 'AGY-LIVE', session_id: CONV }));
+    const old = join(notices, `agy-${OTHER}-1.json`);
+    writeFileSync(old, JSON.stringify({ text: 'AGY-OLD', session_id: OTHER }));
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    utimesSync(old, twoDaysAgo, twoDaysAgo);
+    writeFileSync(join(notices, 'h10-cc.json'), JSON.stringify({ text: 'CC-OWN', session_id: 'cc-session-1' }));
+    const drain = join(HOOKS, 'h19-delivery-drain.mjs');
+    const cc = run(drain, { hook_event_name: 'UserPromptSubmit', session_id: 'cc-session-1', cwd: dir, prompt: 'hi' }, dir);
+    assert.equal(cc.code, 0, cc.stderr);
+    assert.equal(JSON.parse(cc.stdout).hookSpecificOutput.additionalContext, 'CC-OWN');
+    assert.ok(existsSync(live), 'the live agy queue survives a Claude Code drain');
+    assert.ok(!existsSync(old), 'a day-old foreign agy entry is cleaned up');
+    const mine = run(drain, agy('PreInvocation', dir, { invocationNum: 1 }), dir);
+    assert.deepEqual(JSON.parse(mine.stdout), { injectSteps: [{ systemMessage: { systemMessage: 'AGY-LIVE' } }] });
+    assert.ok(!existsSync(live));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -275,24 +319,30 @@ test('queued delivery: PreToolUse and PostToolUse context is queued, the envelop
 
 // ── Stop's loop guard ───────────────────────────────────────────────────────
 
-test('Stop: a blocking hook continues once per user turn; the next Stop of that turn with the same duties lets agy stop', () => {
+test('Stop: one continue per user turn, where a turn starts at invocationNum 0; two identical prompts in a row are two turns', () => {
   const dir = project();
   try {
     const h = harness(dir, `if (input.stop_hook_active) allow(); deny('STERLING: capture duties are owed.\\n');`);
-    const stop = (extra) => agy('Stop', dir, { executionNum: 1, terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false, ...extra });
-    const owed = run(h, stop(), dir);
-    assert.equal(owed.code, 0, owed.stderr);
-    assert.deepEqual(JSON.parse(owed.stdout), { decision: 'continue', reason: 'STERLING: capture duties are owed.' });
-    // continuationActive stays false on the continued Stop (measured), so the guard is the adapter's own.
-    const again = run(h, stop({ executionNum: 2 }), dir);
-    assert.equal(again.code, 0, again.stderr);
-    assert.deepEqual(JSON.parse(again.stdout), { decision: 'allow' });
-    // Even a hook that ignores stop_hook_active is released on the repeat.
     const stubborn = harness(dir, `deny('STERLING: capture duties are owed.\\n');`);
-    assert.deepEqual(JSON.parse(run(stubborn, stop({ executionNum: 3 }), dir).stdout), { decision: 'allow' });
-    // A new user turn may be continued again.
-    const next = run(h, stop({ lastUserInput: 'now do the next thing' }), dir);
-    assert.deepEqual(JSON.parse(next.stdout), { decision: 'continue', reason: 'STERLING: capture duties are owed.' });
+    const drain = join(HOOKS, 'h19-delivery-drain.mjs');
+    const prompt = 'fix the failing test';
+    const turn = (initialNumSteps) => assert.equal(run(drain, agy('PreInvocation', dir, { invocationNum: 0, initialNumSteps, lastUserInput: prompt }), dir).code, 0);
+    const stop = (hook, extra) =>
+      JSON.parse(run(hook, agy('Stop', dir, { executionNum: 1, terminationReason: 'NO_TOOL_CALL', error: '', fullyIdle: true, continuationActive: false, lastUserInput: prompt, ...extra }), dir).stdout);
+    const CONTINUE = { decision: 'continue', reason: 'STERLING: capture duties are owed.' };
+
+    turn(1);
+    assert.deepEqual(stop(h), CONTINUE);
+    // continuationActive stays false on the continued Stop (measured), so the guard is the adapter's own.
+    assert.deepEqual(stop(h, { executionNum: 2 }), { decision: 'allow' }, 'the same duties in the same turn do not continue again');
+    assert.deepEqual(stop(stubborn, { executionNum: 3 }), { decision: 'allow' }, 'even a hook that ignores stop_hook_active is released');
+    // A later model call of the same turn does not start a new one.
+    assert.equal(run(drain, agy('PreInvocation', dir, { invocationNum: 1, initialNumSteps: 4, lastUserInput: prompt }), dir).code, 0);
+    assert.deepEqual(stop(h, { executionNum: 4 }), { decision: 'allow' });
+    // The user sends the identical prompt again: a new turn, continued once more.
+    turn(9);
+    assert.deepEqual(stop(h), CONTINUE);
+    assert.deepEqual(stop(h, { executionNum: 2 }), { decision: 'allow' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -320,6 +370,19 @@ test('role marker parsing: anchored on the System Prompt record, with one- and t
   // A role merely quoted in the conversation does not count.
   assert.deepEqual(rolesInConversationBytes(Buffer.from('the user said STERLING-ROLE: reviewer here', 'latin1')), []);
   assert.deepEqual(rolesInConversationBytes(conversationBytes('You are an agent.\nSTERLING-ROLE: reviewer')), []);
+});
+
+test('one store-write tool list: the agy role guard and the OpenCode permissions read the same names from the implementor template', () => {
+  const agyNames = [...storeWriteToolNames(root)];
+  const openCode = storeWriteTools(root);
+  // An independent read of the source both use: every mcp__sterling__<tool> in implementor.md's disallowedTools.
+  const fm = readFileSync(join(root, 'agent-templates', 'implementor.md'), 'utf8').match(/^---\n([\s\S]*?)\n---\n/)[1];
+  const expected = [...new Set([...fm.match(/^disallowedTools:\s*(.+)$/m)[1].matchAll(/mcp__sterling__(\w+)/g)].map((m) => m[1]))];
+  assert.ok(expected.length >= 29, `the template lists ${expected.length} store-write tools`);
+  assert.deepEqual(agyNames, expected);
+  assert.deepEqual(openCode, expected.map((t) => `sterling_${t}`));
+  for (const write of ['knowledge_create', 'knowledge_update', 'board_add', 'config_set']) assert.ok(agyNames.includes(write), write);
+  for (const read of ['knowledge_get', 'knowledge_query', 'board_query', 'knowledge_preflight']) assert.ok(!agyNames.includes(read), read);
 });
 
 test('H15 under agy denies a store write by a read-only role, allows a writing role, and fails open with one warning per conversation', () => {

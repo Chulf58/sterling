@@ -10,8 +10,7 @@ import { basename as basename2, isAbsolute as isAbsolute2, resolve as resolve3, 
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync2, existsSync as existsSync3, writeSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join as join4 } from "node:path";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5982,7 +5981,7 @@ var AGY_EVENTS = {
   Stop: "Stop"
 };
 var AGY_PRETOOLUSE_KEYS = Object.freeze(["decision", "reason", "overwrite", "permissionOverrides"]);
-var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, stopTurnFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
+var agy = { active: false, event: null, conversationId: null, checkout: null, emitted: false, queued: [], deferredGuards: [], stopFile: null, stopTurn: null, stopAlreadyContinued: false, errText: [] };
 function isAgyInput(raw) {
   return raw !== null && typeof raw === "object" && typeof raw.hookEventName === "string" && !("hook_event_name" in raw);
 }
@@ -6120,14 +6119,30 @@ function agyKey(conversationId) {
 function agyStateDir(checkout) {
   return join4(checkout, ".sterling", "transient", "agy");
 }
-function queueAgyNotice(checkout, conversationId, text) {
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname3(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(value));
+  renameSync(tmp, path);
+}
+function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
   const dir = join4(checkout, ".sterling", "transient", "notices");
   mkdirSync(dir, { recursive: true });
   const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ text: String(text), session_id: String(conversationId) }), { flag: "wx" });
+  const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
+  writeFileSync(tmp, JSON.stringify(body), { flag: "wx" });
   renameSync(tmp, target);
   return target;
+}
+function flushAgyQueue() {
+  if (!agy.checkout) return;
+  const texts = [...new Set(agy.queued)];
+  if (texts.length) {
+    queueAgyNotice(agy.checkout, agy.conversationId, texts.join("\n\n"), { guards: agy.deferredGuards });
+    return;
+  }
+  for (const { path, guard } of agy.deferredGuards) writeJsonAtomic(path, guard);
 }
 function queueAgyWarningOnce(name, text) {
   if (!agy.active || !agy.checkout) {
@@ -6162,12 +6177,11 @@ function agyStdoutWrite(chunk) {
     agy.emitted = true;
     return;
   }
-  if (!agy.checkout) return;
-  for (const t of texts) queueAgyNotice(agy.checkout, agy.conversationId, t);
+  agy.queued.push(...texts);
 }
 function adoptAgyInput(raw, options = {}) {
   const { input: input2, skip } = normalizeAgyInput(raw, options);
-  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip, lastUserInput: raw.lastUserInput });
+  Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip });
   const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
   process.stdout.write = (chunk, encoding, callback) => {
     const done = typeof encoding === "function" ? encoding : callback;
@@ -6187,9 +6201,17 @@ function adoptAgyInput(raw, options = {}) {
     return writeErr(chunk, ...rest);
   };
   process.on("exit", (code) => {
+    let effective = code;
     try {
-      const stopContinue = agy.event === "Stop" && code === 2 ? recordAgyStopContinue() : true;
-      const envelope = agyExitEnvelope({ event: agy.event, code, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
+      flushAgyQueue();
+    } catch (e) {
+      writeErr(`Sterling agy adapter: this hook's context could not be queued (${e && e.message || e}), so it is lost and nothing was marked delivered.
+`);
+      if (effective === 0) effective = 1;
+    }
+    try {
+      const stopContinue = agy.event === "Stop" && effective === 2 ? recordAgyStopContinue() : true;
+      const envelope = agyExitEnvelope({ event: agy.event, code: effective, err: agy.errText.join(""), emitted: agy.emitted, stopContinue });
       if (envelope.text) writeAllSync(1, envelope.text);
       process.exitCode = envelope.code;
     } catch (e) {
@@ -6200,20 +6222,36 @@ function adoptAgyInput(raw, options = {}) {
   });
   return input2;
 }
-function agyStopTurn(checkout, conversationId, lastUserInput) {
-  return {
-    file: join4(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`),
-    turn: createHash("sha256").update(String(lastUserInput ?? "")).digest("hex")
-  };
+function agyTurnFile(checkout, conversationId) {
+  return join4(agyStateDir(checkout), `turn-${agyKey(conversationId)}.json`);
+}
+function agyStopFile(checkout, conversationId) {
+  return join4(agyStateDir(checkout), `stop-${agyKey(conversationId)}.json`);
+}
+function recordAgyTurn(raw) {
+  const turn = Number.isInteger(raw.initialNumSteps) ? `steps-${raw.initialNumSteps}` : `at-${Date.now()}-${process.pid}`;
+  try {
+    writeJsonAtomic(agyTurnFile(agy.checkout, raw.conversationId), { turn });
+  } catch (e) {
+    process.stderr.write(`Sterling agy adapter: the user turn could not be recorded (${e && e.message || e}); this turn's Stop may not be continued.
+`);
+  }
 }
 function settleAgyInput(raw, input2, inProject) {
   agy.checkout = inProject ? input2.cwd : null;
+  if (agy.event === "PreInvocation" && raw.invocationNum === 0 && raw.lastUserInput !== "" && agy.checkout) recordAgyTurn(raw);
   if (agy.event === "Stop" && agy.checkout) {
-    const { file, turn } = agyStopTurn(agy.checkout, raw.conversationId, raw.lastUserInput);
-    agy.stopTurnFile = file;
+    let turn = "unknown";
+    try {
+      turn = JSON.parse(readFileSync2(agyTurnFile(agy.checkout, raw.conversationId), "utf8")).turn ?? "unknown";
+    } catch (e) {
+      if (e?.code !== "ENOENT") process.stderr.write(`Sterling agy adapter: the user turn could not be read (${e && e.message || e}).
+`);
+    }
+    agy.stopFile = agyStopFile(agy.checkout, raw.conversationId);
     agy.stopTurn = turn;
     try {
-      agy.stopAlreadyContinued = JSON.parse(readFileSync2(file, "utf8")).turn === turn;
+      agy.stopAlreadyContinued = JSON.parse(readFileSync2(agy.stopFile, "utf8")).turn === turn;
     } catch (e) {
       if (e?.code !== "ENOENT") agy.stopAlreadyContinued = true;
     }
@@ -6223,13 +6261,12 @@ function settleAgyInput(raw, input2, inProject) {
 }
 function recordAgyStopContinue() {
   if (agy.stopAlreadyContinued) return false;
-  if (!agy.stopTurnFile) {
+  if (!agy.stopFile) {
     process.stderr.write("Sterling agy adapter: a Stop block outside a Sterling project was released (no state to stop a continue loop).\n");
     return false;
   }
   try {
-    mkdirSync(agyStateDir(agy.checkout), { recursive: true });
-    writeFileSync(agy.stopTurnFile, JSON.stringify({ turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() }));
+    writeJsonAtomic(agy.stopFile, { turn: agy.stopTurn, at: (/* @__PURE__ */ new Date()).toISOString() });
     return true;
   } catch (e) {
     process.stderr.write(`Sterling agy adapter: the Stop block was released because its loop guard could not be recorded (${e && e.message || e}).
@@ -6239,20 +6276,32 @@ function recordAgyStopContinue() {
 }
 
 // scripts/hooks/lib/agy-role-guard.mjs
-import { readFileSync as readFileSync3, existsSync as existsSync4 } from "node:fs";
+import { readFileSync as readFileSync4, existsSync as existsSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
+import { join as join6 } from "node:path";
+
+// scripts/lib/store-write-tools.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
 import { join as join5 } from "node:path";
+function implementorTemplatePath(pluginRoot) {
+  return join5(pluginRoot, "agent-templates", "implementor.md");
+}
+function readStoreWriteToolNames(pluginRoot) {
+  const text = readFileSync3(implementorTemplatePath(pluginRoot), "utf8").replace(/\r\n/g, "\n");
+  const fm = text.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
+  return [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))];
+}
+
+// scripts/hooks/lib/agy-role-guard.mjs
 var READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
 var STERLING_SERVERS = /* @__PURE__ */ new Set(["sterling", "sterling_sterling"]);
 var CONVERSATIONS_DIR_ENV = "STERLING_AGY_CONVERSATIONS_DIR";
 function conversationsDir(env = process.env) {
-  return env[CONVERSATIONS_DIR_ENV] || join5(homedir2(), ".gemini", "antigravity-cli", "conversations");
+  return env[CONVERSATIONS_DIR_ENV] || join6(homedir2(), ".gemini", "antigravity-cli", "conversations");
 }
 function storeWriteToolNames(pluginRoot) {
-  const text = readFileSync3(join5(pluginRoot, "agent-templates", "implementor.md"), "utf8").replace(/\r\n/g, "\n");
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
-  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
-  const names = new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean));
+  const names = new Set(readStoreWriteToolNames(pluginRoot));
   if (!names.size) throw new Error("agent-templates/implementor.md disallowedTools names no mcp__sterling__ tool");
   return names;
 }
@@ -6289,11 +6338,11 @@ function agyRoleVerdict({ toolName, conversationId, dir = conversationsDir(), wr
   if (typeof conversationId !== "string" || !/^[A-Za-z0-9-]+$/.test(conversationId)) {
     return { action: "warn", cause: `the hook input carries no usable conversationId (${JSON.stringify(conversationId)})` };
   }
-  const db = join5(dir, `${conversationId}.db`);
+  const db = join6(dir, `${conversationId}.db`);
   const roles = [];
   try {
-    roles.push(...rolesInConversationBytes(readFileSync3(db)));
-    if (existsSync4(`${db}-wal`)) roles.push(...rolesInConversationBytes(readFileSync3(`${db}-wal`)));
+    roles.push(...rolesInConversationBytes(readFileSync4(db)));
+    if (existsSync4(`${db}-wal`)) roles.push(...rolesInConversationBytes(readFileSync4(`${db}-wal`)));
   } catch (e) {
     return { action: "warn", cause: `the conversation file ${db} could not be read (${e && e.code || e && e.message || e})` };
   }
@@ -6314,13 +6363,13 @@ function unenforcedWarning(cause) {
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname3, join as join6 } from "node:path";
+import { dirname as dirname4, join as join7 } from "node:path";
 import { fileURLToPath } from "node:url";
 function walkUpPluginRoot(moduleUrl) {
-  let dir = dirname3(fileURLToPath(moduleUrl));
+  let dir = dirname4(fileURLToPath(moduleUrl));
   for (let i = 0; i < 4; i++) {
-    if (existsSync5(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname3(dir);
+    if (existsSync5(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname4(dir);
   }
   return null;
 }

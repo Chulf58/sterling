@@ -400,11 +400,15 @@ try {
 } catch (err) {
   domainMapResult = { error: String(err?.message ?? err) };
 }
+// The host whose agents the post-update and clone syncs refresh: agy when the
+// session is Antigravity CLI (lib/common.mjs normalises its input with host
+// 'agy'), Claude Code otherwise. OpenCode never runs this hook.
+const syncHost = input.host === 'agy' ? 'agy' : 'claude';
 let postUpdateWarning = '';
 let postUpdateContext = '';
 let postUpdateOutcome = null;
 try {
-  const result = await postUpdateSync({ root: pluginRoot(), project: input.cwd, host: 'claude' });
+  const result = await postUpdateSync({ root: pluginRoot(), project: input.cwd, host: syncHost });
   if (result) {
     postUpdateWarning = result.warning;
     postUpdateContext = result.context;
@@ -1319,7 +1323,7 @@ try {
   // stale warning below still prints there, as it did before the clone sync existed.
   if (behind.length && process.env[WORKER_ENV_FLAG] !== '1') {
     try {
-      const synced = await cloneAgentSync({ root: pluginRoot(), project: input.cwd, behind, host: 'claude' });
+      const synced = await cloneAgentSync({ root: pluginRoot(), project: input.cwd, behind, host: syncHost });
       if (synced) {
         cloneSyncOutcome = synced.outcome;
         cloneSyncClause = synced.clause ?? '';
