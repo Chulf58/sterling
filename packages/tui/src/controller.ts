@@ -3,15 +3,15 @@
 // (main.ts) and the OpenCode plugin (packages/opencode-plugin/src/tui.tsx)
 // both drive it, so a board edit or a config toggle runs the same code in
 // either host. Nothing here touches a terminal.
-import { readFileSync, writeFileSync, existsSync, rmSync, lstatSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, lstatSync, chmodSync, mkdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_ROLES } from '@sterling/schemas';
-import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type AgyModelEffect, type WorkerModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
+import { parseConfig, resolveOverpass, isCustomAgentKey, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_ROLES } from '@sterling/schemas';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type AgyModelEffect, type CustomAgentModelEffect, type AdoptPlanEffect, type AdoptRunEffect, type AdoptedAgentView, type CustomModelView, type WorkerModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
 import { ConfigChangedError, replaceConfigFile, writeConfigKey, type ConfigWriteSeams, applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassRole, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
@@ -22,7 +22,9 @@ import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
-import { discoverCustomAgents, installedGovernedAgents } from './custom-agents.js';
+import { discoverCustomAgents, installedGovernedAgents, customAgentFile } from './custom-agents.js';
+import { AGENT_SOURCE_DIR, adopt, planAdoption, readSourceFiles, sourcePathOf } from '../../../scripts/lib/agent-adoption.mjs';
+import { detectInstalledHosts, parseSource, syncCustomAgents } from '../../../scripts/lib/custom-agent-render.mjs';
 import { writeFileAtomic } from '../../../scripts/lib/atomic-write.mjs';
 import { AGY_AGENTS_DIR, AGY_ROSTER, probeAgy, setupAgy } from '../../../scripts/lib/agy-setup.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
@@ -58,6 +60,8 @@ export interface DashboardOptions {
   configWriteFs?: ConfigWriteSeams;
   /** The agy project setup an agy_model effect runs after writing config.json; tests inject a hermetic one. */
   agySetup?: (args: { projectDir: string; pluginRoot: string }) => ReturnType<typeof setupAgy>;
+  /** The hosts adopted custom agents are rendered into; default: the hosts installed here (detectInstalledHosts). Tests pin it. */
+  customAgentHosts?: Array<'claude' | 'opencode' | 'agy'>;
   /** Which host opened the dashboard. 'opencode' offers the Overpass rows (in
    *  work mode). The in-OpenCode dashboard (opencode/sterling-tui/tui.tsx)
    *  passes 'opencode'; the tmux side pane (main.ts) passes it from
@@ -557,7 +561,15 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       sparring_partner?: { enabled?: boolean; models?: { openai?: { model?: string } } };
       tdd?: { enabled?: boolean };
     };
-    const configModels = cfg.models ?? {};
+    const configModels: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }> = {};
+    const customModels: Record<string, CustomModelView> = {};
+    for (const [k, v] of Object.entries((cfg.models ?? {}) as Record<string, { model?: string; effort?: string; opencode_model?: string; agy_model?: string }>)) {
+      if (isCustomAgentKey(k)) {
+        customModels[k] = { ...v };
+        // placeholders: the picker flow reads configModels, and an adopted agent may name no model or effort
+        configModels[k] = { model: v.model ?? '', effort: v.effort ?? '', ...(v.opencode_model ? { opencode_model: v.opencode_model } : {}), ...(v.agy_model ? { agy_model: v.agy_model } : {}) };
+      } else configModels[k] = v as { model: string; effort: string };
+    }
     // parseConfig converts the old sparring_partner.model into models.openai.
     const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.models?.openai?.model };
     const tdd = { enabled: cfg.tdd?.enabled ?? true };
@@ -576,7 +588,30 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     // never throws, so a bad agent file cannot fail the tab
     const installedAt = installedGovernedAgents(projectRoot);
     const hostInstalled = [...new Set([...installedAt.opencode, ...installedAt.agy])].filter((name) => !agents.some((a) => a.name === name));
-    const customAgents = discoverCustomAgents(projectRoot);
+    const customAgents = discoverCustomAgents(projectRoot).map((a) => ({ ...a, file: customAgentFile(a) }));
+    // Adopted custom agents: config.models.custom-* with its agent-sources/<key>.md, the hosts it is rendered
+    // into, and what the render refuses for it (a dry run: nothing is written here).
+    const adoptedAgents: AdoptedAgentView[] = [];
+    const adoptedKeys = Object.keys(customModels).filter((k) => existsSync(join(projectRoot, sourcePathOf(k))));
+    if (adoptedKeys.length > 0) {
+      const hosts = customHosts();
+      let refused: Array<{ key: string; host: string; reason: string }> = [];
+      try {
+        refused = syncCustomAgents(projectRoot, config as { models?: Record<string, object> }, { hosts, dryRun: true }).refused;
+      } catch (err) {
+        refused = adoptedKeys.map((key) => ({ key, host: '*', reason: `the render plan failed: ${(err as Error).message}` }));
+      }
+      for (const key of adoptedKeys) {
+        let name = key.slice('custom-'.length);
+        try {
+          const parsed = parseSource(readFileSync(join(projectRoot, sourcePathOf(key)), 'utf8'));
+          if (!('error' in parsed) && typeof parsed.data.name === 'string') name = parsed.data.name;
+        } catch {
+          // an unreadable source shows under its key; the render plan reports the problem on the row
+        }
+        adoptedAgents.push({ key, name, hosts, refusals: refused.filter((r) => r.key === key).map((r) => ({ host: r.host, reason: r.reason })) });
+      }
+    }
 
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
     try {
@@ -597,7 +632,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, hostInstalled, opencodeInstalled: installedAt.opencode, agyInstalled: installedAt.agy, customAgents, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+    return { agents, hostInstalled, opencodeInstalled: installedAt.opencode, agyInstalled: installedAt.agy, customAgents, adoptedAgents, customModels, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
   }
 
   /** maintenance_worker.opencode_model for the Maintenance worker row, from the RAW
@@ -937,6 +972,183 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? 'inherit'} (${outcome}); Claude Code keeps ${e.model}.` };
   }
 
+  /** The hosts adopted custom agents are rendered into. */
+  function customHosts(): Array<'claude' | 'opencode' | 'agy'> {
+    return options.customAgentHosts ?? (detectInstalledHosts(projectRoot) as Array<'claude' | 'opencode' | 'agy'>);
+  }
+
+  /** Execute a custom_agent_model effect: set or remove fields of config.models.<key> of an adopted agent,
+   *  validate the whole config strictly, check the render would not be refused (a dry run, nothing written),
+   *  replace config.json, then render every installed host's file. syncCustomAgents rolls its own files back
+   *  when a write fails; config.json is put back here. */
+  function applyCustomAgentModel(e: CustomAgentModelEffect): void {
+    const fail = (msg: string) => { ui = { ...ui, notice: `Custom agent '${e.key}' not changed — ${msg}; config.json and the agent files are as they were` }; };
+    let configBefore: Buffer;
+    let configAfter: string;
+    let parsed: ReturnType<typeof parseConfig>;
+    try {
+      configBefore = readFileSync(configPath);
+      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
+      const entry = raw.models?.[e.key];
+      if (!entry || typeof entry !== 'object') throw new Error(`config.models has no ${e.key} entry`);
+      const next: Record<string, unknown> = { ...entry };
+      for (const [field, value] of Object.entries(e.set)) {
+        if (value === null) delete next[field];
+        else if (value !== undefined) next[field] = value;
+      }
+      // loading strips an agy_model outside agy's four values, so a value written now is checked strictly here
+      if (typeof next.agy_model === 'string' && !(AGY_MODEL_IDS as readonly string[]).includes(next.agy_model)) throw new Error(`agy_model must be one of ${AGY_MODEL_IDS.join(', ')}, got '${next.agy_model}'`);
+      raw.models = { ...raw.models, [e.key]: next };
+      parsed = parseConfig(raw);
+      configAfter = JSON.stringify(raw, null, 2) + '\n';
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    const hosts = customHosts();
+    try {
+      const dry = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts, dryRun: true });
+      const mine = dry.refused.filter((r) => r.key === e.key);
+      if (mine.length) {
+        fail(mine.map((r) => `${r.host}: ${r.reason}`).join('; '));
+        return;
+      }
+    } catch (err) {
+      fail(`the render plan failed: ${(err as Error).message}`);
+      return;
+    }
+    try {
+      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
+    } catch (err) {
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
+      return;
+    }
+    try {
+      const report = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts });
+      const mine = report.refused.filter((r) => r.key === e.key);
+      if (mine.length) throw new Error(mine.map((r) => `${r.host}: ${r.reason}`).join('; '));
+      const wrote = [...new Set([...report.written, ...report.unchanged].filter((w) => w.key === e.key).map((w) => w.host))];
+      ui = { ...ui, notice: `Custom agent '${e.key}' updated; rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
+    } catch (err) {
+      try {
+        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `Custom agent '${e.key}': the render failed (${(err as Error).message}) and config.json was not restored: ${(restoreErr as Error).message}` };
+        return;
+      }
+      fail((err as Error).message);
+    }
+  }
+
+  /** The adoption plan for a not-yet-adopted agent, from the files on disk. */
+  function planAdoptionFor(id: string): { found: { source: 'claude' | 'opencode' | 'agy'; name: string; file: string; content?: string }; plan: ReturnType<typeof planAdoption> } | undefined {
+    const all = (roster?.customAgents ?? []).map((a) => {
+      const file = a.file ?? customAgentFile(a);
+      let content: string | undefined;
+      try {
+        content = readFileSync(join(projectRoot, file), 'utf8');
+      } catch {
+        content = undefined;
+      }
+      return { source: a.source, name: a.name, file, ...(content !== undefined ? { content } : {}) };
+    });
+    const found = all.find((a) => `${a.source}:${a.name}` === id);
+    if (!found) return undefined;
+    let configKeys: string[] = [];
+    try {
+      configKeys = Object.keys((JSON.parse(readFileSync(configPath, 'utf8')) as { models?: object }).models ?? {});
+    } catch {
+      configKeys = [];
+    }
+    const plan = planAdoption(
+      { host: found.source, name: found.name, file: found.file, ...(found.content !== undefined ? { content: found.content } : {}) },
+      { sourceFiles: readSourceFiles(projectRoot), configKeys, others: all.filter((a) => a !== found).map((a) => ({ host: a.source, name: a.name, ...(a.content !== undefined ? { content: a.content } : {}) })) },
+    );
+    return { found, plan };
+  }
+
+  /** Execute adopt_plan: compute the plan and leave it in ui.adoptConfirm for the user to confirm or cancel. */
+  function applyAdoptPlan(e: AdoptPlanEffect): void {
+    const r = planAdoptionFor(e.id);
+    if (!r) {
+      ui = { ...ui, notice: `Adopt: ${e.id} is no longer listed; nothing changed` };
+      return;
+    }
+    const { plan } = r;
+    const lines = plan.ok
+      ? [
+          `adopt ${e.id}: move ${plan.move!.from} to ${plan.move!.to}`,
+          `new key ${plan.key}; no model or effort is written (the host's own default); every installed host gets a generated copy`,
+          ...((plan.duplicates ?? []).length ? [`identical copies stay and are replaced by generated ones: ${(plan.duplicates ?? []).map((d) => `${d.host}:${d.name}`).join(', ')}`] : []),
+          'ENTER adopts, ESC cancels',
+        ]
+      : [...plan.refusals.map((x) => `refused (${x.code}): ${x.message}`), 'ENTER or ESC closes'];
+    ui = { ...ui, adoptConfirm: { id: e.id, ok: plan.ok, lines } };
+  }
+
+  /** Execute adopt_run: adopt (move the file into agent-sources), create config.models.<key> with no model or
+   *  effort, render every host. Any failure puts the original file, config.json and the sources back. */
+  function applyAdoptRun(e: AdoptRunEffect): void {
+    const fail = (msg: string) => { ui = { ...ui, notice: `Adopt ${e.id} failed — ${msg}; nothing was changed` }; };
+    const r = planAdoptionFor(e.id);
+    if (!r || !r.plan.ok) {
+      fail(r ? r.plan.refusals.map((x) => x.message).join('; ') : 'the agent is no longer listed');
+      return;
+    }
+    const { found, plan } = r;
+    const original = found.content!;
+    let result: { from: string; to: string; key: string };
+    try {
+      result = adopt(projectRoot, plan);
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    const undo = (): void => {
+      const from = join(projectRoot, result.from);
+      mkdirSync(dirname(from), { recursive: true });
+      writeFileSync(from, original);
+      rmSync(join(projectRoot, result.to), { force: true });
+    };
+    let configBefore: Buffer;
+    let configAfter: string;
+    let parsed: ReturnType<typeof parseConfig>;
+    try {
+      configBefore = readFileSync(configPath);
+      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, unknown> };
+      raw.models = { ...(raw.models ?? {}), [result.key]: {} };
+      parsed = parseConfig(raw);
+      configAfter = JSON.stringify(raw, null, 2) + '\n';
+    } catch (err) {
+      undo();
+      fail((err as Error).message);
+      return;
+    }
+    try {
+      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
+    } catch (err) {
+      undo();
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
+      return;
+    }
+    try {
+      const report = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts: customHosts() });
+      const mine = report.refused.filter((x) => x.key === result.key);
+      if (mine.length) throw new Error(mine.map((x) => `${x.host}: ${x.reason}`).join('; '));
+      const wrote = [...new Set([...report.written, ...report.unchanged].filter((w) => w.key === result.key).map((w) => w.host))];
+      ui = { ...ui, notice: `Adopted ${e.id} as ${result.key} (${AGENT_SOURCE_DIR}/${result.key}.md); rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
+    } catch (err) {
+      try {
+        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
+        undo();
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `Adopt ${e.id}: the render failed (${(err as Error).message}) and the undo failed: ${(restoreErr as Error).message}` };
+        return;
+      }
+      fail((err as Error).message);
+    }
+  }
+
   async function applyEffects(all: Effect[]): Promise<boolean> {
     // the host's effect switch: a declined effect never reaches its writer
     const effects = all.filter((e) => {
@@ -961,6 +1173,12 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     for (const e of swaps) await applySwap(e);
     for (const e of overrides) applyOpenCodeModel(e);
     for (const e of effects) if (e.type === 'agy_model') applyAgyModel(e);
+    const customEffects = effects.filter((e) => e.type === 'custom_agent_model' || e.type === 'adopt_plan' || e.type === 'adopt_run');
+    for (const e of effects) {
+      if (e.type === 'custom_agent_model') applyCustomAgentModel(e);
+      else if (e.type === 'adopt_plan') applyAdoptPlan(e);
+      else if (e.type === 'adopt_run') applyAdoptRun(e);
+    }
     const workerModels = effects.filter((e): e is WorkerModelEffect => e.type === 'worker_model');
     for (const e of workerModels) applyWorkerModel(e);
     const refused = overpassRefusedEdit;
@@ -1041,7 +1259,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session (Claude Code) or run opencode reload (OpenCode) to reload the MCP server.');
     }
-    if (refused || swaps.length || overrides.length || workerModels.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
+    if (refused || customEffects.length || swaps.length || overrides.length || workerModels.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);

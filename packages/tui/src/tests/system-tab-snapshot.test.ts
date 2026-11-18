@@ -14,7 +14,11 @@ import { buildDashboardState, initialUi, reduce, SYSTEM_TAB, type AgentRosterSna
 // headings; group labels (Sparring, Workflow, Overpass, Storage) in the Settings section; the Overpass rows
 // listed in every fixture, dimmed with '(work mode on OpenCode only)' when not offered; the PR auto-merge row
 // dimmed with '(acts only in work mode)' in hobby mode and no longer a cursor stop there; the Maintenance worker
-// row without its 'claude CLI, when on PATH' line. Regenerate only on a deliberate change:
+// row without its 'claude CLI, when on PATH' line.
+// Item 5 (2026-11-18) regenerated it again: a governed role installed on two or more hosts gets an 'on:' host line
+// (each host with its effective model, 'effort unsupported' where the host has no effort control), and a
+// not-yet-adopted custom agent is a cursor stop 'host:name (not adopted): <model> — ENTER to adopt' whose ENTER
+// emits adopt_plan (an unreadable one stays read-only). Regenerate only on a deliberate change:
 //   UPDATE_SYSTEM_SNAPSHOT=1 node --test packages/tui/dist/tests/system-tab-snapshot.test.js
 const SNAPSHOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'tests', 'system-tab-snapshot.json');
 

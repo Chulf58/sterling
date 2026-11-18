@@ -312,3 +312,19 @@ test('generated copies are not discovered as custom agents', async () => {
     p.done();
   }
 });
+
+// System tab redesign item 5: the sync and retirement paths must not treat a generated custom agent as foreign.
+test('retireAgents leaves a sterling-custom generated file alone: only a sterling-generated, unmodified retired agent is removed', async () => {
+  const { retireAgents } = await import('../lib/agent-distribution.mjs');
+  const p = project();
+  try {
+    sync(p);
+    const dir = join(p.root, '.claude', 'agents');
+    const before = read(p.root, '.claude/agents/team-scout.md');
+    const report = retireAgents({ targetAgentsDir: dir, registryNames: new Set() });
+    assert.deepEqual(report, [], 'no retirement and no refusal for the custom copy');
+    assert.equal(read(p.root, '.claude/agents/team-scout.md'), before, 'the generated file is still there, unchanged');
+  } finally {
+    p.done();
+  }
+});

@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, isCustomAgentKey, resolveHostSettings, type AgentHost, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -104,6 +104,9 @@ export interface UiState {
    *  it, ENTER commits (empty commits as "unset"), ESCAPE cancels. Mirrors the
    *  Knowledge tab's always-visible-field idiom, scoped to one row. */
   sparringModelEdit?: string;
+  /** System tab, adoption confirm: the plan the controller computed for the not-yet-adopted agent `id`,
+   *  its lines, and whether it can go ahead. ENTER confirms an ok plan, ESCAPE or any move cancels. */
+  adoptConfirm?: { id: string; ok: boolean; lines: string[] };
   /** System tab, Overpass provider row: the edit buffer for config.overpass.provider,
    *  the same always-capture idiom as sparringModelEdit. ENTER commits only a
    *  valid provider id (OVERPASS_PROVIDER_RE) and otherwise keeps the buffer open
@@ -161,12 +164,32 @@ export interface RosterAgent {
   installedModel: string;
   installedEffort: string;
 }
-/** A custom agent found in a project agent folder (System tab, read-only row). */
+/** A custom agent found in a project agent folder and not adopted yet: shown with its host-qualified
+ *  identity and an Adopt action (GitHub #312). */
 export interface CustomAgentView {
   name: string;
   source: 'claude' | 'opencode' | 'agy';
   model?: string;
   error?: string;
+  /** the project-relative file, for the adoption plan */
+  file?: string;
+}
+/** An adopted custom agent (agent-sources/<key>.md plus config.models.<key>): a full editable row. */
+export interface AdoptedAgentView {
+  key: string;
+  /** the agent's own name (its source's frontmatter name, or the key's slug) */
+  name: string;
+  /** the hosts it is rendered into: every host installed in this project */
+  hosts: AgentHost[];
+  /** what planCustomAgents refused for it: a host and the reason, shown on the row */
+  refusals: Array<{ host: string; reason: string }>;
+}
+/** config.models.<key> of an adopted agent: every field may be absent (the host's own default). */
+export interface CustomModelView {
+  model?: string;
+  effort?: string;
+  opencode_model?: string;
+  agy_model?: string;
 }
 /** A models-catalog entry (reference_material.catalog.entries[]). */
 export interface CatalogEntry {
@@ -212,8 +235,12 @@ export interface AgentRosterSnapshot {
   opencodeInstalled?: string[];
   /** Governed agent names installed in agy's folder: an agy override is accepted only for a role in this list. */
   agyInstalled?: string[];
-  /** Custom agents from the project's agent folders: shown read-only, never edited. */
+  /** Custom agents from the project's agent folders that are not adopted yet: an Adopt row each. */
   customAgents?: CustomAgentView[];
+  /** Adopted custom agents (config.models.custom-*): full editable rows. */
+  adoptedAgents?: AdoptedAgentView[];
+  /** Their config.models entries (model and effort may be absent; configModels carries '' placeholders). */
+  customModels?: Record<string, CustomModelView>;
   /** Antigravity CLI is installed: the model picker then offers the agy-only ids. */
   agy?: boolean;
   catalog: CatalogStatusView;
@@ -361,7 +388,9 @@ export type SystemSection = 'agents' | 'settings';
 export type SystemAction =
   | { kind: 'agent'; key: string }
   | { kind: 'toggle'; effect: Effect }
-  | { kind: 'edit'; uiPatch: Partial<UiState> };
+  | { kind: 'edit'; uiPatch: Partial<UiState> }
+  /** a not-yet-adopted custom agent: ENTER asks the controller for the adoption plan */
+  | { kind: 'adopt'; id: string };
 /** One entry of the System tab's single ordered list. Cursor, clamp, draw order and the
  *  click hit-test all derive from this list: a cursorable entry takes the next cursor index
  *  in list order, a read-only one takes none. Adding a row means adding one entry. */
@@ -451,14 +480,16 @@ export const MODEL_VALUE_RE = /^claude-/;
 
 /** The model picker's options for one key: every catalog entry, then, when the
  *  key carries an OpenCode override, one option that clears it. */
-type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' } | { kind: 'agy'; id: string } | { kind: 'agy_clear' };
-function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string; agy_model?: string } | undefined, agy = false): ModelOption[] {
+type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' } | { kind: 'agy'; id: string } | { kind: 'agy_clear' } | { kind: 'inherit' };
+function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string; agy_model?: string } | undefined, agy = false, inheritable = false): ModelOption[] {
   const opts: ModelOption[] = entries.map((entry) => ({ kind: 'entry', entry }));
   if (config?.opencode_model) opts.push({ kind: 'clear' });
   // every agy id is offered as the role's Antigravity-only override (issue #306) once
   // agy is installed (snapshot.agy) or the role already carries one
   if (agy || config?.agy_model) for (const id of AGY_MODEL_IDS) opts.push({ kind: 'agy', id });
   if (config?.agy_model) opts.push({ kind: 'agy_clear' });
+  // an adopted custom agent may drop its model and effort: the host's own default (inherit)
+  if (inheritable) opts.push({ kind: 'inherit' });
   return opts;
 }
 
@@ -471,7 +502,14 @@ function systemKeys(snap: AgentRosterSnapshot): string[] {
   // (user ruling 2026-11-18, GitHub issue #307)
   const installed = new Set([...snap.agents.map((a) => a.name), ...(snap.hostInstalled ?? []), ...(snap.opencodeInstalled ?? []), ...(snap.agyInstalled ?? [])]);
   const isInstalled = (k: string): boolean => [...installed].some((n) => AGENT_MODEL_KEY[n] === k);
-  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), MAINTENANCE_WORKER_ROLE];
+  const adopted = (snap.adoptedAgents ?? []).map((a) => a.key).filter((k) => snap.configModels[k] !== undefined);
+  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), ...adopted, MAINTENANCE_WORKER_ROLE];
+}
+
+/** The model picker's options for one System-tab key (an adopted custom agent also offers inherit). */
+function optionsFor(snap: AgentRosterSnapshot, key: string): ModelOption[] {
+  const custom = isCustomAgentKey(key) ? snap.customModels?.[key] : undefined;
+  return modelOptions(snap.catalog.entries, snap.configModels[key], snap.agy, custom?.model !== undefined);
 }
 
 /** The worker row's model picker (Overpass off): every catalog entry as the OpenCode
@@ -748,7 +786,27 @@ export interface WorkerModelEffect {
   from?: string;
   to?: string;
 }
+/** Write config.models.<key> of an adopted custom agent: a field in `set` is written, null removes it, and
+ *  the controller re-renders every installed host's file. */
+export interface CustomAgentModelEffect {
+  type: 'custom_agent_model';
+  key: string;
+  set: { model?: string | null; effort?: string | null; opencode_model?: string | null; agy_model?: string | null };
+}
+/** Compute the adoption plan for a not-yet-adopted agent (the controller does the IO and sets ui.adoptConfirm). */
+export interface AdoptPlanEffect {
+  type: 'adopt_plan';
+  id: string;
+}
+/** Carry out the plan the user confirmed: adopt, create config.models.<key>, render. */
+export interface AdoptRunEffect {
+  type: 'adopt_run';
+  id: string;
+}
 export type Effect =
+  | CustomAgentModelEffect
+  | AdoptPlanEffect
+  | AdoptRunEffect
   | WorkerModelEffect
   | SelectEffect
   | QuitEffect
@@ -1064,6 +1122,20 @@ export const clipEllipsis = (s: string, width: number): string =>
  * entries at the model stage; effort options at the effort stage). Every
  * line is clipped to `width` so the 33-col floor holds.
  */
+const HOST_LABEL: Record<AgentHost, string> = { claude: 'Claude', opencode: 'OpenCode', agy: 'agy' };
+/** One line for the host column: each host with its effective model and effort (resolveHostSettings), and
+ *  'effort unsupported' where the host has no effort control. */
+function hostSummary(entry: { model?: string; effort?: string; opencode_model?: string; agy_model?: string }, hosts: AgentHost[]): string {
+  return hosts
+    .map((h) => {
+      const r = resolveHostSettings(entry, h);
+      const effort = r.effort ? ` ${r.effort}` : '';
+      const note = r.effortSupported ? '' : entry.effort ? ' (effort unsupported)' : '';
+      return `${HOST_LABEL[h]} ${r.model}${effort}${note}`;
+    })
+    .join(' · ');
+}
+
 function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number): { entries: SystemEntry[]; banner: string[] } {
   const snap = snapshot ?? EMPTY_ROSTER;
   const keys = systemKeys(snap);
@@ -1127,8 +1199,10 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
     const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
     const agentNames = governed.map((a) => a.name);
     // the INSTALLED governing copy for a governed key; config for a config-only key
-    const shownModel = governed.length ? governed[0].installedModel : config.model;
-    const shownEffort = governed.length ? governed[0].installedEffort : config.effort;
+    const adopted = isCustomAgentKey(key) ? (snap.adoptedAgents ?? []).find((a) => a.key === key) : undefined;
+    const customEntry = adopted ? (snap.customModels?.[key] ?? {}) : undefined;
+    const shownModel = customEntry ? (customEntry.model ?? 'inherit') : governed.length ? governed[0].installedModel : config.model;
+    const shownEffort = customEntry ? (customEntry.effort ?? '') : governed.length ? governed[0].installedEffort : config.effort;
     // row drift = ANY governed agent whose installed model/effort disagrees with
     // config (a partial projection leaves one agent stale → the AC4 P5 backstop)
     const drift = governed.some(
@@ -1139,7 +1213,7 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
     // Title-cased label: the leading letter is capitalized so a config-only key
     // like classifiers never surfaces the substring an agent name would match —
     // the roster lists each agent in exactly one row (AC1).
-    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    const label = adopted ? `${adopted.name} (custom)` : key.charAt(0).toUpperCase() + key.slice(1);
     // While Overpass is effective an agent role runs on its Overpass tier, so that is
     // the row's value; the user's own model stays visible, dimmed, as 'saved'
     // (decision system-tab-agent-catalog-with-overpass-on-each-row-shows-the).
@@ -1152,7 +1226,7 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
           // installed-frontmatter drift check stays a separate marker
           { text: clip(`    saved: ${config.model} ${config.effort}${drift ? '  drift' : ''}`), kind: 'meta' },
         ]
-      : [{ text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected }];
+      : [{ text: clip(`${marker}${label}: ${shownModel}${customEntry && !shownEffort ? '' : ` ${shownEffort}`}${drift ? '  drift' : ''}`), kind: 'title', selected }];
     // The agent-name line is dropped when it only repeats the header (AGENT_MODEL_KEY is an
     // identity map now); a name that differs from the key stays listed (board 4e7a6bfc).
     if (!agentNames.every((name) => name === key)) for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
@@ -1165,17 +1239,31 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
         : { text: clip(`    OpenCode: ${config.opencode_model}`), kind: 'body' });
     }
 
+    // The host column: where this agent is installed, with each host's effective model and which controls the
+    // host lacks. A governed role shows it once it is on two hosts; an adopted custom agent always.
+    const rowHosts: AgentHost[] = adopted
+      ? adopted.hosts
+      : ([
+          governed.length > 0 ? 'claude' : undefined,
+          (snap.opencodeInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === key) ? 'opencode' : undefined,
+          (snap.agyInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === key) ? 'agy' : undefined,
+        ].filter((h): h is AgentHost => h !== undefined));
+    if (rowHosts.length >= (adopted ? 1 : 2) && !route) {
+      lines.push({ text: clip(`    on: ${hostSummary(customEntry ?? config, rowHosts)}`), kind: 'meta' });
+    }
+    for (const r of adopted?.refusals ?? []) lines.push({ text: clip(`    ⚠ ${r.host}: ${r.reason}`), kind: 'meta' });
     if (selector && selector.key === key) {
       if (selector.stage === 'tier' || selector.stage === 'role_effort') {
         lines.push(...overpassPickerLines(key));
       } else if (selector.stage === 'model') {
         // a non-anthropic entry is offered as the OpenCode override only, and
         // says so; a set override adds a last option that clears it
-        modelOptions(snap.catalog.entries, config, snap.agy).forEach((o, oi) => {
+        optionsFor(snap, key).forEach((o, oi) => {
           const m = oi === selector.highlight ? '› ' : '  ';
           const text = o.kind === 'clear'
             ? 'OpenCode: use the Claude model'
             : o.kind === 'agy_clear' ? 'Antigravity: inherit'
+            : o.kind === 'inherit' ? 'inherit: the host\'s own model and effort'
             : o.kind === 'agy' ? `${o.id} (Antigravity only)`
             : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
           lines.push({ text: clip(`  ${m}${text}`), kind: 'option', selected: oi === selector.highlight });
@@ -1204,8 +1292,19 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
   };
   label('sys:heading:agents', 'agents', 'Agents', 'title');
   for (const row of rows) entries.push({ id: row.id, section: 'agents', cursorable: true, row, action: { kind: 'agent', key: row.key! } });
-  // custom agents are read-only: no cursor index, no action
-  for (const row of customAgentRows(snap, width)) entries.push({ id: row.id, section: 'agents', cursorable: false, row });
+  // Custom agents that are not adopted yet: host-qualified identity and the file's own model, with an Adopt
+  // action; one the file could not be read for stays read-only with its error.
+  (snap.customAgents ?? []).forEach((a, i) => {
+    const id = `sys:custom:${a.source}:${i}`;
+    const adoptId = `${a.source}:${a.name}`;
+    const ok = a.error === undefined;
+    const selected = ok && ui.cursor === next();
+    const text = ok ? `${selected ? '› ' : '  '}${adoptId} (not adopted): ${a.model ?? 'inherit/default'} — ENTER to adopt` : `  ${adoptId}: ⚠ ${a.error} (read-only)`;
+    const lines: SystemLine[] = [{ text: clip(text), kind: ok ? 'title' : 'meta', ...(ok ? { selected } : {}) }];
+    if (ui.adoptConfirm?.id === adoptId) for (const l of ui.adoptConfirm.lines) lines.push({ text: clip(`    ${l}`), kind: 'body' });
+    const row: SystemRow = { id, key: `custom:${a.source}:${a.name}`, drift: false, agents: [a.name], lines };
+    entries.push({ id, section: 'agents', cursorable: ok, row, ...(ok ? { action: { kind: 'adopt', id: adoptId } as SystemAction } : {}) });
+  });
   label('sys:heading:settings', 'settings', 'Settings', 'title');
   const setting = (row: SystemRow, action: SystemAction): void => {
     entries.push({ id: row.id, section: 'settings', cursorable: true, row, action });
@@ -2221,7 +2320,7 @@ function reduceNodes(
     sel.stage === 'tier' ? overpassTierOptions(roster!.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key as OverpassRole).length
     : sel.stage === 'role_effort' ? OVERPASS_EFFORT_OPTIONS.length
     : sel.stage === 'model' && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster!.catalog.entries, roster!.maintenanceWorker?.opencodeModel).length
-    : sel.stage === 'model' ? modelOptions(roster!.catalog.entries, roster!.configModels[sel.key], roster!.agy).length
+    : sel.stage === 'model' ? optionsFor(roster!, sel.key).length
     : effortOptions(sel.key).length;
 
   /** The open System picker with its highlight scrolled into view: the
@@ -2429,14 +2528,17 @@ function reduceNodes(
               return { ui: revealPicker({ ...ui, selector: { ...sel, highlight: Math.max(0, Math.min(to, n - 1)) } }), effects };
             }
             if (editing) return { ui, effects }; // navigation keys are no-ops while typing the model field
-            if (name === 'UP' || name === 'DOWN') return { ui: revealAt(sysClamp(ui.cursor + (name === 'UP' ? -1 : 1))), effects };
-            if (name === 'HOME' || name === 'END') return { ui: revealAt(sysClamp(name === 'HOME' ? 0 : Infinity)), effects };
+            // moving the cursor closes an open adoption confirm
+            const dropConfirm = (u: UiState): UiState => (u.adoptConfirm ? { ...u, adoptConfirm: undefined } : u);
+            if (name === 'UP' || name === 'DOWN') return { ui: dropConfirm(revealAt(sysClamp(ui.cursor + (name === 'UP' ? -1 : 1)))), effects };
+            if (name === 'HOME' || name === 'END') return { ui: dropConfirm(revealAt(sysClamp(name === 'HOME' ? 0 : Infinity))), effects };
             // a page: over the cursorable rows (the catalog banner and the read-only rows hold no cursor)
             const cursorIds = new Set(sysEntries.map((e) => e.id));
             const selectable = buildSelf(ui).rows.filter((r) => r.type === 'system' && cursorIds.has(r.id));
-            return { ui: revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === 'PAGE_UP' ? -1 : 1, maxBodyLines))), effects };
+            return { ui: dropConfirm(revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === 'PAGE_UP' ? -1 : 1, maxBodyLines)))), effects };
           }
           case 'ESCAPE':
+            if (ui.adoptConfirm) return { ui: { ...ui, adoptConfirm: undefined }, effects };
             if (sel) return { ui: { ...ui, selector: undefined, ...(sel.stage === 'tier' || sel.stage === 'role_effort' ? { notice: undefined } : {}) }, effects };
             if (providerEditing) return { ui: { ...ui, overpassProviderEdit: undefined, notice: undefined }, effects };
             if (editing) return { ui: { ...ui, sparringModelEdit: undefined }, effects };
@@ -2476,7 +2578,16 @@ function reduceNodes(
                 : `Default Codex model cleared — consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
               return { ui: { ...ui, sparringModelEdit: undefined, notice: sparringNotice }, effects };
             }
+            if (ui.adoptConfirm) {
+              // the confirm is open: an ok plan goes ahead, a refused one just closes
+              if (ui.adoptConfirm.ok) effects.push({ type: 'adopt_run', id: ui.adoptConfirm.id });
+              return { ui: { ...ui, adoptConfirm: undefined, notice: undefined }, effects };
+            }
             const entry = sysEntries[cursor];
+            if (entry?.action?.kind === 'adopt') {
+              effects.push({ type: 'adopt_plan', id: entry.action.id });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
             if (entry?.action && entry.action.kind !== 'agent') {
               // a setting: an immediate flip (effect) or the opening of a text field (uiPatch), all data from the entry
               if (entry.action.kind === 'toggle') effects.push(entry.action.effect);
@@ -2536,7 +2647,7 @@ function reduceNodes(
               // be silently refused — surface a notice instead. The worker may
               // still clear a model it has, so only its entry-less, model-less
               // picker is empty.
-              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : modelOptions(roster.catalog.entries, roster.configModels[key], roster.agy).length === 0) {
+              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : optionsFor(roster, key).length === 0) {
                 return { ui: { ...ui, cursor, notice: 'model catalog empty or invalid — nothing to pick; refresh the catalog first' }, effects };
               }
               // open the MODEL picker on the key under the cursor (highlight 0)
@@ -2544,19 +2655,44 @@ function reduceNodes(
             }
             if (sel.stage === 'model') {
               const keyConfig = roster.configModels[sel.key];
-              const option = modelOptions(roster.catalog.entries, keyConfig, roster.agy)[sel.highlight];
+              const option = optionsFor(roster, sel.key)[sel.highlight];
               // an OpenCode-only pick or the clear option commits at once: the
               // OpenCode agent file carries no effort, and the Claude model and
               // effort are left as they are (decision
               // opencode-only-model-override-per-role-for-openai-picks)
               // an Antigravity pick or its clear option commits at once as well: agy
               // carries the effort in the id, and the Claude pin is left as it is
+              const adoptedHosts = isCustomAgentKey(sel.key) ? (roster.adoptedAgents ?? []).find((a) => a.key === sel.key)?.hosts : undefined;
+              if (option?.kind === 'inherit') {
+                // an adopted custom agent drops its model and effort: the host's own default
+                effects.push({ type: 'custom_agent_model', key: sel.key, set: { model: null, effort: null } });
+                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+              }
               if (option?.kind === 'agy' || option?.kind === 'agy_clear') {
                 if (!keyConfig) return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no config entry` }, effects };
+                if (adoptedHosts) {
+                  // an adopted custom agent: the override is written to config.models.<key> and rendered
+                  if (option.kind === 'agy' && !adoptedHosts.includes('agy')) {
+                    return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' is not rendered for agy (agy is not installed here)` }, effects };
+                  }
+                  effects.push({ type: 'custom_agent_model', key: sel.key, set: { agy_model: option.kind === 'agy' ? option.id : null } });
+                  return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+                }
                 if (option.kind === 'agy' && !(roster.agyInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === sel.key)) {
                   return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no agy agent installed, so an Antigravity model would govern nothing` }, effects };
                 }
                 effects.push({ type: 'agy_model', key: sel.key, from: keyConfig.agy_model, to: option.kind === 'agy' ? option.id : undefined, model: keyConfig.model, effort: keyConfig.effort });
+                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+              }
+              if (option && keyConfig && adoptedHosts && (option.kind === 'clear' || (option.kind === 'entry' && isOpenCodeOnlyEntry(option.entry)))) {
+                const to = option.kind === 'clear' ? undefined : `${option.entry.vendor}/${option.entry.id}`;
+                if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
+                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
+                }
+                if (to !== undefined && !adoptedHosts.includes('opencode')) {
+                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${sel.key}' is not rendered for OpenCode (OpenCode is not installed here)` }, effects };
+                }
+                effects.push({ type: 'custom_agent_model', key: sel.key, set: { opencode_model: to ?? null } });
                 return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
               }
               if (option && keyConfig && (option.kind === 'clear' || isOpenCodeOnlyEntry(option.entry))) {
@@ -2581,6 +2717,11 @@ function reduceNodes(
             const effort = efforts[sel.highlight] ?? efforts[0];
             const model = sel.model ?? '';
             const config = roster.configModels[sel.key];
+            if (config && isCustomAgentKey(sel.key) && MODEL_VALUE_RE.test(model)) {
+              // an adopted custom agent: config.models.<key> gets the model and effort and every host's file is re-rendered
+              effects.push({ type: 'custom_agent_model', key: sel.key, set: { model, effort } });
+              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+            }
             if (config && MODEL_VALUE_RE.test(model)) {
               const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
               effects.push({

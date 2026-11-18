@@ -64,16 +64,22 @@ const custom = [
   { name: 'broken', source: 'agy' as const, error: 'frontmatter is not closed' },
 ];
 
-test('custom agents show read-only with their frontmatter model, inherit/default, or an error marker', () => {
+// Changed 2026-11-18 (System tab redesign, item 5): a not-yet-adopted agent is shown with its host-qualified identity
+// (host:path), the model from its own file, and an Adopt action, so its row now holds a cursor index; a file that
+// could not be read stays read-only with its error marker.
+test('custom agents show host:name with the file\'s own model and an adopt hint; an unreadable one stays read-only with its error', () => {
   const rows = buildSystemTab(snapshot({ customAgents: custom }), ui()).customRows.map((x) => x.lines[0].text.trim());
   assert.deepEqual(rows, [
-    'helper (claude): claude-haiku-5  read-only',
-    'nomodel (opencode): inherit/default  read-only',
-    'broken (agy): ⚠ frontmatter is not closed  read-only',
+    'claude:helper (not adopted): claude-haiku-5 — ENTER to adopt',
+    'opencode:nomodel (not adopted): inherit/default — ENTER to adopt',
+    'agy:broken: ⚠ frontmatter is not closed (read-only)',
   ]);
+  const entries = buildSystemTab(snapshot({ customAgents: custom }), ui()).entries.filter((e) => e.id.startsWith('sys:custom:'));
+  assert.deepEqual(entries.map((e) => e.cursorable), [true, true, false]);
+  assert.deepEqual(entries.map((e) => e.action?.kind), ['adopt', 'adopt', undefined]);
 });
 
-test('custom rows take no cursor index: moving to the end and pressing ENTER or SPACE never emits an effect for them', () => {
+test('an unreadable custom row takes no cursor index, and moving to the end never selects an adopt row', () => {
   const roster = snapshot({ customAgents: custom });
   const keysBefore = buildSystemTab(roster, ui()).rows.length;
   const r = drive(roster, ['END', 'ENTER', 'SPACE', 'ENTER']);

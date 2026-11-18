@@ -12,12 +12,13 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
-import { parseConfig } from '@sterling/schemas';
+import { parseConfig, isCustomAgentKey } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { migrateProjectConfig } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
+import { syncCustomAgents } from './lib/custom-agent-render.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { workIdentityRefusal } from './lib/project-identity.mjs';
@@ -172,6 +173,21 @@ for (const r of agySetup.rows ?? []) {
   if (r.refused) {
     refused += 1;
     console.error('\n' + r.instruction + '\n');
+  }
+}
+
+// Adopted custom agents (config.models.custom-*, GitHub #312): each is agent-sources/<key>.md plus its config
+// entry, and the host files are generated projections of it, so a sync re-renders them for every installed host.
+// A refusal (a file Sterling did not write, an edited copy) is printed loudly and the file is left alone; it does
+// not count toward exit 2, so one edited custom agent never blocks /sterling:update.
+if (Object.keys(config.models ?? {}).some(isCustomAgentKey)) {
+  try {
+    const custom = syncCustomAgents(targetDir, config);
+    for (const w of custom.written) console.log(`${w.status}: ${w.path} (custom agent ${w.key})`);
+    for (const r of custom.refused) console.log(`custom agent refused: ${r.key} on ${r.host}: ${r.reason}`);
+    for (const r of custom.removed) console.log(`removed: ${r.path} (custom agent ${r.key} is gone)`);
+  } catch (err) {
+    console.log(`custom agents NOT synced: ${err.message}`);
   }
 }
 
