@@ -5767,7 +5767,6 @@ var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
 var MAINTENANCE_WORKER_ROLE = "maintenance-worker";
 var MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
-var MAINTENANCE_WORKER_CLAUDE_EFFORT = "medium";
 var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -13686,7 +13685,6 @@ function systemEntries(snapshot, ui, width) {
         lines2.push({ text: clip3(`${marker2}Maintenance worker: config unreadable: ${worker.unreadable}`), kind: "title", selected: i === ui.cursor });
       } else {
         lines2.push({ text: clip3(`${marker2}Maintenance worker: ${saved ?? "not set: worker will not start"}`), kind: "title", selected: i === ui.cursor });
-        lines2.push({ text: clip3(`    claude CLI, when on PATH: ${MAINTENANCE_WORKER_CLAUDE_MODEL} ${MAINTENANCE_WORKER_CLAUDE_EFFORT}`), kind: "meta" });
       }
       if (selector && selector.key === key) {
         if (selector.stage === "model") {
@@ -13708,15 +13706,15 @@ function systemEntries(snapshot, ui, width) {
     const drift = governed.some((a) => driftOf(a.installedModel, config.model) || driftOf(a.installedEffort, config.effort));
     const selected = i === ui.cursor;
     const marker = selected ? "\u203A " : "  ";
-    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    const label2 = key.charAt(0).toUpperCase() + key.slice(1);
     const route = overpassEffective && isOverpassRole(key) ? overpassRoute(overpassView, key) : void 0;
     const lines = route ? [
-      { text: clip3(`${marker}${label}: ${route.tier} (Overpass)${overpassEffortText(overpassView, key)}`), kind: "title", selected },
+      { text: clip3(`${marker}${label2}: ${route.tier} (Overpass)${overpassEffortText(overpassView, key)}`), kind: "title", selected },
       // 'saved' is the user's config.models pair (decision
       // system-tab-agent-catalog-with-overpass-on-each-row-shows-the); the
       // installed-frontmatter drift check stays a separate marker
       { text: clip3(`    saved: ${config.model} ${config.effort}${drift ? "  drift" : ""}`), kind: "meta" }
-    ] : [{ text: clip3(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }];
+    ] : [{ text: clip3(`${marker}${label2}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }];
     if (!agentNames.every((name) => name === key))
       for (const name of agentNames)
         lines.push({ text: clip3(`    ${name}`), kind: "body" });
@@ -13745,29 +13743,55 @@ function systemEntries(snapshot, ui, width) {
   });
   const catBanner = catalogBanner(snap.catalog, width);
   const banner = ui.notice ? [clip3(`\u26A0 ${ui.notice}`), ...catBanner] : catBanner;
-  const entries = rows.map((row) => ({ id: row.id, section: "agents", cursorable: true, row, action: { kind: "agent", key: row.key } }));
+  const entries = [];
   const next = () => entries.filter((e) => e.cursorable).length;
+  const label = (id, section, text, kind) => {
+    entries.push({ id, section, cursorable: false, row: { id, lines: [{ text: clip3(text), kind }] } });
+  };
+  label("sys:heading:agents", "agents", "Agents", "title");
+  for (const row of rows)
+    entries.push({ id: row.id, section: "agents", cursorable: true, row, action: { kind: "agent", key: row.key } });
+  for (const row of customAgentRows(snap, width))
+    entries.push({ id: row.id, section: "agents", cursorable: false, row });
+  label("sys:heading:settings", "settings", "Settings", "title");
   const setting = (row, action) => {
     entries.push({ id: row.id, section: "settings", cursorable: true, row, action });
   };
+  const disabled = (row, reason) => {
+    const lines = row.lines.map((l) => ({ text: clip3(`${l.text.replace(/^(› | {2})/, "  ")}  (${reason})`), kind: "meta" }));
+    entries.push({ id: row.id, section: "settings", cursorable: false, row: { ...row, lines }, disabled: reason });
+  };
+  label("sys:group:sparring", "settings", "  \u2500\u2500 Sparring", "meta");
   const sparring = sparringPartnerRows(snap, ui, width, next());
-  setting(sparring[0], { kind: "toggle", effect: { type: "sparring_toggle", enabled: !(snap.sparringPartner?.enabled ?? true) } });
+  setting(sparring[0], { kind: "toggle", effect: { type: "sparring_toggle", enabled: flipTo(snap.sparringPartner?.enabled, true) } });
   setting(sparring[1], { kind: "edit", uiPatch: { sparringModelEdit: snap.sparringPartner?.model ?? "" } });
-  setting(tddToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "tdd_toggle", enabled: !(snap.tdd?.enabled ?? true) } });
-  setting(modeToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "mode_toggle", mode: (snap.mode ?? "hobby") === "hobby" ? "work" : "hobby" } });
-  setting(handoffToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "handoff_toggle", enabled: (snap.handoff ?? false) === false } });
-  setting(autoMergeToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "auto_merge_toggle", enabled: (snap.autoMergeOnClean ?? true) === false } });
+  label("sys:group:workflow", "settings", "  \u2500\u2500 Workflow", "meta");
+  setting(tddToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "tdd_toggle", enabled: flipTo(snap.tdd?.enabled, true) } });
+  setting(modeToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "mode_toggle", mode: (snap.mode === void 0 ? "hobby" : snap.mode) === "hobby" ? "work" : "hobby" } });
+  setting(handoffToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "handoff_toggle", enabled: flipTo(snap.handoff, false) } });
+  if ((snap.mode === void 0 ? "hobby" : snap.mode) === "hobby")
+    disabled(autoMergeToggleRow(snap, ui, width, Number.NaN), "acts only in work mode");
+  else
+    setting(autoMergeToggleRow(snap, ui, width, next()), { kind: "toggle", effect: { type: "auto_merge_toggle", enabled: flipTo(snap.autoMergeOnClean, true) } });
+  label("sys:group:overpass", "settings", "  \u2500\u2500 Overpass", "meta");
   if (overpassOffered(snap)) {
     const [op, provider, bypass] = overpassToggleRows(snap, ui, width, next());
     const current = overpassView.provider !== null && OVERPASS_PROVIDER_RE.test(overpassView.provider) ? overpassView.provider : "";
-    setting(op, { kind: "toggle", effect: { type: "overpass_toggle", enabled: overpassView.enabled === false } });
+    setting(op, { kind: "toggle", effect: { type: "overpass_toggle", enabled: flipTo(overpassView.enabled, false) } });
     setting(provider, { kind: "edit", uiPatch: { overpassProviderEdit: current } });
-    setting(bypass, { kind: "toggle", effect: { type: "overpass_bypass_toggle", enabled: overpassView.conductorBypass === false } });
+    setting(bypass, { kind: "toggle", effect: { type: "overpass_bypass_toggle", enabled: flipTo(overpassView.conductorBypass, false) } });
+  } else {
+    for (const row of overpassToggleRows(snap, ui, width, Number.NaN))
+      disabled(row, "work mode on OpenCode only");
   }
+  label("sys:group:storage", "settings", "  \u2500\u2500 Storage", "meta");
   entries.push({ id: "sys:storage", section: "settings", cursorable: false, row: storageRow(snap, width) });
-  for (const row of customAgentRows(snap, width))
-    entries.push({ id: row.id, section: "agents", cursorable: false, row });
   return { entries, banner };
+}
+function flipTo(value, defaultOn) {
+  if (value === void 0)
+    return !defaultOn;
+  return value === false;
 }
 function cursorEntries(snap, ui) {
   return systemEntries(snap, ui, Infinity).entries.filter((e) => e.cursorable);
@@ -13776,7 +13800,7 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const { entries: all, banner } = systemEntries(snapshot, ui, width);
   const selector = ui.selector;
   const entries = selector ? all.filter((e) => e.action?.kind === "agent" && e.row.key === selector.key) : all;
-  const byIds = (ids) => entries.filter((e) => ids.includes(e.id)).map((e) => e.row);
+  const byIds = (ids) => entries.filter((e) => e.cursorable && ids.includes(e.id)).map((e) => e.row);
   return {
     entries,
     banner,
@@ -13787,8 +13811,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     handoffRows: byIds(LEGACY_VIEW_LISTS.handoffRows),
     autoMergeRows: byIds(LEGACY_VIEW_LISTS.autoMergeRows),
     overpassRows: byIds(LEGACY_VIEW_LISTS.overpassRows),
-    storageRows: byIds(LEGACY_VIEW_LISTS.storageRows),
-    customRows: entries.filter((e) => e.section === "agents" && e.action === void 0).map((e) => e.row)
+    storageRows: entries.filter((e) => e.id === "sys:storage").map((e) => e.row),
+    customRows: entries.filter((e) => e.id.startsWith("sys:custom:")).map((e) => e.row)
   };
 }
 function customAgentRows(snap, width) {
