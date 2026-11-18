@@ -23,7 +23,7 @@
 // keys plus the added defaults: parseConfig is a gate only, never serialized (it would materialize defaults).
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, moveImplementorHardTask, parseConfig, resetOverpassDefaults } from '@sterling/schemas';
+import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, parseConfig, resetOverpassDefaults } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -41,6 +41,11 @@ export function describeMigration(dropped) {
         ? `${CONFIG_MIGRATION_LINE_PREFIX}models.classifiers dropped (a retired key: it belonged to the retired Haiku noise-gate and nothing read it); value was ${show(d.value)}`
         : `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (a retired key, ignored since the roster rename); value was ${show(d.value)}; set models.<role> in the System tab for the role you want it on`
   );
+}
+
+/** One report line per agy_model dropped for not being one of agy's four values (GitHub #310). */
+export function describeStaleAgy(dropped) {
+  return dropped.map((d) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.role}.agy_model dropped (agy accepts only inherit, flash_lite, flash or pro, and drops a subagent with any other model); value was ${show(d.value)}, so the ${d.role} agy agent now runs on model: inherit; pick one of the four in the System tab if you want one`);
 }
 
 /** One report line per added default (addModelDefaults). */
@@ -91,11 +96,12 @@ export function prepareConfigMigration(projectDir) {
     return refuse(`does not parse or validate (${oneLine(err)})`);
   }
   const m = migrateRetiredModelKeys(raw);
-  const d = addModelDefaults(m.config);
+  const a = migrateStaleAgyModels(m.config);
+  const d = addModelDefaults(a.config);
   const h = moveImplementorHardTask(d.config);
   const o = resetOverpassDefaults(h.config);
   if (o.refusal) return refuse(o.refusal);
-  if (!m.changed && !d.changed && !h.changed && !o.changed) return { status: 'unchanged', lines: [] };
+  if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: 'unchanged', lines: [] };
   // A linked .sterling would send the rewrite to a config outside the project.
   try {
     containedPath(projectDir, '.sterling', 'dir');
@@ -120,11 +126,13 @@ export function prepareConfigMigration(projectDir) {
     next: JSON.stringify(o.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
     config: o.config,
     dropped: m.dropped,
+    staleAgy: a.dropped,
     added: d.added,
     hardMove: h.move,
     overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
     lines: [
       ...describeMigration(m.dropped),
+      ...describeStaleAgy(a.dropped),
       ...describeAdded(d.added),
       ...(d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : []),
       ...describeHardMove(h.move),

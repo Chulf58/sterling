@@ -5187,30 +5187,7 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
-var AGY_MODEL_IDS = [
-  "claude-opus-5-5-low",
-  "claude-opus-5-5-medium",
-  "claude-opus-5-5-high",
-  "claude-sonnet-5-5-low",
-  "claude-sonnet-5-5-medium",
-  "claude-sonnet-5-5-high",
-  "gemini-3.8-flash-low",
-  "gemini-3.8-flash-medium",
-  "gemini-3.8-flash-high",
-  "gemini-4-argon-low",
-  "gemini-4-argon-medium",
-  "gemini-4-argon-high",
-  "gemini-4-carbon-low",
-  "gemini-4-carbon-medium",
-  "gemini-4-carbon-high",
-  "gemini-4-hydrogen-low",
-  "gemini-4-hydrogen-medium",
-  "gemini-4-hydrogen-high",
-  "gemini-4-hydrogen-xhigh",
-  "gemini-pro-orchestrator",
-  "gemini-pro-orchestrator-argon",
-  "gpt-oss-120b-medium"
-];
+var AGY_MODEL_IDS = ["inherit", "flash_lite", "flash", "pro"];
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
@@ -5422,7 +5399,7 @@ var configSchema = external_exports.object({
     // read-only grant as the reviewer, so the same install-time default. Every
     // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra", agy_model: "claude-opus-5-5-high" }),
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
     // preflight is the sterling/preflight agent (decision
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
@@ -5789,7 +5766,24 @@ function normalizeRawConfig(raw) {
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
   }
+  out = migrateStaleAgyModels(out).config;
   return out;
+}
+function migrateStaleAgyModels(raw) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.models))
+    return { config: raw, changed: false, dropped: [] };
+  const dropped = [];
+  const models = {};
+  for (const [role, entry] of Object.entries(raw.models)) {
+    if (isPlainObject(entry) && Object.prototype.hasOwnProperty.call(entry, "agy_model") && !AGY_MODEL_IDS.includes(entry.agy_model)) {
+      const { agy_model, ...rest } = entry;
+      dropped.push({ role, value: agy_model });
+      models[role] = rest;
+    } else {
+      models[role] = entry;
+    }
+  }
+  return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));

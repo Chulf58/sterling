@@ -5037,30 +5037,7 @@ var modelPin = external_exports.object({
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
-var AGY_MODEL_IDS = [
-  "claude-opus-5-5-low",
-  "claude-opus-5-5-medium",
-  "claude-opus-5-5-high",
-  "claude-sonnet-5-5-low",
-  "claude-sonnet-5-5-medium",
-  "claude-sonnet-5-5-high",
-  "gemini-3.8-flash-low",
-  "gemini-3.8-flash-medium",
-  "gemini-3.8-flash-high",
-  "gemini-4-argon-low",
-  "gemini-4-argon-medium",
-  "gemini-4-argon-high",
-  "gemini-4-carbon-low",
-  "gemini-4-carbon-medium",
-  "gemini-4-carbon-high",
-  "gemini-4-hydrogen-low",
-  "gemini-4-hydrogen-medium",
-  "gemini-4-hydrogen-high",
-  "gemini-4-hydrogen-xhigh",
-  "gemini-pro-orchestrator",
-  "gemini-pro-orchestrator-argon",
-  "gpt-oss-120b-medium"
-];
+var AGY_MODEL_IDS = ["inherit", "flash_lite", "flash", "pro"];
 var agentModelEntry = external_exports.object({
   model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
@@ -5273,7 +5250,7 @@ var configSchema = external_exports.object({
     // read-only grant as the reviewer, so the same install-time default. Every
     // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra", agy_model: "claude-opus-5-5-high" }),
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
     // preflight is the sterling/preflight agent (decision
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
@@ -5639,7 +5616,24 @@ function normalizeRawConfig(raw) {
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
   }
+  out = migrateStaleAgyModels(out).config;
   return out;
+}
+function migrateStaleAgyModels(raw) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.models))
+    return { config: raw, changed: false, dropped: [] };
+  const dropped = [];
+  const models = {};
+  for (const [role, entry] of Object.entries(raw.models)) {
+    if (isPlainObject(entry) && Object.prototype.hasOwnProperty.call(entry, "agy_model") && !AGY_MODEL_IDS.includes(entry.agy_model)) {
+      const { agy_model, ...rest } = entry;
+      dropped.push({ role, value: agy_model });
+      models[role] = rest;
+    } else {
+      models[role] = entry;
+    }
+  }
+  return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
@@ -6801,6 +6795,9 @@ function describeMigration(dropped) {
     (d) => d.renamed_to ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (ignored since the roster rename to models.${d.renamed_to}); value was ${show(d.value)}; set models.${d.renamed_to} in the System tab if you want it` : d.key === "classifiers" ? `${CONFIG_MIGRATION_LINE_PREFIX}models.classifiers dropped (a retired key: it belonged to the retired Haiku noise-gate and nothing read it); value was ${show(d.value)}` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (a retired key, ignored since the roster rename); value was ${show(d.value)}; set models.<role> in the System tab for the role you want it on`
   );
 }
+function describeStaleAgy(dropped) {
+  return dropped.map((d) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.role}.agy_model dropped (agy accepts only inherit, flash_lite, flash or pro, and drops a subagent with any other model); value was ${show(d.value)}, so the ${d.role} agy agent now runs on model: inherit; pick one of the four in the System tab if you want one`);
+}
 function describeAdded(added) {
   return added.map(
     (a) => a.field === "entry" ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role} added as the shipped default ${show(a.value)}, so the System tab shows the model each OpenCode dispatch of this role runs on; change it there` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role}.${a.field} added as ${show(a.value)} (the model the conductor named on these dispatches before); change it in the System tab, or clear it to run the role on its Claude model${a.field === "hard_task" ? " (cleared: no separate hard lane)" : ""}`
@@ -6837,11 +6834,12 @@ function prepareConfigMigration(projectDir) {
     return refuse(`does not parse or validate (${oneLine(err)})`);
   }
   const m = migrateRetiredModelKeys(raw);
-  const d = addModelDefaults(m.config);
+  const a = migrateStaleAgyModels(m.config);
+  const d = addModelDefaults(a.config);
   const h = moveImplementorHardTask(d.config);
   const o = resetOverpassDefaults(h.config);
   if (o.refusal) return refuse(o.refusal);
-  if (!m.changed && !d.changed && !h.changed && !o.changed) return { status: "unchanged", lines: [] };
+  if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: "unchanged", lines: [] };
   try {
     containedPath(projectDir, ".sterling", "dir");
   } catch (err) {
@@ -6865,11 +6863,13 @@ function prepareConfigMigration(projectDir) {
     next: JSON.stringify(o.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
     config: o.config,
     dropped: m.dropped,
+    staleAgy: a.dropped,
     added: d.added,
     hardMove: h.move,
     overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
     lines: [
       ...describeMigration(m.dropped),
+      ...describeStaleAgy(a.dropped),
       ...describeAdded(d.added),
       ...d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : [],
       ...describeHardMove(h.move),
@@ -9855,7 +9855,7 @@ function renderAgyAgent(templateContent, label, name, { root, nodePath = process
     "---",
     `name: ${name}`,
     `description: ${yamlString(description)}`,
-    `model: ${agyModel ?? "inherit"}`,
+    `model: ${AGY_MODEL_IDS.includes(agyModel) ? agyModel : "inherit"}`,
     `mainAgent: ${conductor}`,
     `subagent: ${!conductor}`,
     "tools:",
@@ -9940,19 +9940,20 @@ function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, n
   }
   return rows;
 }
-function agyModelsOf(projectDir) {
+function readAgyModels(projectDir) {
+  const pins = {};
+  const ignored = [];
   const configPath2 = join15(storeRootFor(projectDir), ".sterling", "config.json");
-  if (!existsSync10(configPath2)) return {};
+  if (!existsSync10(configPath2)) return { pins, ignored };
   const models = JSON.parse(readFileSync11(configPath2, "utf8")).models;
-  const out = {};
-  if (models === null || typeof models !== "object") return out;
+  if (models === null || typeof models !== "object") return { pins, ignored };
   for (const [role, entry] of Object.entries(models)) {
-    const id = entry?.agy_model;
-    if (id === void 0) continue;
-    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9.-]*$/.test(id)) throw new Error(`config.models.${role}.agy_model is ${JSON.stringify(id)}, not an agy model id (P5)`);
-    out[role] = id;
+    const value = entry?.agy_model;
+    if (value === void 0) continue;
+    if (AGY_MODEL_IDS.includes(value)) pins[role] = value;
+    else ignored.push({ role, value });
   }
-  return out;
+  return { pins, ignored };
 }
 function projectNameOf(projectDir) {
   const configPath2 = join15(storeRootFor(projectDir), ".sterling", "config.json");
@@ -10072,7 +10073,11 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
   const { tracked } = inventory;
   const server = probeServer({ root, env });
   if (server.readOnly) {
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath, agyModels: agyModelsOf(projectDir) }));
+    const { pins, ignored } = readAgyModels(projectDir);
+    for (const { role, value } of ignored) {
+      rows.push({ item: `models.${role}.agy_model`, status: "ignored", detail: `${JSON.stringify(value)} is not one of ${AGY_MODEL_IDS.join(", ")}, which agy accepts; the ${role} agent renders model: inherit (run /sterling:update to drop the stale value)` });
+    }
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath, agyModels: pins }));
   } else {
     const remedy = resolve8(root) !== resolve8(pluginRoot2) ? `install this Sterling into agy (agy plugin install ${fwd4(resolve8(pluginRoot2))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd4(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
     rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));

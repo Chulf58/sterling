@@ -673,6 +673,16 @@ export function agyInjectEnvelope(texts) {
 }
 
 /**
+ * Hand a block reason to the agy adapter when the hook wrote it to fd 2 directly. The adapter
+ * collects the reason from process.stderr.write, which a synchronous writeSync(2, ...) bypasses
+ * (H10 uses writeSync on purpose, to detect a failed delivery), so such a hook calls this with
+ * the same text. Outside agy it does nothing.
+ */
+export function agyBlockReason(text) {
+  if (agy.active) agy.errText.push(String(text));
+}
+
+/**
  * The envelope the exit listener writes and the exit code it sets, for a hook on
  * agy event `event` that exited `code` with stderr `err`. `emitted` says a
  * SessionStart/PreInvocation envelope already left at write time. A PreToolUse

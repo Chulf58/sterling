@@ -8,7 +8,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSy
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, migrateStaleAgyModels, AGY_MODEL_IDS, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1922,6 +1922,17 @@ function configSetImpl(
         );
       }
     }
+  }
+
+  // normalizeRawConfig below strips an agy_model outside AGY_MODEL_IDS so a stale value already on disk
+  // (v0.19.155 wrote exact ids) never makes a config unreadable. That must not let a NEW bad value in:
+  // refuse any such value this write introduces, and tolerate one that was already there unchanged.
+  const staleBefore = new Set(migrateStaleAgyModels(raw).dropped.map((d) => `${d.role}\u0000${JSON.stringify(d.value)}`));
+  const introduced = migrateStaleAgyModels(mutated).dropped.find((d) => !staleBefore.has(`${d.role}\u0000${JSON.stringify(d.value)}`));
+  if (introduced) {
+    throw new Error(
+      `config_set: the resulting config.json would fail schema validation — models.${introduced.role}.agy_model: must be one of ${AGY_MODEL_IDS.join(', ')} (agy drops a subagent with any other model), got ${JSON.stringify(introduced.value)}. Nothing was written.`
+    );
   }
 
   const validation = configSchema.safeParse(normalizeRawConfig(mutated));
