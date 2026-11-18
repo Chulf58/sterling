@@ -175,6 +175,27 @@ function git(projectDir, args) {
   return spawnSync('git', args, { cwd: projectDir, encoding: 'utf8' });
 }
 
+/** True when `dir` or a directory above it holds a `.git` (a directory, or a worktree's file). */
+function insideGitCheckout(dir) {
+  for (let d = resolve(dir); ; d = dirname(d)) {
+    if (existsSync(join(d, '.git'))) return true;
+    if (dirname(d) === d) return false;
+  }
+}
+
+/**
+ * The tracked files among `paths`: { tracked } or { failed: <git's error> }. Outside any git
+ * checkout nothing can be tracked, so a failing git is { tracked: [] }; inside one, a failing
+ * `git ls-files` (a broken index, exit 128) is a failure, never an empty list.
+ */
+export function trackedFiles(projectDir, paths, runGit = git) {
+  const ls = runGit(projectDir, ['ls-files', '--', ...paths]);
+  if (!ls.error && ls.status === 0) return { tracked: ls.stdout.split('\n').filter(Boolean) };
+  if (!insideGitCheckout(projectDir)) return { tracked: [] };
+  const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || '').trim().split('\n')[0] || 'no message'}`;
+  return { failed: why };
+}
+
 /** Write or check every agy agent file. Rows: created | matches | refreshed | refused. */
 export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath = process.execPath }) {
   const rows = [];
@@ -293,16 +314,21 @@ export function ensureAgyExcluded({ projectDir, gemini }) {
  * Steps 1-3 for one project. Returns { skipped } when agy is absent, else { root, rows }
  * with every row { item, status, detail?, refused?, instruction? }.
  */
-export function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeAgy, nodePath = process.execPath }) {
+export function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeAgy, nodePath = process.execPath, runGit = git }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
   // The test preload sets this so a test run never writes agy files into a fixture by accident.
   if (env.STERLING_AGY_SETUP_DISABLE === '1') return { skipped: 'Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)' };
   const found = probe({ env, home });
   if (!found.installed) return { skipped: `agy not installed (${found.reason}) — Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
   const { root, why } = agyMcpRoot({ pluginRoot, env, home, installed });
-  const ls = git(projectDir, ['ls-files', '--', AGY_AGENTS_DIR, GEMINI_MD]);
-  const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   const rows = [{ item: 'Sterling MCP server', status: 'matches', detail: `${fwd(join(root, 'mcp', 'sterling-mcp.mjs'))} (${why})` }];
+  const inventory = trackedFiles(projectDir, [AGY_AGENTS_DIR, GEMINI_MD], runGit);
+  if (inventory.failed) {
+    // Inside a checkout, an unknown tracked set could refresh a file the project commits: nothing is written.
+    rows.push(refusal(`${AGY_AGENTS_DIR}/, ${GEMINI_MD}, .git/info/exclude (agy)`, `git ls-files failed in ${fwd(projectDir)}, so which agy files git tracks is unknown (${inventory.failed})`, 'fix the repository (git status shows the same error), then rerun /sterling:update'));
+    return { root, rows };
+  }
+  const { tracked } = inventory;
   rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath }));
   const gemini = tracked.includes(GEMINI_MD)
     ? { item: GEMINI_MD, status: 'matches', detail: 'tracked by git — the project keeps its own; left untouched' }

@@ -20,12 +20,14 @@ import {
   ensureAgyExcluded,
   formatAgyRows,
   probeAgy,
+  renderAgyAgent,
   renderGeminiMd,
   setupAgy,
+  trackedFiles,
 } from '../lib/agy-setup.mjs';
 import { ROSTER } from '../lib/opencode-install.mjs';
 import { installHostOf, newestInstalledSterling, scanInstalledSterling, sterlingInstallRemedy, sterlingUpdateRemedy } from '../lib/sterling-roots.mjs';
-import { postUpdateSync, runPostUpdateSteps } from '../lib/post-update-sync.mjs';
+import { postUpdateSync, runPostUpdateSteps, runStepSync } from '../lib/post-update-sync.mjs';
 import { extractBlock } from '../lib/contract-bullets.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -330,4 +332,93 @@ test('init: agy absent leaves the project as before (no .agents/, no GEMINI.md, 
   assert.equal(present.code, 0, present.out);
   assert.ok(existsSync(join(present.dir, '.agents', 'agents', 'conductor', 'agent.md')), present.out);
   assert.match(readFileSync(join(present.dir, 'GEMINI.md'), 'utf8'), /— agyinit \(Sterling layer\)/);
+});
+
+// ---------- a failing git inventory (review fix round) ----------
+
+test('a failing git ls-files inside a checkout refuses every agy write and names git\'s error; outside a checkout nothing is tracked', () => {
+  const dir = gitProject();
+  // A Sterling-stamped conductor that an unknown inventory would otherwise refresh, tracked by git.
+  const rel = '.agents/agents/conductor/agent.md';
+  mkdirSync(join(dir, dirname(rel)), { recursive: true });
+  const older = renderAgyAgent(readFileSync(join(repo, 'agent-templates', 'conductor.md'), 'utf8'), 'c', 'conductor', { root: repo, nodePath: '/old/node' });
+  writeFileSync(join(dir, rel), older);
+  git(dir, 'add', '-f', rel);
+  writeFileSync(join(dir, '.git', 'index'), 'not an index');
+  const ls = git(dir, 'ls-files');
+  assert.equal(ls.status, 128, 'the broken index makes git ls-files fail with exit 128');
+  const excludeBefore = readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8');
+  const r = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false, nodePath: NODE });
+  const refused = r.rows.filter((x) => x.refused);
+  assert.equal(refused.length, 1, JSON.stringify(r.rows));
+  assert.match(refused[0].detail, /git ls-files failed .*exit 128: .*index/);
+  assert.match(refused[0].instruction, /^REFUSED: /);
+  assert.equal(readFileSync(join(dir, rel), 'utf8'), older, 'the tracked agent is not refreshed');
+  assert.equal(existsSync(join(dir, '.agents', 'agents', 'scout')), false, 'no other agent written');
+  assert.equal(existsSync(join(dir, 'GEMINI.md')), false);
+  assert.equal(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), excludeBefore);
+
+  const plain = tmp('sterling-agy-nogit-');
+  const failing = () => ({ status: 128, stdout: '', stderr: 'fatal: not a git repository' });
+  assert.deepEqual(trackedFiles(plain, ['GEMINI.md'], failing), { tracked: [] });
+  assert.deepEqual(trackedFiles(dir, ['GEMINI.md'], failing), { failed: 'exit 128: fatal: not a git repository' });
+});
+
+// ---------- a project set up only for agy (no CLAUDE.md) ----------
+
+function agyOnlyProject() {
+  const proj = tmp('sterling-agy-only-');
+  git(proj, 'init', '-q');
+  const fill = (t) => t.replaceAll('{{PROJECT_NAME}}', 'p').replaceAll('{{STACK_TAGS}}', 'node').replaceAll('{{TOOLCHAINS}}', 'node').replaceAll('{{LINT_COMMAND}}', 'x').replaceAll('{{DOMAINS}}', 'x').replaceAll('{{BACKUP_PATH}}', 'x').replaceAll('{{CONVENTIONS_SECTION}}', 'x');
+  return import('../lib/agent-fences.mjs').then(({ renderClaudeText }) => {
+    writeFileSync(join(proj, 'AGENTS.md'), fill(renderClaudeText(readFileSync(join(repo, 'templates/target-agents-md.md'), 'utf8'), 'a')));
+    const gemini = renderGeminiMd({ pluginRoot: repo, root: repo, projectName: 'p' });
+    const lead = '- **Concept articles — capture design the moment it settles';
+    const b = extractBlock(gemini, lead);
+    const lines = gemini.split('\n');
+    lines.splice(b.start, b.end - b.start);
+    writeFileSync(join(proj, 'GEMINI.md'), lines.join('\n'));
+    const regDb = join(tmp('sterling-agy-only-reg-'), 'registry.db');
+    const registry = new ProjectRegistry(regDb);
+    registry.register({ repo_path: proj, name: 'agy-only', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    registry.close();
+    return { proj, regDb, lead, block: b.block };
+  });
+}
+
+test('stamp-contract: a project with AGENTS.md and GEMINI.md but no CLAUDE.md is processed, and GEMINI.md gains the missing bullet', async () => {
+  const { proj, regDb, lead, block } = await agyOnlyProject();
+  const r = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, STERLING_REGISTRY_DB: regDb } });
+  const out = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 0, out);
+  assert.match(out, /— 1 project\(s\) processed/);
+  assert.doesNotMatch(out, /no_claude_md/);
+  assert.match(out, /inserted {2}\[GEMINI\.md\] - \*\*Concept articles/);
+  assert.equal(extractBlock(readFileSync(join(proj, 'GEMINI.md'), 'utf8'), lead)?.block, block);
+  assert.equal(existsSync(join(proj, 'CLAUDE.md')), false, 'no CLAUDE.md is created');
+  // Neither host layer: still refused, as before agy.
+  rmSync(join(proj, 'GEMINI.md'));
+  const none = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, STERLING_REGISTRY_DB: regDb } });
+  assert.equal(none.status, 2);
+  assert.match(none.stdout, /✗ agy-only: no_claude_md/);
+});
+
+test('post-update sync on agy: an agy-only project runs sync-agents and stamp-contract through to a synced result', async () => {
+  const { proj, regDb } = await agyOnlyProject();
+  mkdirSync(join(proj, '.sterling'));
+  writeFileSync(join(proj, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
+  const keys = ['STERLING_REGISTRY_DB', 'STERLING_CLAUDE_PROBE', 'STERLING_AGY_PROBE', 'STERLING_AGY_SETUP_DISABLE', 'STERLING_OPENCODE_SETUP_DISABLE'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { STERLING_REGISTRY_DB: regDb, STERLING_CLAUDE_PROBE: 'absent', STERLING_AGY_PROBE: 'ok', STERLING_OPENCODE_SETUP_DISABLE: '1' });
+  delete process.env.STERLING_AGY_SETUP_DISABLE;
+  try {
+    const result = await runPostUpdateSteps(repo, proj, runStepSync, 'agy');
+    assert.equal(result.ok, true, result.detail);
+    assert.equal(result.restart, true, 'sync-agents wrote the agy agents');
+    assert.ok(result.inserted.some((i) => /\[GEMINI\.md\] - \*\*Concept articles/.test(i)), JSON.stringify(result));
+    assert.ok(existsSync(join(proj, '.agents', 'agents', 'conductor', 'agent.md')));
+  } finally {
+    for (const k of keys) if (saved[k] === undefined) delete process.env[k];
+    else process.env[k] = saved[k];
+  }
 });

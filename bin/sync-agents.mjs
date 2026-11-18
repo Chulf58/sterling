@@ -9834,6 +9834,19 @@ function refusal2(item, what, remedy) {
 function git2(projectDir, args2) {
   return spawnSync5("git", args2, { cwd: projectDir, encoding: "utf8" });
 }
+function insideGitCheckout(dir) {
+  for (let d = resolve8(dir); ; d = dirname4(d)) {
+    if (existsSync10(join14(d, ".git"))) return true;
+    if (dirname4(d) === d) return false;
+  }
+}
+function trackedFiles(projectDir, paths, runGit = git2) {
+  const ls = runGit(projectDir, ["ls-files", "--", ...paths]);
+  if (!ls.error && ls.status === 0) return { tracked: ls.stdout.split("\n").filter(Boolean) };
+  if (!insideGitCheckout(projectDir)) return { tracked: [] };
+  const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || "").trim().split("\n")[0] || "no message"}`;
+  return { failed: why };
+}
 function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath }) {
   const rows = [];
   for (const name of AGY_ROSTER) {
@@ -9928,15 +9941,19 @@ function ensureAgyExcluded({ projectDir, gemini }) {
 `);
   return { item: label, status: "created", detail: lines.join(" ") };
 }
-function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, nodePath = process.execPath }) {
+function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, nodePath = process.execPath, runGit = git2 }) {
   if (!isAbsolute2(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
   const found = probe({ env, home });
   if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
   const { root, why } = agyMcpRoot({ pluginRoot: pluginRoot2, env, home, installed });
-  const ls = git2(projectDir, ["ls-files", "--", AGY_AGENTS_DIR, GEMINI_MD]);
-  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   const rows = [{ item: "Sterling MCP server", status: "matches", detail: `${fwd4(join14(root, "mcp", "sterling-mcp.mjs"))} (${why})` }];
+  const inventory = trackedFiles(projectDir, [AGY_AGENTS_DIR, GEMINI_MD], runGit);
+  if (inventory.failed) {
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/, ${GEMINI_MD}, .git/info/exclude (agy)`, `git ls-files failed in ${fwd4(projectDir)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
+    return { root, rows };
+  }
+  const { tracked } = inventory;
   rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
   const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root });
   rows.push(gemini);

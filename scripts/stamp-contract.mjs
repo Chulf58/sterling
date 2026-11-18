@@ -183,7 +183,6 @@ const variants = historicalVariants({
   extractBlock: extractTemplateBlock,
   currentBlocks: current,
 });
-const layerFileName = (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : 'CLAUDE.md');
 // The CLAUDE.md-layer bullets as GEMINI.md carries them: the agy render of the same template,
 // with the Sterling root setupAgy writes into GEMINI.md. A lead the agy render leaves out
 // has no GEMINI.md form and is not stamped there.
@@ -268,7 +267,13 @@ for (const { p, dir: repo } of work) {
     drift++;
     continue;
   }
-  if (!existsSync(claudeMd)) {
+  // The host layers: CLAUDE.md (Claude Code and OpenCode) and GEMINI.md (agy; init and
+  // sync-agents write it only where agy is installed). Each one present is stamped on its
+  // own; a project with neither is refused, as a project without CLAUDE.md was before agy.
+  const geminiMd = join(repo, GEMINI_MD);
+  const hasClaude = existsSync(claudeMd);
+  const hasGemini = existsSync(geminiMd);
+  if (!hasClaude && !hasGemini) {
     record({ project: projectLabel, status: 'no_claude_md', detail: claudeMd });
     drift++;
     continue;
@@ -279,10 +284,15 @@ for (const { p, dir: repo } of work) {
     const text = normalizeEol(raw);
     return { path, raw, original: text, text };
   };
-  const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
-  // GEMINI.md is optional: init and sync-agents write it only where agy is installed.
-  const geminiMd = join(repo, GEMINI_MD);
-  const gemini = existsSync(geminiMd) ? loadSibling(geminiMd) : null;
+  const agents = loadSibling(agentsMd);
+  const claude = hasClaude ? loadSibling(claudeMd) : null;
+  const gemini = hasGemini ? loadSibling(geminiMd) : null;
+  // The first pass pairs AGENTS.md with CLAUDE.md, or, in a project set up only for agy, with
+  // GEMINI.md; there it carries only the AGENTS.md-layer bullets and the sections, and the
+  // GEMINI.md pass below carries the rest in their agy wording.
+  const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, claude ?? gemini]]);
+  const hostName = claude ? 'CLAUDE.md' : GEMINI_MD;
+  const layerName = (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : hostName);
   const actions = [];
   // Only a bullet that validated THIS run (in sync, or replaced by the current wording) may
   // anchor an insert — a refused block is never restructured by an insert beside it.
@@ -302,8 +312,8 @@ for (const { p, dir: repo } of work) {
       actions.push({
         lead: label,
         action: 'SECTION_HEADING_WITHOUT_BULLETS_REFUSED',
-        file: layerFileName(home),
-        detail: `${layerFileName(home)} already has a '${target.text.split('\n')[own].trim()}' heading and none of the '${section.heading}' bullets. To get Sterling's section, rename that heading and re-run; or copy the bullets from ${home} under it.`,
+        file: layerName(home),
+        detail: `${layerName(home)} already has a '${target.text.split('\n')[own].trim()}' heading and none of the '${section.heading}' bullets. To get Sterling's section, rename that heading and re-run; or copy the bullets from ${home} under it.`,
       });
       drift++;
       for (const lead of section.leads) sectionRefused.add(lead);
@@ -314,8 +324,8 @@ for (const { p, dir: repo } of work) {
       actions.push({
         lead: label,
         action: 'SECTION_ANCHOR_MISSING_REFUSED',
-        file: layerFileName(home),
-        detail: `${layerFileName(home)} has no '${section.before}' heading to put the section before. Copy the '${section.heading}' section from ${home} to where it belongs and re-run.`,
+        file: layerName(home),
+        detail: `${layerName(home)} has no '${section.before}' heading to put the section before. Copy the '${section.heading}' section from ${home} to where it belongs and re-run.`,
       });
       drift++;
       for (const lead of section.leads) sectionRefused.add(lead);
@@ -326,7 +336,7 @@ for (const { p, dir: repo } of work) {
     if (at > 0 && lines[at - 1].trim() !== '') block.unshift('');
     lines.splice(at, 0, ...block);
     target.text = lines.join('\n');
-    actions.push({ lead: label, action: WRITE_INSERTS ? 'section_inserted' : 'would_insert_section', file: layerFileName(home) });
+    actions.push({ lead: label, action: WRITE_INSERTS ? 'section_inserted' : 'would_insert_section', file: layerName(home) });
   }
   // The per-lead pass over one pair of files: `files` maps each template rel to the sibling
   // file its leads land in, `wantOf` gives a lead's current text and `variantsOf` the
@@ -430,10 +440,10 @@ for (const { p, dir: repo } of work) {
   };
   stampLeads({
     files: siblingFiles,
-    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead)),
+    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead) && (claude || leadLayer.get(lead) !== CLAUDE_TEMPLATE_REL)),
     wantOf: (lead) => current.get(lead),
     variantsOf: (lead) => variants.get(lead),
-    nameOf: layerFileName,
+    nameOf: layerName,
     pass: actions,
   });
   // GEMINI.md, the agy form of CLAUDE.md, gets the CLAUDE.md-layer bullets in their agy
@@ -441,7 +451,7 @@ for (const { p, dir: repo } of work) {
   if (gemini) {
     const geminiPass = [];
     stampLeads({
-      files: new Map([[AGENTS_TEMPLATE_REL, siblingFiles.get(AGENTS_TEMPLATE_REL)], [CLAUDE_TEMPLATE_REL, gemini]]),
+      files: new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, gemini]]),
       leads: TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL && agyCurrent.has(lead) && !sectionRefused.has(lead) && !['WRONG_LAYER_REFUSED', 'DUPLICATE_REFUSED'].includes(actions.find((a) => a.lead === lead)?.action)),
       wantOf: (lead) => agyCurrent.get(lead),
       variantsOf: (lead) => new Set([...(variants.get(lead) ?? []), ...(agyCurrent.has(lead) ? [agyCurrent.get(lead)] : [])]),
@@ -454,7 +464,7 @@ for (const { p, dir: repo } of work) {
   // Only a file whose text changed is written. In a dry run nothing is; in --apply-inserts
   // the text holds inserts only.
   if (WRITE_INSERTS) {
-    const written = [...[...siblingFiles].map(([rel, f]) => [layerFileName(rel), f]), ...(gemini ? [[GEMINI_MD, gemini]] : [])];
+    const written = [['AGENTS.md', agents], ...(claude ? [['CLAUDE.md', claude]] : []), ...(gemini ? [[GEMINI_MD, gemini]] : [])];
     for (const [file, f] of written) {
       if (f.text === f.original) continue;
       try {
@@ -471,7 +481,7 @@ for (const { p, dir: repo } of work) {
       }
     }
   }
-  record({ project: projectLabel, status: 'processed', file: `${agentsMd} + ${claudeMd}${gemini ? ` + ${geminiMd}` : ''}`, actions });
+  record({ project: projectLabel, status: 'processed', file: [agentsMd, ...(claude ? [claudeMd] : []), ...(gemini ? [geminiMd] : [])].join(' + '), actions });
 }
 
 const processed = results.filter((r) => r.status === 'processed').length;
