@@ -17,6 +17,7 @@ import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, desc
 import { migrateProjectConfig } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
+import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { workIdentityRefusal } from './lib/project-identity.mjs';
@@ -155,6 +156,19 @@ if (!claudeHost) {
 const opencodeSetup = setupOpenCode({ projectDir: targetDir, pluginRoot });
 for (const line of formatOpenCodeRows(opencodeSetup)) console.log(line);
 for (const r of opencodeSetup.rows ?? []) {
+  if (r.refused) {
+    refused += 1;
+    console.error('\n' + r.instruction + '\n');
+  }
+}
+
+// Sterling on Antigravity CLI (decision
+// antigravity-cli-agy-sterling-mcp-server-is-declared-per-agen): the .agents/agents/ roster,
+// GEMINI.md and their exclude block, whenever agy is installed, whichever host runs this.
+// Lines start "Antigravity CLI (agy)", which /sterling:update's agent-status parser does not count.
+const agySetup = setupAgy({ projectDir: targetDir, pluginRoot });
+for (const line of formatAgyRows(agySetup)) console.log(line);
+for (const r of agySetup.rows ?? []) {
   if (r.refused) {
     refused += 1;
     console.error('\n' + r.instruction + '\n');

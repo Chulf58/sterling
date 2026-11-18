@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync4, realpathSync as realpathSync4 } from "node:fs";
-import { join as join9, dirname as dirname3, resolve as resolve4 } from "node:path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, existsSync as existsSync5, realpathSync as realpathSync4 } from "node:fs";
+import { join as join10, dirname as dirname4, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -4054,15 +4054,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd)) {
+  const fwd2 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd2)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd.startsWith("/")) {
+  if (fwd2.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd.split("/")) {
+  for (const seg of fwd2.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -6024,6 +6024,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -6038,7 +6039,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -6056,7 +6061,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -6107,6 +6112,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -6120,6 +6130,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -6128,7 +6141,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -6139,7 +6152,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -6378,18 +6392,15 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   return { worktree, mainRoot };
 }
 
-// scripts/lib/contract-bullets.mjs
-import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join8 } from "node:path";
-
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
   "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
   "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+  "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
 };
-var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
+var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode|agy)[\s_-]*only/i;
 var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
 function classify(line) {
@@ -6414,10 +6425,57 @@ function malformedMarkers(text, label) {
   return out;
 }
 var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
+var COUNTERPART_HOSTS = ["claude", "opencode", "agy"];
+var HOST_OF_KIND = { "claude-only": "claude", "opencode-only": "opencode", "agy-only": "agy" };
+var GENERAL_MARKER_RE = /^<!-- no-counterpart: ([a-z]+(?:, [a-z]+)*) -->$/;
+var COUNTERPART_COMMENT_RE = /<!--\s*no[-_ ][\s\S]*?counterpart[\s\S]*?(?:-->|$)/gi;
+function noCounterpartHosts(line) {
+  if (line === NO_COUNTERPART_MARKER) return ["opencode"];
+  const m = GENERAL_MARKER_RE.exec(line);
+  return m ? m[1].split(", ") : null;
+}
 var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
-function validateFences(text, label) {
+function counterpartViolations(text, lines, label) {
+  const out = [];
+  for (const m of text.matchAll(COUNTERPART_COMMENT_RE)) {
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    const hosts = lines[lineIndex] === m[0] ? noCounterpartHosts(m[0]) : null;
+    if (!hosts) {
+      out.push({ kind: "fence_counterpart_malformed", detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} is not '${NO_COUNTERPART_MARKER}' or '<!-- no-counterpart: host, host -->' on a line of its own` });
+      continue;
+    }
+    const bad = hosts.filter((h) => !COUNTERPART_HOSTS.includes(h));
+    if (bad.length || new Set(hosts).size !== hosts.length) {
+      out.push({ kind: "fence_counterpart_host", detail: `${label}:${lineIndex + 1}: no-counterpart hosts must be distinct names from ${COUNTERPART_HOSTS.join(", ")}; got ${hosts.join(", ")}` });
+    }
+  }
+  return out;
+}
+function unaccountedHosts(hostBlocks, lines, label) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const covered = new Set(run.flatMap((b) => [b.host, ...b.noCounterpart]));
+    const missing = COUNTERPART_HOSTS.filter((h) => !covered.has(h));
+    if (missing.length) {
+      out.push({ kind: "fence_host_unaccounted", detail: `${label}:${run[0].start}: this host block has no counterpart for ${missing.join(", ")}; add a ${missing.map((h) => `${h}-only`).join(" / ")} block, or '<!-- no-counterpart: ${missing.join(", ")} -->' as the first line inside one of the run's blocks` });
+    }
+    run = [];
+  };
+  for (const block of hostBlocks) {
+    const prev = run[run.length - 1];
+    if (prev && !lines.slice(prev.end, block.start - 1).every((l) => l.trim() === "")) flush();
+    run.push(block);
+  }
+  flush();
+  return out;
+}
+function validateFences(text, label, { allHosts = false } = {}) {
   const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
+  violations.push(...counterpartViolations(text.replace(/\r\n/g, "\n"), splitLines(text), label));
   let openFence = null;
+  const hostBlocks = [];
   const lines = splitLines(text);
   lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
@@ -6434,16 +6492,27 @@ function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
-      if (marker.kind === "claude-only" || marker.kind === "opencode-only") {
-        const body = lines.slice(openFence.line, index).filter((l) => l !== NO_COUNTERPART_MARKER);
+      const host = HOST_OF_KIND[marker.kind];
+      if (host) {
+        const body = lines.slice(openFence.line, index).filter((l) => !noCounterpartHosts(l));
         if (!body.some((l) => l.trim() !== "")) {
           violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
         }
+        hostBlocks.push({ host, start: openFence.line, end: index + 1, noCounterpart: noCounterpartHosts(lines[openFence.line]) ?? [] });
+        lines.slice(openFence.line, index).forEach((l, i) => {
+          const hosts = noCounterpartHosts(l);
+          if (!hosts) return;
+          if (i !== 0) {
+            violations.push({ kind: "fence_counterpart_misplaced", detail: `${label}:${openFence.line + i + 1}: a no-counterpart marker must be the first line inside its ${marker.kind} block` });
+          } else if (hosts.includes(host)) {
+            violations.push({ kind: "fence_counterpart_self", detail: `${label}:${openFence.line + 1}: a ${marker.kind} block cannot declare that ${host} has no counterpart for itself` });
+          }
+        });
       }
       if (marker.kind === "claude-only") {
         const first = lines[openFence.line];
         const next = lines.slice(index + 1).find((l) => l.trim() !== "");
-        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS["opencode-only"].open) {
+        if (!(noCounterpartHosts(first) ?? []).includes("opencode") && next !== FENCE_KINDS["opencode-only"].open) {
           violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
         }
       }
@@ -6453,6 +6522,7 @@ function validateFences(text, label) {
   if (openFence) {
     violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
   }
+  if (allHosts) violations.push(...unaccountedHosts(hostBlocks, lines, label));
   return violations;
 }
 function render(text, label, keepKinds) {
@@ -6465,7 +6535,7 @@ function render(text, label, keepKinds) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
-    if (line === NO_COUNTERPART_MARKER) continue;
+    if (noCounterpartHosts(line)) continue;
     if (marker) {
       inside = marker.role === "open" ? marker.kind : null;
       continue;
@@ -6478,8 +6548,59 @@ function render(text, label, keepKinds) {
 function renderClaudeText(text, label) {
   return render(text, label, ["sterling-only", "claude-only"]);
 }
+function renderAgyText(text, label) {
+  return render(text, label, ["sterling-only", "agy-only"]);
+}
+
+// scripts/lib/agy-setup.mjs
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, statSync as statSync2, writeFileSync } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { basename as basename2, dirname as dirname3, isAbsolute, join as join8, resolve as resolve4 } from "node:path";
+
+// scripts/lib/agent-distribution.mjs
+var RESTART_INSTRUCTION = [
+  "================================================================",
+  "RESTART REQUIRED \u2014 project subagents load at session start.",
+  "Agents installed into .claude/agents/ are NOT visible to a",
+  "session that was already running. Restart Claude Code in this",
+  "project before dispatching any of the agents above.",
+  "================================================================"
+].join("\n");
+
+// scripts/lib/agy-setup.mjs
+var GEMINI_MD = "GEMINI.md";
+var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
+var SHELL = ["run_command", "command_status"];
+var EDIT = ["write_file", "edit_file", "multi_replace_file_content"];
+var WEB = ["search_web", "read_url_content"];
+var DISPATCH = ["invoke_subagent", "send_message"];
+var AGY_TOOLS = {
+  conductor: [...READ, ...SHELL, ...EDIT, ...WEB, ...DISPATCH, "ask_question"],
+  implementor: [...READ, ...SHELL, ...EDIT, ...WEB],
+  "implementor-hard": [...READ, ...SHELL, ...EDIT, ...WEB],
+  researcher: [...READ, ...SHELL, ...WEB],
+  scout: [...READ],
+  reviewer: [...READ, ...SHELL],
+  sparring: [...READ, ...SHELL],
+  librarian: ["read_file", "grep_search"],
+  preflight: [...READ]
+};
+var AGY_ROSTER = Object.keys(AGY_TOOLS);
+var fwd = (p) => p.replace(/\\/g, "/");
+function agyPluginCopy({ env = process.env, home = homedir5() } = {}) {
+  return join8(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
+}
+function agyMcpRoot({ pluginRoot, env = process.env, home = homedir5(), installed }) {
+  const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
+  if (!isInstalled) return { root: resolve4(pluginRoot), why: "the Sterling clone running this" };
+  const agyCopy = agyPluginCopy({ env, home });
+  if (existsSync4(join8(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
+  return { root: resolve4(pluginRoot), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd(agyCopy)})` };
+}
 
 // scripts/lib/contract-bullets.mjs
+import { readFileSync as readFileSync4 } from "node:fs";
+import { join as join9 } from "node:path";
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -6694,16 +6815,16 @@ function extractTemplateBlock(text, lead) {
   return extractBlock(renderClaudeText(text, "template"), lead);
 }
 function readTemplateBullets(repoRoot2) {
-  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join8(repoRoot2, rel), "utf8")]));
+  const templates2 = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync4(join9(repoRoot2, rel), "utf8")]));
   const leadLayer2 = /* @__PURE__ */ new Map();
   const current2 = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
-    const home = TEMPLATE_RELS.find((rel) => extractTemplateBlock(templates.get(rel), lead));
+    const home = TEMPLATE_RELS.find((rel) => extractTemplateBlock(templates2.get(rel), lead));
     if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
     leadLayer2.set(lead, home);
-    current2.set(lead, extractTemplateBlock(templates.get(home), lead).block);
+    current2.set(lead, extractTemplateBlock(templates2.get(home), lead).block);
   }
-  return { templates, leadLayer: leadLayer2, current: current2 };
+  return { templates: templates2, leadLayer: leadLayer2, current: current2 };
 }
 
 // scripts/stamp-contract.mjs
@@ -6727,20 +6848,20 @@ var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve4(process.argv[++i]));
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve5(process.argv[++i]));
 }
 var realOrResolved = (path) => {
   try {
     return realpathSync4(path);
   } catch {
-    return resolve4(path);
+    return resolve5(path);
   }
 };
 var projectTargets = onlyProjects.map((value) => {
   const linked = resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
-var repoRoot = join9(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var repoRoot = join10(dirname4(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
 function withOriginalEols(raw, finalLf) {
   const pieces = raw.split("\n");
@@ -6793,7 +6914,7 @@ function itemEnd(text, start) {
   }
   return end;
 }
-var { leadLayer, current } = readTemplateBullets(repoRoot);
+var { templates, leadLayer, current } = readTemplateBullets(repoRoot);
 var variants = historicalVariants({
   repoRoot,
   templateRels: TEMPLATE_RELS,
@@ -6802,6 +6923,11 @@ var variants = historicalVariants({
   currentBlocks: current
 });
 var layerFileName = (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : "CLAUDE.md";
+var agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root.replace(/\\/g, "/");
+var agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll("{{STERLING_ROOT}}", () => agyRoot);
+var agyCurrent = new Map(
+  TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL).map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block]).filter(([, block]) => block !== void 0)
+);
 var registry = new ProjectRegistry(registryPath());
 var projects;
 try {
@@ -6840,7 +6966,7 @@ function record(r) {
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 function stampDirs(p) {
   if (!onlyProjects.length) return [p.repo_path];
-  const hits = projectTargets.filter((t) => t.match === resolve4(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  const hits = projectTargets.filter((t) => t.match === resolve5(p.repo_path) || t.match === realOrResolved(p.repo_path));
   for (const t of hits) matchedProjects.add(t.value);
   if (!hits.length) return null;
   const worktrees = hits.filter((t) => t.worktree);
@@ -6849,32 +6975,33 @@ function stampDirs(p) {
 var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
-  if (!existsSync4(repo)) {
+  if (!existsSync5(repo)) {
     record({ project: projectLabel, status: "missing_path", detail: repo });
     continue;
   }
   if (realpathSync4(repo) === selfPath) continue;
-  const agentsMd = join9(repo, "AGENTS.md");
-  const claudeMd = join9(repo, "CLAUDE.md");
-  if (!existsSync4(agentsMd)) {
+  const agentsMd = join10(repo, "AGENTS.md");
+  const claudeMd = join10(repo, "CLAUDE.md");
+  if (!existsSync5(agentsMd)) {
     record({ project: projectLabel, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
-  if (!existsSync4(claudeMd)) {
+  if (!existsSync5(claudeMd)) {
     record({ project: projectLabel, status: "no_claude_md", detail: claudeMd });
     drift++;
     continue;
   }
   const loadSibling = (path) => {
-    const raw = readFileSync4(path, "utf8");
+    const raw = readFileSync5(path, "utf8");
     const text = normalizeEol(raw);
     return { path, raw, original: text, text };
   };
   const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
+  const geminiMd = join10(repo, GEMINI_MD);
+  const gemini = existsSync5(geminiMd) ? loadSibling(geminiMd) : null;
   const actions = [];
   const VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
-  const outcome = (lead) => [...actions].reverse().find((a) => a.lead === lead)?.action;
   const sectionRefused = /* @__PURE__ */ new Set();
   for (const section of TARGET_SECTIONS) {
     const home = leadLayer.get(section.leads[0]);
@@ -6912,90 +7039,112 @@ for (const { p, dir: repo } of work) {
     target.text = lines.join("\n");
     actions.push({ lead: label, action: WRITE_INSERTS ? "section_inserted" : "would_insert_section", file: layerFileName(home) });
   }
-  for (const lead of TARGET_LEADS) {
-    if (sectionRefused.has(lead)) continue;
-    const home = leadLayer.get(lead);
-    const other = TEMPLATE_RELS.find((rel) => rel !== home);
-    const want = current.get(lead);
-    const target = siblingFiles.get(home);
-    const foundInOther = extractBlock(siblingFiles.get(other).text, lead);
-    if (foundInOther) {
-      const foundHome = extractBlock(target.text, lead);
-      if (foundHome) {
-        actions.push({ lead, action: "DUPLICATE_REFUSED", file: layerFileName(home), have: foundHome.block });
-      } else {
-        actions.push({ lead, action: "WRONG_LAYER_REFUSED", file: layerFileName(other), have: foundInOther.block });
-      }
-      drift++;
-      continue;
-    }
-    const found = extractBlock(target.text, lead);
-    if (found) {
-      if (found.block === want) {
-        actions.push({ lead, action: "matches", file: layerFileName(home) });
+  const stampLeads = ({ files, leads, wantOf, variantsOf, nameOf, pass }) => {
+    const outcome = (lead) => [...pass].reverse().find((a) => a.lead === lead)?.action;
+    for (const lead of leads) {
+      const home = leadLayer.get(lead);
+      const other = TEMPLATE_RELS.find((rel) => rel !== home);
+      const want = wantOf(lead);
+      const target = files.get(home);
+      const foundInOther = extractBlock(files.get(other).text, lead);
+      if (foundInOther) {
+        const foundHome = extractBlock(target.text, lead);
+        if (foundHome) {
+          pass.push({ lead, action: "DUPLICATE_REFUSED", file: nameOf(home), have: foundHome.block });
+        } else {
+          pass.push({ lead, action: "WRONG_LAYER_REFUSED", file: nameOf(other), have: foundInOther.block });
+        }
+        drift++;
         continue;
       }
-      if (variants.get(lead).has(found.block)) {
-        if (!APPLY_INSERTS) {
-          const lines = target.text.split("\n");
-          lines.splice(found.start, found.end - found.start, ...want.split("\n"));
-          target.text = lines.join("\n");
+      const found = extractBlock(target.text, lead);
+      if (found) {
+        if (found.block === want) {
+          pass.push({ lead, action: "matches", file: nameOf(home) });
+          continue;
         }
-        actions.push({ lead, action: APPLY ? "updated" : "would_update", file: layerFileName(home) });
-      } else {
-        actions.push({ lead, action: "HAND_TUNED_REFUSED", file: layerFileName(home), have: found.block });
-        drift++;
-      }
-      continue;
-    }
-    let renamed = false;
-    for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
-      const oldFound = extractBlock(target.text, oldLead);
-      if (!oldFound) continue;
-      renamed = true;
-      if (variants.get(oldLead).has(oldFound.block)) {
-        if (!APPLY_INSERTS) {
-          const lines = target.text.split("\n");
-          lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
-          target.text = lines.join("\n");
+        if (variantsOf(lead).has(found.block)) {
+          if (!APPLY_INSERTS) {
+            const lines = target.text.split("\n");
+            lines.splice(found.start, found.end - found.start, ...want.split("\n"));
+            target.text = lines.join("\n");
+          }
+          pass.push({ lead, action: APPLY ? "updated" : "would_update", file: nameOf(home) });
+        } else {
+          pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: found.block });
+          drift++;
         }
-        actions.push({ lead, action: APPLY ? "renamed" : "would_rename", file: layerFileName(home) });
-      } else {
-        actions.push({ lead, action: "HAND_TUNED_REFUSED", file: layerFileName(home), have: oldFound.block });
-        drift++;
+        continue;
       }
-      break;
+      let renamed = false;
+      for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
+        const oldFound = extractBlock(target.text, oldLead);
+        if (!oldFound) continue;
+        renamed = true;
+        if (variantsOf(oldLead).has(oldFound.block)) {
+          if (!APPLY_INSERTS) {
+            const lines = target.text.split("\n");
+            lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
+            target.text = lines.join("\n");
+          }
+          pass.push({ lead, action: APPLY ? "renamed" : "would_rename", file: nameOf(home) });
+        } else {
+          pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: oldFound.block });
+          drift++;
+        }
+        break;
+      }
+      if (renamed) continue;
+      const covering = [...files.entries()].map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) })).find((c) => c.hit);
+      if (covering) {
+        pass.push({
+          lead,
+          action: "SIMILAR_BULLET_KEPT",
+          file: nameOf(home),
+          info: true,
+          detail: `kept the project's own bullet in ${nameOf(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`
+        });
+        continue;
+      }
+      const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean)).find(Boolean);
+      if (anchor) {
+        const lines = target.text.split("\n");
+        lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split("\n"));
+        target.text = lines.join("\n");
+        pass.push({ lead, action: WRITE_INSERTS ? "inserted" : "would_insert", file: nameOf(home) });
+        continue;
+      }
+      pass.push({ lead, action: "ANCHOR_MISSING_REFUSED", file: nameOf(home) });
+      drift++;
     }
-    if (renamed) continue;
-    const covering = [...siblingFiles.entries()].map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) })).find((c) => c.hit);
-    if (covering) {
-      actions.push({
-        lead,
-        action: "SIMILAR_BULLET_KEPT",
-        file: layerFileName(home),
-        info: true,
-        detail: `kept the project's own bullet in ${layerFileName(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`
-      });
-      continue;
-    }
-    const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean)).find(Boolean);
-    if (anchor) {
-      const lines = target.text.split("\n");
-      lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split("\n"));
-      target.text = lines.join("\n");
-      actions.push({ lead, action: WRITE_INSERTS ? "inserted" : "would_insert", file: layerFileName(home) });
-      continue;
-    }
-    actions.push({ lead, action: "ANCHOR_MISSING_REFUSED", file: layerFileName(home) });
-    drift++;
+  };
+  stampLeads({
+    files: siblingFiles,
+    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead)),
+    wantOf: (lead) => current.get(lead),
+    variantsOf: (lead) => variants.get(lead),
+    nameOf: layerFileName,
+    pass: actions
+  });
+  if (gemini) {
+    const geminiPass = [];
+    stampLeads({
+      files: /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, siblingFiles.get(AGENTS_TEMPLATE_REL)], [CLAUDE_TEMPLATE_REL, gemini]]),
+      leads: TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL && agyCurrent.has(lead) && !sectionRefused.has(lead) && !["WRONG_LAYER_REFUSED", "DUPLICATE_REFUSED"].includes(actions.find((a) => a.lead === lead)?.action)),
+      wantOf: (lead) => agyCurrent.get(lead),
+      variantsOf: (lead) => /* @__PURE__ */ new Set([...variants.get(lead) ?? [], ...agyCurrent.has(lead) ? [agyCurrent.get(lead)] : []]),
+      nameOf: (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : GEMINI_MD,
+      pass: geminiPass
+    });
+    actions.push(...geminiPass.map((a) => ({ ...a, lead: a.file === GEMINI_MD ? `[${GEMINI_MD}] ${a.lead}` : a.lead })));
   }
   if (WRITE_INSERTS) {
-    for (const [rel, f] of siblingFiles) {
+    const written = [...[...siblingFiles].map(([rel, f]) => [layerFileName(rel), f]), ...gemini ? [[GEMINI_MD, gemini]] : []];
+    for (const [file, f] of written) {
       if (f.text === f.original) continue;
       try {
-        writeFileSync(f.path, withOriginalEols(f.raw, f.text));
+        writeFileSync2(f.path, withOriginalEols(f.raw, f.text));
       } catch (err) {
-        const file = layerFileName(rel);
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({
           lead: `${file} (write)`,
@@ -7007,7 +7156,7 @@ for (const { p, dir: repo } of work) {
       }
     }
   }
-  record({ project: projectLabel, status: "processed", file: `${agentsMd} + ${claudeMd}`, actions });
+  record({ project: projectLabel, status: "processed", file: `${agentsMd} + ${claudeMd}${gemini ? ` + ${geminiMd}` : ""}`, actions });
 }
 var processed = results.filter((r) => r.status === "processed").length;
 console.log(

@@ -5602,7 +5602,8 @@ var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
   "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
   "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+  "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
 };
 var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
 

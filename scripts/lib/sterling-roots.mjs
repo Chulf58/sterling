@@ -13,13 +13,17 @@
 //                Sterling ships with (STERLING_GIT_SPEC; measured 2026-10-02 on OpenCode 2.0.21),
 //                which is why the walk is depth-bounded instead of fixed. The walk skips OpenCode's
 //                .staging-* folders: a copy inside one is half-finished, GitHub board 1199c770.)
+//   agy          ~/.gemini/config/plugins/sterling/
+//                (finding c588c43d, agy 1.5.11: `agy plugin install <directory>` copies the plugin
+//                tree there, a copy and not a symlink, and a reinstall replaces it in place, so
+//                the path holds one copy and never carries a version.)
 // VERSION: read from the copy's own manifest, never from a directory name. A claude-code
-//   copy reads .claude-plugin/plugin.json first, an opencode copy package.json first; the
-//   other file is the fallback. A copy with neither, or with an unparsable one, is skipped
+//   copy reads .claude-plugin/plugin.json first, an opencode copy package.json first, an agy
+//   copy .antigravity-plugin/plugin.json first; the other files are the fallback. A copy with neither, or with an unparsable one, is skipped
 //   and its reason is reported.
 // NEWEST: the highest version by compareSterlingVersions (SemVer 2.0.0 precedence; a
-//   pre-release sorts below its release). TIE: the claude-code copy wins over the opencode copy (the long-standing
-//   install path); within one host the lexically greater root wins, which for OpenCode
+//   pre-release sorts below its release). TIE: claude-code wins over opencode, and opencode over
+//   agy (the long-standing install path first); within one host the lexically greater root wins, which for OpenCode
 //   is the later timestamp directory.
 //
 // Generated files (the OpenCode shims, the MCP launcher, sterling-check.mjs, the tmux
@@ -59,6 +63,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -73,7 +78,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -91,7 +100,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -142,6 +151,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -155,6 +169,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -163,7 +180,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -174,7 +191,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -196,7 +214,7 @@ const api = new Function(
   `${RESOLVER_SOURCE}\nreturn { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`,
 )(existsSync, readFileSync, readdirSync, join, homedir);
 
-/** (env = process.env, home = homedir()) -> [{host: 'claude-code'|'opencode', dir}] */
+/** (env = process.env, home = homedir()) -> [{host: 'claude-code'|'opencode'|'agy', dir}]; the agy copy is <dir>/sterling. */
 export const installRoots = api.installRoots;
 /** (root, host) -> {version} | {reason} */
 export const readCopyVersion = api.readCopyVersion;
@@ -208,7 +226,7 @@ export const compareSterlingVersions = api.compareSterlingVersions;
 export const scanInstalledSterling = api.scanInstalledSterling;
 /** (env, home) -> {root, version, host} | null. Reasons for a null: scanInstalledSterling().skipped, or sterlingNotFoundMessage. */
 export const newestInstalledSterling = api.newestInstalledSterling;
-/** ('claude-code' | 'opencode' | null) -> the install command; throws on any other host. */
+/** ('claude-code' | 'opencode' | 'agy' | null) -> the install command; throws on any other host. */
 export const sterlingInstallRemedy = api.sterlingInstallRemedy;
 /** (host, env, home) -> one line: the roots searched, every skipped copy with its reason, the host's install command. */
 export const sterlingNotFoundMessage = api.sterlingNotFoundMessage;
@@ -358,13 +376,15 @@ function pinOf(spec) {
 // The spec is printed inside double quotes in a command the reader pastes into a shell.
 const SHELL_SPECIAL = /["$`]/;
 
-/** ('claude-code' | 'opencode' | null, { env, home, root }) -> how to update an installed copy; throws on any other host.
+/** ('claude-code' | 'opencode' | 'agy' | null, { env, home, root }) -> how to update an installed copy; throws on any other host.
+ *  agy has no plugin update command (`agy update` updates the CLI), so its route is a reinstall from a directory.
  *  For opencode the target is the Sterling spec the global opencode.json configures (the entry
  *  matching the cache of `root`, the refused copy, when both an npm and a Git entry exist; the
  *  shipped STERLING_GIT_SPEC when none is configured). A config that cannot be read is said so
  *  before the shipped spec is named as the fallback; a spec pinned to a tag or commit is flagged. */
 export function sterlingUpdateRemedy(host, { env = process.env, home = homedir(), root = null } = {}) {
   if (host === 'claude-code') return '/plugin (Installed tab → Update) or `claude plugin update sterling@<marketplace>`';
+  if (host === 'agy') return AGY_UPDATE_REMEDY;
   if (host === 'opencode' || host === null) {
     const found = configuredSterlingSpec(env, home, root);
     const shipped = (why) => `\`opencode plugin update "${STERLING_GIT_SPEC}"\`${why ? ` (the shipped spec; ${why})` : ''}`;
@@ -377,10 +397,14 @@ export function sterlingUpdateRemedy(host, { env = process.env, home = homedir()
       const note = pin ? ` — but that spec is pinned to #${pin} and never updates; change it to "${STERLING_GIT_SPEC}" (a semver range) in the plugins list of opencode.json, then update` : '';
       opencode = `\`opencode plugin update "${found.spec}"\`${note}`;
     }
-    return host === 'opencode' ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code) or ${opencode} (OpenCode)`;
+    return host === 'opencode' ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code), ${opencode} (OpenCode) or ${AGY_UPDATE_REMEDY} (Antigravity CLI)`;
   }
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
+
+// Measured on agy 1.5.11 (2026-11-18): `agy plugin install` takes a directory and copies it to
+// ~/.gemini/config/plugins/<name>/, replacing the old copy; agy has no plugin update command.
+const AGY_UPDATE_REMEDY = '`agy plugin install <a directory holding the newer Sterling>` (agy has no plugin update command; the install replaces ~/.gemini/config/plugins/sterling)';
 
 // realpath when the path exists; a path that does not exist cannot be reached
 // through a symlink, so its plain resolved form is its identity.
@@ -393,7 +417,7 @@ function canonical(p) {
   }
 }
 
-/** The host whose install root `root` resolves (realpath) under, or null when under neither. */
+/** The host whose install root `root` resolves (realpath) under, or null when under none. */
 export function installHostOf(root, { env = process.env, home = homedir() } = {}) {
   const real = canonical(root);
   for (const { host, dir } of installRoots(env, home)) {

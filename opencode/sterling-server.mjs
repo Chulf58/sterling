@@ -13688,9 +13688,52 @@ function malformedMarkers(text, label) {
   }
   return out;
 }
-function validateFences(text, label) {
+function noCounterpartHosts(line) {
+  if (line === NO_COUNTERPART_MARKER) return ["opencode"];
+  const m = GENERAL_MARKER_RE.exec(line);
+  return m ? m[1].split(", ") : null;
+}
+function counterpartViolations(text, lines, label) {
+  const out = [];
+  for (const m of text.matchAll(COUNTERPART_COMMENT_RE)) {
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    const hosts = lines[lineIndex] === m[0] ? noCounterpartHosts(m[0]) : null;
+    if (!hosts) {
+      out.push({ kind: "fence_counterpart_malformed", detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} is not '${NO_COUNTERPART_MARKER}' or '<!-- no-counterpart: host, host -->' on a line of its own` });
+      continue;
+    }
+    const bad = hosts.filter((h) => !COUNTERPART_HOSTS.includes(h));
+    if (bad.length || new Set(hosts).size !== hosts.length) {
+      out.push({ kind: "fence_counterpart_host", detail: `${label}:${lineIndex + 1}: no-counterpart hosts must be distinct names from ${COUNTERPART_HOSTS.join(", ")}; got ${hosts.join(", ")}` });
+    }
+  }
+  return out;
+}
+function unaccountedHosts(hostBlocks, lines, label) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const covered = new Set(run.flatMap((b) => [b.host, ...b.noCounterpart]));
+    const missing = COUNTERPART_HOSTS.filter((h) => !covered.has(h));
+    if (missing.length) {
+      out.push({ kind: "fence_host_unaccounted", detail: `${label}:${run[0].start}: this host block has no counterpart for ${missing.join(", ")}; add a ${missing.map((h) => `${h}-only`).join(" / ")} block, or '<!-- no-counterpart: ${missing.join(", ")} -->' as the first line inside one of the run's blocks` });
+    }
+    run = [];
+  };
+  for (const block of hostBlocks) {
+    const prev = run[run.length - 1];
+    if (prev && !lines.slice(prev.end, block.start - 1).every((l) => l.trim() === "")) flush();
+    run.push(block);
+  }
+  flush();
+  return out;
+}
+function validateFences(text, label, { allHosts = false } = {}) {
   const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
+  violations.push(...counterpartViolations(text.replace(/\r\n/g, "\n"), splitLines(text), label));
   let openFence = null;
+  const hostBlocks = [];
   const lines = splitLines(text);
   lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
@@ -13707,16 +13750,27 @@ function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
-      if (marker.kind === "claude-only" || marker.kind === "opencode-only") {
-        const body = lines.slice(openFence.line, index).filter((l) => l !== NO_COUNTERPART_MARKER);
+      const host = HOST_OF_KIND[marker.kind];
+      if (host) {
+        const body = lines.slice(openFence.line, index).filter((l) => !noCounterpartHosts(l));
         if (!body.some((l) => l.trim() !== "")) {
           violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
         }
+        hostBlocks.push({ host, start: openFence.line, end: index + 1, noCounterpart: noCounterpartHosts(lines[openFence.line]) ?? [] });
+        lines.slice(openFence.line, index).forEach((l, i) => {
+          const hosts = noCounterpartHosts(l);
+          if (!hosts) return;
+          if (i !== 0) {
+            violations.push({ kind: "fence_counterpart_misplaced", detail: `${label}:${openFence.line + i + 1}: a no-counterpart marker must be the first line inside its ${marker.kind} block` });
+          } else if (hosts.includes(host)) {
+            violations.push({ kind: "fence_counterpart_self", detail: `${label}:${openFence.line + 1}: a ${marker.kind} block cannot declare that ${host} has no counterpart for itself` });
+          }
+        });
       }
       if (marker.kind === "claude-only") {
         const first = lines[openFence.line];
         const next = lines.slice(index + 1).find((l) => l.trim() !== "");
-        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS["opencode-only"].open) {
+        if (!(noCounterpartHosts(first) ?? []).includes("opencode") && next !== FENCE_KINDS["opencode-only"].open) {
           violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
         }
       }
@@ -13726,6 +13780,7 @@ function validateFences(text, label) {
   if (openFence) {
     violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
   }
+  if (allHosts) violations.push(...unaccountedHosts(hostBlocks, lines, label));
   return violations;
 }
 function render2(text, label, keepKinds) {
@@ -13738,7 +13793,7 @@ function render2(text, label, keepKinds) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
-    if (line === NO_COUNTERPART_MARKER) continue;
+    if (noCounterpartHosts(line)) continue;
     if (marker) {
       inside = marker.role === "open" ? marker.kind : null;
       continue;
@@ -13754,19 +13809,24 @@ function renderClaudeText(text, label) {
 function renderOpenCodeFullText(text, label) {
   return render2(text, label, ["sterling-only", "opencode-only"]);
 }
-var FENCE_KINDS, FENCE_WORD_RE, COMMENT_RE, EXACT_MARKERS, NO_COUNTERPART_MARKER, splitLines;
+var FENCE_KINDS, FENCE_WORD_RE, COMMENT_RE, EXACT_MARKERS, NO_COUNTERPART_MARKER, COUNTERPART_HOSTS, HOST_OF_KIND, GENERAL_MARKER_RE, COUNTERPART_COMMENT_RE, splitLines;
 var init_agent_fences = __esm({
   "scripts/lib/agent-fences.mjs"() {
     FENCE_KINDS = {
       "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
       "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
       "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+      "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
     };
-    FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
+    FENCE_WORD_RE = /(?:sterling|portable|claude|opencode|agy)[\s_-]*only/i;
     COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
     EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
     NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
+    COUNTERPART_HOSTS = ["claude", "opencode", "agy"];
+    HOST_OF_KIND = { "claude-only": "claude", "opencode-only": "opencode", "agy-only": "agy" };
+    GENERAL_MARKER_RE = /^<!-- no-counterpart: ([a-z]+(?:, [a-z]+)*) -->$/;
+    COUNTERPART_COMMENT_RE = /<!--\s*no[-_ ][\s\S]*?counterpart[\s\S]*?(?:-->|$)/gi;
     splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
   }
 });
@@ -21548,6 +21608,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -21562,7 +21623,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -21580,7 +21645,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -21631,6 +21696,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -21644,6 +21714,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -21652,7 +21725,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -21663,7 +21736,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -21792,6 +21866,7 @@ function pinOf(spec) {
 var SHELL_SPECIAL = /["$`]/;
 function sterlingUpdateRemedy(host, { env = process.env, home = homedir5(), root = null } = {}) {
   if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
+  if (host === "agy") return AGY_UPDATE_REMEDY;
   if (host === "opencode" || host === null) {
     const found = configuredSterlingSpec(env, home, root);
     const shipped = (why) => `\`opencode plugin update "${STERLING_GIT_SPEC}"\`${why ? ` (the shipped spec; ${why})` : ""}`;
@@ -21804,10 +21879,11 @@ function sterlingUpdateRemedy(host, { env = process.env, home = homedir5(), root
       const note = pin ? ` \u2014 but that spec is pinned to #${pin} and never updates; change it to "${STERLING_GIT_SPEC}" (a semver range) in the plugins list of opencode.json, then update` : "";
       opencode = `\`opencode plugin update "${found.spec}"\`${note}`;
     }
-    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code) or ${opencode} (OpenCode)`;
+    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code), ${opencode} (OpenCode) or ${AGY_UPDATE_REMEDY} (Antigravity CLI)`;
   }
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
+var AGY_UPDATE_REMEDY = "`agy plugin install <a directory holding the newer Sterling>` (agy has no plugin update command; the install replaces ~/.gemini/config/plugins/sterling)";
 function canonical(p) {
   try {
     return realpathSync8(p);
@@ -24891,16 +24967,28 @@ var HOST_TEXT2 = {
     restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `/reload` in the TUI, or `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`), before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
     retry: "retries the next time OpenCode starts",
     rerun: "re-runs at every OpenCode start"
+  },
+  // Antigravity CLI: project agents and their MCP servers load when an agy session starts
+  // (finding c588c43d), and the Sterling server lives until the session ends.
+  agy: {
+    label: "agy session start",
+    restartShort: "agents synced \u2014 RESTART agy to load them (quit, then run `agy --agent conductor` again)",
+    restartLong: "RESTART REQUIRED \u2014 agy reads project agents and starts their MCP servers at session start: quit agy and start it again with `agy --agent conductor` before dispatching any agent.",
+    retry: "retries at the next agy session start",
+    rerun: "re-runs at every agy session start"
   }
 };
+var AGY_SKIP_LINE = /^Antigravity CLI \(agy\): .*$/m;
+var AGY_AGENT_WRITTEN_LINE = /^Antigravity CLI \(agy\) (created|refreshed): \.agents\/agents\//m;
 var UPDATE_ROUTE = {
   "claude-code": () => "update it through /plugin (Installed tab \u2192 Update)",
-  opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy("opencode", { env, home, root })}`
+  opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy("opencode", { env, home, root })}`,
+  agy: (env, home, root) => `update it with ${sterlingUpdateRemedy("agy", { env, home, root })}`
 };
-var ASKING_HOST_INSTALL = { claude: "claude-code", opencode: "opencode" };
+var ASKING_HOST_INSTALL = { claude: "claude-code", opencode: "opencode", agy: "agy" };
 function hostText(host) {
   const text = HOST_TEXT2[host];
-  if (!text) throw new TypeError(`post-update sync: unknown host ${JSON.stringify(host)} (expected 'claude' or 'opencode')`);
+  if (!text) throw new TypeError(`post-update sync: unknown host ${JSON.stringify(host)} (expected 'claude', 'opencode' or 'agy')`);
   return text;
 }
 function samePath2(a, b) {
@@ -24977,7 +25065,9 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   if (sync.status !== 0) return { ok: false, migrated, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
   if (openCodeSkip) return { ok: false, migrated, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out);
+  const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
+  if (agySkip) return { ok: false, migrated, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out) || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out);
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, migrated, detail: `stamp-contract did not run (${contract.error})` };

@@ -1,5 +1,6 @@
 // stamp-contract [S] — propagate contract-wording bullets from
-// templates/target-claude-md.md to every registered sibling project's CLAUDE.md
+// templates/target-claude-md.md to every registered sibling project's CLAUDE.md (and its
+// GEMINI.md, the agy form, where one exists)
 // (decision foreign_7208729b wiring; second propagation after foreign_c76f63fa proved the need
 // recurs). Deterministic (P3) and guarded:
 //   - a sibling bullet is replaced ONLY when its current text matches some
@@ -36,6 +37,8 @@ import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
+import { renderAgyText } from './lib/agent-fences.mjs';
+import { GEMINI_MD, agyMcpRoot } from './lib/agy-setup.mjs';
 import {
   AGENTS_TEMPLATE_REL,
   CLAUDE_TEMPLATE_REL,
@@ -169,7 +172,7 @@ function itemEnd(text, start) {
 }
 
 // leadLayer: lead -> template rel it currently lives in (= the sibling file it propagates to).
-const { leadLayer, current } = readTemplateBullets(repoRoot);
+const { templates, leadLayer, current } = readTemplateBullets(repoRoot);
 // Historical variants (scripts/lib/contract-history.mjs): the git history of both
 // templates, or on an installed copy with no history bin/contract-history.json plus the
 // current text.
@@ -181,6 +184,16 @@ const variants = historicalVariants({
   currentBlocks: current,
 });
 const layerFileName = (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : 'CLAUDE.md');
+// The CLAUDE.md-layer bullets as GEMINI.md carries them: the agy render of the same template,
+// with the Sterling root setupAgy writes into GEMINI.md. A lead the agy render leaves out
+// has no GEMINI.md form and is not stamped there.
+const agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root.replace(/\\/g, '/');
+const agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll('{{STERLING_ROOT}}', () => agyRoot);
+const agyCurrent = new Map(
+  TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL)
+    .map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block])
+    .filter(([, block]) => block !== undefined),
+);
 
 const registry = new ProjectRegistry(registryPath());
 let projects;
@@ -267,11 +280,13 @@ for (const { p, dir: repo } of work) {
     return { path, raw, original: text, text };
   };
   const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
+  // GEMINI.md is optional: init and sync-agents write it only where agy is installed.
+  const geminiMd = join(repo, GEMINI_MD);
+  const gemini = existsSync(geminiMd) ? loadSibling(geminiMd) : null;
   const actions = [];
   // Only a bullet that validated THIS run (in sync, or replaced by the current wording) may
   // anchor an insert — a refused block is never restructured by an insert beside it.
   const VALID_ANCHOR = new Set(['matches', 'updated', 'would_update', 'inserted', 'would_insert', 'renamed', 'would_rename']);
-  const outcome = (lead) => [...actions].reverse().find((a) => a.lead === lead)?.action;
   // Whole sections first. A sibling with the heading, or with any of the section's bullets
   // in either file, is left to the per-lead loop below.
   const sectionRefused = new Set();
@@ -313,111 +328,138 @@ for (const { p, dir: repo } of work) {
     target.text = lines.join('\n');
     actions.push({ lead: label, action: WRITE_INSERTS ? 'section_inserted' : 'would_insert_section', file: layerFileName(home) });
   }
-  for (const lead of TARGET_LEADS) {
-    if (sectionRefused.has(lead)) continue;
-    const home = leadLayer.get(lead);
-    const other = TEMPLATE_RELS.find((rel) => rel !== home);
-    const want = current.get(lead);
-    const target = siblingFiles.get(home);
-    const foundInOther = extractBlock(siblingFiles.get(other).text, lead);
-    if (foundInOther) {
-      // A bullet present in the WRONG layer must never gain a second copy in the home file —
-      // checked BEFORE any replace/rename/insert path, whether or not it is ALSO present (a true
-      // duplicate) in the home layer (Sol review fix round, finding 6).
-      const foundHome = extractBlock(target.text, lead);
-      if (foundHome) {
-        actions.push({ lead, action: 'DUPLICATE_REFUSED', file: layerFileName(home), have: foundHome.block });
-      } else {
-        actions.push({ lead, action: 'WRONG_LAYER_REFUSED', file: layerFileName(other), have: foundInOther.block });
-      }
-      drift++;
-      continue;
-    }
-    const found = extractBlock(target.text, lead);
-    if (found) {
-      if (found.block === want) {
-        actions.push({ lead, action: 'matches', file: layerFileName(home) });
+  // The per-lead pass over one pair of files: `files` maps each template rel to the sibling
+  // file its leads land in, `wantOf` gives a lead's current text and `variantsOf` the
+  // template-descended texts that may be replaced. Pushes to `pass` and counts drift.
+  const stampLeads = ({ files, leads, wantOf, variantsOf, nameOf, pass }) => {
+    const outcome = (lead) => [...pass].reverse().find((a) => a.lead === lead)?.action;
+    for (const lead of leads) {
+      const home = leadLayer.get(lead);
+      const other = TEMPLATE_RELS.find((rel) => rel !== home);
+      const want = wantOf(lead);
+      const target = files.get(home);
+      const foundInOther = extractBlock(files.get(other).text, lead);
+      if (foundInOther) {
+        // A bullet present in the WRONG layer must never gain a second copy in the home file —
+        // checked BEFORE any replace/rename/insert path, whether or not it is ALSO present (a true
+        // duplicate) in the home layer (Sol review fix round, finding 6).
+        const foundHome = extractBlock(target.text, lead);
+        if (foundHome) {
+          pass.push({ lead, action: 'DUPLICATE_REFUSED', file: nameOf(home), have: foundHome.block });
+        } else {
+          pass.push({ lead, action: 'WRONG_LAYER_REFUSED', file: nameOf(other), have: foundInOther.block });
+        }
+        drift++;
         continue;
       }
-      if (variants.get(lead).has(found.block)) {
-        // clean template-descended block → replace. Not in --apply-inserts: that mode
-        // writes the text it holds, so the old wording has to stay in it.
-        if (!APPLY_INSERTS) {
-          const lines = target.text.split('\n');
-          lines.splice(found.start, found.end - found.start, ...want.split('\n'));
-          target.text = lines.join('\n');
+      const found = extractBlock(target.text, lead);
+      if (found) {
+        if (found.block === want) {
+          pass.push({ lead, action: 'matches', file: nameOf(home) });
+          continue;
         }
-        actions.push({ lead, action: APPLY ? 'updated' : 'would_update', file: layerFileName(home) });
-      } else {
-        actions.push({ lead, action: 'HAND_TUNED_REFUSED', file: layerFileName(home), have: found.block });
-        drift++;
-      }
-      continue;
-    }
-    // Bullet absent. A RENAMED bullet may still sit under its old lead — replace
-    // a clean template-descended old block with the new bullet; a hand-tuned old
-    // block is refused (P5), same as the normal replace path.
-    let renamed = false;
-    for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
-      const oldFound = extractBlock(target.text, oldLead);
-      if (!oldFound) continue;
-      renamed = true;
-      if (variants.get(oldLead).has(oldFound.block)) {
-        if (!APPLY_INSERTS) {
-          const lines = target.text.split('\n');
-          lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
-          target.text = lines.join('\n');
+        if (variantsOf(lead).has(found.block)) {
+          // clean template-descended block → replace. Not in --apply-inserts: that mode
+          // writes the text it holds, so the old wording has to stay in it.
+          if (!APPLY_INSERTS) {
+            const lines = target.text.split('\n');
+            lines.splice(found.start, found.end - found.start, ...want.split('\n'));
+            target.text = lines.join('\n');
+          }
+          pass.push({ lead, action: APPLY ? 'updated' : 'would_update', file: nameOf(home) });
+        } else {
+          pass.push({ lead, action: 'HAND_TUNED_REFUSED', file: nameOf(home), have: found.block });
+          drift++;
         }
-        actions.push({ lead, action: APPLY ? 'renamed' : 'would_rename', file: layerFileName(home) });
-      } else {
-        actions.push({ lead, action: 'HAND_TUNED_REFUSED', file: layerFileName(home), have: oldFound.block });
-        drift++;
+        continue;
       }
-      break;
+      // Bullet absent. A RENAMED bullet may still sit under its old lead — replace
+      // a clean template-descended old block with the new bullet; a hand-tuned old
+      // block is refused (P5), same as the normal replace path.
+      let renamed = false;
+      for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
+        const oldFound = extractBlock(target.text, oldLead);
+        if (!oldFound) continue;
+        renamed = true;
+        if (variantsOf(oldLead).has(oldFound.block)) {
+          if (!APPLY_INSERTS) {
+            const lines = target.text.split('\n');
+            lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
+            target.text = lines.join('\n');
+          }
+          pass.push({ lead, action: APPLY ? 'renamed' : 'would_rename', file: nameOf(home) });
+        } else {
+          pass.push({ lead, action: 'HAND_TUNED_REFUSED', file: nameOf(home), have: oldFound.block });
+          drift++;
+        }
+        break;
+      }
+      if (renamed) continue;
+      // The project may already state the rule under its own bullet (a different lead, maybe under
+      // another heading): keep it and insert nothing. Information, not a refusal and not drift.
+      const covering = [...files.entries()]
+        .map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) }))
+        .find((c) => c.hit);
+      if (covering) {
+        pass.push({
+          lead,
+          action: 'SIMILAR_BULLET_KEPT',
+          file: nameOf(home),
+          info: true,
+          detail: `kept the project's own bullet in ${nameOf(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`,
+        });
+        continue;
+      }
+      // An insertable bullet goes after the first anchor in its chain that validated this run,
+      // past that anchor's whole list item; everything else missing = drift.
+      const anchor = (INSERT_AFTER.get(lead) ?? [])
+        .filter((a) => VALID_ANCHOR.has(outcome(a)))
+        // In --apply-inserts a would_rename anchor still sits under its old lead.
+        .map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean))
+        .find(Boolean);
+      if (anchor) {
+        const lines = target.text.split('\n');
+        lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split('\n'));
+        target.text = lines.join('\n');
+        pass.push({ lead, action: WRITE_INSERTS ? 'inserted' : 'would_insert', file: nameOf(home) });
+        continue;
+      }
+      pass.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: nameOf(home) });
+      drift++;
     }
-    if (renamed) continue;
-    // The project may already state the rule under its own bullet (a different lead, maybe under
-    // another heading): keep it and insert nothing. Information, not a refusal and not drift.
-    const covering = [...siblingFiles.entries()]
-      .map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) }))
-      .find((c) => c.hit);
-    if (covering) {
-      actions.push({
-        lead,
-        action: 'SIMILAR_BULLET_KEPT',
-        file: layerFileName(home),
-        info: true,
-        detail: `kept the project's own bullet in ${layerFileName(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`,
-      });
-      continue;
-    }
-    // An insertable bullet goes after the first anchor in its chain that validated this run,
-    // past that anchor's whole list item; everything else missing = drift.
-    const anchor = (INSERT_AFTER.get(lead) ?? [])
-      .filter((a) => VALID_ANCHOR.has(outcome(a)))
-      // In --apply-inserts a would_rename anchor still sits under its old lead.
-      .map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean))
-      .find(Boolean);
-    if (anchor) {
-      const lines = target.text.split('\n');
-      lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split('\n'));
-      target.text = lines.join('\n');
-      actions.push({ lead, action: WRITE_INSERTS ? 'inserted' : 'would_insert', file: layerFileName(home) });
-      continue;
-    }
-    actions.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: layerFileName(home) });
-    drift++;
+  };
+  stampLeads({
+    files: siblingFiles,
+    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead)),
+    wantOf: (lead) => current.get(lead),
+    variantsOf: (lead) => variants.get(lead),
+    nameOf: layerFileName,
+    pass: actions,
+  });
+  // GEMINI.md, the agy form of CLAUDE.md, gets the CLAUDE.md-layer bullets in their agy
+  // wording (agyCurrent). A lead the CLAUDE.md pass refused for its layer is not repeated.
+  if (gemini) {
+    const geminiPass = [];
+    stampLeads({
+      files: new Map([[AGENTS_TEMPLATE_REL, siblingFiles.get(AGENTS_TEMPLATE_REL)], [CLAUDE_TEMPLATE_REL, gemini]]),
+      leads: TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL && agyCurrent.has(lead) && !sectionRefused.has(lead) && !['WRONG_LAYER_REFUSED', 'DUPLICATE_REFUSED'].includes(actions.find((a) => a.lead === lead)?.action)),
+      wantOf: (lead) => agyCurrent.get(lead),
+      variantsOf: (lead) => new Set([...(variants.get(lead) ?? []), ...(agyCurrent.has(lead) ? [agyCurrent.get(lead)] : [])]),
+      nameOf: (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : GEMINI_MD),
+      pass: geminiPass,
+    });
+    actions.push(...geminiPass.map((a) => ({ ...a, lead: a.file === GEMINI_MD ? `[${GEMINI_MD}] ${a.lead}` : a.lead })));
   }
 
   // Only a file whose text changed is written. In a dry run nothing is; in --apply-inserts
   // the text holds inserts only.
   if (WRITE_INSERTS) {
-    for (const [rel, f] of siblingFiles) {
+    const written = [...[...siblingFiles].map(([rel, f]) => [layerFileName(rel), f]), ...(gemini ? [[GEMINI_MD, gemini]] : [])];
+    for (const [file, f] of written) {
       if (f.text === f.original) continue;
       try {
         writeFileSync(f.path, withOriginalEols(f.raw, f.text));
       } catch (err) {
-        const file = layerFileName(rel);
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({
           lead: `${file} (write)`,
@@ -429,7 +471,7 @@ for (const { p, dir: repo } of work) {
       }
     }
   }
-  record({ project: projectLabel, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
+  record({ project: projectLabel, status: 'processed', file: `${agentsMd} + ${claudeMd}${gemini ? ` + ${geminiMd}` : ''}`, actions });
 }
 
 const processed = results.filter((r) => r.status === 'processed').length;

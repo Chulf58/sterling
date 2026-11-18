@@ -13141,7 +13141,8 @@ var init_agent_fences = __esm({
       "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
       "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
       "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+      "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
     };
     EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
   }
@@ -16754,6 +16755,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -16768,7 +16770,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -16786,7 +16792,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -16837,6 +16843,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -16850,6 +16861,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -16858,7 +16872,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -16869,7 +16883,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -16998,6 +17013,7 @@ function pinOf(spec) {
 var SHELL_SPECIAL = /["$`]/;
 function sterlingUpdateRemedy(host, { env = process.env, home = homedir7(), root = null } = {}) {
   if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
+  if (host === "agy") return AGY_UPDATE_REMEDY;
   if (host === "opencode" || host === null) {
     const found = configuredSterlingSpec(env, home, root);
     const shipped = (why) => `\`opencode plugin update "${STERLING_GIT_SPEC}"\`${why ? ` (the shipped spec; ${why})` : ""}`;
@@ -17010,10 +17026,11 @@ function sterlingUpdateRemedy(host, { env = process.env, home = homedir7(), root
       const note = pin ? ` \u2014 but that spec is pinned to #${pin} and never updates; change it to "${STERLING_GIT_SPEC}" (a semver range) in the plugins list of opencode.json, then update` : "";
       opencode = `\`opencode plugin update "${found.spec}"\`${note}`;
     }
-    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code) or ${opencode} (OpenCode)`;
+    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code), ${opencode} (OpenCode) or ${AGY_UPDATE_REMEDY} (Antigravity CLI)`;
   }
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
+var AGY_UPDATE_REMEDY = "`agy plugin install <a directory holding the newer Sterling>` (agy has no plugin update command; the install replaces ~/.gemini/config/plugins/sterling)";
 function canonical(p) {
   try {
     return realpathSync8(p);
@@ -17060,16 +17077,28 @@ var HOST_TEXT = {
     restartLong: "RELOAD REQUIRED \u2014 agents load when the shared OpenCode server loads them, and relaunching one TUI does not restart that server: run `/reload` in the TUI, or `opencode reload` in any shell (or `! ~/.opencode/bin/opencode reload`), before dispatching any agent. Fallback: `opencode service restart`, which interrupts every project open on that server.",
     retry: "retries the next time OpenCode starts",
     rerun: "re-runs at every OpenCode start"
+  },
+  // Antigravity CLI: project agents and their MCP servers load when an agy session starts
+  // (finding c588c43d), and the Sterling server lives until the session ends.
+  agy: {
+    label: "agy session start",
+    restartShort: "agents synced \u2014 RESTART agy to load them (quit, then run `agy --agent conductor` again)",
+    restartLong: "RESTART REQUIRED \u2014 agy reads project agents and starts their MCP servers at session start: quit agy and start it again with `agy --agent conductor` before dispatching any agent.",
+    retry: "retries at the next agy session start",
+    rerun: "re-runs at every agy session start"
   }
 };
+var AGY_SKIP_LINE = /^Antigravity CLI \(agy\): .*$/m;
+var AGY_AGENT_WRITTEN_LINE = /^Antigravity CLI \(agy\) (created|refreshed): \.agents\/agents\//m;
 var UPDATE_ROUTE = {
   "claude-code": () => "update it through /plugin (Installed tab \u2192 Update)",
-  opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy("opencode", { env, home, root })}`
+  opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy("opencode", { env, home, root })}`,
+  agy: (env, home, root) => `update it with ${sterlingUpdateRemedy("agy", { env, home, root })}`
 };
-var ASKING_HOST_INSTALL = { claude: "claude-code", opencode: "opencode" };
+var ASKING_HOST_INSTALL = { claude: "claude-code", opencode: "opencode", agy: "agy" };
 function hostText(host) {
   const text = HOST_TEXT[host];
-  if (!text) throw new TypeError(`post-update sync: unknown host ${JSON.stringify(host)} (expected 'claude' or 'opencode')`);
+  if (!text) throw new TypeError(`post-update sync: unknown host ${JSON.stringify(host)} (expected 'claude', 'opencode' or 'agy')`);
   return text;
 }
 function samePath2(a, b) {
@@ -17119,7 +17148,9 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   if (sync.status !== 0) return { ok: false, migrated, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
   if (openCodeSkip) return { ok: false, migrated, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out);
+  const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
+  if (agySkip) return { ok: false, migrated, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out) || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out);
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, migrated, detail: `stamp-contract did not run (${contract.error})` };

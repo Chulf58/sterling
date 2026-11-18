@@ -52,6 +52,7 @@ import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { setupOpenCode } from './lib/opencode-install.mjs';
+import { setupAgy } from './lib/agy-setup.mjs';
 import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
 import { renderClaudeText } from './lib/agent-fences.mjs';
@@ -1060,6 +1061,16 @@ const opencodeSetup = setupOpenCode({ projectDir: target, pluginRoot });
 if (opencodeSetup.skipped) items.push({ item: 'Sterling on OpenCode 2', status: 'skipped', detail: opencodeSetup.skipped });
 for (const r of opencodeSetup.rows ?? []) {
   items.push({ item: `OpenCode ${r.item}`, status: r.status, detail: r.detail ?? '' });
+  if (r.instruction) agentInstructions.push(r.instruction);
+}
+
+// Sterling on Antigravity CLI (decision
+// antigravity-cli-agy-sterling-mcp-server-is-declared-per-agen): the .agents/agents/ roster,
+// GEMINI.md and their exclude block, whenever agy is installed, whichever host runs init.
+const agySetup = setupAgy({ projectDir: target, pluginRoot });
+if (agySetup.skipped) items.push({ item: 'Sterling on Antigravity CLI', status: 'skipped', detail: agySetup.skipped });
+for (const r of agySetup.rows ?? []) {
+  items.push({ item: `agy ${r.item}`, status: r.status, detail: r.detail ?? '' });
   if (r.instruction) agentInstructions.push(r.instruction);
 }
 

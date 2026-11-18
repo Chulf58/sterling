@@ -2457,7 +2457,7 @@ test('installed copy (no .git at the plugin root): /sterling:update refuses befo
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
     assert.equal(report.exit, 2);
     assert.deepEqual(calls, [], 'nothing runs on an installed copy');
-    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\) or `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"` \(OpenCode\)/, 'a copy under neither install root names both hosts');
+    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\), `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"` \(OpenCode\) or `agy plugin install [^`]+`.* \(Antigravity CLI\)/, 'a copy under no install root names all three hosts');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

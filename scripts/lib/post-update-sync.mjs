@@ -8,7 +8,7 @@
 // banner and the context. An OLDER copy refuses with one loud line
 // telling the user to update that host's Sterling; an equal one does nothing
 // (decision dual-host-post-update-sync-newest-copy-wins). The marker is per
-// project and both hosts write it, so an inequality trigger would downgrade and
+// project and every host (Claude Code, OpenCode, agy) writes it, so an inequality trigger would downgrade and
 // re-upgrade the project on alternate sessions; the version order makes it
 // monotonic.
 //
@@ -51,7 +51,22 @@ const HOST_TEXT = {
     retry: 'retries the next time OpenCode starts',
     rerun: 're-runs at every OpenCode start',
   },
+  // Antigravity CLI: project agents and their MCP servers load when an agy session starts
+  // (finding c588c43d), and the Sterling server lives until the session ends.
+  agy: {
+    label: 'agy session start',
+    restartShort: 'agents synced — RESTART agy to load them (quit, then run `agy --agent conductor` again)',
+    restartLong: 'RESTART REQUIRED — agy reads project agents and starts their MCP servers at session start: quit agy and start it again with `agy --agent conductor` before dispatching any agent.',
+    retry: 'retries at the next agy session start',
+    rerun: 're-runs at every agy session start',
+  },
 };
+
+// The line sync-agents prints when it skipped the agy setup (scripts/lib/agy-setup.mjs
+// formatAgyRows), and the lines for an agy agent file it wrote. Literal, not imported:
+// this module is builtins-only.
+const AGY_SKIP_LINE = /^Antigravity CLI \(agy\): .*$/m;
+const AGY_AGENT_WRITTEN_LINE = /^Antigravity CLI \(agy\) (created|refreshed): \.agents\/agents\//m;
 
 // How to update an installed copy, by the host that INSTALLED it (installHostOf), not the
 // host asking: on a dual-host machine OpenCode can run a Claude-cache copy and H1 an npm
@@ -60,14 +75,15 @@ const HOST_TEXT = {
 const UPDATE_ROUTE = {
   'claude-code': () => 'update it through /plugin (Installed tab → Update)',
   opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy('opencode', { env, home, root })}`,
+  agy: (env, home, root) => `update it with ${sterlingUpdateRemedy('agy', { env, home, root })}`,
 };
 // A copy under neither install root (installed, so not a git clone, but somewhere the
 // resolver does not scan) takes the asking host's own install route.
-const ASKING_HOST_INSTALL = { claude: 'claude-code', opencode: 'opencode' };
+const ASKING_HOST_INSTALL = { claude: 'claude-code', opencode: 'opencode', agy: 'agy' };
 
 function hostText(host) {
   const text = HOST_TEXT[host];
-  if (!text) throw new TypeError(`post-update sync: unknown host ${JSON.stringify(host)} (expected 'claude' or 'opencode')`);
+  if (!text) throw new TypeError(`post-update sync: unknown host ${JSON.stringify(host)} (expected 'claude', 'opencode' or 'agy')`);
   return text;
 }
 
@@ -188,7 +204,12 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
   // means none of them was checked, which a running OpenCode contradicts (P5).
   const openCodeSkip = host === 'opencode' ? /^OpenCode: .*$/m.exec(sync.out) : null;
   if (openCodeSkip) return { ok: false, migrated, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || (host === 'opencode' && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out));
+  // The same on agy: a skipped agy setup checked none of the .agents/agents/ files a running agy reads.
+  const agySkip = host === 'agy' ? AGY_SKIP_LINE.exec(sync.out) : null;
+  if (agySkip) return { ok: false, migrated, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) ||
+    (host === 'opencode' && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out)) ||
+    (host === 'agy' && AGY_AGENT_WRITTEN_LINE.test(sync.out));
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: '', inserted: [], migrated };

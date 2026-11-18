@@ -46,6 +46,7 @@ if (!process.env[MARKER]) {
   // A real init/sync-agents spawned by a test must never install Sterling's OpenCode
   // shims into the user's actual ~/.config/opencode (scripts/lib/opencode-install.mjs).
   process.env.STERLING_OPENCODE_SETUP_DISABLE = '1';
+  process.env.STERLING_AGY_SETUP_DISABLE = '1';
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });

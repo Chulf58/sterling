@@ -8,8 +8,8 @@ var __export = (target, all) => {
 
 // scripts/sync-agents.mjs
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { dirname as dirname4, join as join14, resolve as resolve8 } from "node:path";
-import { readFileSync as readFileSync10, existsSync as existsSync10 } from "node:fs";
+import { dirname as dirname5, join as join15, resolve as resolve9 } from "node:path";
+import { readFileSync as readFileSync11, existsSync as existsSync11 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4054,15 +4054,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd4 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd4)) {
+  const fwd5 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd5)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd4.startsWith("/")) {
+  if (fwd5.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd4.split("/")) {
+  for (const seg of fwd5.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -5851,9 +5851,10 @@ var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
   "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
   "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+  "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
 };
-var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
+var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode|agy)[\s_-]*only/i;
 var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
 function classify(line) {
@@ -5878,10 +5879,57 @@ function malformedMarkers(text, label) {
   return out;
 }
 var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
+var COUNTERPART_HOSTS = ["claude", "opencode", "agy"];
+var HOST_OF_KIND = { "claude-only": "claude", "opencode-only": "opencode", "agy-only": "agy" };
+var GENERAL_MARKER_RE = /^<!-- no-counterpart: ([a-z]+(?:, [a-z]+)*) -->$/;
+var COUNTERPART_COMMENT_RE = /<!--\s*no[-_ ][\s\S]*?counterpart[\s\S]*?(?:-->|$)/gi;
+function noCounterpartHosts(line) {
+  if (line === NO_COUNTERPART_MARKER) return ["opencode"];
+  const m = GENERAL_MARKER_RE.exec(line);
+  return m ? m[1].split(", ") : null;
+}
 var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
-function validateFences(text, label) {
+function counterpartViolations(text, lines, label) {
+  const out = [];
+  for (const m of text.matchAll(COUNTERPART_COMMENT_RE)) {
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    const hosts = lines[lineIndex] === m[0] ? noCounterpartHosts(m[0]) : null;
+    if (!hosts) {
+      out.push({ kind: "fence_counterpart_malformed", detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} is not '${NO_COUNTERPART_MARKER}' or '<!-- no-counterpart: host, host -->' on a line of its own` });
+      continue;
+    }
+    const bad = hosts.filter((h) => !COUNTERPART_HOSTS.includes(h));
+    if (bad.length || new Set(hosts).size !== hosts.length) {
+      out.push({ kind: "fence_counterpart_host", detail: `${label}:${lineIndex + 1}: no-counterpart hosts must be distinct names from ${COUNTERPART_HOSTS.join(", ")}; got ${hosts.join(", ")}` });
+    }
+  }
+  return out;
+}
+function unaccountedHosts(hostBlocks, lines, label) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const covered = new Set(run.flatMap((b) => [b.host, ...b.noCounterpart]));
+    const missing = COUNTERPART_HOSTS.filter((h) => !covered.has(h));
+    if (missing.length) {
+      out.push({ kind: "fence_host_unaccounted", detail: `${label}:${run[0].start}: this host block has no counterpart for ${missing.join(", ")}; add a ${missing.map((h) => `${h}-only`).join(" / ")} block, or '<!-- no-counterpart: ${missing.join(", ")} -->' as the first line inside one of the run's blocks` });
+    }
+    run = [];
+  };
+  for (const block of hostBlocks) {
+    const prev = run[run.length - 1];
+    if (prev && !lines.slice(prev.end, block.start - 1).every((l) => l.trim() === "")) flush();
+    run.push(block);
+  }
+  flush();
+  return out;
+}
+function validateFences(text, label, { allHosts = false } = {}) {
   const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
+  violations.push(...counterpartViolations(text.replace(/\r\n/g, "\n"), splitLines(text), label));
   let openFence = null;
+  const hostBlocks = [];
   const lines = splitLines(text);
   lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
@@ -5898,16 +5946,27 @@ function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
-      if (marker.kind === "claude-only" || marker.kind === "opencode-only") {
-        const body = lines.slice(openFence.line, index).filter((l) => l !== NO_COUNTERPART_MARKER);
+      const host = HOST_OF_KIND[marker.kind];
+      if (host) {
+        const body = lines.slice(openFence.line, index).filter((l) => !noCounterpartHosts(l));
         if (!body.some((l) => l.trim() !== "")) {
           violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
         }
+        hostBlocks.push({ host, start: openFence.line, end: index + 1, noCounterpart: noCounterpartHosts(lines[openFence.line]) ?? [] });
+        lines.slice(openFence.line, index).forEach((l, i) => {
+          const hosts = noCounterpartHosts(l);
+          if (!hosts) return;
+          if (i !== 0) {
+            violations.push({ kind: "fence_counterpart_misplaced", detail: `${label}:${openFence.line + i + 1}: a no-counterpart marker must be the first line inside its ${marker.kind} block` });
+          } else if (hosts.includes(host)) {
+            violations.push({ kind: "fence_counterpart_self", detail: `${label}:${openFence.line + 1}: a ${marker.kind} block cannot declare that ${host} has no counterpart for itself` });
+          }
+        });
       }
       if (marker.kind === "claude-only") {
         const first = lines[openFence.line];
         const next = lines.slice(index + 1).find((l) => l.trim() !== "");
-        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS["opencode-only"].open) {
+        if (!(noCounterpartHosts(first) ?? []).includes("opencode") && next !== FENCE_KINDS["opencode-only"].open) {
           violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
         }
       }
@@ -5917,6 +5976,7 @@ function validateFences(text, label) {
   if (openFence) {
     violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
   }
+  if (allHosts) violations.push(...unaccountedHosts(hostBlocks, lines, label));
   return violations;
 }
 function render(text, label, keepKinds) {
@@ -5929,7 +5989,7 @@ function render(text, label, keepKinds) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
-    if (line === NO_COUNTERPART_MARKER) continue;
+    if (noCounterpartHosts(line)) continue;
     if (marker) {
       inside = marker.role === "open" ? marker.kind : null;
       continue;
@@ -5947,6 +6007,9 @@ function renderPortableText(text, label) {
 }
 function renderOpenCodeFullText(text, label) {
   return render(text, label, ["sterling-only", "opencode-only"]);
+}
+function renderAgyText(text, label) {
+  return render(text, label, ["sterling-only", "agy-only"]);
 }
 
 // scripts/lib/checks.mjs
@@ -8097,6 +8160,7 @@ function installRoots(env = process.env, home = homedir()) {
   return [
     { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
     { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+    { host: 'agy', dir: join(home, '.gemini', 'config', 'plugins') },
   ];
 }
 
@@ -8111,7 +8175,11 @@ function sterlingRootsLs(dir) {
 }
 
 function readCopyVersion(root, host) {
-  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  const manifests = host === 'opencode'
+    ? ['package.json', '.claude-plugin/plugin.json']
+    : host === 'agy'
+      ? ['.antigravity-plugin/plugin.json', '.claude-plugin/plugin.json', 'package.json']
+      : ['.claude-plugin/plugin.json', 'package.json'];
   for (const rel of manifests) {
     let text;
     try {
@@ -8129,7 +8197,7 @@ function readCopyVersion(root, host) {
     if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
-  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+  return { reason: 'no ' + manifests.join(' or ') };
 }
 
 // The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
@@ -8180,6 +8248,11 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    if (host === 'agy') {
+      // One copy per machine, at <dir>/sterling; an absent directory is no copy, not a skip.
+      if (existsSync(join(dir, 'sterling'))) consider(join(dir, 'sterling'), host);
+      continue;
+    }
     // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
     // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
@@ -8193,6 +8266,9 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
   return { roots, copies, skipped };
 }
 
+// The tie order between hosts at an equal version: the higher rank wins.
+const STERLING_HOST_RANK = { 'claude-code': 3, opencode: 2, agy: 1 };
+
 function newestInstalledSterling(env = process.env, home = homedir()) {
   let best = null;
   for (const c of scanInstalledSterling(env, home).copies) {
@@ -8201,7 +8277,7 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
       continue;
     }
     const d = compareSterlingVersions(c.version, best.version) ||
-      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      Math.sign((STERLING_HOST_RANK[c.host] || 0) - (STERLING_HOST_RANK[best.host] || 0)) ||
       (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
     if (d > 0) best = c;
   }
@@ -8212,7 +8288,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
   if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
+  if (host === 'agy') return 'agy plugin install <a directory holding a Sterling checkout>';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode, or agy plugin install <a directory holding a Sterling checkout> for Antigravity CLI';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -8352,7 +8429,7 @@ function isSterlingRoot(dir) {
 
 // scripts/lib/worktree-root.mjs
 function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git2 = (args2, at) => spawnSync2("git", args2, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const git3 = (args2, at) => spawnSync2("git", args2, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
     try {
       return realpathSync3(p);
@@ -8360,7 +8437,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
       return null;
     }
   };
-  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  const r = git3(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
@@ -8368,7 +8445,7 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   const commonReal = real(resolve5(cwd, commonDir));
   const worktree = real(toplevel);
   if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const core = git3(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
   const settings = {};
   if (!core.error && core.status === 0) {
     for (const line of core.stdout.split("\n")) {
@@ -9644,6 +9721,234 @@ function formatOpenCodeRows(result) {
   return result.rows.map((r) => `OpenCode ${r.status}: ${r.item}${r.detail ? ` \u2014 ${r.detail}` : ""}`);
 }
 
+// scripts/lib/agy-setup.mjs
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { createHash as createHash5 } from "node:crypto";
+import { existsSync as existsSync10, mkdirSync as mkdirSync4, readFileSync as readFileSync10, statSync as statSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute2, join as join14, resolve as resolve8 } from "node:path";
+var AGY_AGENTS_DIR = ".agents/agents";
+var GEMINI_MD = "GEMINI.md";
+var AGY_CONDUCTOR = "conductor";
+var GEMINI_MD_MAX_BYTES = 24e3;
+var AGY_MCP_SERVER_NAME = "sterling";
+var EXCLUDE_BEGIN2 = "# >>> sterling agy (managed by Sterling init/update; per-user files, never committed)";
+var EXCLUDE_END2 = "# <<< sterling agy";
+var HEADER_RE2 = /^<!-- sterling-agy renderer=agy\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
+var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
+var SHELL = ["run_command", "command_status"];
+var EDIT = ["write_file", "edit_file", "multi_replace_file_content"];
+var WEB = ["search_web", "read_url_content"];
+var DISPATCH = ["invoke_subagent", "send_message"];
+var AGY_TOOLS = {
+  conductor: [...READ, ...SHELL, ...EDIT, ...WEB, ...DISPATCH, "ask_question"],
+  implementor: [...READ, ...SHELL, ...EDIT, ...WEB],
+  "implementor-hard": [...READ, ...SHELL, ...EDIT, ...WEB],
+  researcher: [...READ, ...SHELL, ...WEB],
+  scout: [...READ],
+  reviewer: [...READ, ...SHELL],
+  sparring: [...READ, ...SHELL],
+  librarian: ["read_file", "grep_search"],
+  preflight: [...READ]
+};
+var AGY_ROSTER = Object.keys(AGY_TOOLS);
+var CONDUCTOR_DESCRIPTION = "Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Started with `agy --agent conductor` from .agents/agents/conductor/agent.md (written by /sterling:init and sync-agents); never invoked as a subagent.";
+var fwd4 = (p) => p.replace(/\\/g, "/");
+var normalize4 = (s) => s.replace(/\r\n/g, "\n");
+var sha2563 = (text) => createHash5("sha256").update(text).digest("hex");
+function agyPluginCopy({ env = process.env, home = homedir4() } = {}) {
+  return join14(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
+}
+function probeAgy({ env = process.env, home = homedir4() } = {}) {
+  const forced = env.STERLING_AGY_PROBE;
+  if (forced === "ok") return { installed: true, version: "forced" };
+  if (forced === "absent") return { installed: false, reason: "STERLING_AGY_PROBE=absent" };
+  if (forced) throw new Error(`STERLING_AGY_PROBE must be 'ok' or 'absent' (got '${forced}')`);
+  let r = spawnSync5("agy", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const homeBin = join14(home, ".local", "bin", "agy");
+  if (r.error?.code === "ENOENT" && existsSync10(homeBin)) r = spawnSync5(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `agy` on PATH or in ~/.local/bin" : `agy --version could not run (${r.error.message})` };
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
+  if (r.status !== 0 || !m) return { installed: false, reason: `agy --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
+  return { installed: true, version: m[0] };
+}
+function agyMcpRoot({ pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed }) {
+  const isInstalled = installed ?? isInstalledCopy(pluginRoot2, { env, home });
+  if (!isInstalled) return { root: resolve8(pluginRoot2), why: "the Sterling clone running this" };
+  const agyCopy = agyPluginCopy({ env, home });
+  if (existsSync10(join14(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
+  return { root: resolve8(pluginRoot2), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd4(agyCopy)})` };
+}
+var yamlString = (s) => JSON.stringify(s);
+function templateDescription(frontmatter, label) {
+  const line = frontmatter.match(/^description:\s*(.+)$/m)?.[1];
+  if (!line) throw new Error(`agy agent ${label}: no description in the template frontmatter (P5)`);
+  return /^(["']).*\1$/.test(line) ? line.slice(1, -1) : line;
+}
+function renderAgyAgent(templateContent, label, name, { root, nodePath = process.execPath }) {
+  const tools = AGY_TOOLS[name];
+  if (!tools) throw new Error(`agy agent ${label}: '${name}' is not in the agy roster (P5)`);
+  const rendered = normalize4(renderAgyText(templateContent, label));
+  const m = rendered.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error(`agy agent ${label}: missing frontmatter block (P5)`);
+  const [, frontmatter, body] = m;
+  const leftover = body.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) throw new Error(`agy agent ${label}: the body keeps the token ${leftover[0]}, which nothing fills on agy (P5)`);
+  const conductor = name === AGY_CONDUCTOR;
+  const description = conductor ? CONDUCTOR_DESCRIPTION : templateDescription(frontmatter, label);
+  const fm = [
+    "---",
+    `name: ${name}`,
+    `description: ${yamlString(description)}`,
+    "model: inherit",
+    `mainAgent: ${conductor}`,
+    `subagent: ${!conductor}`,
+    "tools:",
+    ...tools.map((t) => `  - ${t}`),
+    "# agy cannot limit MCP tools per agent: every tool of a declared server is reachable through call_mcp_tool.",
+    "mcpServers:",
+    `  - name: ${AGY_MCP_SERVER_NAME}`,
+    `    command: ${yamlString(fwd4(nodePath))}`,
+    "    args:",
+    `      - ${yamlString(fwd4(join14(root, "mcp", "sterling-mcp.mjs")))}`,
+    `      - ${yamlString("--project")}`,
+    `      - ${yamlString(".")}`,
+    "---"
+  ].join("\n");
+  const content = `${fm}
+STERLING-ROLE: ${name}
+${body}`;
+  const header = `<!-- sterling-agy renderer=agy/1 template=${name} template_hash=${sha2563(templateContent)} content_hash=${sha2563(content)} -->`;
+  return `${fm}
+STERLING-ROLE: ${name}
+${header}
+${body}`;
+}
+function unstamped(disk, headerLine) {
+  return disk.replace(`${headerLine}
+`, "");
+}
+function refusal2(item, what, remedy) {
+  return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
+}
+function git2(projectDir, args2) {
+  return spawnSync5("git", args2, { cwd: projectDir, encoding: "utf8" });
+}
+function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath }) {
+  const rows = [];
+  for (const name of AGY_ROSTER) {
+    const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
+    const path = join14(projectDir, rel);
+    if (tracked.includes(rel)) {
+      rows.push(refusal2(rel, `${rel} is tracked by git, and the Sterling agy agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
+      continue;
+    }
+    const templatePath = join14(pluginRoot2, "agent-templates", `${name}.md`);
+    const content = renderAgyAgent(readFileSync10(templatePath, "utf8"), `agent-templates/${name}.md`, name, { root, nodePath });
+    let disk = null;
+    if (existsSync10(path)) {
+      if (!statSync4(path).isFile()) {
+        rows.push(refusal2(rel, `${rel} exists and is not a file`, "move it aside, then rerun /sterling:update"));
+        continue;
+      }
+      disk = normalize4(readFileSync10(path, "utf8"));
+      const h = disk.match(HEADER_RE2);
+      if (!h || h[1] !== name) {
+        rows.push(refusal2(rel, `${rel} carries no Sterling agy header (a file Sterling did not write)`, "rename or remove it, then rerun /sterling:update"));
+        continue;
+      }
+      if (sha2563(unstamped(disk, h[0])) !== h[3]) {
+        rows.push(refusal2(rel, `${rel} was edited after Sterling wrote it`, "move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update"));
+        continue;
+      }
+    }
+    if (disk === content) {
+      rows.push({ item: rel, status: "matches" });
+      continue;
+    }
+    mkdirSync4(dirname4(path), { recursive: true });
+    writeFileAtomic(path, content);
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+  }
+  return rows;
+}
+function projectNameOf(projectDir) {
+  const configPath2 = join14(storeRootFor(projectDir), ".sterling", "config.json");
+  if (!existsSync10(configPath2)) return basename4(projectDir);
+  const name = JSON.parse(readFileSync10(configPath2, "utf8")).project_name;
+  return typeof name === "string" && name ? name : basename4(projectDir);
+}
+function renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName }) {
+  const rel = "templates/target-claude-md.md";
+  const text = renderAgyText(readFileSync10(join14(pluginRoot2, rel), "utf8"), rel).replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll("{{STERLING_ROOT}}", () => fwd4(root));
+  if (/^@AGENTS\.md\s*$/m.test(text)) throw new Error(`${GEMINI_MD}: the agy render of ${rel} imports @AGENTS.md; agy loads AGENTS.md itself (P5)`);
+  const leftover = text.match(/\{\{[A-Z_]+\}\}/);
+  if (leftover) throw new Error(`${GEMINI_MD}: the agy render of ${rel} keeps the token ${leftover[0]} (P5)`);
+  const dead = findDeadTerms(text);
+  if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > GEMINI_MD_MAX_BYTES) throw new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`);
+  return text;
+}
+function ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root }) {
+  const path = join14(projectDir, GEMINI_MD);
+  let want;
+  try {
+    want = renderGeminiMd({ pluginRoot: pluginRoot2, root, projectName: projectNameOf(projectDir) });
+  } catch (err) {
+    return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
+  }
+  if (!existsSync10(path)) {
+    writeFileAtomic(path, want);
+    return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
+  }
+  if (normalize4(readFileSync10(path, "utf8")) === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
+  return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
+}
+function ensureAgyExcluded({ projectDir, gemini }) {
+  const label = ".git/info/exclude (agy)";
+  const gp = git2(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
+  if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
+  const excludePath = resolve8(projectDir, gp.stdout.trim());
+  const current = existsSync10(excludePath) ? normalize4(readFileSync10(excludePath, "utf8")) : "";
+  const begin = current.indexOf(EXCLUDE_BEGIN2);
+  const end = current.indexOf(EXCLUDE_END2);
+  const listed = begin !== -1 && end > begin && current.slice(begin, end).split("\n").includes(`/${GEMINI_MD}`);
+  const excludeGemini = gemini === "exclude" || gemini === "keep" && listed;
+  const lines = [...AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`), ...excludeGemini ? [`/${GEMINI_MD}`] : []];
+  const want = [EXCLUDE_BEGIN2, ...lines, EXCLUDE_END2].join("\n");
+  if (begin !== -1 && end > begin) {
+    if (current.slice(begin, end + EXCLUDE_END2.length) === want) return { item: label, status: "matches", detail: lines.join(" ") };
+    writeFileSync5(excludePath, current.slice(0, begin) + want + current.slice(end + EXCLUDE_END2.length));
+    return { item: label, status: "refreshed", detail: lines.join(" ") };
+  }
+  mkdirSync4(dirname4(excludePath), { recursive: true });
+  const sep3 = current === "" || current.endsWith("\n") ? "" : "\n";
+  writeFileSync5(excludePath, `${current}${sep3}${want}
+`);
+  return { item: label, status: "created", detail: lines.join(" ") };
+}
+function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed, probe = probeAgy, nodePath = process.execPath }) {
+  if (!isAbsolute2(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
+  if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
+  const found = probe({ env, home });
+  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
+  const { root, why } = agyMcpRoot({ pluginRoot: pluginRoot2, env, home, installed });
+  const ls = git2(projectDir, ["ls-files", "--", AGY_AGENTS_DIR, GEMINI_MD]);
+  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+  const rows = [{ item: "Sterling MCP server", status: "matches", detail: `${fwd4(join14(root, "mcp", "sterling-mcp.mjs"))} (${why})` }];
+  rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath }));
+  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot: pluginRoot2, root });
+  rows.push(gemini);
+  const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
+  rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));
+  return { root, rows };
+}
+function formatAgyRows(result) {
+  if (result.skipped) return [`Antigravity CLI (agy): ${result.skipped}`];
+  return result.rows.map((r) => `Antigravity CLI (agy) ${r.status}: ${r.item}${r.detail ? ` \u2014 ${r.detail}` : ""}`);
+}
+
 // scripts/lib/project-identity.mjs
 function workIdentityRefusal(root, mode) {
   let onPostgres;
@@ -9665,9 +9970,9 @@ function workIdentityRefusal(root, mode) {
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
 
 // scripts/lib/claude-probe.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 function probeClaude({ env = process.env } = {}) {
-  const r = spawnSync5("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync6("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `claude` on PATH" : `claude --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `claude --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -9682,13 +9987,13 @@ function probeClaudeWithOverride({ env = process.env } = {}) {
 }
 
 // scripts/sync-agents.mjs
-var here = dirname4(fileURLToPath2(new URL("../scripts/sync-agents.mjs", import.meta.url).href));
-var pluginRoot = resolve8(here, "..");
+var here = dirname5(fileURLToPath2(new URL("../scripts/sync-agents.mjs", import.meta.url).href));
+var pluginRoot = resolve9(here, "..");
 var args = process.argv.slice(2);
 var targetIdx = args.indexOf("--target");
-var targetDir = targetIdx !== -1 ? resolve8(args[targetIdx + 1]) : process.cwd();
+var targetDir = targetIdx !== -1 ? resolve9(args[targetIdx + 1]) : process.cwd();
 var configDir = storeRootFor(targetDir);
-var pluginVersion = JSON.parse(readFileSync10(join14(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
+var pluginVersion = JSON.parse(readFileSync11(join15(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
 var projectMode;
 try {
   projectMode = readProjectMode(configDir);
@@ -9719,11 +10024,11 @@ try {
   process.exit(2);
 }
 var claudeHost = claudeProbe.installed;
-var configPath = join14(configDir, ".sterling", "config.json");
-var configSource = existsSync10(configPath) ? configPath : join14(pluginRoot, "templates", "default-config.json");
+var configPath = join15(configDir, ".sterling", "config.json");
+var configSource = existsSync11(configPath) ? configPath : join15(pluginRoot, "templates", "default-config.json");
 var config;
 try {
-  config = parseConfig(JSON.parse(readFileSync10(configSource, "utf8")));
+  config = parseConfig(JSON.parse(readFileSync11(configSource, "utf8")));
 } catch (err) {
   console.log(`refused_config: ${configSource.replace(/\\/g, "/")} does not validate (${err.message.replace(/\s+/g, " ")}); fix it (the TUI System tab writes config.models), then rerun /sterling:update; nothing synced`);
   process.exit(2);
@@ -9736,9 +10041,9 @@ if (configMigration.status === "refused") {
 }
 if (configMigration.status === "migrated") config = parseConfig(configMigration.config);
 var { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: "" } : syncAgents({
-  templatesDir: join14(pluginRoot, "agent-templates"),
-  registryPath: join14(pluginRoot, "agent-templates", "registry.json"),
-  targetAgentsDir: join14(targetDir, ".claude", "agents"),
+  templatesDir: join15(pluginRoot, "agent-templates"),
+  registryPath: join15(pluginRoot, "agent-templates", "registry.json"),
+  targetAgentsDir: join15(targetDir, ".claude", "agents"),
   pluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
   config
@@ -9773,6 +10078,14 @@ for (const r of opencodeSetup.rows ?? []) {
     console.error("\n" + r.instruction + "\n");
   }
 }
+var agySetup = setupAgy({ projectDir: targetDir, pluginRoot });
+for (const line of formatAgyRows(agySetup)) console.log(line);
+for (const r of agySetup.rows ?? []) {
+  if (r.refused) {
+    refused += 1;
+    console.error("\n" + r.instruction + "\n");
+  }
+}
 var cloneTarget;
 try {
   cloneTarget = isSterlingClone(targetDir, pluginRoot);
@@ -9787,8 +10100,8 @@ var handoffTarget = cloneTarget === false && handoffEnabled;
 if (cloneTarget === false && !handoffTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED \u2014 ${HANDOFF_OFF_DETAIL}`);
 if (cloneTarget === false && handoffUnmaintained.length) console.log(handoffUnmaintainedNotice(handoffUnmaintained));
 var { report: opencodeReport } = !handoffTarget ? { report: [] } : syncOpenCodeAgents({
-  templatesDir: join14(pluginRoot, "agent-templates"),
-  registryPath: join14(pluginRoot, "agent-templates", "registry.json"),
+  templatesDir: join15(pluginRoot, "agent-templates"),
+  registryPath: join15(pluginRoot, "agent-templates", "registry.json"),
   targetDir
 });
 for (const r of opencodeReport) {

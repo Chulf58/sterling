@@ -350,13 +350,13 @@ test('sterling-check.mjs: authoring bakes the clone path; installed bakes NO pat
       for (const s of ['check-record-citations.mjs', 'check-stale-claims.mjs']) touch(join(cache, v, 'scripts', s), `console.log('STUB ' + import.meta.url);\n`);
     }
     writeFileSync(join(project, 'sterling-check.mjs'), installed);
-    const env = { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') };
+    const env = { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') };
     const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env, encoding: 'utf8', timeout: 30_000 });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /STUB file:.*\/1\.10\.0\/scripts\/check-record-citations\.mjs/, 'the highest version ran the citation check');
     assert.doesNotMatch(r.stdout, /1\.9\.0/, 'the older version did not run');
 
-    const empty = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, 'nothing-here'), XDG_CACHE_HOME: join(home, 'nothing-here') }, encoding: 'utf8', timeout: 30_000 });
+    const empty = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: join(home, 'nothing-here'), XDG_CACHE_HOME: join(home, 'nothing-here') }, encoding: 'utf8', timeout: 30_000 });
     assert.equal(empty.status, 3, 'no installed version: exit 3 (the check never ran)');
     assert.match(empty.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm/);
     assert.match(empty.stderr, /claude plugin install sterling@sterling .*opencode plugin add "github:Chulf58\/sterling#semver:>=0\.18\.0"/, 'generated from a copy under neither root: both remedies');
@@ -385,7 +385,7 @@ test('sterling-check.mjs prefers <plugin>/bin/<check>.mjs over the scripts/ sour
       touch(join(v, 'scripts', s), `console.log('SOURCE ' + import.meta.url); process.exit(1);\n`);
     }
     writeFileSync(join(project, 'sterling-check.mjs'), installed);
-    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') }, encoding: 'utf8', timeout: 30_000 });
+    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') }, encoding: 'utf8', timeout: 30_000 });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /BIN file:.*\/bin\/check-record-citations\.mjs/);
     assert.match(r.stdout, /BIN file:.*\/bin\/check-stale-claims\.mjs/);
@@ -411,7 +411,7 @@ test('sterling-check.mjs on an installed copy runs the REAL bundled checks with 
     git('init', '-q');
     git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
     writeFileSync(join(project, 'sterling-check.mjs'), installed);
-    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') }, encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') }, encoding: 'utf8', timeout: 60_000 });
     const out = r.stdout + r.stderr;
     assert.doesNotMatch(out, /ERR_MODULE_NOT_FOUND|Cannot find (package|module)/, `every check loaded: ${out}`);
     assert.notEqual(r.status, 3, `no check failed to run: ${out}`);

@@ -607,9 +607,9 @@ function ownPluginRoot() {
 }
 
 /** The refusal for an installed copy, naming the update command of the host it was
- *  installed by (installHostOf); null (a copy under neither install root) names both. */
+ *  installed by (installHostOf); null (a copy under no install root) names every host's. */
 export function installedCopyRefusal(host, { env = process.env, home = homedir(), root = null } = {}) {
-  const by = host === 'claude-code' ? 'as a Claude Code plugin' : host === 'opencode' ? 'as an OpenCode plugin' : 'as a plugin';
+  const by = host === 'claude-code' ? 'as a Claude Code plugin' : host === 'opencode' ? 'as an OpenCode plugin' : host === 'agy' ? 'as an Antigravity CLI plugin' : 'as a plugin';
   return `Sterling is installed ${by} — update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 
