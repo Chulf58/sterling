@@ -5,8 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { detectInstalledHosts, outputPath, planCustomAgents, syncCustomAgents, translateTools } from '../lib/custom-agent-render.mjs';
 
-const DENIES = ['sterling_knowledge_create'];
-const OPTS = { storeWriteDenies: DENIES };
+const OPTS = {};
 const ALL = ['claude', 'opencode', 'agy'];
 const KEY = 'custom-team-scout';
 
@@ -42,9 +41,7 @@ test('renders one agent to all three hosts with a stamp, and a second run change
     const oc = read(p.root, '.opencode/agents/team-scout.md');
     assert.match(oc, /^model: openai\/gpt-6.1-sol$/m);
     assert.doesNotMatch(oc, /effort/);
-    assert.match(oc, /^  edit: deny$/m);
-    assert.match(oc, /^  bash: deny$/m);
-    assert.match(oc, /^  sterling_knowledge_create: deny$/m);
+    assert.match(oc, /^permission:\n  "\*": deny\n  read: allow\n  grep: allow\n  glob: allow\n---/m);
     const agy = read(p.root, '.agents/agents/team-scout/agent.md');
     assert.match(agy, /^model: pro$/m);
     assert.match(agy, /^ {2}- read_file$/m);
@@ -82,15 +79,19 @@ test('OpenCode takes a full claude id from the source as anthropic/<id> when con
   }
 });
 
+const rulesOf = (r) => r.rules.map((x) => `${x.action}:${x.verdict}`);
+
 test('tool translation: what each host can and cannot express', () => {
   assert.deepEqual(translateTools('claude', { tools: 'mcp__x__y' }), { ok: true });
-  const oc = translateTools('opencode', { tools: 'Read, Grep' });
-  assert.deepEqual(oc, { ok: true, permission: { edit: 'deny', bash: 'deny', webfetch: 'deny', websearch: 'deny', task: 'deny' }, storeDeny: true });
-  assert.deepEqual(translateTools('opencode', { tools: ['Read', 'Edit', 'Write', 'MultiEdit', 'Bash'] }).permission, { webfetch: 'deny', websearch: 'deny', task: 'deny' });
+  assert.deepEqual(rulesOf(translateTools('opencode', { tools: 'Read, Grep, Glob' })), ['*:deny', 'read:allow', 'grep:allow', 'glob:allow']);
+  assert.deepEqual(rulesOf(translateTools('opencode', { tools: ['Read', 'Edit', 'Write', 'MultiEdit', 'Bash', 'WebSearch', 'Agent'] })), ['*:deny', 'read:allow', 'edit:allow', 'bash:allow', 'websearch:allow', 'task:allow']);
   assert.match(translateTools('opencode', { tools: 'Read, Edit' }).reason, /grants edit as one permission/);
-  assert.match(translateTools('opencode', { tools: 'Read, mcp__sterling__knowledge_query' }).reason, /MCP tool entry/);
   assert.match(translateTools('opencode', { tools: 'Read, Teleport' }).reason, /Teleport/);
-  assert.deepEqual(translateTools('opencode', { disallowedTools: 'Bash' }), { ok: true, permission: { bash: 'deny' }, storeDeny: false });
+  assert.match(translateTools('opencode', { tools: 'Read, mcp__sterling' }).reason, /whole server or a wildcard/);
+  assert.match(translateTools('opencode', { tools: 'mcp__sterling__knowledge_*' }).reason, /whole server or a wildcard/);
+  assert.deepEqual(rulesOf(translateTools('opencode', { disallowedTools: 'Bash' })), ['bash:deny']);
+  assert.deepEqual(rulesOf(translateTools('opencode', {})), [], 'no tools line leaves the agent unrestricted');
+  assert.deepEqual(rulesOf(translateTools('opencode', { disallowedTools: 'mcp__sterling__knowledge_create' })), ['sterling_knowledge_create:deny']);
   assert.deepEqual(translateTools('agy', { tools: 'Read, Grep' }), { ok: true, tools: ['read_file', 'grep_search'] });
   assert.match(translateTools('agy', { tools: 'Read, mcp__sterling__knowledge_query' }).reason, /cannot limit MCP/);
   assert.match(translateTools('agy', { tools: 'Read, NotebookEdit' }).reason, /no tool for NotebookEdit/);
@@ -98,15 +99,40 @@ test('tool translation: what each host can and cannot express', () => {
   assert.ok(!translateTools('agy', { disallowedTools: 'Bash' }).tools.includes('run_command'));
 });
 
-test('an allowlist a host cannot express refuses that host only, never renders broader', () => {
-  const p = project(source({ tools: 'Read, mcp__sterling__knowledge_query' }));
+test('OpenCode: a read-only allowlist is a deny-all and exactly its allows; no allow rule holds a wildcard', () => {
+  const p = project(source({ tools: 'Read, Grep, Glob' }));
+  try {
+    sync(p, { hosts: ['opencode'] });
+    const oc = read(p.root, '.opencode/agents/team-scout.md');
+    assert.match(oc, /^---\ndescription: "Scouts the team folders"\nmode: subagent\npermission:\n  "\*": deny\n  read: allow\n  grep: allow\n  glob: allow\n---\n<!-- sterling-custom /);
+    const permission = oc.split('permission:\n')[1].split('\n---')[0].split('\n');
+    assert.deepEqual(permission.filter((l) => /: allow$/.test(l) && l.includes('*')), [], 'no allow rule holds a wildcard');
+    assert.equal(permission.filter((l) => l.includes('*')).length, 1, 'the leading deny-all is the only wildcard');
+  } finally {
+    p.done();
+  }
+});
+
+test('OpenCode: an MCP allowlist entry renders as <server>_<tool>, normalized, and a deny wins over an allow', () => {
+  const p = project(source({ tools: 'Read, mcp__sterling__knowledge_query, mcp__my.server__do-it, mcp__sterling__knowledge_create', disallowedTools: 'mcp__sterling__knowledge_create' }));
+  try {
+    const r = sync(p, { hosts: ['opencode', 'agy'] });
+    const oc = read(p.root, '.opencode/agents/team-scout.md');
+    assert.match(oc, /\n {2}"\*": deny\n {2}read: allow\n {2}sterling_knowledge_query: allow\n {2}my_server_do-it: allow\n {2}sterling_knowledge_create: deny\n---/);
+    assert.ok(!/sterling_knowledge_create: allow/.test(oc));
+    assert.match(r.refused.find((x) => x.host === 'agy').reason, /cannot limit MCP/, 'agy keeps its refusal');
+  } finally {
+    p.done();
+  }
+});
+
+test('a host that cannot express a restriction refuses that host only, never renders broader', () => {
+  const p = project(source({ tools: 'Read, Edit' }));
   try {
     const r = sync(p);
-    assert.deepEqual(r.written.map((w) => w.host), ['claude']);
-    assert.deepEqual(r.refused.map((x) => x.host).sort(), ['agy', 'opencode']);
-    assert.match(r.refused.find((x) => x.host === 'agy').reason, /MCP/);
+    assert.deepEqual(r.written.map((w) => w.host), ['claude', 'agy']);
+    assert.match(r.refused.find((x) => x.host === 'opencode').reason, /grants edit as one permission/);
     assert.equal(existsSync(join(p.root, '.opencode/agents/team-scout.md')), false);
-    assert.equal(existsSync(join(p.root, '.agents/agents/team-scout')), false);
     const hooks = project(source({ hooks: 'x' }));
     try {
       assert.match(sync(hooks).refused.find((x) => x.host === 'opencode').reason, /hooks/);

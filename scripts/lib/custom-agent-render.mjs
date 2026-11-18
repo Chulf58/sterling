@@ -26,8 +26,7 @@ import { AGENT_MODEL_KEY, CUSTOM_AGENT_KEY_RE, CUSTOM_AGENT_SLUG_RE, customAgent
 import { AGENT_SOURCE_DIR } from './agent-adoption.mjs';
 import { AGY_AGENTS_DIR, AGY_ROSTER, probeAgy } from './agy-setup.mjs';
 import { writeFileAtomicIfChanged } from './atomic-write.mjs';
-import { permissionLines } from './opencode-agents.mjs';
-import { probeOpenCode, sterlingRootFrom, storeWriteTools } from './opencode-install.mjs';
+import { probeOpenCode } from './opencode-install.mjs';
 
 export const CUSTOM_RENDERER = 'custom-agent/1';
 export const CUSTOM_HOSTS = ['claude', 'opencode', 'agy'];
@@ -47,29 +46,41 @@ export function outputPath(host, name) {
 }
 
 // ── tool translation ─────────────────────────────────────────────────────────
-// Claude tool name → what OpenCode and agy call it. `oc` is the OpenCode permission key the tool
-// belongs to (null: always available there); `agy` the agy built-ins. Names are from the agy
-// measurement in agy-setup.mjs and the OpenCode keys of OPENCODE_PERMISSION_KEYS.
+// Claude tool name → what OpenCode and agy call it. `agy` is the agy built-ins, named
+// by the measurement in agy-setup.mjs; the OpenCode actions are OC_ACTIONS below.
 const TOOL_MAP = {
-  Read: { oc: null, agy: ['read_file'] },
-  Grep: { oc: null, agy: ['grep_search'] },
-  Glob: { oc: null, agy: ['find_by_name', 'list_dir'] },
-  LS: { oc: null, agy: ['list_dir'] },
-  Bash: { oc: 'bash', agy: ['run_command', 'command_status'] },
-  Edit: { oc: 'edit', agy: ['edit_file'] },
-  Write: { oc: 'edit', agy: ['write_file'] },
-  MultiEdit: { oc: 'edit', agy: ['multi_replace_file_content'] },
-  NotebookEdit: { oc: 'edit', agy: null },
-  WebFetch: { oc: 'webfetch', agy: ['read_url_content'] },
-  WebSearch: { oc: 'websearch', agy: ['search_web'] },
-  Task: { oc: 'task', agy: ['invoke_subagent', 'send_message'] },
-  Agent: { oc: 'task', agy: ['invoke_subagent', 'send_message'] },
-  TodoWrite: { oc: null, agy: [] },
+  Read: { agy: ['read_file'] },
+  Grep: { agy: ['grep_search'] },
+  Glob: { agy: ['find_by_name', 'list_dir'] },
+  LS: { agy: ['list_dir'] },
+  Bash: { agy: ['run_command', 'command_status'] },
+  Edit: { agy: ['edit_file'] },
+  Write: { agy: ['write_file'] },
+  MultiEdit: { agy: ['multi_replace_file_content'] },
+  NotebookEdit: { agy: null },
+  WebFetch: { agy: ['read_url_content'] },
+  WebSearch: { agy: ['search_web'] },
+  Task: { agy: ['invoke_subagent', 'send_message'] },
+  Agent: { agy: ['invoke_subagent', 'send_message'] },
+  TodoWrite: { agy: [] },
 };
-// A permission key's members: granting it grants all of them on OpenCode, so a partial grant
-// cannot be expressed there.
-const OC_GROUPS = { edit: ['Edit', 'Write', 'MultiEdit'], bash: ['Bash'], webfetch: ['WebFetch'], websearch: ['WebSearch'], task: ['Task', 'Agent'] };
-const OC_KEYS = Object.keys(OC_GROUPS);
+// OpenCode permission actions in the order they are written, each with the Claude tools it
+// covers. An action is one switch: granting it grants every member, so a grant of only some
+// members (Edit without Write) cannot be expressed and refuses the host. `task` is granted by
+// either of its two names. The action names are OpenCode's (opencode.ai permissions); the
+// webfetch/websearch pair is two actions (anti-pattern opencode-agent-permission-denying-webfetch-
+// but-not-websearch), and the five in OPENCODE_PERMISSION_KEYS are the ones Sterling's own roles use.
+const OC_ACTIONS = [
+  ['read', ['Read']],
+  ['grep', ['Grep']],
+  ['glob', ['Glob']],
+  ['list', ['LS']],
+  ['edit', ['Edit', 'Write', 'MultiEdit']],
+  ['bash', ['Bash']],
+  ['webfetch', ['WebFetch']],
+  ['websearch', ['WebSearch']],
+  ['task', ['Task', 'Agent']],
+];
 const AGY_ALL = [...new Set(Object.values(TOOL_MAP).flatMap((t) => t.agy ?? []))];
 
 function toolList(value) {
@@ -82,10 +93,10 @@ function toolList(value) {
  * Translate an agent's `tools` (allowlist) and `disallowedTools` (denylist) for one host.
  * Returns { ok: true, ... } or { ok: false, reason }.
  *   claude   verbatim, always ok.
- *   opencode ok: { permission, storeDeny } where permission denies the keys the agent may not use
- *            and storeDeny is true when an allowlist is given (the Sterling store-write tools are
- *            then denied, as for Sterling's own non-writing roles). Refused: an MCP tool, an unknown
- *            tool name, or a partial grant of one permission key (Edit without Write).
+ *   opencode ok: { rules: [{action, verdict}] }, in written order. With an allowlist the first rule is
+ *            `*` deny and each later one an exact allow (builtin actions, then each MCP entry as
+ *            <server>_<tool>); a denylist alone gives exact denies. Refused: an unknown tool name, a
+ *            whole-server or wildcard MCP entry, or a partial grant of one action (Edit without Write).
  *   agy      ok: { tools } (null when unrestricted). Refused: an MCP allowlist entry (agy cannot
  *            limit MCP tools), a tool with no agy name, or an unknown name.
  */
@@ -105,19 +116,38 @@ export function translateTools(host, { tools, disallowedTools }) {
     for (const n of deny) for (const t of TOOL_MAP[n]?.agy ?? []) granted.delete(t);
     return { ok: true, tools: AGY_ALL.filter((t) => granted.has(t)) };
   }
-  const mcp = names.filter((n) => n.startsWith('mcp__'));
-  if (mcp.length) return { ok: false, reason: `opencode cannot express the MCP tool entry ${mcp.join(', ')} from this agent's tools list` };
+  // OpenCode. An allowlist becomes a leading deny-all and then one exact allow per granted action
+  // (a `*` deny also hides the builtins, so each must be allowed back); no rule other than that
+  // first one holds a wildcard. A denylist alone becomes exact denies. No tools line leaves the
+  // agent unrestricted, as on Claude.
+  const mcpAction = (entry) => {
+    const m = /^mcp__([^_](?:[^_]|_(?!_))*)__(.+)$/.exec(entry);
+    if (!m || m[2].includes('*')) return null;
+    return `${m[1]}_${m[2]}`.replace(/[^A-Za-z0-9_-]/g, '_');
+  };
+  const mcpEntries = (list) => list.filter((n) => n.startsWith('mcp__'));
+  const badMcp = names.filter((n) => n.startsWith('mcp__') && mcpAction(n) === null);
+  if (badMcp.length) return { ok: false, reason: `opencode names an MCP tool as <server>_<tool>, so ${badMcp.join(', ')} (a whole server or a wildcard) cannot be kept to what it lists` };
   const granted = new Set(allow === null ? Object.keys(TOOL_MAP) : allow);
   for (const n of deny) granted.delete(n);
-  const permission = {};
-  for (const key of OC_KEYS) {
-    const members = OC_GROUPS[key].filter((m) => granted.has(m));
-    if (members.length === 0) permission[key] = 'deny';
-    else if (members.length !== OC_GROUPS[key].length && key !== 'task') {
-      return { ok: false, reason: `opencode grants ${key} as one permission, and this agent's tools allow only ${members.join(', ')} of ${OC_GROUPS[key].join(', ')}` };
+  const rules = [];
+  if (allow !== null) rules.push({ action: '*', verdict: 'deny' });
+  for (const [action, members] of OC_ACTIONS) {
+    const have = members.filter((m) => granted.has(m));
+    if (have.length === members.length || (action === 'task' && have.length > 0)) {
+      if (allow !== null) rules.push({ action, verdict: 'allow' });
+    } else if (have.length === 0) {
+      if (allow === null) rules.push({ action, verdict: 'deny' });
+    } else {
+      return { ok: false, reason: `opencode grants ${action} as one permission, and this agent's tools allow only ${have.join(', ')} of ${members.join(', ')}` };
     }
   }
-  return { ok: true, permission, storeDeny: allow !== null };
+  const denied = new Set(mcpEntries(deny).map(mcpAction));
+  if (allow !== null) {
+    for (const e of mcpEntries(allow)) if (!denied.has(mcpAction(e)) && !rules.some((r) => r.action === mcpAction(e))) rules.push({ action: mcpAction(e), verdict: 'allow' });
+  }
+  for (const action of denied) rules.push({ action, verdict: 'deny' });
+  return { ok: true, rules };
 }
 
 // ── source parsing ───────────────────────────────────────────────────────────
@@ -171,7 +201,7 @@ function withStamp(frontmatterBlock, body, host, key, sourceHash) {
  * Render one agent for one host. Returns { ok: true, name, content } or { ok: false, reason }.
  * `source` is parseSource output, `entry` the agent's config.models entry (any field may be absent).
  */
-export function renderCustomAgent({ host, key, name, source, entry, sourceHash, storeWriteDenies }) {
+export function renderCustomAgent({ host, key, name, source, entry, sourceHash }) {
   const { data, body } = source;
   const cfg = entry ?? {};
   const srcModel = typeof data.model === 'string' ? data.model : undefined;
@@ -195,12 +225,9 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash, 
   if (!translated.ok) return translated;
   if (host === 'opencode') {
     const resolved = resolveHostSettings({ model: cfg.model ?? (srcModel?.startsWith('claude-') ? srcModel : undefined), opencode_model: cfg.opencode_model }, 'opencode');
-    const permission = translated.permission;
     const lines = ['---', `description: ${yamlString(data.description)}`, 'mode: subagent'];
     if (resolved.model !== 'inherit') lines.push(`model: ${resolved.model}`);
-    const permLines = Object.keys(permission).length ? permissionLines(permission, key) : [];
-    const denies = translated.storeDeny ? storeWriteDenies.map((t) => `  ${t}: deny`) : [];
-    if (permLines.length || denies.length) lines.push(...(permLines.length ? permLines : ['permission:']), ...denies);
+    if (translated.rules.length) lines.push('permission:', ...translated.rules.map((r) => `  ${r.action === '*' ? '"*"' : r.action}: ${r.verdict}`));
     lines.push('---');
     return { ok: true, name, content: withStamp(lines.join('\n'), body, host, key, sourceHash) };
   }
@@ -281,7 +308,7 @@ function readSources(root) {
  * Plan the sync without writing: { ops, written, unchanged, refused, removed, skipped }.
  * ops are { path, content, previous } (content null removes the file).
  */
-export function planCustomAgents(projectRoot, config, { hosts, pluginRoot, storeWriteDenies } = {}) {
+export function planCustomAgents(projectRoot, config, { hosts } = {}) {
   const root = projectRoot;
   const models = config?.models ?? {};
   const result = { ops: [], written: [], unchanged: [], refused: [], removed: [], skipped: [] };
@@ -289,8 +316,6 @@ export function planCustomAgents(projectRoot, config, { hosts, pluginRoot, store
   const sources = readSources(root);
   const live = new Set();
   const refuse = (key, host, reason, path) => result.refused.push({ key, host, reason, ...(path ? { path } : {}) });
-  let denies = storeWriteDenies;
-  const getDenies = () => (denies ??= storeWriteTools(pluginRoot ?? sterlingRootFrom()));
 
   // Parse every source once, then check output-name collisions across agents.
   const agents = [];
@@ -336,7 +361,7 @@ export function planCustomAgents(projectRoot, config, { hosts, pluginRoot, store
       const rel = outputPath(host, a.name);
       let r;
       try {
-        r = renderCustomAgent({ host, key: a.key, name: a.name, source: a.source, entry: a.entry, sourceHash: a.sourceHash, storeWriteDenies: host === 'opencode' ? getDenies() : [] });
+        r = renderCustomAgent({ host, key: a.key, name: a.name, source: a.source, entry: a.entry, sourceHash: a.sourceHash });
       } catch (err) {
         r = { ok: false, reason: err.message };
       }
@@ -403,9 +428,9 @@ function pruneEmptyAgyDir(root, rel) {
  * dryRun }. All writes are atomic; when one fails the ones already made are put back and the error
  * is rethrown, so the run converges fully or leaves the folders as they were.
  */
-export function syncCustomAgents(projectRoot, config, { hosts, dryRun = false, pluginRoot, storeWriteDenies, env, home, probes } = {}) {
+export function syncCustomAgents(projectRoot, config, { hosts, dryRun = false, env, home, probes } = {}) {
   const chosen = hosts ?? detectInstalledHosts(projectRoot, { env, home, probes });
-  const plan = planCustomAgents(projectRoot, config, { hosts: chosen, pluginRoot, storeWriteDenies });
+  const plan = planCustomAgents(projectRoot, config, { hosts: chosen });
   const { ops, ...report } = plan;
   if (dryRun) return { ...report, dryRun: true };
   const done = [];
