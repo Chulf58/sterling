@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +43,10 @@ async function harness() {
   return { dir, client, store, tools, cleanup, draft, apply, decision, get };
 }
 
+// The tool refuses off Linux (it pins the drafts folder through /proc/self/fd),
+// so every test that expects it to open a draft runs on Linux only.
+const linuxOnly = { skip: process.platform !== 'linux' ? 'the tool pins the drafts folder through /proc/self/fd (Linux/WSL)' : false };
+
 const text = (res: unknown): string => ((res as { content: { text: string }[] }).content ?? []).map((c) => c.text).join('\n');
 
 // A value well past the 2,000-character line limit, with multi-byte characters,
@@ -63,7 +67,7 @@ test('the tool is served with a strict top-level schema of {path, dry_run}', asy
   }
 });
 
-test('a 5,000-character field value is applied byte-exact, with update, append and edit ops in one file', async () => {
+test('a 5,000-character field value is applied byte-exact, with update, append and edit ops in one file', linuxOnly, async () => {
   const h = await harness();
   try {
     assert.equal(LONG.length, 5000);
@@ -100,7 +104,7 @@ test('a 5,000-character field value is applied byte-exact, with update, append a
   }
 });
 
-test('an absolute path outside the drafts folder and a relative path climbing out of it are refused, nothing written', async () => {
+test('an absolute path outside the drafts folder and a relative path climbing out of it are refused, nothing written', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -121,7 +125,7 @@ test('an absolute path outside the drafts folder and a relative path climbing ou
   }
 });
 
-test('a symlink inside the drafts folder that points outside it is refused, and so is a drafts folder that is itself a symlink', async () => {
+test('a symlink inside the drafts folder that points outside it is refused, and so is a drafts folder that is itself a symlink', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -145,7 +149,7 @@ test('a symlink inside the drafts folder that points outside it is refused, and 
   }
 });
 
-test('a create op is refused and the whole file writes nothing, even the valid op before it', async () => {
+test('a create op is refused and the whole file writes nothing, even the valid op before it', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -166,7 +170,7 @@ test('a create op is refused and the whole file writes nothing, even the valid o
   }
 });
 
-test('a malformed op (unknown argument, unknown op) is refused before any write, naming each bad op', async () => {
+test('a malformed op (unknown argument, unknown op) is refused before any write, naming each bad op', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -188,7 +192,7 @@ test('a malformed op (unknown argument, unknown op) is refused before any write,
   }
 });
 
-test('an op knowledge_update refuses is refused with the same message; earlier ops stay written and later ones are not attempted', async () => {
+test('an op knowledge_update refuses is refused with the same message; earlier ops stay written and later ones are not attempted', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -216,7 +220,7 @@ test('an op knowledge_update refuses is refused with the same message; earlier o
   }
 });
 
-test('array_remove keeps its exact-uuid rule inside a drafts file', async () => {
+test('array_remove keeps its exact-uuid rule inside a drafts file', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -230,7 +234,7 @@ test('array_remove keeps its exact-uuid rule inside a drafts file', async () => 
   }
 });
 
-test('resolves on a drafted op closes the named maintenance item, as on knowledge_update', async () => {
+test('resolves on a drafted op closes the named maintenance item, as on knowledge_update', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -268,7 +272,7 @@ test('resolves on a drafted op closes the named maintenance item, as on knowledg
   }
 });
 
-test('dry_run resolves every record and writes nothing; a missing file is refused', async () => {
+test('dry_run resolves every record and writes nothing; a missing file is refused', linuxOnly, async () => {
   const h = await harness();
   try {
     const id = h.decision();
@@ -286,7 +290,7 @@ test('dry_run resolves every record and writes nothing; a missing file is refuse
   }
 });
 
-test('a delete that fails after a full apply is reported in the receipt, and the writes stand', { skip: process.platform === 'win32' || process.getuid?.() === 0 ? 'directory write permission is not enforced here' : false }, async () => {
+test('a delete that fails after a full apply is reported in the receipt, and the writes stand', { skip: process.platform !== 'linux' ? linuxOnly.skip : process.getuid?.() === 0 ? 'directory write permission is not enforced for root' : false }, async () => {
   const h = await harness();
   const drafts = join(h.dir, '.sterling', 'drafts');
   try {
@@ -319,7 +323,7 @@ const WRAPPED = ['openSync', 'lstatSync', 'statSync', 'realpathSync', 'rmSync', 
 
 /** Runs `action` once, before or after the first wrapped fs call whose string
  *  path satisfies `match`. Returns a restore function. */
-function injectSwap(match: (path: string) => boolean, when: 'before' | 'after', action: () => void): () => void {
+function injectSwap(match: (path: string) => boolean, when: 'before' | 'after', action: () => void, only?: (typeof WRAPPED)[number]): () => void {
   const orig: Record<string, (...a: unknown[]) => unknown> = {};
   let fired = false;
   let busy = false;
@@ -328,7 +332,7 @@ function injectSwap(match: (path: string) => boolean, when: 'before' | 'after', 
     orig[name] = fn;
     const wrapped = function (this: unknown, ...a: unknown[]) {
       const p = typeof a[0] === 'string' ? a[0] : undefined;
-      const hit = !fired && !busy && p !== undefined && (() => { busy = true; try { return match(p); } finally { busy = false; } })();
+      const hit = !fired && !busy && p !== undefined && (only === undefined || only === name) && (() => { busy = true; try { return match(p); } finally { busy = false; } })();
       const fire = () => { fired = true; busy = true; try { action(); } finally { busy = false; } };
       if (hit && when === 'before') fire();
       const r = fn.apply(this, a);
@@ -345,7 +349,6 @@ function injectSwap(match: (path: string) => boolean, when: 'before' | 'after', 
   };
 }
 
-const linuxOnly = { skip: process.platform !== 'linux' ? 'the tool pins the drafts folder through /proc/self/fd (Linux/WSL)' : false };
 
 test('race: the draft swapped for a symlink to an outside file right after it is located is refused, nothing applied', linuxOnly, async () => {
   const h = await harness();
@@ -435,7 +438,7 @@ test('race: the drafts folder swapped for a symlink after the apply and before t
   }
 });
 
-test('a .sterling folder that is a symlink is refused', async () => {
+test('a .sterling folder that is a symlink is refused', linuxOnly, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-apply-drafts-link-'));
   mkdirSync(join(dir, 'real-sterling', 'drafts'), { recursive: true });
   symlinkSync(join(dir, 'real-sterling'), join(dir, '.sterling'));
@@ -455,5 +458,117 @@ test('a .sterling folder that is a symlink is refused', async () => {
     await server.close();
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Re-check of the descriptor fix: identity checks alone pass an IN-PLACE edit
+// (same inode), so the tool applied the old ops and then deleted the file that
+// held the new, unapplied ones. The content read from the open file is now
+// compared again before the apply and before the delete.
+test('in-place edit right after the read is refused before anything is applied', linuxOnly, async () => {
+  const h = await harness();
+  try {
+    const id = h.decision();
+    const draft = h.draft('inplace.json', [{ op: 'update', id, body: { rationale: 'first version' } }]);
+    // The first lstat of the draft's own name is the identity check that runs after the read.
+    const restore = injectSwap((p) => p.endsWith('/inplace.json'), 'before', () => {
+      writeFileSync(draft, JSON.stringify([{ op: 'update', id, body: { rationale: 'second version, longer' } }]));
+    }, 'lstatSync');
+    let res;
+    try {
+      res = await h.apply({ path: 'inplace.json' });
+    } finally {
+      restore();
+    }
+    assert.equal(h.get(id).version, 1, `ops were applied from content that changed after it was read: ${text(res)}`);
+    assert.equal(res.isError, true, text(res));
+    assert.match(text(res), /changed after it was read/);
+    assert.equal(existsSync(draft), true, 'the edited draft is kept');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('in-place edit after the apply keeps the file, so the new ops are not lost', linuxOnly, async () => {
+  const h = await harness();
+  try {
+    const id = h.decision();
+    const draft = h.draft('inplace2.json', [{ op: 'update', id, body: { rationale: 'landed' } }]);
+    const newer = JSON.stringify([{ op: 'update', id, body: { rationale: 'the next draft' } }]);
+    const restore = injectSwap(() => (h.store.get(id) as Loose | undefined)?.rationale === 'landed', 'before', () => writeFileSync(draft, newer));
+    let res;
+    try {
+      res = await h.apply({ path: 'inplace2.json' });
+    } finally {
+      restore();
+    }
+    assert.notEqual(res.isError, true, text(res));
+    assert.equal(h.get(id).rationale, 'landed', 'the applied write stands');
+    assert.equal(existsSync(draft), true, 'the file holding the unapplied ops was deleted');
+    assert.equal(readFileSync(draft, 'utf8'), newer);
+    const receipt = JSON.parse(text(res)) as Loose;
+    assert.equal(receipt.file_removed, false);
+    assert.match(String(receipt.file_remove_error), /changed after it was read/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('on a platform other than Linux the tool refuses, naming the platform', async () => {
+  const h = await harness();
+  const real = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  try {
+    const id = h.decision();
+    h.draft('mac.json', [{ op: 'update', id, body: { rationale: 'would land' } }]);
+    Object.defineProperty(process, 'platform', { ...real, value: 'darwin' });
+    let res;
+    try {
+      res = await h.apply({ path: 'mac.json' });
+    } finally {
+      Object.defineProperty(process, 'platform', real);
+    }
+    assert.equal(res.isError, true, text(res));
+    assert.match(text(res), /exists only on Linux/);
+    assert.match(text(res), /'darwin' is refused/);
+    assert.equal(h.get(id).version, 1);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('when /proc/self/fd is unavailable the refusal names that, not a missing drafts folder', linuxOnly, async () => {
+  const h = await harness();
+  try {
+    const id = h.decision();
+    h.draft('noproc.json', [{ op: 'update', id, body: { rationale: 'would land' } }]);
+    // Simulates a Linux without /proc mounted: every /proc/self/fd path is absent.
+    const orig: Record<string, (...a: unknown[]) => unknown> = {};
+    for (const name of WRAPPED) {
+      const fn = cjsFs[name] as (...a: unknown[]) => unknown;
+      orig[name] = fn;
+      const wrapped = function (this: unknown, ...a: unknown[]) {
+        if (typeof a[0] === 'string' && a[0].startsWith('/proc/self/fd')) {
+          if (name === 'existsSync') return false;
+          throw Object.assign(new Error(`ENOENT: no such file or directory, '${a[0]}'`), { code: 'ENOENT' });
+        }
+        return fn.apply(this, a);
+      };
+      if (name === 'realpathSync') (wrapped as unknown as { native: unknown }).native = (fn as unknown as { native: unknown }).native;
+      cjsFs[name] = wrapped;
+    }
+    syncBuiltinESMExports();
+    let res;
+    try {
+      res = await h.apply({ path: 'noproc.json' });
+    } finally {
+      for (const name of WRAPPED) cjsFs[name] = orig[name];
+      syncBuiltinESMExports();
+    }
+    assert.equal(res.isError, true, text(res));
+    assert.match(text(res), /\/proc\/self\/fd is not available/);
+    assert.doesNotMatch(text(res), /does not exist/);
+    assert.equal(h.get(id).version, 1);
+  } finally {
+    await h.cleanup();
   }
 });
