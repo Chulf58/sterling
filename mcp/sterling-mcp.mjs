@@ -19220,9 +19220,9 @@ var configSchema = external_exports.object({
     reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6.1-sol" }),
     // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
     // read-only grant as the reviewer, so the same install-time default. Every
-    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // dispatch pins its model (Astra, then Sol, then Opus 5.5); under Overpass its
     // role tier decides.
-    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra" }),
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high", opencode_model: "openai/gpt-6-astra", agy_model: "claude-opus-5-5-high" }),
     // preflight is the sterling/preflight agent (decision
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
@@ -22459,11 +22459,53 @@ function hasRecordCentralityHit(record2, outgoingText, opts = {}) {
 
 // packages/store/dist/domain-fit.js
 var DOMAIN_FIT_MIN_TERMS = 2;
+var DOMAIN_FIT_GENERIC_TERMS = /* @__PURE__ */ new Set([
+  "language",
+  "languages",
+  "library",
+  "libraries",
+  "game",
+  "games",
+  "data",
+  "tool",
+  "tools",
+  "framework",
+  "frameworks",
+  "application",
+  "applications",
+  "software",
+  "system",
+  "systems",
+  "project",
+  "projects",
+  "package",
+  "packages",
+  "service",
+  "services",
+  "runtime",
+  "knowledge",
+  "practice",
+  "practices",
+  "pattern",
+  "patterns",
+  "independent",
+  "using",
+  "usage",
+  "standard",
+  "general",
+  "common",
+  "conventions",
+  "development",
+  "platform",
+  "page",
+  "pages",
+  "store"
+]);
 function termsMatch(a, b) {
   return a === b || a.startsWith(b) || b.startsWith(a);
 }
 function subjectTerms(text) {
-  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t) && !DOMAIN_FIT_GENERIC_TERMS.has(t));
 }
 function fitDomains(recordText, domains, opts = {}) {
   if (typeof recordText !== "string")
