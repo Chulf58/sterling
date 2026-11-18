@@ -21,7 +21,7 @@ function shippedPortableBlocks() {
 }
 
 export function lintAgentFences(content, label, portableBlocks = shippedPortableBlocks()) {
-  const violations = validateFences(content, label);
+  const violations = validateFences(content, label, { allHosts: true });
   const block = portableBlocks[label];
   if (violations.length || block === undefined) return violations;
   const normalized = content.replace(/\r\n/g, '\n');

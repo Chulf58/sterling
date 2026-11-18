@@ -2457,7 +2457,7 @@ test('installed copy (no .git at the plugin root): /sterling:update refuses befo
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
     assert.equal(report.exit, 2);
     assert.deepEqual(calls, [], 'nothing runs on an installed copy');
-    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\) or `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"` \(OpenCode\)/, 'a copy under neither install root names both hosts');
+    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\), `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"` \(OpenCode\) or `agy plugin install [^`]+`.* \(Antigravity CLI\)/, 'a copy under no install root names all three hosts');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -2610,13 +2610,13 @@ test('consumer update: with neither tool found no opener is written, the pristin
     const none = await run({ ...fx.env, PATH: emptyBin });
     assert.ok(existsSync(join(fx.proj, 'sterling.bat')), 'kept');
     assert.ok(!existsSync(join(fx.proj, 'claude-code.bat')) && !existsSync(join(fx.proj, 'sterling-launch.sh')), 'no opener, no engine');
-    assert.match(none, /Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of the two\./);
+    assert.match(none, /None of Claude Code, OpenCode or Antigravity CLI \(agy\) was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of them\./);
     assert.doesNotMatch(none, /sterling\.bat: removed/);
 
     const found = await run(fx.env);
     assert.ok(!existsSync(join(fx.proj, 'sterling.bat')), 'deleted once a tool is found');
     assert.match(found, /sterling\.bat: removed — deleted — an unedited generated copy/);
-    assert.doesNotMatch(found, /Neither Claude Code nor OpenCode was found/);
+    assert.doesNotMatch(found, /None of Claude Code, OpenCode or Antigravity CLI/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(emptyBin, { recursive: true, force: true });

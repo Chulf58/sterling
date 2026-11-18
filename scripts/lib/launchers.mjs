@@ -1,15 +1,17 @@
 // Project launchers (§11,
-// decision launchers-consolidated-to-claude-code-and-opencode-pair): one engine, sterling-launch.sh claude|opencode|tui (templates/launcher-tmux.sh),
+// decision launchers-consolidated-to-claude-code-and-opencode-pair): one engine, sterling-launch.sh claude|opencode|agy|tui (templates/launcher-tmux.sh),
 // and two thin openers per platform that call it:
 //
-//   windows (WSL2, or node on native Windows): claude-code.bat, opencode.bat
+//   windows (WSL2, or node on native Windows): claude-code.bat, opencode.bat, antigravity.bat
 //     (templates/opener-win.bat: Windows Terminal -> wsl.exe --cd <project> -> the engine)
-//   linux (a native Linux desktop):             claude-code.sh, opencode.sh
+//   linux (a native Linux desktop):             claude-code.sh, opencode.sh, antigravity.sh
 //     (templates/opener-linux.sh: runs the engine in place from a terminal, else opens a
 //     terminal window it finds at launch; nothing about the terminal is written at init,
 //     decision bb5e25cd)
 //
-// The engine is written when Claude Code or OpenCode is installed, and an opener pair
+// The agy opener is the third arm (user-ruled 2026-11-18, superseding the exactly-two
+// rule of that decision); it starts `agy --agent conductor`, the only way Sterling's MCP
+// is present. The engine is written when Claude Code, OpenCode or agy is installed, and an opener pair
 // only for a tool that is (user-ruled 2026-10-08, "Yes, per tool found").
 //
 // sterling.bat, tui.bat and sterling-windows.bat are no longer generated: re-opening an
@@ -42,10 +44,12 @@ export const OPENERS = {
   windows: [
     { file: 'claude-code.bat', mode: 'claude', tool: 'claude', app: 'Claude Code' },
     { file: 'opencode.bat', mode: 'opencode', tool: 'opencode', app: 'OpenCode' },
+    { file: 'antigravity.bat', mode: 'agy', tool: 'agy', app: 'Antigravity' },
   ],
   linux: [
     { file: 'claude-code.sh', mode: 'claude', tool: 'claude', app: 'Claude Code' },
     { file: 'opencode.sh', mode: 'opencode', tool: 'opencode', app: 'OpenCode' },
+    { file: 'antigravity.sh', mode: 'agy', tool: 'agy', app: 'Antigravity' },
   ],
 };
 /** Launchers init wrote before and writes no more: the template each was rendered from,
@@ -64,6 +68,8 @@ export const LAUNCHER_GITIGNORE_ENTRIES = [
 export const LAUNCHER_HOST_ENV = 'STERLING_LAUNCHER_HOST';
 /** Test seam and manual override for the OpenCode lookup: 'found' or 'absent'. */
 export const LAUNCHER_OPENCODE_ENV = 'STERLING_LAUNCHER_OPENCODE';
+/** Test seam and manual override for the agy lookup: 'found' or 'absent'. */
+export const LAUNCHER_AGY_ENV = 'STERLING_LAUNCHER_AGY';
 
 const lf = (s) => s.replace(/\r\n/g, '\n');
 // A generated bash launcher must be executable: the .bat openers run ./sterling-launch.sh,
@@ -121,7 +127,7 @@ export const onPath = (name, env = process.env) =>
 
 /**
  * Which tools get an opener, found the way the engine finds them at run time: claude on
- * PATH; opencode on PATH or at ~/.opencode/bin/opencode. `claude` overrides the claude
+ * PATH; opencode on PATH or at ~/.opencode/bin/opencode; agy on PATH or at ~/.local/bin/agy. `claude` overrides the claude
  * lookup (init passes its own Claude Code probe). STERLING_LAUNCHER_OPENCODE ('found' or
  * 'absent') overrides the opencode lookup; any other value throws.
  */
@@ -130,9 +136,14 @@ export function launcherTools({ env = process.env, home = homedir(), claude } = 
   if (forced && forced !== 'found' && forced !== 'absent') {
     throw new Error(`${LAUNCHER_OPENCODE_ENV} must be 'found' or 'absent' (got '${forced}')`);
   }
+  const forcedAgy = env[LAUNCHER_AGY_ENV];
+  if (forcedAgy && forcedAgy !== 'found' && forcedAgy !== 'absent') {
+    throw new Error(`${LAUNCHER_AGY_ENV} must be 'found' or 'absent' (got '${forcedAgy}')`);
+  }
   return {
     claude: claude ?? onPath('claude', env),
     opencode: forced ? forced === 'found' : onPath('opencode', env) || executableFile(join(home, '.opencode', 'bin', 'opencode')),
+    agy: forcedAgy ? forcedAgy === 'found' : onPath('agy', env) || executableFile(join(home, '.local', 'bin', 'agy')),
   };
 }
 
@@ -178,7 +189,7 @@ export const legacySessionName = (target) =>
 
 /** The session base name baked into the engine: the readable legacy name plus 4 hex of a
  *  hash of the absolute project path, so two checkouts with the same directory name get
- *  different sessions (GitHub issue #52). The engine adds -claude or -opencode. */
+ *  different sessions (GitHub issue #52). The engine adds -claude, -opencode or -agy. */
 export const sessionName = (target) =>
   `${legacySessionName(target)}-${createHash('sha256').update(fwd(resolve(target))).digest('hex').slice(0, 4)}`;
 
@@ -201,7 +212,7 @@ export function renderOpener(pluginRoot, target, host, opener) {
  * @param {object} o
  * @param {number} o.splitPercent TUI pane width
  * @param {'windows'|'linux'} o.host from launcherHost()
- * @param {{claude: boolean, opencode: boolean}} [o.tools] from launcherTools(): an opener only for a tool found
+ * @param {{claude: boolean, opencode: boolean, agy?: boolean}} [o.tools] from launcherTools(): an opener only for a tool found
  * @param {ReturnType<typeof launcherHistoryLoader>} [o.history] share one history read with removeRetiredLaunchers
  * @param {boolean} [o.installedCopy]
  * @param {(label: string, text: string) => string} [o.checkText] throws on a bad render (init's dead-term check)
@@ -211,7 +222,7 @@ export function renderOpener(pluginRoot, target, host, opener) {
 export function ensureLaunchers(target, pluginRoot, {
   splitPercent,
   host,
-  tools = { claude: true, opencode: true },
+  tools = { claude: true, opencode: true, agy: true },
   history = launcherHistoryLoader(pluginRoot),
   installedCopy = isInstalledCopy(pluginRoot),
   checkText = (_label, text) => text,
@@ -246,7 +257,7 @@ export function ensureLaunchers(target, pluginRoot, {
   const cloneLauncher = installedCopy && existing !== null ? cloneLauncherTarget(existing) : null;
   if (existing === null) {
     writeFileSync(enginePath, expected, { mode: 0o755 });
-    items.push({ item: ENGINE_NAME, status: 'created', detail: `tmux sessions ${session}-claude and ${session}-opencode, ${splitPercent}% TUI pane` });
+    items.push({ item: ENGINE_NAME, status: 'created', detail: `tmux sessions ${session}-claude, ${session}-opencode and ${session}-agy, ${splitPercent}% TUI pane` });
   } else if (lf(existing) === lf(expected)) {
     items.push({ item: ENGINE_NAME, status: 'matches', detail: 'generated content unchanged' });
   } else if (cloneLauncher) {

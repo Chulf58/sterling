@@ -607,9 +607,9 @@ function ownPluginRoot() {
 }
 
 /** The refusal for an installed copy, naming the update command of the host it was
- *  installed by (installHostOf); null (a copy under neither install root) names both. */
+ *  installed by (installHostOf); null (a copy under no install root) names every host's. */
 export function installedCopyRefusal(host, { env = process.env, home = homedir(), root = null } = {}) {
-  const by = host === 'claude-code' ? 'as a Claude Code plugin' : host === 'opencode' ? 'as an OpenCode plugin' : 'as a plugin';
+  const by = host === 'claude-code' ? 'as a Claude Code plugin' : host === 'opencode' ? 'as an OpenCode plugin' : host === 'agy' ? 'as an Antigravity CLI plugin' : 'as a plugin';
   return `Sterling is installed ${by} — update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 
@@ -718,7 +718,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       const { host, tools } = launcherSetup;
       const rows = [];
       const warns = [];
-      if (tools.claude || tools.opencode) {
+      if (tools.claude || tools.opencode || tools.agy) {
         const ratio = JSON.parse(readFileSync(join(repoPath, '.sterling', 'config.json'), 'utf8')).tui_split_ratio;
         // tui_split_ratio defaults to 0.35 (packages/schemas/src/config.ts); a value the
         // schema would refuse stops the launchers for this project, loudly.
@@ -727,14 +727,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         rows.push(...r.items);
         warns.push(...r.warns);
       }
-      if (tools.claude || tools.opencode) {
+      if (tools.claude || tools.opencode || tools.agy) {
         const retired = removeRetiredLaunchers(repoPath, cwd, { history: launcherHistory });
         rows.push(...retired.items);
         warns.push(...retired.warns);
       } else {
         // no opener was written, so the old launchers are the project's only ones
         // (user-ruled 2026-10-08, "Keep old ones if no tool (Recommended)")
-        warns.push('⚠ Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.');
+        warns.push('⚠ None of Claude Code, OpenCode or Antigravity CLI (agy) was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of them.');
       }
       const ignored = ensureLauncherIgnores(repoPath);
       const out = rows.filter((r) => r.status !== 'matches').map((r) => `${r.item}: ${r.status} — ${r.detail}`);

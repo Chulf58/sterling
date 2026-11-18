@@ -34,6 +34,7 @@ const LOCKFILE = 'package-lock.json';
 // into the parsed JSON.
 const ALLOWED_FIELDS = new Map([
   ['.claude-plugin/plugin.json', [['version']]],
+  ['.antigravity-plugin/plugin.json', [['version']]],
   ['package.json', [['version']]],
   [LOCKFILE, [['version'], ['packages', '', 'version']]],
 ]);

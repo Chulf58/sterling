@@ -45,14 +45,16 @@ function opencodeCopy(home, ts, version, key = ['@chulf58', 'sterling@latest']) 
   return root;
 }
 
-test('installRoots: both hosts, honouring CLAUDE_CONFIG_DIR and XDG_CACHE_HOME', () => {
+test('installRoots: all three hosts, honouring CLAUDE_CONFIG_DIR and XDG_CACHE_HOME', () => {
   assert.deepEqual(installRoots({}, '/h'), [
     { host: 'claude-code', dir: join('/h', '.claude', 'plugins', 'cache') },
     { host: 'opencode', dir: join('/h', '.cache', 'opencode', 'npm') },
+    { host: 'agy', dir: join('/h', '.gemini', 'config', 'plugins') },
   ]);
   assert.deepEqual(installRoots({ CLAUDE_CONFIG_DIR: '/c', XDG_CACHE_HOME: '/x' }, '/h').map((r) => r.dir), [
     join('/c', 'plugins', 'cache'),
     join('/x', 'opencode', 'npm'),
+    join('/h', '.gemini', 'config', 'plugins'),
   ]);
 });
 
