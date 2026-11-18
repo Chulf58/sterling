@@ -31614,7 +31614,7 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync11, existsSync as existsSync8, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
+import { readFileSync as readFileSync11, existsSync as existsSync8, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, readSync as readSync4, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
 import { join as join16, dirname as dirname9, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve7, sep as sep2 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
@@ -42022,6 +42022,18 @@ var fileId = (fd) => {
   return { dev: st.dev, ino: st.ino };
 };
 var errCode = (e) => e?.code;
+function readAllAt(fd) {
+  const chunks = [];
+  let pos = 0;
+  for (; ; ) {
+    const buf = Buffer.alloc(Math.max(65536, fstatSync3(fd).size - pos));
+    const n = readSync4(fd, buf, 0, buf.length, pos);
+    if (n === 0)
+      return Buffer.concat(chunks);
+    chunks.push(buf.subarray(0, n));
+    pos += n;
+  }
+}
 function draftsRefusal(repoRoot, why) {
   return new Error(`knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${join16(repoRoot, DRAFTS_DIR).replace(/\\/g, "/")}). Nothing was written.`);
 }
@@ -42032,6 +42044,9 @@ function closeDraft(d) {
 function openDraft(repoRoot, path) {
   if (process.platform !== "linux") {
     throw draftsRefusal(repoRoot, `this tool pins the drafts folder through /proc/self/fd, which exists only on Linux (run Sterling under WSL on Windows); platform '${process.platform}' is refused`);
+  }
+  if (!existsSync8("/proc/self/fd")) {
+    throw draftsRefusal(repoRoot, "this tool pins the drafts folder through /proc/self/fd, and /proc/self/fd is not available in this process (is /proc mounted?)");
   }
   const base2 = join16(repoRoot, DRAFTS_DIR);
   const inside = (b) => {
@@ -42286,11 +42301,13 @@ function createSterlingServer(target, opts = {}) {
   };
   const applyPinnedDraft = (draft, dryRun) => {
     const label = draft.label;
-    const text = readFileSync11(draft.leafFd, "utf8");
+    const bytes = readAllAt(draft.leafFd);
     const moved = draftMoved(repoRoot, draft);
     if (moved)
       throw draftsRefusal(repoRoot, `${label} changed while it was read: ${moved}`);
-    const ops = parseDraftOps(text, label);
+    if (!readAllAt(draft.leafFd).equals(bytes))
+      throw draftsRefusal(repoRoot, `${label} changed after it was read (its content was edited in place)`);
+    const ops = parseDraftOps(bytes.toString("utf8"), label);
     if (dryRun) {
       return {
         path: label,
@@ -42320,6 +42337,8 @@ function createSterlingServer(target, opts = {}) {
     const movedNow = draftMoved(repoRoot, draft);
     if (movedNow)
       return keep(`not removed: ${movedNow}`);
+    if (!readAllAt(draft.leafFd).equals(bytes))
+      return keep(`not removed: ${label} changed after it was read, so it may hold ops that were not applied`);
     try {
       unlinkSync3(viaFd(draft.dirFds[draft.dirFds.length - 1], draft.leaf));
     } catch (e) {
@@ -42482,7 +42501,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ ...arrayRemoveArgs, projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(applyArrayRemove(args2), projection)));
   server.registerTool("knowledge_apply_drafts", {
-    description: `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute). Every component below the project root (.sterling, drafts, any subfolder, the file) must be a real directory or regular file, never a symlink, else the call is refused; each is opened through the descriptor of the one above, the content is read from the file's descriptor, and the read is refused if the path no longer leads to that file afterwards. Linux (and WSL) only: other platforms are refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written; the file is kept, and the refusal lists the written ops (re-running the file re-applies them, so remove them from it first). When every op applied, the file is deleted through the held drafts folder, only while the path still leads to the file that was read, and the receipt says file_removed:true; otherwise, or when the delete fails, the file is kept and the receipt says file_removed:false with file_remove_error, and the writes stand. Not excluded: a same-user process replacing the file's name inside the drafts folder between that last check and the delete (Node has no unlinkat), which removes the replacement, never a file outside the folder. dry_run:true checks the file and resolves each op's record, writing and deleting nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}], file_removed, file_remove_error?}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
+    description: `Apply a drafts file of updates to EXISTING records server-side, so long drafted values (over the 2,000-character line limit of an agent's file reader) land byte-exact without passing through any reader or tool call. \`path\` names a file inside the project's ${DRAFTS_DIR}/ folder (relative to it, or absolute). Every component below the project root (.sterling, drafts, any subfolder, the file) must be a real directory or regular file, never a symlink, else the call is refused; each is opened through the descriptor of the one above, the content is read from the file's descriptor, and the read is refused if the path no longer leads to that file afterwards or the file's content changed (re-read through the same descriptor). Linux (and WSL) only: other platforms are refused. The file is a JSON array of operations, each one of {op:"update", ...knowledge_update's arguments}, {op:"append", ...knowledge_append's}, {op:"edit", ...knowledge_edit's}, {op:"array_remove", ...knowledge_array_remove's}, without projection. There is no create op: records are created by the conductor with knowledge_create. Every op is shape-checked before anything is written; a malformed file writes nothing. Ops then run in file order through the same code as the single-op tools, with the same validation, refusals and resolves handling. They are NOT one transaction: the first refused op stops the run, the call fails naming that op with the single-op tool's own message, and the ops before it stay written; the file is kept, and the refusal lists the written ops (re-running the file re-applies them, so remove them from it first). When every op applied, the file is deleted through the held drafts folder, only while the path still leads to the file that was read and its content is still the bytes that were applied, and the receipt says file_removed:true; otherwise, or when the delete fails, the file is kept and the receipt says file_removed:false with file_remove_error, and the writes stand. Not excluded: a same-user process replacing or editing the file inside the drafts folder between that last check and the delete (Node has no unlinkat), which removes the replacement or edit, never a file outside the folder. dry_run:true checks the file and resolves each op's record, writing and deleting nothing. Returns {path, applied:[{index, op, id, version, written:{<field>:{chars, utf8_bytes}|{entries}}, warnings?}], file_removed, file_remove_error?}, where written measures the stored value of each field the op touched, so the caller can check its length.`,
     inputSchema: strict({
       path: external_exports.string().min(1).describe(`the drafts file: relative to ${DRAFTS_DIR}/, or an absolute path inside it`),
       dry_run: external_exports.boolean().optional().describe("check the file and resolve every record without writing")
