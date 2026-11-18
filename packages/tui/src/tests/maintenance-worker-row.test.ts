@@ -30,6 +30,8 @@ const CATALOG = [
 function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: 'claude-sonnet-5-5', installedEffort: 'high' }],
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } },
     catalog: { present: true, stale: false, staleDate: null, entries: CATALOG },
     codexWired: true,

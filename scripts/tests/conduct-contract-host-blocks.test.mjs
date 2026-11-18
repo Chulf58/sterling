@@ -69,7 +69,10 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // Moved 2026-10-27 (from 122d1c92…): the Close-on-commit bullet says a user task's board_remove
 // takes an outcome, which the removal journal keeps (decision
 // board-issue-mirror-design-required-outcome-snapshot-read-single-writer; board 2460ad0a).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '43ad42421e5e96483250fa34e35a9941c5207f57aabf3ace1a98fd368d3ccc85';
+// Moved 2026-11-18 (from 43ad4242…): the sparring fallback is Sol, then Opus 5.5, replacing Fable, in the
+// two bullets that named it (user-ruled 2026-11-18, GitHub issue #309; decision
+// sparring-steps-down-astra-sol-opus-5-5-replaces-fable).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '54e6d2156ad4f6ea00973551682298104e4202938e178fe86dcd66fea4e15a39';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);

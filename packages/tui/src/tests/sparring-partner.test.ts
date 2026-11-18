@@ -73,6 +73,7 @@ interface RosterAgent {
  *  comment above) — the two new fields the System tab's sparring rows read. */
 interface AgentRosterSnapshot {
   agents: RosterAgent[];
+  hostInstalled?: string[];
   configModels: Record<string, { model: string; effort: string }>;
   catalog: CatalogStatusView;
   codexWired: boolean;
@@ -154,6 +155,8 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
     // would simply never render a row — this fixture only cares about
     // numKeys (the row count the sparring/tdd rows sit past), so it uses the
     // real 5 keys directly rather than keys that would now be filtered out.
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: {
       implementor: { model: 'claude-sonnet-4-6', effort: 'high' },
       researcher: { model: 'claude-opus-4-8', effort: 'low' },

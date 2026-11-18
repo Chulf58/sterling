@@ -20,6 +20,7 @@ import {
   AGY_TOOLS,
   GEMINI_MD_MAX_BYTES,
   agyMcpRoot,
+  agyModelsOf,
   ensureAgyExcluded,
   ensureGeminiMd,
   geminiRootAlias,
@@ -572,4 +573,45 @@ test('probeMcpServer: a server that ignores SIGTERM and never answers is killed 
   assert.equal(r.readOnly, false);
   assert.match(r.reason, /--capabilities did not answer within 1000 ms and was killed/);
   assert.ok(r.ms < 5000, `returned after ${r.ms} ms`);
+});
+
+// ---------- agy_model (issue #306) ----------
+
+test('renderAgyAgent writes the pinned agy model, and model: inherit when none is set', () => {
+  const tpl = readFileSync(join(repo, 'agent-templates', 'implementor.md'), 'utf8');
+  const pinned = renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE, agyModel: 'claude-opus-5-5-high' });
+  assert.match(pinned, /^model: claude-opus-5-5-high$/m);
+  assert.doesNotMatch(pinned, /^model: inherit$/m);
+  const unset = renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE });
+  assert.match(unset, /^model: inherit$/m);
+});
+
+test('agyModelsOf reads config.models.<role>.agy_model and ignores roles without one; a malformed id throws', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-models-'));
+  try {
+    assert.deepEqual(agyModelsOf(dir), {}, 'no config: nothing pinned');
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { implementor: { model: 'm', effort: 'high', agy_model: 'gpt-oss-120b-medium' }, scout: { model: 'm', effort: 'low' } } }));
+    assert.deepEqual(agyModelsOf(dir), { implementor: 'gpt-oss-120b-medium' });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { scout: { agy_model: 'bad\nid' } } }));
+    assert.throws(() => agyModelsOf(dir), /not an agy model id/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the shipped default config pins only the sparring agy agent to Opus 5.5 (cross-vendor with the Gemini conductor); every other role stays model: inherit (issue #309)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-default-pin-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
+    const pins = agyModelsOf(dir);
+    assert.deepEqual(pins, { sparring: 'claude-opus-5-5-high' });
+    for (const name of AGY_ROSTER) {
+      const text = renderAgyAgent(readFileSync(join(repo, 'agent-templates', `${name}.md`), 'utf8'), 't', name, { root: repo, nodePath: NODE, agyModel: pins[name] });
+      assert.match(text, name === 'sparring' ? /^model: claude-opus-5-5-high$/m : /^model: inherit$/m, name);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

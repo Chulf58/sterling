@@ -301,12 +301,12 @@ test('model defaults: absent opencode_model and hard_task are added and reported
     assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' });
     assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
     assert.deepEqual(after.models.reviewer, { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' }, 'a value the user set stays');
-    assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }, 'a role with no entry gets the shipped default entry');
+    assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' }, 'a role with no entry gets the shipped default entry');
     assert.deepEqual(after.models.researcher, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'other roles are not touched');
     assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'overpass-defaults-2026-10-23']);
     assert.equal(r.lines.length, 4);
     assert.match(r.lines[0], /^config migration: models\.implementor\.hard_task added as \{"model":"claude-opus-5-5"\}/);
-    assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra"\}/);
+    assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra","agy_model":"claude-opus-5-5-high"\}/);
     assert.match(r.lines[2], /^config migration: models\.implementor\.hard_task \{"model":"claude-opus-5-5"\} moved to models\.implementor-hard as \{"model":"claude-opus-5-5","effort":"high"\}/);
     assert.match(r.lines[3], /^config migration: overpass\.conductor_bypass set to true \(was unset\)/);
   } finally {

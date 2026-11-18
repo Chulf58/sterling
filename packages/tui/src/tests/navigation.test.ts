@@ -55,6 +55,8 @@ const ENTRIES = Array.from({ length: 12 }, (_, i) => ({ id: `claude-m${i}`, labe
 function roster(): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: 'claude-m0', installedEffort: 'low' }],
+    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
+    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
     configModels: { implementor: { model: 'claude-m0', effort: 'low' } },
     catalog: { present: true, stale: false, staleDate: null, entries: ENTRIES },
   };
