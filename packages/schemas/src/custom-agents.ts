@@ -1,4 +1,4 @@
-import { AGY_MODEL_IDS, CLAUDE_PROVIDER, CUSTOM_AGENT_KEY_PREFIX, DEFAULT_OVERPASS_PROVIDER, OVERPASS_MODEL_NAMESPACE, PLAN_MODEL_KEY, toCanonicalConfig, canonicalModelsSchema } from './config.js';
+import { AGY_MODEL_IDS, AGY_MODEL_NAMESPACE, CLAUDE_PROVIDER, CUSTOM_AGENT_KEY_PREFIX, DEFAULT_OVERPASS_PROVIDER, OVERPASS_MODEL_NAMESPACE, PLAN_MODEL_KEY, toCanonicalConfig, canonicalModelsSchema } from './config.js';
 
 // Custom-agent identity and per-host capabilities (decisions
 // custom-agents-are-adopted-into-a-source-folder-host-files-are-generated-projections and
@@ -48,10 +48,10 @@ export function customAgentKey(name: string): string | null {
 export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 
-/** The Claude models Antigravity serves (GitHub #314: `agy models` lists claude-opus-5-5 and
- *  claude-sonnet-5-5, each with an effort suffix; decision
- *  agy-served-claude-models-share-catalog-entries-with-claude-ids lists them under their Claude ids). */
-export const AGY_SERVED_CLAUDE_MODELS = ['anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5'] as const;
+/** The canonical models agy runs: its own, agy/<id> for each of AGY_MODEL_IDS. USER-RULED (decision
+ *  one-model-per-agent-an-agent-has-a-single-model-not-a-claude, rationale point (5), "No agy copy,
+ *  fail loudly"): an agent on a Claude model gets no agy copy, because agy agent files cannot name one. */
+export const AGY_CANONICAL_MODELS: readonly string[] = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
 
 export interface HostCapability {
   host: AgentHost;
@@ -60,22 +60,22 @@ export interface HostCapability {
   model: { kind: 'claude_catalog' | 'opencode_ref' | 'agy_enum'; values?: readonly string[] };
   /** Effort levels the host's rendered agent carries; empty when the host has no effort control. */
   effortLevels: readonly string[];
-  /** Which canonical models (<provider>/<id>) the host can run: every provider ('*'), the
-   *  providers listed, or exactly the models listed. */
-  runs: { providers: '*' | readonly string[] } | { models: readonly string[] };
+  /** Which canonical models (<provider>/<id>) the host can run: every provider ('*') except the
+   *  ones in `except`, the providers listed, or exactly the models listed. */
+  runs: { providers: '*' | readonly string[]; except?: readonly string[] } | { models: readonly string[] };
 }
 
 /** One table of what each host lets a model or effort control do, and which models it runs.
  *  Claude: model from the catalog, effort low, medium or high, anthropic models only. OpenCode:
  *  a model reference, no effort (the renderer, renderFullOpenCodeAgent in
- *  scripts/lib/opencode-install.mjs, writes none), any provider. agy: inherit, flash_lite, flash
- *  or pro in its agent files, no effort (decision
- *  agy-model-accepts-only-agy-subagent-values-inherit-flash-lite-flash-pro); of the canonical
- *  models it runs the Claude models it serves (AGY_SERVED_CLAUDE_MODELS). */
+ *  scripts/lib/opencode-install.mjs, writes none), any provider but agy's own, which only agy
+ *  runs. agy: inherit, flash_lite, flash or pro in its agent files, no effort (decision
+ *  agy-model-accepts-only-agy-subagent-values-inherit-flash-lite-flash-pro), so of the canonical
+ *  models it runs exactly AGY_CANONICAL_MODELS. */
 export const AGENT_HOST_CAPABILITIES: Readonly<Record<AgentHost, HostCapability>> = Object.freeze({
   claude: { host: 'claude', model: { kind: 'claude_catalog' }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
-  opencode: { host: 'opencode', model: { kind: 'opencode_ref' }, effortLevels: [], runs: { providers: '*' } },
-  agy: { host: 'agy', model: { kind: 'agy_enum', values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_SERVED_CLAUDE_MODELS } },
+  opencode: { host: 'opencode', model: { kind: 'opencode_ref' }, effortLevels: [], runs: { providers: '*', except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: 'agy', model: { kind: 'agy_enum', values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } },
 });
 
 /** Whether `host` can run the canonical model `model` (<provider>/<id>; a bare id is a Claude id). */
@@ -83,7 +83,9 @@ export function hostRunsModel(model: string, host: AgentHost): boolean {
   const ref = model.includes('/') ? model : `${CLAUDE_PROVIDER}/${model}`;
   const runs = AGENT_HOST_CAPABILITIES[host].runs;
   if ('models' in runs) return runs.models.includes(ref);
-  return runs.providers === '*' || runs.providers.includes(ref.slice(0, ref.indexOf('/')));
+  const provider = ref.slice(0, ref.indexOf('/'));
+  if (runs.except?.includes(provider)) return false;
+  return runs.providers === '*' || runs.providers.includes(provider);
 }
 
 /** A canonical model as OpenCode names it: overpass/<tier> becomes <provider>/<tier>; anything else is unchanged. */
@@ -142,9 +144,9 @@ export function resolveHostSettings(entry: AgentModelSettings | undefined, host:
   } else if (e.agy_model) {
     ({ model, modelFrom } = { model: e.agy_model, modelFrom: 'override' });
   } else if (canonical) {
-    // agy agent files accept only its enum, so a served Claude model renders inherit.
+    // agy agent files name the bare enum value: agy/flash renders flash.
     modelSupported = hostRunsModel(canonical, 'agy');
-    if (!modelSupported) ({ model, modelFrom } = { model: canonical, modelFrom: 'model' });
+    ({ model, modelFrom } = { model: modelSupported ? canonical.slice(AGY_MODEL_NAMESPACE.length + 1) : canonical, modelFrom: 'model' });
   }
   const out: ResolvedHostSettings = { host, model, modelFrom, modelSupported, effortSupported };
   if (e.effort !== undefined) {

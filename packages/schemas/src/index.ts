@@ -114,7 +114,7 @@ export { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, K
 export type { KnowledgeWrite } from './transient.js';
 export { configSchema, parseConfig, normalizeRawConfig, migrateRetiredModelKeys, migrateStaleAgyModels, addModelDefaults, MODEL_DEFAULTS_MIGRATION_ID, moveImplementorHardTask, IMPLEMENTOR_HARD_MIGRATION_ID, resetOverpassDefaults, OVERPASS_DEFAULTS_MIGRATION_ID, AGENT_TOOL_NAME_RE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, CLAUDE_MODEL_ID_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys, resolveOverpass, OverpassUnknownRoleError, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, OVERPASS_TIERS, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS } from './config.js';
 export { CUSTOM_AGENT_KEY_PREFIX, CUSTOM_AGENT_SLUG_RE, CUSTOM_AGENT_KEY_RE, isCustomAgentKey } from './config.js';
-export { toCanonicalConfig, parseCanonicalConfig, parseCanonicalModels, canonicalConfigSchema, canonicalModelsSchema, workflowSchema, LegacyConfigError, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, CANONICAL_RETIRED_KEYS } from './config.js';
+export { toCanonicalConfig, parseCanonicalConfig, parseCanonicalModels, canonicalConfigSchema, canonicalModelsSchema, workflowSchema, LegacyConfigError, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, CANONICAL_RETIRED_KEYS } from './config.js';
 export type { CanonicalConfig, CanonicalConfigResult, CanonicalChange, ModelConflict, ConflictResolutions, MergePath } from './config.js';
 export {
   AGENT_HOSTS,
@@ -126,7 +126,7 @@ export {
   customAgentSlug,
   customAgentKey,
   resolveHostSettings,
-  AGY_SERVED_CLAUDE_MODELS,
+  AGY_CANONICAL_MODELS,
   hostRunsModel,
   opencodeModelRef,
   unsupportedAgents,

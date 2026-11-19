@@ -8,12 +8,12 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hostRunsModel, resolveHostSettings, unsupportedAgents } from '@sterling/schemas';
+import { canonicalModelsSchema, hostRunsModel, resolveHostSettings, unsupportedAgents } from '@sterling/schemas';
 import { dispatchModel, projectRouting, resolveDispatchModel } from '../../packages/opencode-plugin/src/dispatch-model.mjs';
 import { desiredOverlay, expectedSessionModel, overpassResolution } from '../../packages/opencode-plugin/src/overpass.mjs';
 import { syncAgents } from '../lib/agent-distribution.mjs';
 import { syncCustomAgents } from '../lib/custom-agent-render.mjs';
-import { ensureAgyAgents, renderAgyAgent } from '../lib/agy-setup.mjs';
+import { ensureAgyAgents, readAgyFit, renderAgyAgent } from '../lib/agy-setup.mjs';
 import { buildWorkerArgs, workerModelOf } from '../hooks/lib/maintenance-worker.mjs';
 
 const scratch = (p) => mkdtempSync(join(tmpdir(), p));
@@ -84,17 +84,26 @@ test('overlay: plan and conductor come from models.plan and models.conductor, a 
 
 // ── host fit ────────────────────────────────────────────────────────────────
 
-test('host fit: Claude runs anthropic only, agy its served Claude models, OpenCode anything', () => {
+// agy runs only its own models, agy/<id> (user-ruled, decision
+// one-model-per-agent-an-agent-has-a-single-model-not-a-claude point (5), "No agy copy, fail loudly").
+test('host fit: Claude runs anthropic only, agy its own agy/<id> models only, OpenCode anything but agy/', () => {
   assert.equal(hostRunsModel('anthropic/claude-haiku-5-5', 'claude'), true);
   assert.equal(hostRunsModel('claude-haiku-5-5', 'claude'), true, 'a bare id is a Claude id');
   assert.equal(hostRunsModel('openai/gpt-6.1-sol', 'claude'), false);
   assert.equal(hostRunsModel('overpass/agentic-auto', 'claude'), false);
-  assert.equal(hostRunsModel('anthropic/claude-opus-5-5', 'agy'), true);
+  assert.equal(hostRunsModel('anthropic/claude-opus-5-5', 'agy'), false, 'an Opus agent gets no agy copy');
   assert.equal(hostRunsModel('anthropic/claude-haiku-5-5', 'agy'), false);
+  assert.equal(hostRunsModel('agy/flash', 'agy'), true);
+  assert.equal(hostRunsModel('agy/ultra', 'agy'), false, 'only the four agy ids');
+  assert.equal(hostRunsModel('agy/flash', 'claude'), false);
+  assert.equal(hostRunsModel('agy/flash', 'opencode'), false);
   assert.equal(hostRunsModel('overpass/agentic-auto', 'opencode'), true);
+  assert.equal(canonicalModelsSchema.safeParse({ scout: { model: 'agy/flash_lite' } }).success, true, 'the canonical schema accepts the four agy ids');
+  assert.match(canonicalModelsSchema.safeParse({ scout: { model: 'agy/ultra' } }).error.issues[0].message, /is not an agy model: after agy\/ it must be one of inherit, flash_lite, flash, pro/);
   assert.deepEqual(resolveHostSettings({ model: 'anthropic/claude-opus-5-5', effort: 'high' }, 'claude'), { host: 'claude', model: 'claude-opus-5-5', modelFrom: 'model', modelSupported: true, effortSupported: true, effort: 'high' });
   assert.equal(resolveHostSettings({ model: 'openai/gpt-6.1-sol' }, 'claude').modelSupported, false);
-  assert.equal(resolveHostSettings({ model: 'anthropic/claude-sonnet-5-5' }, 'agy').model, 'inherit');
+  assert.equal(resolveHostSettings({ model: 'anthropic/claude-sonnet-5-5' }, 'agy').modelSupported, false);
+  assert.equal(resolveHostSettings({ model: 'agy/flash_lite' }, 'agy').model, 'flash_lite', 'agy files name the bare value');
 });
 
 test('unsupportedAgents lists each agent a host cannot run, and a two-model role once, for the session line and the TUI', () => {
@@ -103,7 +112,10 @@ test('unsupportedAgents lists each agent a host cannot run, and a two-model role
     { agent: 'sparring', host: '*', reason: 'role sparring has two models; run /sterling:update to choose' },
     { agent: 'reviewer', host: 'claude', model: 'openai/gpt-6.1-sol', reason: 'claude cannot run openai/gpt-6.1-sol, so it gets no copy of reviewer' },
   ], 'plan is judged on OpenCode only, and OpenCode runs every provider');
-  assert.ok(unsupportedAgents({}, ['agy']).some((r) => r.agent === 'librarian'), 'agy serves no Haiku, so the default librarian is listed for agy');
+  const agyRows = unsupportedAgents({ models: { scout: { model: 'agy/flash' } } }, ['agy']);
+  assert.ok(agyRows.some((r) => r.agent === 'reviewer' && r.reason === 'agy cannot run anthropic/claude-opus-5-5, so it gets no copy of reviewer'), 'an Opus agent is listed for agy');
+  assert.ok(!agyRows.some((r) => r.agent === 'scout'), 'an agy/flash agent is not');
+  assert.ok(unsupportedAgents({ models: { scout: { model: 'agy/flash' } } }, ['claude']).some((r) => r.agent === 'scout' && r.model === 'agy/flash'));
 });
 
 // ── Claude roster: stale copy removed, edited copy kept ─────────────────────
@@ -176,11 +188,11 @@ function customProject(src, entry) {
 const SRC = '---\nname: team-scout\ndescription: Scouts the team folders\ntools: Read, Grep\n---\nFind things.\n';
 
 test('custom agent: a host that cannot run the model gets no copy; its unedited copy goes and an edited one stays', () => {
-  const p = customProject(SRC, { model: 'claude-opus-5-5', effort: 'high' });
+  const p = customProject(SRC, {});
   try {
     syncCustomAgents(p.root, p.config, { hosts: ['claude', 'opencode', 'agy'] });
-    assert.match(readFileSync(join(p.root, '.claude/agents/team-scout.md'), 'utf8'), /^model: claude-opus-5-5$/m);
-    assert.match(readFileSync(join(p.root, '.opencode/agents/team-scout.md'), 'utf8'), /^model: anthropic\/claude-opus-5-5$/m);
+    assert.doesNotMatch(readFileSync(join(p.root, '.claude/agents/team-scout.md'), 'utf8'), /^model:/m);
+    assert.doesNotMatch(readFileSync(join(p.root, '.opencode/agents/team-scout.md'), 'utf8'), /^model:/m);
     assert.match(readFileSync(join(p.root, '.agents/agents/team-scout/agent.md'), 'utf8'), /^model: inherit$/m);
     const agyPath = join(p.root, '.agents/agents/team-scout/agent.md');
     writeFileSync(agyPath, `${readFileSync(agyPath, 'utf8')}edited\n`);
@@ -220,6 +232,56 @@ test('custom agent: a quoted "sterling-origin" key is Sterling bookkeeping and n
     } finally {
       rmSync(p.root, { recursive: true, force: true });
     }
+  }
+});
+
+test('custom agent: an Opus agent gets no agy copy, and the stale unedited agy copy is removed', () => {
+  const p = customProject(SRC, {});
+  try {
+    syncCustomAgents(p.root, p.config, { hosts: ['claude', 'opencode', 'agy'] });
+    const agyPath = join(p.root, '.agents/agents/team-scout/agent.md');
+    assert.match(readFileSync(agyPath, 'utf8'), /^model: inherit$/m, 'no model: every host inherits');
+    const r = syncCustomAgents(p.root, { models: { [KEY]: { model: 'anthropic/claude-opus-5-5', effort: 'high' } } }, { hosts: ['claude', 'opencode', 'agy'] });
+    assert.deepEqual(r.removed, [{ key: KEY, host: 'agy', path: '.agents/agents/team-scout/agent.md' }]);
+    assert.equal(existsSync(agyPath), false);
+    assert.ok(r.refused.some((x) => x.host === 'agy' && /agy cannot run anthropic\/claude-opus-5-5/.test(x.reason)));
+    assert.match(readFileSync(join(p.root, '.claude/agents/team-scout.md'), 'utf8'), /^model: claude-opus-5-5$/m);
+  } finally {
+    rmSync(p.root, { recursive: true, force: true });
+  }
+});
+
+test('custom agent: an agy/flash agent gets an agy copy naming model: flash, and no Claude Code or OpenCode copy', () => {
+  const p = customProject(SRC, { model: 'agy/flash' });
+  try {
+    const r = syncCustomAgents(p.root, p.config, { hosts: ['claude', 'opencode', 'agy'] });
+    assert.match(readFileSync(join(p.root, '.agents/agents/team-scout/agent.md'), 'utf8'), /^model: flash$/m);
+    assert.equal(existsSync(join(p.root, '.claude/agents/team-scout.md')), false);
+    assert.equal(existsSync(join(p.root, '.opencode/agents/team-scout.md')), false);
+    assert.ok(r.refused.some((x) => x.host === 'claude' && /claude cannot run agy\/flash/.test(x.reason)));
+  } finally {
+    rmSync(p.root, { recursive: true, force: true });
+  }
+});
+
+test('agy roster through readAgyFit: an agy/flash role renders model: flash; Claude-model roles lose their unedited copies', () => {
+  const projectDir = scratch('host-fit-agy-fit-');
+  const pluginRoot = join(import.meta.dirname, '..', '..');
+  try {
+    mkdirSync(join(projectDir, '.sterling'), { recursive: true });
+    writeFileSync(join(projectDir, '.sterling', 'config.json'), JSON.stringify({ models: { scout: { model: 'agy/flash' } } }));
+    const args = { projectDir, pluginRoot, root: pluginRoot, tracked: [], nodePath: '/usr/bin/node' };
+    ensureAgyAgents(args);
+    assert.ok(existsSync(join(projectDir, '.agents/agents/reviewer/agent.md')), 'a stale copy from before');
+    const { unsupported, frozen, models } = readAgyFit(projectDir);
+    assert.deepEqual(models, { scout: 'flash' });
+    const rows = ensureAgyAgents({ ...args, agyModels: models, unsupported, frozen });
+    assert.match(readFileSync(join(projectDir, '.agents/agents/scout/agent.md'), 'utf8'), /^model: flash$/m);
+    assert.equal(rows.find((r) => r.item === '.agents/agents/reviewer/agent.md').status, 'removed');
+    assert.equal(existsSync(join(projectDir, '.agents/agents/reviewer')), false, 'the Opus reviewer gets no agy copy');
+    assert.ok(existsSync(join(projectDir, '.agents/agents/conductor/agent.md')), 'the conductor is not judged');
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
   }
 });
 

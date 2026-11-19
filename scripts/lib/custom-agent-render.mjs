@@ -376,7 +376,7 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash, 
       const resolved = resolveHostSettings({ model: cfg.model }, 'opencode');
       if (cfg.model && resolved.model !== 'inherit') setLine('model', opencodeModelRef(resolved.model, overpassProvider));
     } else if (cfg.model) {
-      // agy agent files accept only its own enum, so a served Claude model renders inherit.
+      // agy agent files name the bare enum value (agy/flash renders flash); renderCustomAgent refused any other model above.
       setLine('model', resolveHostSettings({ model: cfg.model }, 'agy').model);
     }
     return { ok: true, name, content: withStamp(`---\n${fm}\n---`, body, host, key, sourceHash) };

@@ -25,10 +25,12 @@ const sync = (p, extra = {}) => syncCustomAgents(p.root, p.config, { hosts: ALL,
 
 test('renders one agent to all three hosts with a stamp, and a second run changes nothing', () => {
   // One model per agent (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude):
-  // the entry names one model, which every host that can run it renders; agy serves Opus and
-  // renders it as inherit, because its agent files accept only its own enum. Before the settings
-  // redesign this entry carried per-host opencode_model and agy_model overrides instead.
-  const p = project(source({ tools: 'Read, Grep, Glob', model: 'sonnet' }), { [KEY]: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
+  // the entry names no model, so every host renders its own default and all three get a copy.
+  // Before the settings redesign this entry carried model plus per-host opencode_model and
+  // agy_model overrides; one model can no longer reach all three hosts, because agy runs only
+  // agy/<id> models (rationale point (5)). The model lines per host are covered by
+  // scripts/tests/host-fit-one-model.test.mjs.
+  const p = project(source({ tools: 'Read, Grep, Glob', model: 'sonnet' }), { [KEY]: { effort: 'high' } });
   try {
     const first = sync(p);
     assert.deepEqual(first.refused, []);
@@ -38,12 +40,12 @@ test('renders one agent to all three hosts with a stamp, and a second run change
       ['agy', '.agents/agents/team-scout/agent.md', 'created'],
     ]);
     const claude = read(p.root, '.claude/agents/team-scout.md');
-    assert.match(claude, /^model: claude-opus-5-5$/m);
+    assert.match(claude, /^model: sonnet$/m, 'the author model stays on the origin host');
     assert.match(claude, /^effort: high$/m);
     assert.match(claude, /^tools: Read, Grep, Glob$/m, 'the Claude copy keeps the author tools line');
     assert.match(claude, /<!-- sterling-custom renderer=custom-agent\/1 host=claude key=custom-team-scout source_hash=[0-9a-f]{64} content_hash=[0-9a-f]{64} -->/);
     const oc = read(p.root, '.opencode/agents/team-scout.md');
-    assert.match(oc, /^model: anthropic\/claude-opus-5-5$/m);
+    assert.doesNotMatch(oc, /^model:/m);
     assert.doesNotMatch(oc, /effort/);
     assert.match(oc, /^permission:\n  "\*": deny\n  read: allow\n  grep: allow\n  glob: allow\n---/m);
     const agy = read(p.root, '.agents/agents/team-scout/agent.md');

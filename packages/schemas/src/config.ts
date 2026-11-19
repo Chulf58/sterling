@@ -1316,6 +1316,9 @@ export const MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[
 export const CLAUDE_PROVIDER = 'anthropic';
 /** The logical provider of an Overpass tier, overpass/<tier>, whatever config.overpass.provider is. */
 export const OVERPASS_MODEL_NAMESPACE = 'overpass';
+/** agy's own models, agy/<id> with <id> one of AGY_MODEL_IDS: the only models agy agent files can name
+ *  (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude, rationale point (5)). */
+export const AGY_MODEL_NAMESPACE = 'agy';
 /** The models keys of the two agents that are not subagents: the conductor and OpenCode's Plan agent. */
 export const CONDUCTOR_MODEL_KEY = 'conductor';
 export const PLAN_MODEL_KEY = 'plan';
@@ -1358,6 +1361,9 @@ export const canonicalModelsSchema = z
       const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
       if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'model'], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+      }
+      if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !(AGY_MODEL_IDS as readonly string[]).includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'model'], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(', ')}` });
       }
       if (e.effort === 'max' && overpassTier === null) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'effort'], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });

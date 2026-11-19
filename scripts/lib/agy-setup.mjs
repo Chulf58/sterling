@@ -35,7 +35,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { AGENT_MODEL_KEY, AGY_MODEL_IDS, unsupportedAgents } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, AGY_MODEL_IDS, parseCanonicalModels, resolveHostSettings, unsupportedAgents } from '@sterling/schemas';
 import { renderAgyText } from './agent-fences.mjs';
 import { findDeadTerms } from './agent-distribution.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -317,23 +317,31 @@ function removeUnsupported(projectDir, rel, name, why, tracked) {
 }
 
 /**
- * Which agy roster agents the project's config gives a model agy cannot run: { unsupported, frozen },
- * each a Map of roster name to the reason (unsupportedAgents, the one host-fit table). The conductor
- * runs on the agy session's own model and is not judged. A role with two models not yet chosen is
- * `frozen`. A project with no config.json has neither.
+ * Which agy roster agents the project's config gives a model agy cannot run: { unsupported, frozen,
+ * models }. `unsupported` and `frozen` are Maps of roster name to the reason (unsupportedAgents, the one
+ * host-fit table): agy runs only its own models, agy/<id> (user-ruled, decision
+ * one-model-per-agent-an-agent-has-a-single-model-not-a-claude point (5): an agent on a Claude model
+ * gets no agy copy). `models` gives each roster agent on an agy model the bare value its file names
+ * (agy/flash -> flash). The conductor runs on the agy session's own model and is not judged. A role
+ * with two models not yet chosen is `frozen`. A project with no config.json has none of them.
  */
 export function readAgyFit(projectDir) {
   const unsupported = new Map();
   const frozen = new Map();
+  const models = {};
   const configPath = join(storeRootFor(projectDir), '.sterling', 'config.json');
-  if (!existsSync(configPath)) return { unsupported, frozen };
-  const rows = unsupportedAgents(JSON.parse(readFileSync(configPath, 'utf8')), ['agy']);
+  if (!existsSync(configPath)) return { unsupported, frozen, models };
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  const rows = unsupportedAgents(config, ['agy']);
+  const canonical = parseCanonicalModels(config);
   for (const name of AGY_ROSTER) {
     const key = AGENT_MODEL_KEY[name];
     if (!key) continue;
     for (const r of rows.filter((x) => x.agent === key)) (r.host === '*' ? frozen : unsupported).set(name, r.reason);
+    const model = canonical[key]?.model;
+    if (model && !unsupported.has(name) && !frozen.has(name)) models[name] = resolveHostSettings({ model }, 'agy').model;
   }
-  return { unsupported, frozen };
+  return { unsupported, frozen, models };
 }
 
 /**
@@ -529,8 +537,8 @@ export function setupAgy({ projectDir, pluginRoot, env = process.env, home = hom
     for (const { role, value } of ignored) {
       rows.push({ item: `models.${role}.agy_model`, status: 'ignored', detail: `${JSON.stringify(value)} is not one of ${AGY_MODEL_IDS.join(', ')}, which agy accepts; the ${role} agent renders model: inherit (run /sterling:update to drop the stale value)` });
     }
-    const { unsupported, frozen } = readAgyFit(projectDir);
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: pins, unsupported, frozen }));
+    const { unsupported, frozen, models } = readAgyFit(projectDir);
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: { ...pins, ...models }, unsupported, frozen }));
   } else {
     const remedy = resolve(root) !== resolve(pluginRoot)
       ? `install this Sterling into agy (agy plugin install ${fwd(resolve(pluginRoot))}), then rerun /sterling:update`
