@@ -573,7 +573,8 @@ test('[overpass] effective Overpass with claude on PATH runs the worker through 
 
     const noBinary = pluginLaunch(fx, on, { execPath: '/usr/bin/node' });
     assert.deepEqual(noBinary, [], 'effective Overpass with no OpenCode binary does not fall back to claude');
-    assert.match(notices(fx.project).join('\n'), /Overpass is effective/);
+    // reworded with the settings redesign: a tier is the worker's own model, not a global switch
+    assert.match(notices(fx.project).join('\n'), /Its model in config\.models \(an Overpass tier or another non-Claude model\) runs only through OpenCode/);
   } finally {
     fx.cleanup();
   }

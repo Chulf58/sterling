@@ -1,190 +1,123 @@
-// The dispatch model resolver on OpenCode (decision
-// subagent-model-choice-on-opencode-conductor-states-dispatch). While Overpass is NOT
-// effective, each subagent call's model comes from the project's config.models, driven by
-// the dispatch intent the conductor states on one brief line:
-//   MODEL-INTENT: hard               the role's hard_task pin; on sterling/implementor, the
-//                                    models.implementor-hard entry (back-compat: the hard
-//                                    implementor lane is its own agent now, decision
-//                                    hard-implementor-is-its-own-agent-sterling-implementor-hard,
-//                                    so dispatch sterling/implementor-hard instead)
-//   MODEL-INTENT: review-of=<p>      a reviewer of work written on provider <p>; the
-//                                    reviewer is moved off that provider when it can be
-//   MODEL-INTENT: fallback=<reason>  the role's Claude model (models.<role>.model), announced
-// A brief with no line runs on the role's normal model: opencode_model, else
-// anthropic/<model>. The role's effort is sent as the OpenCode variant (`#<effort>`): model
-// and effort stay separate in config and are composed only here.
+// The dispatch model resolver on OpenCode. Every subagent call's model comes from the agent's
+// ONE canonical model in config.models (decisions one-model-per-agent-an-agent-has-a-single-model-not-a-claude,
+// overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi and
+// settings-redesign-build-shape-one-legacy-to-canonical-config): the config is read through the
+// legacy-to-canonical transform (toCanonicalConfig), so a legacy file and a canonical one give
+// the same answer. An agent's model is <provider>/<id>, sent with its optional effort as the
+// OpenCode variant (`#<effort>`); an Overpass tier, overpass/<tier>, is a logical namespace
+// mapped through config.overpass.provider and sent without a variant, because a tier's effort
+// reaches the request as its reasoning effort (overpass.mjs requestEffort).
 //
-// Precedence: a model the call names is a deliberate pin and is kept, with a line naming
-// what config.models would have given (the decision's strongest objection to a fixed
-// override order was that it erases such pins). The resolver fills only a call that names
-// no model. While Overpass is effective none of this runs: overpass.mjs dispatchPin and
-// OVERPASS-BYPASS decide exactly as before, and an intent line is ignored.
+// There is no MODEL-INTENT line any more (hard, review-of and fallback are gone with the one
+// model), and no Overpass switch: a brief's MODEL-INTENT or OVERPASS-BYPASS line is plain text.
 //
-// Failure: a malformed or repeated MODEL-INTENT line refuses the dispatch (thrown out of
-// execute.before, as a bad OVERPASS-BYPASS line is), because the conductor's own line is
-// cheap to fix. A config.models value that fails validation never refuses and never drops
-// the dispatch: the call keeps its own model and carries a loud line plus a notice.
-import { CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, configSchema, judgeProjectMode, migrateStaleAgyModels } from '@sterling/schemas';
+// Precedence: a model the call names is a deliberate pin and is kept, with a line naming what
+// config.models would have given (decision subagent-model-choice-on-opencode-conductor-states-dispatch).
+// The resolver fills only a call that names no model.
+//
+// Failure: a role whose legacy entry still names two models (a Claude model and a different
+// OpenCode model, not yet chosen by /sterling:update) refuses the dispatch loudly, on either model
+// (conductor ruling 2026-11-19: the transform's proposal is not used). A config.models value that
+// fails validation never refuses: the call keeps its own model and carries a loud line plus a notice.
+import { DEFAULT_OVERPASS_PROVIDER, OVERPASS_MODEL_NAMESPACE, OVERPASS_PROVIDER_RE, canonicalModelsSchema, opencodeModelRef, toCanonicalConfig, twoModelsReason } from '@sterling/schemas';
 import { agentRole } from './agent-name.mjs';
-import { unfencedMarkers } from './overpass.mjs';
 
-const INTENT_LINE = /^[ \t]*MODEL-INTENT:(.*)$/;
-const PROVIDER_RE = /^[a-z0-9][a-z0-9-]*$/;
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const TIER_PREFIX = `${OVERPASS_MODEL_NAMESPACE}/`;
 
-/** The message a dispatch is refused with when its MODEL-INTENT line cannot be read (`why` names the defect). */
-export function intentRefusal(why) {
-  return `Sterling refused this subagent dispatch: its brief carries a MODEL-INTENT line but ${why}. Use exactly one line, "MODEL-INTENT: hard", "MODEL-INTENT: review-of=<provider>" (the provider the reviewed work was written on, for example openai) or "MODEL-INTENT: fallback=<reason>", or drop the line to run on the role's normal model.`;
+/** The message a dispatch to a role with an unresolved two-model conflict is refused with. */
+export function conflictRefusal(role) {
+  return `Sterling refused this subagent dispatch: ${twoModelsReason(role)}. Nothing was sent, on either model.`;
 }
 
 /**
- * The dispatch intent in a brief: { kind: 'normal' } when no unfenced MODEL-INTENT line is
- * there, else { kind: 'hard' }, { kind: 'review-of', author } or { kind: 'fallback', reason }.
- * Throws intentRefusal for two or more lines or a value that is none of those.
+ * The project's model routing, read once from a raw config (legacy or canonical):
+ * { provider, conflicts: Set<role>, entries: { [key]: entry } } where an entry is
+ * { canonical, model, effort?, tier } (`model` the OpenCode reference, overpass/<tier> mapped
+ * through the provider) or { problem }. The eight shipped roles always have an entry (their
+ * defaults). `modelsProblem` is set when config.models is not an object. Throws what
+ * toCanonicalConfig throws for a legacy value it cannot carry, and for an overpass block or
+ * provider that is not valid, so the caller refuses rather than guess a route.
  */
-export function parseIntent(prompt) {
-  const lines = unfencedMarkers(prompt, INTENT_LINE);
-  if (!lines.length) return { kind: 'normal' };
-  if (lines.length > 1) throw new Error(intentRefusal(`it has ${lines.length} of them`));
-  const value = lines[0];
-  if (value === 'hard') return { kind: 'hard' };
-  const review = /^review-of=(.*)$/.exec(value);
-  if (review) {
-    const author = review[1].trim();
-    if (!PROVIDER_RE.test(author)) throw new Error(intentRefusal(`review-of names ${JSON.stringify(author)}, which is not a provider id such as openai or anthropic`));
-    return { kind: 'review-of', author };
+export function projectRouting(config) {
+  const { config: canon, conflicts } = toCanonicalConfig(isObject(config) ? config : {});
+  const overpass = canon.overpass;
+  if (overpass !== undefined && !isObject(overpass)) throw new Error(`config.overpass is ${JSON.stringify(overpass)} — it must be an object`);
+  const provider = overpass?.provider ?? DEFAULT_OVERPASS_PROVIDER;
+  if (typeof provider !== 'string' || !OVERPASS_PROVIDER_RE.test(provider)) throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} — it must be letters, digits, '-', '_' and '.'`);
+  const routing = { provider, conflicts: new Set(conflicts.map((c) => c.role)), entries: {} };
+  const raw = canon.models;
+  if (raw !== undefined && !isObject(raw)) {
+    routing.modelsProblem = `config.models is ${JSON.stringify(raw)}, not an object`;
+    return routing;
   }
-  const fallback = /^fallback=(.*)$/.exec(value);
-  if (fallback) {
-    const reason = fallback[1].trim();
-    if (!reason) throw new Error(intentRefusal('the fallback gives no reason'));
-    return { kind: 'fallback', reason };
+  const add = (key, e) => {
+    if (e.model === undefined) return;
+    const tier = e.model.startsWith(TIER_PREFIX);
+    routing.entries[key] = { canonical: e.model, model: opencodeModelRef(e.model, provider), ...(e.effort === undefined ? {} : { effort: e.effort }), tier };
+  };
+  for (const [key, e] of Object.entries(canonicalModelsSchema.parse({}))) add(key, e);
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    const parsed = canonicalModelsSchema.safeParse({ [key]: value });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      routing.entries[key] = { problem: `config.models.${[key, ...issue.path.slice(1)].join('.')}: ${issue.message}` };
+      continue;
+    }
+    delete routing.entries[key];
+    add(key, parsed.data[key]);
   }
-  throw new Error(intentRefusal(`its value ${JSON.stringify(value)} is not one of hard, review-of=<provider> or fallback=<reason>`));
-}
-
-const providerOf = (ref) => ref.slice(0, ref.indexOf('/'));
-const claudeRef = (entry) => `anthropic/${entry.model}`;
-
-/** The role's config.models entry judged by the schema (defaults applied): { entry } | { entry: null } | { problem }. */
-function roleEntry(config, role) {
-  // a v0.19.155 config may hold an exact agy_model id; the shared legacy strip, never a second copy
-  const models = migrateStaleAgyModels(config).config?.models;
-  if (models !== undefined && !isObject(models)) return { problem: `config.models is ${JSON.stringify(models)}, not an object` };
-  const raw = models ?? {};
-  const parsed = configSchema.shape.models.safeParse(Object.hasOwn(raw, role) ? { [role]: raw[role] } : {});
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    return { problem: `config.models.${[role, ...issue.path.slice(1)].join('.')}: ${issue.message}` };
-  }
-  return { entry: Object.hasOwn(parsed.data, role) ? parsed.data[role] : null };
-}
-
-/** A hard_task model as an OpenCode reference: <provider>/<model> as is, a Claude id on anthropic, else null. */
-function hardRef(model) {
-  if (OPENCODE_MODEL_REF_RE.test(model)) return model;
-  if (CLAUDE_MODEL_ID_RE.test(model)) return `anthropic/${model}`;
-  return null;
+  return routing;
 }
 
 /**
- * MODEL-INTENT: hard on sterling/implementor: the models.implementor-hard entry's normal
- * model, as a sterling/implementor-hard dispatch gets it. A models.implementor.hard_task
- * still in the file is no longer read, and the note says so.
+ * The pure resolver: (role, routing) -> what config.models gives the dispatch. null when the
+ * role has no model (an agent Sterling does not configure, or a custom agent left on the host's
+ * default: the call is left alone); { conflict: true } for an unresolved two-model role;
+ * { problem } when the entry fails validation; else { model, variant, ref, note, overpass }:
+ * `ref` is what to send (`model#variant`, or `model` when no effort or on a tier).
  */
-function hardImplementor(config) {
-  const res = resolveDispatchModel('implementor-hard', { kind: 'normal' }, config);
-  if (!res || res.problem) return res;
-  const stale = isObject(config?.models?.implementor) && Object.hasOwn(config.models.implementor, 'hard_task');
-  const note = `${res.note} (MODEL-INTENT hard on implementor; dispatch sterling/implementor-hard instead${stale ? '; models.implementor.hard_task is no longer read, and /sterling:update moves it into models.implementor-hard' : ''})`;
-  return { ...res, note };
-}
-
-/**
- * The pure resolver: (role, intent, raw config, project mode) -> what config.models gives
- * the dispatch. Returns null when the role has no config.models entry (an agent Sterling
- * does not configure: the call is left alone), { problem } when the entry fails validation,
- * else { model, variant, ref, note }: `ref` is `model#variant`, `note` says why, in words.
- * `mode` is read only for review-of, through the strict mode judge; null means judge config.mode.
- */
-export function resolveDispatchModel(role, intent, config, mode = null) {
+export function resolveDispatchModel(role, routing) {
   if (typeof role !== 'string' || !role) return null;
-  if (role === 'implementor' && intent.kind === 'hard') return hardImplementor(config);
-  const judged = roleEntry(config, role);
-  if (judged.problem) return { problem: judged.problem };
-  const { entry } = judged;
+  if (routing.conflicts.has(role)) return { conflict: true };
+  if (routing.modelsProblem) return { problem: routing.modelsProblem };
+  const entry = Object.hasOwn(routing.entries, role) ? routing.entries[role] : null;
   if (!entry) return null;
-  const normal = entry.opencode_model ?? claudeRef(entry);
-  let model = normal;
-  let variant = entry.effort;
-  let note = `config.models.${role}`;
-  if (intent.kind === 'hard') {
-    if (!entry.hard_task) note = `config.models.${role} (MODEL-INTENT hard, but ${role} has no hard_task, so its normal model)`;
-    else {
-      const ref = hardRef(entry.hard_task.model);
-      if (!ref) return { problem: `config.models.${role}.hard_task.model is ${JSON.stringify(entry.hard_task.model)}, neither a Claude model id nor <provider>/<model>` };
-      model = ref;
-      variant = entry.hard_task.effort ?? entry.effort;
-      note = `config.models.${role}.hard_task (MODEL-INTENT hard)`;
-    }
-  } else if (intent.kind === 'review-of') {
-    let judgedMode = mode;
-    if (judgedMode === null) {
-      try {
-        judgedMode = judgeProjectMode(config?.mode, '.sterling/config.json');
-      } catch (e) {
-        return { problem: e.message };
-      }
-    }
-    const alt = claudeRef(entry);
-    if (judgedMode === 'work') note = `config.models.${role} (work mode: every pre-PR reviewer runs on the normal reviewer model, whoever wrote the work)`;
-    else if (providerOf(normal) !== intent.author) note = `config.models.${role} (already a different provider from the author's ${intent.author})`;
-    else if (providerOf(alt) !== intent.author) {
-      model = alt;
-      note = `config.models.${role}.model (the author wrote on ${intent.author}, so the dispatch moves to the role's Claude model)`;
-    } else note = `config.models.${role} (CROSS-FAMILY NOT POSSIBLE: the author wrote on ${intent.author} and this role configures no model on another provider)`;
-  } else if (intent.kind === 'fallback') {
-    model = claudeRef(entry);
-    note = `config.models.${role}.model (announced fallback: ${intent.reason})`;
+  if (entry.problem) return { problem: entry.problem };
+  const { model, effort, tier } = entry;
+  if (tier) {
+    const note = `config.models.${role}, the Overpass tier ${entry.canonical} on provider '${routing.provider}'${effort ? ` with effort ${effort} sent as the request's reasoning effort` : ''}`;
+    return { model, variant: undefined, ref: model, note, overpass: true };
   }
-  return { model, variant, ref: `${model}#${variant}`, note };
+  return { model, variant: effort, ref: effort ? `${model}#${effort}` : model, note: `config.models.${role}`, overpass: false };
 }
 
 /**
- * The model step for one subagent call while Overpass is not effective: { model, line,
- * notice? }. `model` is what to set on the call (null leaves the call as it is); `line` goes
- * on the call's result; `notice` also reaches the conductor's session. Throws intentRefusal.
+ * The model step for one subagent call: { model, line, notice?, resolved?, overpass? }. `model`
+ * is what to set on the call (null leaves the call as it is); `line` goes on the call's result;
+ * `notice` also reaches the conductor's session; `overpass` marks a tier route for the
+ * availability check. Throws conflictRefusal for a role with two models.
  */
-export function dispatchModel(config, args) {
-  const intent = parseIntent(args?.prompt);
+export function dispatchModel(routing, args) {
   const role = agentRole(args?.agent);
   const named = typeof args?.model === 'string' && args.model ? args.model : null;
   // A call that resumes a subagent session (`sessionID` on 2.1.2's subagent tool, the old task_id)
-  // keeps that session's own model: a model on the call would beat it and switch a warm session
-  // (an Opus lane resumed as Sonnet). Only an explicit intent line resolves a model for a resume.
-  if (typeof args?.sessionID === 'string' && args.sessionID && intent.kind === 'normal') {
-    return { model: null, line: named ? null : 'MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied).' };
+  // keeps that session's own model: a model on the call would beat it and switch a warm session.
+  if (typeof args?.sessionID === 'string' && args.sessionID) {
+    return { model: null, line: named ? null : 'MODEL: resumed session keeps its own model (config.models is not applied).' };
   }
-  const res = resolveDispatchModel(role, intent, config);
-  if (res === null) {
-    return intent.kind === 'normal'
-      ? { model: null, line: null }
-      : { model: null, line: `MODEL: the MODEL-INTENT line was not applied: the agent ${JSON.stringify(args?.agent)} has no config.models entry, so the call ${named ? `kept ${named}` : 'runs on the agent\'s own model'}.` };
-  }
+  const res = resolveDispatchModel(role, routing);
+  if (res === null) return { model: null, line: null };
+  if (res.conflict) throw new Error(conflictRefusal(role));
   if (res.problem) {
     const text = `config.models is invalid (${res.problem}), so this dispatch was not given a model from it and ${named ? `kept ${named} as the call named` : 'runs on the agent\'s own model'}. Fix the value in .sterling/config.json (TUI System tab).`;
     return { model: null, line: `MODEL: ${text}`, notice: `Sterling models: ${text}` };
   }
   if (named) {
-    const differs = named !== res.ref;
-    const line = differs ? `MODEL: kept ${named} as the call named; ${res.note} gives ${res.ref}. Omit the call's model to run on config.models.` : null;
-    const notice = intent.kind === 'fallback' ? `Sterling models: fallback dispatch on ${named} (reason: ${intent.reason}).` : undefined;
-    return notice ? { model: null, line: line ?? `MODEL: fallback dispatch on ${named} (reason: ${intent.reason}).`, notice } : { model: null, line };
+    const line = named !== res.ref ? `MODEL: kept ${named} as the call named; ${res.note} gives ${res.ref}. Omit the call's model to run on config.models.` : null;
+    return { model: null, line };
   }
-  const line = `MODEL: this dispatch runs on ${res.ref}, from ${res.note}.`;
-  return intent.kind === 'fallback'
-    ? { model: res.ref, line, notice: `Sterling models: fallback dispatch on ${res.ref} (reason: ${intent.reason}).`, resolved: true }
-    : { model: res.ref, line, resolved: true };
+  return { model: res.ref, line: `MODEL: this dispatch runs on ${res.ref}, from ${res.note}.`, resolved: true, overpass: res.overpass };
 }
 
 const variantIds = (entry) => (Array.isArray(entry?.variants) ? entry.variants.map((v) => (typeof v === 'string' ? v : v?.id)).filter((v) => typeof v === 'string') : null);

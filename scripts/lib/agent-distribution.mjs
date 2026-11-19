@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE, canonicalModelsSchema, hostRunsModel, toCanonicalConfig } from '@sterling/schemas';
 import { MCP_PREFIXES } from './checks.mjs';
 import { renderClaudeText } from './agent-fences.mjs';
 import { writeFileAtomicIfChanged } from './atomic-write.mjs';
@@ -106,6 +106,15 @@ export const HEADER_RE =
 // (config stays optional), so a token-free template renders byte-identically with
 // or without config. When the tokens ARE present, config.models must resolve them
 // or we refuse loudly (P5) rather than emit a half-baked frontmatter.
+//
+// The entry is read through the legacy-to-canonical transform (decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config): its ONE model is
+// <provider>/<id>, and only an anthropic model runs on Claude Code (hostRunsModel). A
+// model Claude Code cannot run gives { unsupported } instead of vars, and the agent gets
+// no Claude copy (prepareRegisteredAgents). A role whose legacy entry still names two
+// models keeps its Claude model until /sterling:update asks which to keep, so its Claude
+// copy is neither changed nor removed meanwhile. An unset effort stays unset: the
+// template's effort line is dropped (EFFORT null).
 function resolveModelVars(templateContent, label, config) {
   if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
   const { name } = parseTemplate(templateContent, label);
@@ -113,11 +122,28 @@ function resolveModelVars(templateContent, label, config) {
   if (!key) {
     throw new Error(`model resolution failed for ${label}: agent '${name}' has no AGENT_MODEL_KEY entry — cannot resolve {{MODEL}}/{{EFFORT}}`);
   }
-  const entry = config && config.models && config.models[key];
-  if (!entry || typeof entry.model !== 'string' || typeof entry.effort !== 'string') {
+  if (!config?.models?.[key] || typeof config.models[key] !== 'object') {
     throw new Error(`model resolution failed for ${label}: config.models['${key}'] is missing model/effort — a tokenized template needs config.models (P5)`);
   }
-  return { MODEL: entry.model, EFFORT: entry.effort };
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const conflict = conflicts.find((c) => c.role === key);
+  let entry;
+  if (conflict) entry = conflict.claude;
+  else {
+    const parsed = canonicalModelsSchema.safeParse({ [key]: canon.models[key] });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new Error(`model resolution failed for ${label}: config.models.${[key, ...issue.path.slice(1)].join('.')}: ${issue.message} (P5)`);
+    }
+    entry = parsed.data[key];
+  }
+  if (!hostRunsModel(entry.model, 'claude')) return { unsupported: `config.models.${key} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { MODEL: entry.model.slice(entry.model.indexOf('/') + 1), EFFORT: entry.effort ?? null };
+}
+
+/** Why Claude Code gets no copy of this template under `config` (its model is one it cannot run), or null. */
+export function claudeUnsupportedReason(templateContent, label, config) {
+  return resolveModelVars(templateContent, label, config).unsupported ?? null;
 }
 
 // Per-project tool extension (decision
@@ -178,12 +204,19 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   // tokens that install bakes to machine-detected forward-slash paths (§6
   // emission rule — the backslash check below guards the substituted result) and
   // {{MODEL}}/{{EFFORT}} tokens resolved per agent from config.models (98064d77).
-  const allVars = { ...vars, ...resolveModelVars(templateContent, label, config) };
+  const modelVars = resolveModelVars(templateContent, label, config);
+  if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
+  const allVars = { ...vars, ...modelVars };
   // Fences (agent-fences.mjs): the Claude render keeps sterling-only content and
   // drops only its marker lines, and drops portable-only blocks whole, so a fenced
   // template installs byte-identically to its unfenced form. template_hash below
   // stays the hash of the RAW template.
   let substituted = renderClaudeText(templateContent, label);
+  // An unset effort is not written: the effort line goes with its token.
+  if (allVars.EFFORT === null) {
+    substituted = substituted.replace(/^effort:[ \t]*\{\{EFFORT\}\}[ \t]*\r?\n/m, '');
+    delete allVars.EFFORT;
+  }
   for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
   }
@@ -474,7 +507,25 @@ export const RESTART_INSTRUCTION = [
 ].join('\n');
 
 export function agentChangesRequireRestart(report) {
-  return report.some((entry) => ['installed', 'refreshed', 'header_repaired', 'machine_rebaked', 'retired'].includes(entry.status));
+  return report.some((entry) => ['installed', 'refreshed', 'header_repaired', 'machine_rebaked', 'retired', 'unsupported_removed'].includes(entry.status));
+}
+
+/** The refusal for an edited copy of an agent Claude Code no longer gets (its model is one it cannot run). */
+export function unsupportedModifiedInstruction(name, reason) {
+  return [
+    `REFUSED: .claude/agents/${name}.md is no longer generated (${reason}), but it was edited after install,`,
+    'so Sterling keeps it. It may run another model or allow other tools than the agent is configured with.',
+    `Remove it by hand (move it out of .claude/agents/), or choose an anthropic model for ${name} in config.models (TUI System tab).`,
+  ].join('\n');
+}
+
+// The Claude roster agents the config gives a model Claude Code cannot run: each is left out of
+// the render, its unedited generated copy is removed through the retirement path (the same
+// ownership rule as the custom-agent cleanup in custom-agent-render.mjs planCustomAgents: only
+// an unedited Sterling copy is deleted; an edited one is kept and reported), and an agent with
+// no copy on disk is still reported, so the gap is never silent.
+function unsupportedRoster(prepared) {
+  return new Map(prepared.filter((e) => e.unsupported).map((e) => [e.name, e.unsupported]));
 }
 
 function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config }) {
@@ -493,6 +544,8 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, no
   // a bad template/config may not turn a registry typo into an irreversible prune.
   return entries.map((entry) => {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
+    const unsupported = claudeUnsupportedReason(templateContent, entry.file, config);
+    if (unsupported) return { ...entry, templateContent, unsupported };
     const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
@@ -513,9 +566,10 @@ export function retirementRefuseInstruction(name) {
 
 // Retire only recognized, unmodified generated artifacts. lstat is deliberate:
 // a symlink in .claude/agents is neither our regular file nor ours to follow.
-export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
+export function retireAgents({ targetAgentsDir, registryNames, unsupported = new Map(), fs = {} }) {
   const io = { readdirSync, lstatSync, readFileSync, unlinkSync, renameSync, linkSync, ...fs };
   const report = [];
+  const seenUnsupported = new Set();
   let entries;
   try {
     entries = io.readdirSync(targetAgentsDir);
@@ -558,8 +612,11 @@ export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
       report.push({ name, status: 'retired_identity_mismatch', refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
+    const unsupportedWhy = unsupported.get(name);
+    if (unsupportedWhy) seenUnsupported.add(name);
     if (isLocallyModified(content, header)) {
-      report.push({ name, status: 'retired_but_modified', refused: true, instruction: retirementRefuseInstruction(name) });
+      if (unsupportedWhy) report.push({ name, status: 'unsupported_but_modified', refused: true, detail: unsupportedWhy, instruction: unsupportedModifiedInstruction(name, unsupportedWhy) });
+      else report.push({ name, status: 'retired_but_modified', refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
     // Rename first: after this atomic move the original pathname is free for a
@@ -584,7 +641,7 @@ export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
       io.afterQuarantineVerify?.({ path, quarantine, name });
       verifyQuarantine();
       io.unlinkSync(quarantine);
-      report.push({ name, status: 'retired' });
+      report.push(unsupportedWhy ? { name, status: 'unsupported_removed', detail: unsupportedWhy } : { name, status: 'retired' });
     } catch (err) {
       // Never overwrite a file that appeared at the original path.  Restore
       // only into an absent name; otherwise preserve the quarantine for manual
@@ -600,11 +657,16 @@ export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
       report.push({ name, status: 'retired_delete_failed', refused: true, instruction: `${retirementRefuseInstruction(name)}\nUnable to retire safely (${err?.code ?? err?.message ?? err}); ${restored ? 'the candidate was restored.' : `it remains quarantined at ${quarantine}.`}` });
     }
   }
+  for (const [name, why] of unsupported) {
+    if (!seenUnsupported.has(name)) report.push({ name, status: 'unsupported', detail: why });
+  }
   return report;
 }
 
 export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const all = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const unsupported = unsupportedRoster(all);
+  const prepared = all.filter((entry) => !entry.unsupported);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of prepared) {
@@ -635,7 +697,7 @@ export function installAgents({ templatesDir, registryPath, targetAgentsDir, plu
     writeFileAtomicIfChanged(installedPath, entry.installedContent);
     report.push({ name: entry.name, status: 'installed' });
   }
-  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
+  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), unsupported, fs: retirementFs }));
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 
@@ -688,7 +750,9 @@ export function foreignFileInstruction(name) {
 // config_drift | up_to_date | locally_modified_up_to_date |
 // refused_local_modification | foreign_file.
 export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const all = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const unsupported = unsupportedRoster(all);
+  const prepared = all.filter((entry) => !entry.unsupported);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of prepared) {
@@ -763,7 +827,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       }
     }
   }
-  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
+  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), unsupported, fs: retirementFs }));
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 

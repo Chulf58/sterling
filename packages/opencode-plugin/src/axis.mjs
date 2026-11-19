@@ -8,17 +8,13 @@
 // opener the configured config.sparring_partner.model is written into the call's
 // arguments when the call names none: execute.before's input is the live object
 // (finding opencode-2-plugin-spike-hooks-and-sidebar-october-2026, supplement 2).
-// On a subagent call, while Overpass is effective, the lane model replaces the call's
-// model (overpass.mjs dispatchPin; finding
+// On a subagent call that names no model, the agent's one model from config.models is
+// written into the call (dispatch-model.mjs; finding
 // opencode-2-0-23-how-session-and-subagent-models-are-chosen-and-overridden: the
-// mutated model reaches execution, and an unavailable one fails as a tool error). Before
-// that, a tier model missing from OpenCode's model list refuses the call with the fix steps
-// (overpass.mjs readInventory, GitHub #257, #258, #281).
-// A brief with an `OVERPASS-BYPASS: <reason>` line keeps the model the call names
-// (decision overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re).
-// While Overpass is not effective, a call that names no model gets one from
-// config.models through the brief's MODEL-INTENT line (dispatch-model.mjs; decision
-// subagent-model-choice-on-opencode-conductor-states-dispatch).
+// mutated model reaches execution, and an unavailable one fails as a tool error). An
+// Overpass tier model missing from OpenCode's model list refuses the call with the fix
+// steps (overpass.mjs readInventory, GitHub #257, #258, #281); a role with two models not
+// yet chosen refuses the call too.
 // H20 never denies on either host: Claude Code's deny-once rung was removed by
 // decision sterling-claude-code-scale-down-boundary (h20-mechanism-axis.mjs:435-441),
 // so the question surface is a post-answer audit here too.
@@ -46,7 +42,7 @@ import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
-import { dispatchOverpass, dispatchPin, missingRouteRefusal, overpassRefusal, overpassUnknownLine, readInventory, routeAvailability, unknownRouteLine } from './overpass.mjs';
+import { dispatchOverpass, missingRouteRefusal, overpassRefusal, overpassUnknownLine, readInventory, routeAvailability, unknownRouteLine } from './overpass.mjs';
 import { checkVariant, dispatchModel } from './dispatch-model.mjs';
 import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
@@ -160,14 +156,12 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
       });
     }
     if (surface === 'dispatch') {
-      // Overpass (overpass.mjs): while effective, every subagent call runs on the lane
-      // model, replacing a model the call named. An overpass block that is present but
-      // invalid is never read as off: the call is REFUSED by a throw out of
-      // execute.before, outside the fence (OpenCode's documented way for a plugin to block
-      // a tool call), because letting it run could put it on a direct provider. A whole
-      // config that cannot be read or parsed does not refuse (a hobby project that never
-      // turned Overpass on keeps dispatching): the call goes ahead unrouted and carries a
-      // loud UNKNOWN line. Applied before the carriage, like the codex pin.
+      // The model step (dispatch-model.mjs): a config whose model settings cannot be carried
+      // (an invalid overpass block or legacy value) is never guessed at: the call is REFUSED
+      // by a throw out of execute.before, outside the fence (OpenCode's documented way for a
+      // plugin to block a tool call). A whole config that cannot be read or parsed does not
+      // refuse: the call goes ahead on its own model and carries a loud UNKNOWN line.
+      // Applied before the carriage, like the codex pin.
       let read;
       try {
         read = dispatchOverpass(root);
@@ -180,22 +174,19 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         pinLine = overpassUnknownLine(read.unreadable);
         reportOverpass(root, pinLine);
       } else {
-        // An OVERPASS-BYPASS brief line keeps the call's model; one that cannot be honoured
-        // (no model on the call, no reason) throws and refuses the dispatch the same way.
-        // While Overpass is not effective, the model comes from config.models through the
-        // dispatch intent instead (dispatch-model.mjs); a bad MODEL-INTENT line refuses the same way.
+        // A role with two models not yet chosen throws and refuses the dispatch the same way.
         let pin;
         try {
-          pin = read.res.effective ? dispatchPin(read.res, args) : dispatchModel(read.config, args);
+          pin = dispatchModel(read.routing, args);
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
         }
         // The availability check (overpass.mjs readInventory): a tier route OpenCode does not
         // list refuses the dispatch before it starts, with the fix steps; a list that cannot
-        // be read sends the dispatch to its tier unchecked, with an UNKNOWN line. A bypassed
-        // dispatch (pin.model null) keeps its own model and is not checked here.
-        if (read.res.effective && pin.model) {
+        // be read sends the dispatch to its tier unchecked, with an UNKNOWN line. A call that
+        // named its own model (pin.model null) keeps it and is not checked here.
+        if (pin.overpass && pin.model) {
           const route = routeAvailability(readInventory(await boundedModelList(listModels, modelListTimeoutMs)), pin.model);
           if (route.state === 'missing') {
             const message = missingRouteRefusal(read.res, args.agent, pin.model, route.why);
@@ -216,7 +207,7 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         }
         if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
         pinLine = pin.line;
-        // The bypass is also told to the conductor's session as a notice, so it stays visible beyond the one result.
+        // A notice (an invalid config.models value) is also told to the conductor's session, so it stays visible beyond the one result.
         if (pin.notice) {
           reportOverpass(root, pin.notice);
           await fenced('axis', root, () => addNotice(root, pin.notice));

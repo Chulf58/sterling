@@ -32,7 +32,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rm
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CORE_SCHEMA, load } from 'js-yaml';
-import { AGENT_MODEL_KEY, CUSTOM_AGENT_KEY_RE, CUSTOM_AGENT_SLUG_RE, customAgentSlug, resolveHostSettings } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, CUSTOM_AGENT_KEY_RE, CUSTOM_AGENT_SLUG_RE, DEFAULT_OVERPASS_PROVIDER, customAgentSlug, hostRunsModel, opencodeModelRef, resolveHostSettings, toCanonicalConfig, twoModelsReason } from '@sterling/schemas';
 import { AGENT_SOURCE_DIR } from './agent-adoption.mjs';
 import { AGY_AGENTS_DIR, AGY_ROSTER, probeAgy } from './agy-setup.mjs';
 import { writeFileAtomicIfChanged } from './atomic-write.mjs';
@@ -162,7 +162,8 @@ export function translateTools(host, { tools, disallowedTools }) {
 
 // ── origin and source restrictions ───────────────────────────────────────────
 export const ORIGIN_FIELD = 'sterling-origin';
-const ORIGIN_LINE_RE = new RegExp(`^${ORIGIN_FIELD}:.*(?:\n|$)`, 'm');
+// The key may be quoted ("sterling-origin" or 'sterling-origin'), which YAML reads as the same key.
+const ORIGIN_LINE_RE = new RegExp(`^(?:${ORIGIN_FIELD}|"${ORIGIN_FIELD}"|'${ORIGIN_FIELD}')[ \t]*:.*(?:\n|$)`, 'm');
 
 /** The host a parsed source was written for: { origin } or { error }. */
 export function originOf(data) {
@@ -273,7 +274,9 @@ export function sourceRestrictions(origin, data) {
 
 // Frontmatter keys that restrict or extend an agent in a way no other host expresses, per origin:
 // a host other than the origin refuses an agent that has one, rather than render it without.
-const NON_PORTABLE_KEYS = { claude: ['hooks', 'mcpServers', 'permissionMode', 'isolation'], opencode: [], agy: [] };
+// agy's mcpServers declares the agent's own MCP servers (agy-setup.mjs renders one per agent),
+// which a Claude or OpenCode copy would silently lose (board 83a09944).
+const NON_PORTABLE_KEYS = { claude: ['hooks', 'mcpServers', 'permissionMode', 'isolation'], opencode: [], agy: ['mcpServers'] };
 
 /**
  * Why `host` cannot carry the restrictions of a source written for `origin`, or null when it can.
@@ -341,13 +344,18 @@ function withStamp(frontmatterBlock, body, host, key, sourceHash) {
 
 /**
  * Render one agent for one host. Returns { ok: true, name, content } or { ok: false, reason }.
- * `source` is parseSource output, `entry` the agent's config.models entry (any field may be absent).
- * The source's origin host (ORIGIN_FIELD, Claude when absent) gets the author's frontmatter as
- * written; every other host gets the origin's restrictions translated, or a refusal.
+ * `source` is parseSource output, `entry` the agent's canonical config.models entry ({ model?,
+ * effort? }, the model <provider>/<id>; planCustomAgents reads it through toCanonicalConfig).
+ * A host that cannot run the entry's model is refused (hostRunsModel; decision
+ * settings-redesign-build-shape-one-legacy-to-canonical-config). The source's origin host
+ * (ORIGIN_FIELD, Claude when absent) gets the author's frontmatter as written; every other host
+ * gets the origin's restrictions translated, or a refusal. `overpassProvider` maps an
+ * overpass/<tier> model on OpenCode.
  */
-export function renderCustomAgent({ host, key, name, source, entry, sourceHash }) {
+export function renderCustomAgent({ host, key, name, source, entry, sourceHash, overpassProvider = DEFAULT_OVERPASS_PROVIDER }) {
   const { data, body } = source;
   const cfg = entry ?? {};
+  if (cfg.model && !hostRunsModel(cfg.model, host)) return { ok: false, reason: `${host} cannot run ${cfg.model}, the model config.models.${key} names` };
   const o = originOf(data);
   if (o.error) return { ok: false, reason: o.error };
   const origin = o.origin;
@@ -361,14 +369,15 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash }
     };
     if (host === 'claude') {
       const resolved = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, 'claude');
-      if (cfg.model) setLine('model', cfg.model);
+      if (cfg.model) setLine('model', resolved.model);
       if (cfg.effort && resolved.effort) setLine('effort', resolved.effort);
       if (!/^name:/m.test(fm)) fm = `name: ${name}\n${fm}`;
     } else if (host === 'opencode') {
-      const resolved = resolveHostSettings({ model: cfg.model, opencode_model: cfg.opencode_model }, 'opencode');
-      if ((cfg.model || cfg.opencode_model) && resolved.model !== 'inherit') setLine('model', resolved.model);
-    } else if (cfg.agy_model) {
-      setLine('model', resolveHostSettings({ agy_model: cfg.agy_model }, 'agy').model);
+      const resolved = resolveHostSettings({ model: cfg.model }, 'opencode');
+      if (cfg.model && resolved.model !== 'inherit') setLine('model', opencodeModelRef(resolved.model, overpassProvider));
+    } else if (cfg.model) {
+      // agy agent files accept only its own enum, so a served Claude model renders inherit.
+      setLine('model', resolveHostSettings({ model: cfg.model }, 'agy').model);
     }
     return { ok: true, name, content: withStamp(`---\n${fm}\n---`, body, host, key, sourceHash) };
   }
@@ -381,7 +390,7 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash }
     const fromOc = origin === 'opencode' ? /^anthropic\/(claude-.+)$/.exec(srcModel ?? '')?.[1] : undefined;
     const resolved = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, 'claude');
     const lines = ['---', `name: ${name}`, `description: ${yamlString(data.description)}`];
-    if (cfg.model || fromOc) lines.push(`model: ${cfg.model ?? fromOc}`);
+    if (cfg.model || fromOc) lines.push(`model: ${cfg.model ? resolved.model : fromOc}`);
     if (cfg.effort && resolved.effort) lines.push(`effort: ${resolved.effort}`);
     const tools = toolList(restr.tools);
     const denied = toolList(restr.disallowedTools) ?? [];
@@ -393,14 +402,14 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash }
   const translated = translateTools(host, restr);
   if (host === 'opencode') {
     const claudeModel = origin === 'claude' && srcModel?.startsWith('claude-') ? srcModel : undefined;
-    const resolved = resolveHostSettings({ model: cfg.model ?? claudeModel, opencode_model: cfg.opencode_model }, 'opencode');
+    const resolved = resolveHostSettings({ model: cfg.model ?? claudeModel }, 'opencode');
     const lines = ['---', `description: ${yamlString(data.description)}`, 'mode: subagent'];
-    if (resolved.model !== 'inherit') lines.push(`model: ${resolved.model}`);
+    if (resolved.model !== 'inherit') lines.push(`model: ${opencodeModelRef(resolved.model, overpassProvider)}`);
     if (translated.rules.length) lines.push('permission:', ...translated.rules.map((r) => `  ${r.action === '*' ? '"*"' : r.action}: ${r.verdict}`));
     lines.push('---');
     return { ok: true, name, content: withStamp(lines.join('\n'), body, host, key, sourceHash) };
   }
-  const resolved = resolveHostSettings({ agy_model: cfg.agy_model }, 'agy');
+  const resolved = resolveHostSettings({ model: cfg.model }, 'agy');
   const lines = ['---', `name: ${name}`, `description: ${yamlString(data.description)}`, `model: ${resolved.model}`, 'mainAgent: false', 'subagent: true'];
   if (translated.tools !== null) lines.push('tools:', ...translated.tools.map((t) => `  - ${t}`));
   lines.push('---');
@@ -488,7 +497,13 @@ function readSources(root) {
  */
 export function planCustomAgents(projectRoot, config, { hosts, pending, vacated = [] } = {}) {
   const root = projectRoot;
-  const models = config?.models ?? {};
+  // One model per agent: the entries are read through the legacy-to-canonical transform. An agent
+  // whose legacy entry still names two models is not rendered and its copies stay as they are
+  // (`frozen`) until /sterling:update asks which to keep.
+  const { config: canon, conflicts } = toCanonicalConfig(config ?? {});
+  const models = canon?.models ?? {};
+  const overpassProvider = canon?.overpass?.provider ?? DEFAULT_OVERPASS_PROVIDER;
+  const frozen = new Set(conflicts.map((c) => c.role));
   const result = { ops: [], written: [], unchanged: [], refused: [], removed: [], skipped: [] };
   const targetHosts = hosts ?? CUSTOM_HOSTS;
   const sources = readSources(root);
@@ -529,6 +544,10 @@ export function planCustomAgents(projectRoot, config, { hosts, pending, vacated 
       refuse(key, '*', `${src.path}: the name ${name} belongs to a Sterling role, so no host file is written for it`, src.path);
       continue;
     }
+    if (frozen.has(key)) {
+      refuse(key, '*', `${twoModelsReason(key)}; its copies are left as they are until then`, src.path);
+      continue;
+    }
     agents.push({ key, src, source, name, entry: models[key], sourceHash: sha256(normalize(text)) });
   }
   const byName = new Map();
@@ -543,7 +562,7 @@ export function planCustomAgents(projectRoot, config, { hosts, pending, vacated 
       const rel = outputPath(host, a.name);
       let r;
       try {
-        r = renderCustomAgent({ host, key: a.key, name: a.name, source: a.source, entry: a.entry, sourceHash: a.sourceHash });
+        r = renderCustomAgent({ host, key: a.key, name: a.name, source: a.source, entry: a.entry, sourceHash: a.sourceHash, overpassProvider });
       } catch (err) {
         r = { ok: false, reason: err.message };
       }
@@ -573,6 +592,7 @@ export function planCustomAgents(projectRoot, config, { hosts, pending, vacated 
   for (const o of stampedOutputs(root)) {
     if (desired.has(slot(o.host, o.key, o.rel))) continue;
     if (live.has(o.key) && !targetHosts.includes(o.host)) continue;
+    if (frozen.has(o.key)) continue;
     const why = !live.has(o.key) ? 'its agent is gone' : 'Sterling no longer generates this copy for the current source';
     const t = inspectTarget(root, o.rel, o.host, o.key, `${AGENT_SOURCE_DIR}/${o.key}.md`, vacated);
     if (t.state === 'owned') {

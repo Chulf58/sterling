@@ -24,7 +24,11 @@ const read = (root, rel) => readFileSync(join(root, rel), 'utf8');
 const sync = (p, extra = {}) => syncCustomAgents(p.root, p.config, { hosts: ALL, ...OPTS, ...extra });
 
 test('renders one agent to all three hosts with a stamp, and a second run changes nothing', () => {
-  const p = project(source({ tools: 'Read, Grep, Glob', model: 'sonnet' }), { [KEY]: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol', agy_model: 'pro' } });
+  // One model per agent (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude):
+  // the entry names one model, which every host that can run it renders; agy serves Opus and
+  // renders it as inherit, because its agent files accept only its own enum. Before the settings
+  // redesign this entry carried per-host opencode_model and agy_model overrides instead.
+  const p = project(source({ tools: 'Read, Grep, Glob', model: 'sonnet' }), { [KEY]: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
   try {
     const first = sync(p);
     assert.deepEqual(first.refused, []);
@@ -39,11 +43,11 @@ test('renders one agent to all three hosts with a stamp, and a second run change
     assert.match(claude, /^tools: Read, Grep, Glob$/m, 'the Claude copy keeps the author tools line');
     assert.match(claude, /<!-- sterling-custom renderer=custom-agent\/1 host=claude key=custom-team-scout source_hash=[0-9a-f]{64} content_hash=[0-9a-f]{64} -->/);
     const oc = read(p.root, '.opencode/agents/team-scout.md');
-    assert.match(oc, /^model: openai\/gpt-6.1-sol$/m);
+    assert.match(oc, /^model: anthropic\/claude-opus-5-5$/m);
     assert.doesNotMatch(oc, /effort/);
     assert.match(oc, /^permission:\n  "\*": deny\n  read: allow\n  grep: allow\n  glob: allow\n---/m);
     const agy = read(p.root, '.agents/agents/team-scout/agent.md');
-    assert.match(agy, /^model: pro$/m);
+    assert.match(agy, /^model: inherit$/m);
     assert.match(agy, /^ {2}- read_file$/m);
     assert.doesNotMatch(agy, /run_command|effort/);
     const second = sync(p);

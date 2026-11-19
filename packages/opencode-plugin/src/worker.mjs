@@ -10,12 +10,13 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { MAINTENANCE_WORKER_ROLE, resolveOverpass } from '@sterling/schemas';
+import { MAINTENANCE_WORKER_ROLE, hostRunsModel, twoModelsReason } from '@sterling/schemas';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf, WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { missingRouteRemedy, routeAvailability } from './overpass.mjs';
+import { projectRouting } from './dispatch-model.mjs';
 
 /**
  * Whether this plugin runs inside the maintenance worker's own `opencode run`
@@ -57,7 +58,7 @@ export const MODEL_UNSET_TEXT =
   'Sterling: the maintenance worker did not run. config maintenance_worker.opencode_model is not set, and the OpenCode worker never falls back to OpenCode\'s default one. To enable it, add this to .sterling/config.json (any provider/model you can run): "maintenance_worker": { "opencode_model": "<provider>/<model>" }. Until then the queue drains by hand with /sterling:drain.';
 
 export const OVERPASS_NO_RUNNER_TEXT =
-  'Sterling: the maintenance worker did not run. Overpass is effective, so the worker must run through OpenCode on the Overpass model, but this plugin is not running inside an OpenCode binary. The maintenance queue drains only by hand (/sterling:drain) until it is.';
+  'Sterling: the maintenance worker did not run. Its model in config.models (an Overpass tier or another non-Claude model) runs only through OpenCode, but this plugin is not running inside an OpenCode binary. The maintenance queue drains only by hand (/sterling:drain) until it is.';
 
 export const NO_RUNNER_TEXT =
   'Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.';
@@ -90,41 +91,53 @@ export function createWorkerLaunch({
   const findOpencode = opencodeBin ?? (() => opencodeBinDefault(execPath));
   return function launchWorkerFor(root, at) {
     const config = loadConfig(root);
-    // Overpass (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
-    // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
-    // point (5)): while it is effective on this OpenCode host the worker runs
-    // through OpenCode on the tier lane model, even with `claude` on PATH and
-    // whatever maintenance_worker.opencode_model says. An invalid overpass
-    // block fails loud here: no launch, never a fall back to direct providers.
-    // The model and effort are the maintenance-worker role's route (board c97ddc97, user-ruled
-    // 2026-10-23: its own Overpass tier, default agentic-auto), not the shared lane model.
+    // The worker's one model, config.models.maintenance-worker (decision
+    // settings-redesign-build-shape-one-legacy-to-canonical-config, read through the
+    // legacy-to-canonical transform, so a legacy effective Overpass gives its tier). A model
+    // Claude Code cannot run (an Overpass tier mapped through config.overpass.provider, or
+    // another provider) runs through OpenCode, pinned, even with `claude` on PATH. A setting
+    // that cannot be read, or a role with two models not yet chosen, fails loud here: no
+    // launch, never a fall back to another model. `tierModel` is the model OpenCode is pinned
+    // to; only a tier route goes through the availability check below.
     let tierModel = null;
     let tierEffort;
+    let isTier = false;
+    let own = null;
     try {
-      const overpass = resolveOverpass(config, { host: 'opencode' });
-      if (overpass.effective) {
-        const route = overpass.roles[MAINTENANCE_WORKER_ROLE];
-        tierModel = route.model;
-        tierEffort = route.effort;
+      const routing = projectRouting(config ?? {});
+      if (routing.conflicts.has(MAINTENANCE_WORKER_ROLE)) throw new Error(twoModelsReason(MAINTENANCE_WORKER_ROLE));
+      if (routing.modelsProblem) throw new Error(routing.modelsProblem);
+      const entry = routing.entries[MAINTENANCE_WORKER_ROLE];
+      if (entry?.problem) throw new Error(entry.problem);
+      own = entry ?? null;
+      if (entry && (entry.tier || !hostRunsModel(entry.canonical, 'claude'))) {
+        tierModel = entry.model;
+        tierEffort = entry.effort;
+        isTier = entry.tier;
       }
     } catch (e) {
       skipOnce(root, at, `maintenance worker skipped: ${errText(e)}`, `Sterling: the maintenance worker did not run. ${errText(e)}. Fix .sterling/config.json; until then the queue drains by hand with /sterling:drain.`);
       return;
     }
     const ocBin = claudeOnPath() && !tierModel ? null : findOpencode();
+    // A Claude model the worker runs through OpenCode (no `claude` on PATH) is pinned the same way.
+    if (ocBin && !tierModel && own) {
+      tierModel = own.model;
+      tierEffort = own.effort;
+    }
     // No host field means 'claude', the lib's default.
     const runnerHost = ocBin ? { host: 'opencode', opencodeBin: ocBin, ...(tierModel ? { workerModel: tierModel, ...(tierEffort ? { workerEffort: tierEffort } : {}) } : {}) } : {};
     if (!ocBin && tierModel) {
-      skipOnce(root, at, 'maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through', OVERPASS_NO_RUNNER_TEXT);
+      skipOnce(root, at, `maintenance worker skipped: its model ${tierModel} runs only through OpenCode, and no OpenCode binary was found`, OVERPASS_NO_RUNNER_TEXT);
       return;
     }
     // The availability check (overpass.mjs readInventory): a worker route OpenCode does not
     // list is not launched, with one notice per distinct cause until the route loads again;
     // a list that was not read, or could not be, launches unchecked and says so in the log.
-    if (tierModel) {
+    if (isTier) {
       const route = routeAvailability(inventoryFor(root) ?? { state: 'unknown', why: 'no model list was read for this launch' }, tierModel);
       if (route.state === 'missing') {
-        const text = `Sterling: the maintenance worker did not run: Overpass is ON but its route ${tierModel} for the maintenance worker is not available: ${route.why}. It is not run on a direct provider instead. ${missingRouteRemedy(tierModel.slice(0, tierModel.indexOf('/')), { bypass: false })} The next settlement checks again.`;
+        const text = `Sterling: the maintenance worker did not run: its Overpass route ${tierModel} is not available: ${route.why}. It is not run on a direct provider instead. ${missingRouteRemedy(tierModel.slice(0, tierModel.indexOf('/')))} The next settlement checks again.`;
         if (missingReported.get(root) !== text) {
           missingReported.set(root, text);
           logLine(root, `maintenance worker skipped: Overpass route ${tierModel} is not available: ${route.why}`);

@@ -126,8 +126,13 @@ export {
   customAgentSlug,
   customAgentKey,
   resolveHostSettings,
+  AGY_SERVED_CLAUDE_MODELS,
+  hostRunsModel,
+  opencodeModelRef,
+  unsupportedAgents,
+  twoModelsReason,
 } from './custom-agents.js';
-export type { AgentHost, ClaudeEffortLevel, HostCapability, AgentModelSettings, ResolvedHostSettings } from './custom-agents.js';
+export type { AgentHost, ClaudeEffortLevel, HostCapability, AgentModelSettings, ResolvedHostSettings, UnsupportedAgent } from './custom-agents.js';
 export type { StaleAgyModelDrop, SterlingConfig, UnreadConfigKey, OverpassResolution } from './config.js';
 export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';

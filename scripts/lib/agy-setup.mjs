@@ -32,10 +32,10 @@
 //    per-user; a GEMINI.md that git tracks, or one Sterling did not write, is not listed.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { AGY_MODEL_IDS } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, AGY_MODEL_IDS, unsupportedAgents } from '@sterling/schemas';
 import { renderAgyText } from './agent-fences.mjs';
 import { findDeadTerms } from './agent-distribution.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -242,12 +242,25 @@ export function trackedFiles(projectDir, paths, runGit = git) {
   return { failed: why };
 }
 
-/** Write or check every agy agent file. Rows: created | matches | refreshed | refused. */
-export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath = process.execPath, agyModels = {} }) {
+/**
+ * Write or check every agy agent file. Rows: created | matches | refreshed | refused, and for a
+ * role agy cannot run (`unsupported`, from readAgyFit): removed (the unedited copy Sterling wrote)
+ * | unsupported (no copy) | refused (an edited or foreign copy, kept). A role in `frozen` (two
+ * models not yet chosen) is left as it is.
+ */
+export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath = process.execPath, agyModels = {}, unsupported = new Map(), frozen = new Map() }) {
   const rows = [];
   for (const name of AGY_ROSTER) {
     const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
     const path = join(projectDir, rel);
+    if (frozen.has(name)) {
+      rows.push({ item: rel, status: 'kept', detail: `${frozen.get(name)}; the agy copy is left as it is until then` });
+      continue;
+    }
+    if (unsupported.has(name)) {
+      rows.push(removeUnsupported(projectDir, rel, name, unsupported.get(name), tracked));
+      continue;
+    }
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling agy agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
@@ -280,6 +293,47 @@ export function ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePat
     rows.push({ item: rel, status: disk === null ? 'created' : 'refreshed' });
   }
   return rows;
+}
+
+/**
+ * The agy copy of a role agy cannot run (decision settings-redesign-build-shape-one-legacy-to-canonical-config):
+ * the copy Sterling wrote is removed while unedited; a tracked, foreign or edited copy is kept
+ * and reported, because it is not Sterling's to delete.
+ */
+function removeUnsupported(projectDir, rel, name, why, tracked) {
+  const path = join(projectDir, rel);
+  if (!existsSync(path)) return { item: rel, status: 'unsupported', detail: `${why}; agy gets no copy` };
+  const keep = (what) => refusal(rel, `${why}, but ${what}, so Sterling keeps it`, `delete it by hand, or choose a model agy runs for ${name}`);
+  if (tracked.includes(rel)) return keep(`${rel} is tracked by git`);
+  if (!statSync(path).isFile()) return keep(`${rel} is not a file`);
+  const disk = normalize(readFileSync(path, 'utf8'));
+  const h = disk.match(HEADER_RE);
+  if (!h || h[1] !== name) return keep(`${rel} carries no Sterling agy header (a file Sterling did not write)`);
+  if (sha256(unstamped(disk, h[0])) !== h[3]) return keep(`${rel} was edited after Sterling wrote it`);
+  unlinkSync(path);
+  const dir = dirname(path);
+  if (readdirSync(dir).length === 0) rmdirSync(dir);
+  return { item: rel, status: 'removed', detail: `${why}; the unedited copy Sterling wrote is removed` };
+}
+
+/**
+ * Which agy roster agents the project's config gives a model agy cannot run: { unsupported, frozen },
+ * each a Map of roster name to the reason (unsupportedAgents, the one host-fit table). The conductor
+ * runs on the agy session's own model and is not judged. A role with two models not yet chosen is
+ * `frozen`. A project with no config.json has neither.
+ */
+export function readAgyFit(projectDir) {
+  const unsupported = new Map();
+  const frozen = new Map();
+  const configPath = join(storeRootFor(projectDir), '.sterling', 'config.json');
+  if (!existsSync(configPath)) return { unsupported, frozen };
+  const rows = unsupportedAgents(JSON.parse(readFileSync(configPath, 'utf8')), ['agy']);
+  for (const name of AGY_ROSTER) {
+    const key = AGENT_MODEL_KEY[name];
+    if (!key) continue;
+    for (const r of rows.filter((x) => x.agent === key)) (r.host === '*' ? frozen : unsupported).set(name, r.reason);
+  }
+  return { unsupported, frozen };
 }
 
 /**
@@ -475,7 +529,8 @@ export function setupAgy({ projectDir, pluginRoot, env = process.env, home = hom
     for (const { role, value } of ignored) {
       rows.push({ item: `models.${role}.agy_model`, status: 'ignored', detail: `${JSON.stringify(value)} is not one of ${AGY_MODEL_IDS.join(', ')}, which agy accepts; the ${role} agent renders model: inherit (run /sterling:update to drop the stale value)` });
     }
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: pins }));
+    const { unsupported, frozen } = readAgyFit(projectDir);
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot, root, tracked, nodePath, agyModels: pins, unsupported, frozen }));
   } else {
     const remedy = resolve(root) !== resolve(pluginRoot)
       ? `install this Sterling into agy (agy plugin install ${fwd(resolve(pluginRoot))}), then rerun /sterling:update`
