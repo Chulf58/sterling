@@ -4,21 +4,56 @@
     "windows": {
       "default": 1000000
     },
-    "conductor": { "soft_pct": 35, "hard_pct": 50 }
+    "conductor": {
+      "soft_pct": 35,
+      "hard_pct": 50
+    }
   },
-  "applied_config_migrations": ["model-defaults-2026-10-23", "implementor-hard-2026-10-23", "overpass-defaults-2026-10-23"],
+  "applied_config_migrations": [
+    "model-defaults-2026-10-23",
+    "implementor-hard-2026-10-23",
+    "overpass-defaults-2026-10-23",
+    "canonical-config-2026-11-19"
+  ],
   "models": {
-    "implementor": { "model": "claude-sonnet-5-5", "effort": "medium" },
-    "implementor-hard": { "model": "claude-opus-5-5", "effort": "high" },
-    "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
-    "scout": { "model": "claude-sonnet-5-5", "effort": "low" },
-    "librarian": { "model": "claude-haiku-5-5", "effort": "low" },
-    "reviewer": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6.1-sol" },
-    "sparring": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6-astra" },
-    "preflight": { "model": "claude-sonnet-5-5", "effort": "low" }
+    "implementor": {
+      "model": "anthropic/claude-sonnet-5-5",
+      "effort": "medium"
+    },
+    "implementor-hard": {
+      "model": "anthropic/claude-opus-5-5",
+      "effort": "high"
+    },
+    "researcher": {
+      "model": "anthropic/claude-sonnet-5-5",
+      "effort": "medium"
+    },
+    "scout": {
+      "model": "anthropic/claude-sonnet-5-5",
+      "effort": "low"
+    },
+    "librarian": {
+      "model": "anthropic/claude-haiku-5-5",
+      "effort": "low"
+    },
+    "reviewer": {
+      "model": "anthropic/claude-opus-5-5",
+      "effort": "high"
+    },
+    "sparring": {
+      "model": "anthropic/claude-opus-5-5",
+      "effort": "high"
+    },
+    "preflight": {
+      "model": "anthropic/claude-sonnet-5-5",
+      "effort": "low"
+    }
   },
   "session_events": {
-    "research_agents": ["researcher", "claude-code-guide"]
+    "research_agents": [
+      "researcher",
+      "claude-code-guide"
+    ]
   },
   "delegation": {
     "max_concurrent": 5
@@ -34,10 +69,16 @@
     "enabled": true
   },
   "attestation_path_globs": [],
-  "undeclared_source_exclude_globs": ["**/*.sh"],
+  "undeclared_source_exclude_globs": [
+    "**/*.sh"
+  ],
   "store_authority": "primary",
   "staleness": {
-    "research_days": { "fast": 30, "medium": 90, "stable": 365 },
+    "research_days": {
+      "fast": 30,
+      "medium": 90,
+      "stable": 365
+    },
     "platform_external_days": 180
   },
   "models_catalog": {
@@ -49,11 +90,6 @@
     "total_cap_bytes": 3000
   },
   "article_history_genesis_entries": 2,
-  "sparring_partner": {
-    "enabled": true,
-    "vendor": "openai",
-    "models": {}
-  },
   "review": {
     "policy": "cross_vendor",
     "models": {}
@@ -61,17 +97,19 @@
   "tdd": {
     "enabled": true
   },
-  "mode": "hobby",
   "handoff": {
     "enabled": false
   },
   "pr_review": {
-    "copilot_logins": [],
-    "auto_merge_on_clean": true
+    "copilot_logins": []
   },
   "overpass": {
-    "enabled": false,
-    "provider": "overpass",
-    "conductor_bypass": true
+    "provider": "overpass"
+  },
+  "workflow": {
+    "merge": "direct",
+    "reviewers": 1,
+    "copilot_loop": false,
+    "auto_merge_on_clean": true
   }
 }

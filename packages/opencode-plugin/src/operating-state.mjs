@@ -15,10 +15,21 @@
 import { computeUndeclaredSourceDisclosure } from '../../../scripts/hooks/lib/undeclared-source-scan.mjs';
 import { renderUnavailable } from '../../../scripts/hooks/lib/undeclared-source.mjs';
 import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/maintenance-state.mjs';
-import { handoffFilesLine, machineRoleLine, mountedDomainLines, overpassLine, pendingIssueReportsLine, projectModeLine, readProjectConfig, storageLine, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
+import { handoffFilesLine, machineRoleLine, mountedDomainLines, overpassLine, pendingIssueReportsLine, projectModeLine, unsupportedAgentsLine, readProjectConfig, storageLine, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
+import { parseConfig } from '@sterling/schemas';
+
 import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
 import { storeRootFor } from '../../../scripts/lib/worktree-root.mjs';
+
+/** True when the config's merge path is a pull request (a legacy mode work reads as one); an unreadable config is false, which the workflow line itself reports. */
+function prMergePath(config) {
+  try {
+    return parseConfig(config ?? {}).workflow.merge === 'pr';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The config-derived lines, read live on every request so a TUI toggle shows on
@@ -32,7 +43,7 @@ export function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const store = storeRootFor(root);
   const { config, configUnreadable } = readProjectConfig(store);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: prMergePath(config) && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: 'opencode' }), unsupportedAgentsLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config, configUnreadable };
 }
 

@@ -872,9 +872,18 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // value). The prefix has a space, so the status filter above never counts them as agent changes;
       // relayed on success here and verbatim in the failure output below.
       const configMigrationLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('config migration: '));
-      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
+      // `unsupported:` is a role whose model Claude Code cannot run and that has no copy: nothing changed.
+      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: ') && !l.startsWith('unsupported: '));
+      const modelConflictLine = r.stdout.split('\n').map((l) => l.trim()).find((l) => l.startsWith('refused_model_conflicts: '));
       Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length, config_migration: configMigrationLines.length });
-      if (r.status === 2) {
+      if (r.status === 2 && modelConflictLine) {
+        // Not a failure of the files: the user has to choose. commands/update.md asks once per role
+        // (OpenCode preselected) and reruns sync-agents with --model-choice <role>=claude|opencode.
+        log(`  ✗ ${p.name}: MODEL CHOICE NEEDED (project at ${p.repo_path}) — ${modelConflictLine}`);
+        entry.model_conflicts = modelConflictLine.slice('refused_model_conflicts: '.length).split(' each name')[0].split(', ');
+        fail(2);
+        failed = true;
+      } else if (r.status === 2) {
         log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         fail(2);
         failed = true;

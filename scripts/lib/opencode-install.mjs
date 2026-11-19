@@ -68,7 +68,7 @@ export { writeFileAtomic };
 import { OPENCODE_LOADED_SOURCE, RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, SPECS_SOURCE, STERLING_NPM_PACKAGE, installHostOf, openCodeLoadedSterling, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
 import { JSONC_SOURCE, parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
-import { AGENT_MODEL_KEY, CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, parseConfig } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, hostRunsModel, opencodeModelRef as canonicalOpencodeModelRef, parseConfig } from '@sterling/schemas';
 import { sha256, loadRegistry, agentHosts } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
@@ -1267,8 +1267,7 @@ export function opencodeModelFor({ model, opencodeModel } = {}) {
  * (user-ruled 2026-10-09, "Yes, apply on install": a fresh machine or an update
  * matches what the System tab shows). The System tab shows the parsed config, so
  * every roster agent with a config.models key (AGENT_MODEL_KEY) pins that role's
- * parsed entry, a schema default included: its opencode_model override, else
- * anthropic/<model>. An agent with no key (the conductor) gets no entry and keeps
+ * parsed entry, a schema default included: its one model as OpenCode names it. An agent with no key (the conductor) gets no entry and keeps
  * the pin it has. A config.json that is missing, unreadable or does not validate
  * yields { refused } with a refused row (P5), and the caller writes no agent.
  */
@@ -1303,7 +1302,10 @@ export function configuredFullAgentModels(projectDir) {
     if (key === undefined) continue;
     const entry = parsed.models[key];
     if (entry === undefined) continue;
-    models[name] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
+    // the agent's one model (canonical <provider>/<id>; overpass/<tier> maps through
+    // overpass.provider); a model OpenCode cannot run (an agy/<id>) leaves the agent's pin as it is
+    if (typeof entry.model !== 'string' || !hostRunsModel(entry.model, 'opencode')) continue;
+    models[name] = canonicalOpencodeModelRef(entry.model, parsed.overpass.provider);
   }
   return { models };
 }
@@ -1487,6 +1489,24 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
     rows.push({ item: rel, status: disk === null ? 'created' : 'refreshed', path, content: agent.content, previous: raw });
   }
   return rows;
+}
+
+/**
+ * Re-render the project's Sterling-full OpenCode agents from config.models, the same render
+ * setupOpenCode's agent step runs (configuredFullAgentModels, then stageFullAgents). The System
+ * tab calls it after a model change so the OpenCode copies follow at once. A project whose
+ * Sterling-full set was never installed is skipped (nothing is created by it); a config.json that
+ * is refused writes nothing and comes back as { refused }.
+ */
+export function refreshFullAgentModels({ projectDir, pluginRoot }) {
+  if (!existsSync(join(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const configured = configuredFullAgentModels(storeRootFor(projectDir));
+  if (configured.refused) return { refused: configured.refused };
+  const ls = git(projectDir, ['ls-files', '--', '.opencode']);
+  const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
+  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models });
+  writeFullAgentFiles(staged.writes);
+  return { rows: staged.rows };
 }
 
 /**

@@ -14,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig, isCustomAgentKey, readProjectWorkflow, ProjectWorkflowError } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
-import { migrateProjectConfig } from './lib/config-migration.mjs';
+import { describeConflictRefusal, migrateProjectConfigCanonical, modelChoicesFromArgs } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { setupAgy, formatAgyRows, renderGeminiMd } from './lib/agy-setup.mjs';
@@ -99,19 +99,33 @@ try {
   process.exit(2);
 }
 
-// Retired config.models keys are dropped from the file and every value is printed; the
-// model defaults are added and models.implementor.hard_task is moved into
-// models.implementor-hard. A refusal (the file changed under the write, or is a symlink)
-// stops the sync here, before any rendering or setupOpenCode call, like the refusals above.
-const configMigration = migrateProjectConfig(configDir);
-for (const line of configMigration.lines) console.log(line);
-if (configMigration.status === 'refused') {
-  console.log('refused_config_migration: .sterling/config.json was not migrated (retired models keys or missing model defaults); rerun /sterling:update once the file is stable; nothing synced');
+// The canonical migration (decision settings-redesign-build-shape-one-legacy-to-canonical-config):
+// a legacy config.json is rewritten once into the canonical shape (workflow, one model per agent,
+// no mode or sparring_partner), after the retired-key drop, model-default add, implementor-hard move
+// and Overpass reset a file that missed them still gets. A role that names two models (a Claude
+// model and an OpenCode model) is never decided here: sync exits 2 naming each role and the rerun
+// flag --model-choice <role>=claude|opencode, and /sterling:update asks the user once per role.
+// A refusal (the file changed under the write, or is a symlink) stops the sync here, before any
+// rendering or setupOpenCode call, like the refusals above.
+let resolutions;
+try {
+  resolutions = modelChoicesFromArgs(args);
+} catch (err) {
+  console.log(`refused_model_choice: ${err.message}; nothing synced`);
   process.exit(2);
 }
-// The migration can change model values (the implementor-hard move), so the agents render
-// from the document just written, never from the parse above (Sol review: a moved hard_task
-// was saved under implementor-hard while the installed agent pinned the schema default).
+const configMigration = migrateProjectConfigCanonical(configDir, { resolutions });
+for (const line of configMigration.lines) console.log(line);
+if (configMigration.status === 'conflicts') {
+  console.log(describeConflictRefusal(configMigration.conflicts));
+  process.exit(2);
+}
+if (configMigration.status === 'refused') {
+  console.log('refused_config_migration: .sterling/config.json was not migrated to the canonical shape; rerun /sterling:update once the file is stable; nothing synced');
+  process.exit(2);
+}
+// The migration changes model values (the one model per agent), so the agents render from the
+// document just written, never from the parse above.
 if (configMigration.status === 'migrated') config = parseConfig(configMigration.config);
 
 const { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: '' } : syncAgents({

@@ -461,7 +461,7 @@ export function cloneBranchState(root) {
 
 // sync-agents status lines that changed a Claude agent file (agentChangesRequireRestart's
 // set). The portable `.opencode/agents/` copies print the same statuses and need no restart.
-const AGENT_CHANGED_LINE = /^(installed|refreshed|header_repaired|machine_rebaked|retired): (?!\.opencode\/)\S/;
+const AGENT_CHANGED_LINE = /^(installed|refreshed|header_repaired|machine_rebaked|retired|unsupported_removed): (?!\.opencode\/)\S/;
 
 /**
  * CLONE AGENT SYNC (user-ruled 2026-10-06 through the question form, "Sync at session

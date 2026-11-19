@@ -42,7 +42,7 @@ import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRest
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
-import { prepareConfigMigration, commitConfigMigration } from './lib/config-migration.mjs';
+import { prepareCanonicalConfigMigration, commitConfigMigration, describeConflictRefusal, modelChoicesFromArgs } from './lib/config-migration.mjs';
 import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED } from './lib/project-identity.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -75,6 +75,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
   [--backup-path <p> | --backup-opt-out]
   [--invoking-project <dir>] [--domain-description <domain>=<text>]...
+  [--model-choice <role>=claude|opencode]...
   [--update-ensure] [--help]
 --target defaults to the current directory. Declaration flags are required only when no recorded config exists.`);
   process.exit(0);
@@ -225,7 +226,16 @@ let rawRecorded;
 // Retired config.models keys are dropped from the file (drop only), but PLANNED here and
 // COMMITTED below, after every preflight and refusal has passed, so a refused init leaves
 // config.json byte-identical. An unparseable config is refused by the read just below.
-const configMigration = prepareConfigMigration(target);
+// A legacy file is rewritten into the canonical shape (decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config); a role whose old config named two
+// models is never decided here: init exits 2 naming each role and --model-choice <role>=claude|opencode.
+let modelChoices;
+try {
+  modelChoices = modelChoicesFromArgs(process.argv.slice(2));
+} catch (e) {
+  fail(`init REFUSED: ${e.message}. Nothing was written.`, 2);
+}
+const configMigration = prepareCanonicalConfigMigration(target, { resolutions: modelChoices });
 if (existsSync(configPath)) {
   try {
     rawRecorded = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -234,11 +244,12 @@ if (existsSync(configPath)) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate — cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
   }
   if (configMigration.status === 'refused') fail(`init REFUSED: ${configMigration.lines[0]}. Nothing was written.`, 2);
+  if (configMigration.status === 'conflicts') fail(`init REFUSED: ${describeConflictRefusal(configMigration.conflicts)}. Nothing was written.`, 2);
   // The managed mutation below serializes this raw document, so it must already be the
   // migrated one or it would write the retired keys back. The parsed copy follows it: the
   // agents render from `recorded`, and the migration can change model values (the
   // implementor-hard move), so a pre-migration parse would pin the wrong model (Sol review).
-  // prepareConfigMigration has already validated the migrated document.
+  // prepareCanonicalConfigMigration has already validated the migrated document.
   if (configMigration.status === 'ready') {
     rawRecorded = configMigration.config;
     recorded = parseConfig(rawRecorded);
@@ -340,10 +351,10 @@ const expectedConfig = parseConfig({
     ? { project_name: recorded ? recorded.project_name : eff.projectName }
     : {}),
   ...(eff.backupPath ? { backup_path: eff.backupPath } : { backup_opt_out: eff.backupOptOut }),
-  // a recorded mode is a declaration like the ones above (the parsed copy is compared
+  // a recorded workflow is a declaration like the ones above (the parsed copy is compared
   // below, so a recorded config is not "hand-edited" for carrying one); a fresh config
-  // carries config.workflow instead, written below, and no mode.
-  ...(recorded ? { mode: recorded.mode, workflow: recorded.workflow } : {}),
+  // takes freshWorkflow, written below.
+  ...(recorded ? { workflow: recorded.workflow } : {}),
   // a fresh config copies every agent model from the invoking project (above), else
   // takes the shipped models of templates/default-config.json.
   ...(!recorded && inheritedModels !== undefined ? { models: inheritedModels } : {}),
@@ -484,14 +495,9 @@ for (const m of domainsExisting) {
 // config: created from declarations | matches defaults+declarations | tuned/hand-edited → left
 const backupDetail = eff.backupPath ? eff.backupPath : 'OPTED OUT (recorded; snapshots will skip loudly)';
 if (!recorded) {
-  // parseConfig materializes the legacy mode default and strips config.workflow, so the
-  // fresh document drops mode and carries workflow (decision
-  // settings-redesign-build-shape-one-legacy-to-canonical-config). The template's
-  // pr_review.auto_merge_on_clean stays until the canonical migration moves it: legacy
-  // readers still read it there, and a rerun compares against the template.
-  const { mode: _legacyMode, ...withoutMode } = expectedConfig;
-  if (withoutMode.pr_review && withoutMode.pr_review.auto_merge_on_clean !== undefined) withoutMode.pr_review = { ...withoutMode.pr_review, auto_merge_on_clean: freshWorkflow.auto_merge_on_clean };
-  const fresh = { ...withoutMode, workflow: freshWorkflow };
+  // expectedConfig is canonical (parseConfig), so the fresh document only swaps in the workflow
+  // this project starts on (copied from the invoking project, else the defaults).
+  const fresh = { ...expectedConfig, workflow: freshWorkflow };
   if (freshTracked.unknown === null) {
     writeFileSync(configPath, JSON.stringify(fresh, null, 2));
   } else {
@@ -1027,6 +1033,9 @@ if (claudeHost) {
       refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
       foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },
       retired: { status: 'retired', detail: 'removed a clean Sterling-generated agent no longer in the registry' },
+      unsupported: { status: 'matches', detail: 'no Claude Code copy: its one model is one Claude Code cannot run (see the System tab hosts column)' },
+      unsupported_removed: { status: 'retired', detail: 'removed the unedited Sterling-generated copy: its one model is one Claude Code cannot run' },
+      unsupported_but_modified: { status: 'refused', detail: 'its model is one Claude Code cannot run, but the copy was edited — left untouched (see guidance below)' },
       retired_unrecognized: { status: 'refused', detail: 'Sterling-marked retired agent has an unrecognized header — left untouched (see guidance below)' },
       retired_but_modified: { status: 'refused', detail: 'retired Sterling agent was locally modified — left untouched (see guidance below)' },
       retired_identity_mismatch: { status: 'refused', detail: 'retired Sterling agent identity is ambiguous — left untouched (see guidance below)' },

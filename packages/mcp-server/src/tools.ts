@@ -8,7 +8,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSy
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, migrateStaleAgyModels, AGY_MODEL_IDS, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, toCanonicalConfig, canonicalConfigSchema, migrateStaleAgyModels, AGY_MODEL_IDS, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1874,19 +1874,6 @@ function configSetImpl(
     raw = parsed as Record<string, unknown>;
   }
 
-  // The old sparring_partner.model is read only while sparring_partner.models.openai
-  // is absent (normalizeRawConfig converts it; the new key wins). Once the new key
-  // exists a write to the old path would validate, land on disk and change nothing.
-  if (path === 'sparring_partner.model') {
-    const sp = raw.sparring_partner;
-    const spModels = sp !== null && typeof sp === 'object' && !Array.isArray(sp) ? (sp as Record<string, unknown>).models : undefined;
-    if (spModels !== null && typeof spModels === 'object' && !Array.isArray(spModels) && (spModels as Record<string, unknown>).openai !== undefined) {
-      throw new Error(
-        `config_set: 'sparring_partner.model' is the old path and is not read once sparring_partner.models.openai exists, so this write would have no effect — set 'sparring_partner.models.openai.model' instead. Nothing was written.`
-      );
-    }
-  }
-
   // The path can be ANY depth now the allowlist is gone — a bare root key
   // (`machine_role`, 0 dots) or a path several segments deep
   // (`context_watch.windows.claude-fable-5-1`, 2 dots) alike. Walk the
@@ -1935,10 +1922,32 @@ function configSetImpl(
     );
   }
 
-  const validation = configSchema.safeParse(normalizeRawConfig(mutated));
-  if (!validation.success) {
-    const issues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-    throw new Error(`config_set: the resulting config.json would fail schema validation — ${issues}. Nothing was written.`);
+  // A config already in the canonical shape is held to the STRICT canonical check, so a write can
+  // never put a retired key (mode, sparring_partner, a per-host model field) back. A legacy config
+  // on disk, not yet migrated by /sterling:update, is read through the one transform (parseConfig),
+  // which tolerates what is already there (anti_pattern
+  // config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes: the write is still
+  // validated, never stripped).
+  let validationIssues: string | undefined;
+  let wasCanonical = false;
+  try {
+    const before = toCanonicalConfig(raw);
+    wasCanonical = before.changes.length === 0 && before.conflicts.length === 0;
+  } catch {
+    wasCanonical = false; // a legacy document the transform cannot carry: the write is judged by parseConfig below
+  }
+  if (wasCanonical) {
+    const validation = canonicalConfigSchema.safeParse(mutated);
+    if (!validation.success) validationIssues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+  } else {
+    try {
+      parseConfig(mutated);
+    } catch (e) {
+      validationIssues = e instanceof ZodError ? e.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : (e as Error).message;
+    }
+  }
+  if (validationIssues !== undefined) {
+    throw new Error(`config_set: the resulting config.json would fail schema validation — ${validationIssues}. Nothing was written.`);
   }
 
   const serialized = JSON.stringify(mutated, null, 2) + '\n';

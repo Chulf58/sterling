@@ -18,10 +18,9 @@ import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
 // node_modules and no packages/*/dist, so a run-time import of the scripts/lib
 // SOURCE (which imports @sterling/schemas) cannot load there.
-import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
-import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
-import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
+import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
+import { renderHostCopies } from '../../../scripts/lib/host-copies.mjs';
 import { discoverCustomAgents, installedGovernedAgents, customAgentFile } from './custom-agents.js';
 import { AGENT_SOURCE_DIR, adopt, planAdoption, readSourceFiles, sourcePathOf } from '../../../scripts/lib/agent-adoption.mjs';
 import { detectInstalledHosts, parseSource, syncCustomAgents } from '../../../scripts/lib/custom-agent-render.mjs';
@@ -498,9 +497,9 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   }
 
   /** Execute an agent_model effect: write config.models.<key> (canonical, validated: applyAgentModel), then,
-   *  for an adopted custom agent, render every installed host's file from the new config. The agent files of
-   *  a governed role follow the config on the next sync (/sterling:update or sync-agents). A host that cannot
-   *  run the model is not hidden: the row's hosts cell says so. */
+   *  render every installed host's copies from the new config: an adopted custom agent's file, or a governed
+   *  role's agent files (renderHostCopies, the renderers sync uses). A host that cannot run the model is not
+   *  hidden: the row's hosts cell says so. */
   function applyAgentModelEffect(e: AgentModelEffect): void {
     let failure: string | undefined;
     if (!applyAgentModel(e, (msg) => { failure = msg; }, configPath)) {
@@ -509,7 +508,11 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
     const what = e.model === null ? 'on its host default' : `${e.model}${e.effort ? ` at ${e.effort}` : ''}`;
     if (!isCustomAgentKey(e.key)) {
-      ui = { ...ui, notice: `'${e.key}' set to ${what}; its agent files follow on the next sync (/sterling:update).` };
+      // The copies on every installed host follow at once, through the renderers sync uses.
+      const { notes, refused } = renderHostCopies({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), ...(options.agySetup ? { agySetup: options.agySetup } : {}) });
+      ui = { ...ui, notice: refused.length
+        ? `'${e.key}' set to ${what} in config.json, but: ${refused.join('; ')}. Run /sterling:update to retry.`
+        : `'${e.key}' set to ${what}; agent files re-rendered (${notes.join('; ') || 'no host installed'}). Restart the session to pick them up.` };
       return;
     }
     try {

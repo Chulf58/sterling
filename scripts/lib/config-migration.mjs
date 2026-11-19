@@ -286,7 +286,36 @@ export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}
   };
 }
 
-/** prepare and commit in one go (sync-agents). */
+/** prepare and commit in one go (the legacy-steps-only migration; sync-agents and init use migrateProjectConfigCanonical). */
 export function migrateProjectConfig(projectDir, opts) {
   return commitConfigMigration(prepareConfigMigration(projectDir), opts);
+}
+
+/** Plan and commit the canonical rewrite (prepareCanonicalConfigMigration, then commitConfigMigration).
+ *  Returns the plan unchanged when it is not `ready` (absent, unchanged, conflicts or refused), else the
+ *  commit's result (migrated, or refused when the file changed under the write). */
+export function migrateProjectConfigCanonical(projectDir, { resolutions, ...opts } = {}) {
+  return commitConfigMigration(prepareCanonicalConfigMigration(projectDir, { resolutions }), opts);
+}
+
+/** Read the repeatable `--model-choice <role>=claude|opencode` flag from an argument list. Throws an
+ *  Error naming the bad value; callers print it and exit 2. Returns { <role>: 'claude' | 'opencode' }. */
+export function modelChoicesFromArgs(args) {
+  const resolutions = {};
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== '--model-choice') continue;
+    const value = args[i + 1] ?? '';
+    const m = /^([^=\s]+)=(claude|opencode)$/.exec(value);
+    if (!m) throw new Error(`--model-choice needs <role>=claude|opencode, got ${JSON.stringify(value)}`);
+    resolutions[m[1]] = m[2];
+    i += 1;
+  }
+  return resolutions;
+}
+
+/** The exit-2 line for unresolved model conflicts: each role, and the flag that answers it. */
+export function describeConflictRefusal(conflicts) {
+  const roles = conflicts.map((c) => c.role);
+  return `refused_model_conflicts: ${roles.join(', ')} each name two models (a Claude model and an OpenCode model) and an agent has one; ` +
+    `ask which to keep for each, then rerun with ${roles.map((r) => `--model-choice ${r}=claude|opencode`).join(' ')}; nothing synced`;
 }

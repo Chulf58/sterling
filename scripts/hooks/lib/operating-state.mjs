@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { storeRootFor } from '../../lib/worktree-root.mjs';
-import { MAINTENANCE_WORKER_ROLE, ProjectWorkflowError, resolveOverpass, workflowOfConfig } from '@sterling/schemas';
+import { ProjectWorkflowError, opencodeModelRef, parseConfig, unsupportedAgents, workflowOfConfig } from '@sterling/schemas';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../lib/handoff-projection.mjs';
@@ -152,61 +152,72 @@ export function projectModeLine({ config, configUnreadable, noOrigin = false, ro
   return `${head}${ships} Run ${wf.reviewers} task-end ${wf.reviewers === 1 ? 'reviewer' : 'reviewers in parallel'}, then one fix round and one re-check.`;
 }
 
-// The resolved per-role routes (resolveOverpass().roles, ruled defaults plus any
-// config.overpass.roles override) grouped by model and effort, in role order:
-// "model (role, role), model at effort high (role)".
+// The agents whose one model is an Overpass tier, grouped by model and effort in key order:
+// "overpass/agentic-auto at effort high (implementor, scout), overpass/agentic-high (reviewer)".
 const routeLabel = ({ model, effort }) => (effort ? `${model} at effort ${effort}` : model);
 
-function overpassRoleRoutes(roles) {
+function overpassAgentRoutes(entries) {
   const groups = new Map();
-  for (const [role, route] of Object.entries(roles)) {
+  for (const [agent, route] of entries) {
     const label = routeLabel(route);
-    groups.set(label, [...(groups.get(label) ?? []), role]);
+    groups.set(label, [...(groups.get(label) ?? []), agent]);
   }
   return [...groups].map(([label, names]) => `${label} (${names.join(', ')})`).join(', ');
 }
 
 /**
- * OVERPASS (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers and
- * overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
- * point 6): whether every lane is routed through the Overpass tiers, through the one
- * resolver the plugin's routing uses (resolveOverpass). States: ON (provider, the
- * conductor's model or that it is bypassed, each role's model, the lane model); CONFIGURED BUT NOT IN EFFECT
- * with the resolver's reason; OFF, stated only where the toggle is offered (work mode on
- * OpenCode) and silent elsewhere, since hobby mode and Claude Code never route through
- * it; INVALID with the resolver's error; and UNKNOWN for an unreadable config, never
- * the off default (anti-pattern config-derived-posture-line-collapses-absent-into-unusable).
+ * OVERPASS (decisions overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi and
+ * settings-that-replace-project-mode-merge-path-reviewer-count): Overpass is no setting of its
+ * own; an agent is routed through it when its one model is an overpass/<tier> (read through the
+ * canonical transform, so a legacy config reads as it migrates). States: ON (OpenCode, provider
+ * and each routed agent's model); NOT IN EFFECT (an agent holds an Overpass tier but the host is
+ * not OpenCode, which Claude Code and agy cannot run); INVALID with the reader's error; UNKNOWN
+ * for an unreadable config, never the off default (anti-pattern
+ * config-derived-posture-line-collapses-absent-into-unusable); and silent when no agent is routed.
  */
 export function overpassLine({ config, configUnreadable, host }) {
   if (configUnreadable) {
     return (
-      'Overpass: UNKNOWN — the project config could not be read, so config.overpass could not be determined. ' +
+      'Overpass: UNKNOWN — the project config could not be read, so which agents run on Overpass tiers could not be determined. ' +
       'This is NOT the off default: repair the config.'
     );
   }
-  let res;
+  let canon;
   try {
-    res = resolveOverpass(config ?? {}, { host });
+    canon = parseConfig(config ?? {});
   } catch (e) {
-    return `Overpass: INVALID — ${(e && e.message) || e}. Subagent dispatches are not routed through Overpass and say so on each result; fix .sterling/config.json (TUI System tab).`;
+    return `Overpass: INVALID — ${(e && e.message) || e}. Fix .sterling/config.json (TUI System tab).`;
   }
-  if (res.effective) {
-    const conductor = res.conductorRouted
-      ? `the conductor runs on ${res.conductorModel}`
-      : 'the conductor is bypassed (config.overpass.conductor_bypass) and keeps its direct model pin';
-    // The maintenance worker is a role of its own but no subagent: it is named apart.
-    const { [MAINTENANCE_WORKER_ROLE]: worker, ...subagentRoles } = res.roles;
-    return (
-      `Overpass: ON (provider '${res.provider}', config.overpass — TUI System tab) — ${conductor}; ` +
-      `subagent roles run on ${overpassRoleRoutes(subagentRoles)}; ` +
-      `the maintenance worker runs on ${routeLabel(worker)}; ` +
-      `other agents and the Plan agent run on ${res.laneModel}. ` +
-      'The direct model pins in agent files, briefs and models.<role>.opencode_model do not apply while it is on.'
-    );
+  const routed = Object.entries(canon.models).filter(([, entry]) => typeof entry?.model === 'string' && entry.model.startsWith('overpass/'));
+  if (routed.length === 0) return '';
+  const routes = overpassAgentRoutes(routed.map(([agent, entry]) => [agent, { model: opencodeModelRef(entry.model, canon.overpass.provider), effort: entry.effort }]));
+  if (host === 'opencode') return `Overpass: ON (provider '${canon.overpass.provider}', config.models — TUI System tab) — ${routes}.`;
+  return `Overpass: NOT IN EFFECT — ${routes} are set to Overpass tiers, which only OpenCode can run; this host gets no copy of them.`;
+}
+
+/**
+ * HOST FIT (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude): the agents
+ * this session's host gets no copy of because it cannot run their one model, and the roles whose two
+ * legacy models are not chosen yet. Read through unsupportedAgents (the canonical transform), so a
+ * legacy config reads as it migrates. Silent when every agent runs here; an unreadable config is
+ * UNKNOWN, never silence; a config unsupportedAgents cannot read says so (INVALID).
+ */
+export function unsupportedAgentsLine({ config, configUnreadable, host }) {
+  if (configUnreadable) return 'Agents on this host: UNKNOWN — the project config could not be read, so which agents have no copy here could not be determined. Repair the config.';
+  let rows;
+  try {
+    rows = unsupportedAgents(config ?? {}, [host]);
+  } catch (e) {
+    return `Agents on this host: INVALID — ${(e && e.message) || e}. Fix .sterling/config.json (TUI System tab).`;
   }
-  if (res.configured) return `Overpass: CONFIGURED BUT NOT IN EFFECT — ${res.reason}; every lane uses its direct model pin.`;
-  if (host === 'opencode' && config?.mode === 'work') return 'Overpass: OFF (config.overpass.enabled — TUI System tab) — every lane uses its direct model pin.';
-  return '';
+  if (rows.length === 0) return '';
+  const named = (r) => (r.host === '*' ? `${r.agent} (two models; run /sterling:update to choose)` : `${r.agent} (${r.model})`);
+  const conflicts = rows.filter((r) => r.host === '*');
+  const noCopy = rows.filter((r) => r.host !== '*');
+  const parts = [];
+  if (noCopy.length) parts.push(`no ${host === 'claude' ? 'Claude Code' : host === 'opencode' ? 'OpenCode' : 'agy'} copy of ${noCopy.map(named).join(', ')}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
+  if (conflicts.length) parts.push(`${conflicts.map(named).join(', ')}: dispatch refuses until you choose`);
+  return `Agents on this host: ${parts.join('; ')}.`;
 }
 
 const STORAGE_TAIL = 'TUI System tab; switch with the move-store skill';

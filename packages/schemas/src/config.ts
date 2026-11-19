@@ -80,7 +80,7 @@ export function isCustomAgentKey(key: string): boolean {
 // default (inherit). A model or effort present is held to the governed entry's rules.
 const customAgentEntry = agentModelEntry.partial();
 
-// One pin per vendor, shared by sparring_partner.models and review.models.
+// One pin per vendor (review.models).
 const vendorPins = z
   .object({
     openai: modelPin.optional(),
@@ -577,33 +577,12 @@ export const configSchema = z.object({
       total_cap_bytes: z.number().int().nonnegative().default(3000),
     })
     .default({}),
-  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-  // whether the automatic consult moments (design/review/gate second opinions via
-  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern (every field has a default; an absent
-  // block still parses) — a project without the
-  // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-  // — this field never stands in for that absence, only for a deliberate OFF.
-  sparring_partner: z
-    .object({
-      enabled: z.boolean().default(true),
-      // Which vendor's model the consult runs on (decision
-      // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-      // 'openai' is the behaviour before the setting existed.
-      vendor: z.enum(['openai', 'anthropic']).default('openai'),
-      // The model pinned per vendor. Absent = no pin (the host's default). The
-      // old sparring_partner.model is converted to models.openai by
-      // normalizeRawConfig, before this schema strips unknown keys. The default
-      // ships no pin: the decision names no model per vendor.
-      models: vendorPins,
-    })
-    .default({}),
+  // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+  // Sterling's Codex integration is gone and the legacy transform drops the key.
   // Reviews (same decision): the vendor policy and the model pinned per vendor.
   // cross_vendor = the other family than the model that wrote the diff; openai
   // and anthropic force one vendor even when that makes reviewer and author the
-  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  // same family (user-ruled 2026-10-03). Ships no pin.
   review: z
     .object({
       policy: z.enum(['cross_vendor', 'openai', 'anthropic']).default('cross_vendor'),
@@ -613,7 +592,7 @@ export const configSchema = z.object({
   // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-  // Mirrors sparring_partner's additive-optional shape exactly — an absent
+  // An additive-optional shape — an absent
   // block still parses with {enabled: true}, and an unknown field inside the
   // block strips silently rather than refusing (forward-compat, non-strict).
   // OFF silences only the automatic default posture: an explicit user ask
@@ -714,11 +693,15 @@ export const configSchema = z.object({
   applied_config_migrations: z.array(z.string()).optional(),
 });
 
-export type SterlingConfig = z.infer<typeof configSchema>;
+/** The legacy shape configSchema describes: the base the canonical schema is built from. No reader
+ *  takes this shape any more; parseConfig returns the canonical one (SterlingConfig). */
+export type LegacySterlingConfig = z.infer<typeof configSchema>;
+/** What parseConfig returns: the canonical config (settings redesign cutover). */
+export type SterlingConfig = CanonicalConfig;
 
 // ── Overpass resolver ────────────────────────────────────────────────────────
-// Pure: takes an already-parsed (or raw) config object, reads nothing. The mode
-// uses the same strict judge as readProjectMode (judgeProjectMode).
+// Pure: takes an already-parsed (or raw) LEGACY config object, reads nothing. Only the
+// legacy-to-canonical transform calls it, to carry an effective Overpass into models.
 
 export const DEFAULT_OVERPASS_PROVIDER = 'overpass';
 // A provider id: letters, digits, '-', '_', '.'; no '/', no '#', non-empty. It
@@ -809,7 +792,7 @@ export interface OverpassRoleRoute {
 export interface OverpassResolution {
   /** overpass.enabled is true in the config, whatever the mode or host. */
   configured: boolean;
-  /** configured AND mode is 'work' AND host is 'opencode'. */
+  /** configured AND host is 'opencode' (the work-mode gate is lifted: decision settings-that-replace-project-mode-merge-path-reviewer-count). */
   effective: boolean;
   /** effective AND conductor_bypass is false: the conductor itself is routed. */
   conductorRouted: boolean;
@@ -894,8 +877,6 @@ export function resolveOverpass(config: unknown, opts: { host: string }): Overpa
   const roles = resolveOverpassRoles(block.roles, provider);
   const base = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled) return { ...base, effective: false, conductorRouted: false };
-  const mode = judgeProjectMode(cfg.mode, 'the config');
-  if (mode !== 'work') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== 'opencode') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base, effective: true, conductorRouted: !bypass };
 }
@@ -921,29 +902,10 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null &
  *  keys. Returns a copy; the caller's object is never mutated (config_set
  *  round-trips the raw document). Anything that is not a plain object passes
  *  through for the schema to refuse.
- *   - sparring_partner.model (the old single pin) becomes
- *     sparring_partner.models.openai; when models.openai already exists the new
- *     key wins and an old STRING value is dropped. '' is the TUI's clear-to-unset
- *     signal, not a model id, so it creates no pin. A non-string value is moved
- *     as is so the pin schema refuses it loud, over an existing models.openai
- *     too: an invalid value is never dropped unrefused.
  *   - models keys in RETIRED_MODEL_KEYS are dropped. */
 export function normalizeRawConfig(raw: unknown): unknown {
   if (!isPlainObject(raw)) return raw;
   let out: Record<string, unknown> = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, 'model')) {
-    const { model, ...rest } = sp;
-    if (model !== undefined && model !== '') {
-      const existing = rest.models;
-      if (existing === undefined || isPlainObject(existing)) {
-        const models = { ...(existing ?? {}) };
-        if (models.openai === undefined || typeof model !== 'string') models.openai = { model };
-        rest.models = models;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -977,8 +939,11 @@ export function migrateStaleAgyModels(raw: unknown): { config: unknown; changed:
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 
+/** Every reader's entry: any config, legacy or canonical, comes back canonical, through the one
+ *  transform (toCanonicalConfig) and then the strict check. A legacy conflict is read as its
+ *  proposal (the OpenCode model) until /sterling:update asks the user. */
 export function parseConfig(raw: unknown): SterlingConfig {
-  return configSchema.parse(normalizeRawConfig(raw));
+  return parseCanonicalConfig(raw);
 }
 
 // ── Model defaults: the one-time on-disk add ─────────────────────────────────
@@ -1268,8 +1233,6 @@ export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
     for (const [key, child] of Object.entries(value)) {
       const path = prefix ? `${prefix}.${key}` : key;
       if (!Object.prototype.hasOwnProperty.call(shape, key)) {
-        // sparring_partner.model is converted by normalizeRawConfig, so it is read.
-        if (path === 'sparring_partner.model') continue;
         // A catchall object (models) reads every key, so only the retired ones are unread.
         if (!(s._def.catchall instanceof z.ZodNever) && !(prefix === 'models' && RETIRED_MODEL_KEYS.includes(key))) continue;
         const renamed = CONFIG_KEY_RENAMES[path];
@@ -1279,7 +1242,15 @@ export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
       }
     }
   };
-  walk(raw, configSchema, '');
+  // Read through the legacy transform, so a legacy and a canonical document are both judged against
+  // the canonical shape; a document the transform cannot carry is walked as it is.
+  let doc = raw;
+  try {
+    doc = toCanonicalConfig(raw).config;
+  } catch {
+    doc = raw;
+  }
+  walk(doc, canonicalConfigObject, '');
   return out;
 }
 
@@ -1387,7 +1358,7 @@ const canonicalOverpassSchema = z
   .strict()
   .default({});
 
-const canonicalConfigObject = configSchema.omit({ mode: true, sparring_partner: true, models: true, overpass: true, pr_review: true }).extend({
+const canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
   models: canonicalModelsSchema,
   workflow: workflowSchema,
   overpass: canonicalOverpassSchema,
@@ -1587,6 +1558,24 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
       changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: undefined, now: models[CONDUCTOR_MODEL_KEY] });
     }
     modelsChanged = true;
+  }
+  // The maintenance worker joins the one-model rule: its OpenCode runner model moves into
+  // models['maintenance-worker'] (an entry that already has a model wins; the old key is dropped
+  // either way). A value that is not a non-empty string stays for the worker's own reader to refuse.
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, 'opencode_model')) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === 'string' && old.trim() !== '') {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== 'string') {
+        const entry = { ...(isPlainObject(existing) ? existing : {}), model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: 'maintenance_worker.opencode_model', was: old });
+    }
   }
   if (modelsChanged) out.models = models;
 
