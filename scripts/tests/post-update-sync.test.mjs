@@ -848,8 +848,16 @@ function sessionStub(sessions) {
   };
 }
 
+const inertUpdater = {
+  due: () => false,
+  check: async () => {
+    throw new Error('the inert test updater was asked to check');
+  },
+};
+
 function ocSync(plugin, session, extra = {}) {
-  return sync.createSessionSync({ sterlingRoot: plugin, getSession: () => session, now: () => '2026-10-02T12:00:00.000Z', nodeBin: process.execPath, ...extra });
+  // An inert updater: these fixtures test the sync, and must never read the machine's real update receipt or config.
+  return sync.createSessionSync({ sterlingRoot: plugin, getSession: () => session, now: () => '2026-10-02T12:00:00.000Z', nodeBin: process.execPath, updater: inertUpdater, ...extra });
 }
 
 const noticeTexts = (project) => {
