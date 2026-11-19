@@ -462,3 +462,43 @@ test('hasCustomOutputs sees a stamped copy even when no config key is left', asy
     p.done();
   }
 });
+
+test('agy refuses an MCP denial it cannot express, denylist-only and mixed, never rendering the agent broader (item-G review finding 2)', () => {
+  assert.match(translateTools('agy', { disallowedTools: 'mcp__private__delete' }).reason, /agy cannot limit MCP tools per agent, so the denial of mcp__private__delete would be dropped/);
+  assert.match(translateTools('agy', { tools: 'Read, Grep', disallowedTools: 'Bash, mcp__private__delete' }).reason, /denial of mcp__private__delete/);
+  for (const fm of [{ disallowedTools: 'mcp__private__delete' }, { tools: 'Read, Grep', disallowedTools: 'mcp__private__delete' }]) {
+    const p = project(source(fm));
+    try {
+      const r = sync(p);
+      assert.deepEqual(r.written.map((w) => w.host), ['claude', 'opencode'], JSON.stringify(fm));
+      assert.match(r.refused.find((x) => x.host === 'agy').reason, /denial of mcp__private__delete would be dropped/);
+      assert.equal(existsSync(join(p.root, outputPath('agy', 'team-scout'))), false, 'agy gets no copy');
+      assert.match(read(p.root, '.opencode/agents/team-scout.md'), /private_delete: deny/, 'OpenCode keeps the denial');
+    } finally {
+      p.done();
+    }
+  }
+});
+
+test('the origin host\'s model line replaces a quoted "model": key instead of adding a second one, and an edit that does not read back is refused (item-G review finding 9)', () => {
+  const p = project('---\nname: team-scout\ndescription: Scouts the team folders\n"model": claude-sonnet-4\n\'effort\': low\n---\nFind things.\n', { [KEY]: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
+  try {
+    const r = sync(p, { hosts: ['claude'] });
+    assert.deepEqual(r.refused, []);
+    const out = read(p.root, '.claude/agents/team-scout.md');
+    assert.equal(out.split('\n').filter((l) => /^["']?model["']?\s*:/.test(l)).length, 1, out);
+    assert.equal(out.split('\n').filter((l) => /^["']?effort["']?\s*:/.test(l)).length, 1, out);
+    assert.match(out, /^model: claude-opus-5-5$/m);
+    assert.match(out, /^effort: high$/m);
+  } finally {
+    p.done();
+  }
+  const folded = project('---\nname: team-scout\ndescription: Scouts the team folders\nmodel: >\n  claude-sonnet-4\n---\nFind things.\n', { [KEY]: { model: 'anthropic/claude-opus-5-5' } });
+  try {
+    const r = sync(folded, { hosts: ['claude'] });
+    assert.match(r.refused.find((x) => x.host === 'claude').reason, /does not read back model: claude-opus-5-5/);
+    assert.equal(existsSync(join(folded.root, '.claude/agents/team-scout.md')), false, 'nothing is written');
+  } finally {
+    folded.done();
+  }
+});

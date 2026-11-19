@@ -161,3 +161,11 @@ test('adopt refuses a symlinked agent-sources folder and writes nothing outside 
     rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test('plan refuses adoption when agy is installed and the agent denies an MCP tool agy cannot deny, denylist-only and mixed (item-G review finding 2)', () => {
+  for (const content of ['---\nname: scout\ndescription: d\ndisallowedTools: mcp__private__delete\n---\nBody.\n', '---\nname: scout\ndescription: d\ntools: Read, Grep\ndisallowedTools: mcp__private__delete\n---\nBody.\n']) {
+    const plan = planAdoption(scout({ host: 'claude', file: '.claude/agents/team/scout.md', content }), state({ hosts: ['claude', 'agy'] }));
+    assert.deepEqual(codes(plan), ['permission-unrepresentable'], content);
+    assert.match(plan.refusals[0].message, /agy: .*denial of mcp__private__delete/);
+  }
+});

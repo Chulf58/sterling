@@ -107,8 +107,9 @@ function toolList(value) {
  *            `*` deny and each later one an exact allow (builtin actions, then each MCP entry as
  *            <server>_<tool>); a denylist alone gives exact denies. Refused: an unknown tool name, a
  *            whole-server or wildcard MCP entry, or a partial grant of one action (Edit without Write).
- *   agy      ok: { tools } (null when unrestricted). Refused: an MCP allowlist entry (agy cannot
- *            limit MCP tools), a tool with no agy name, or an unknown name.
+ *   agy      ok: { tools } (null when unrestricted). Refused: any MCP entry, allowed or denied (agy
+ *            cannot limit MCP tools per agent, so a denial would be dropped and the copy broader),
+ *            a tool with no agy name, or an unknown name.
  */
 export function translateTools(host, { tools, disallowedTools }) {
   if (host === 'claude') return { ok: true };
@@ -119,7 +120,9 @@ export function translateTools(host, { tools, disallowedTools }) {
   if (unknown.length) return { ok: false, reason: `${host} cannot express the tool name(s) ${unknown.join(', ')}` };
   if (host === 'agy') {
     if ((allow ?? []).some((n) => n.startsWith('mcp__'))) return { ok: false, reason: 'agy cannot limit MCP tools per agent, so an allowlist naming MCP tools cannot be kept to what it lists' };
-    const noAgy = [...(allow ?? []), ...deny.filter((n) => !n.startsWith('mcp__'))].filter((n) => TOOL_MAP[n].agy === null);
+    const deniedMcp = deny.filter((n) => n.startsWith('mcp__'));
+    if (deniedMcp.length) return { ok: false, reason: `agy cannot limit MCP tools per agent, so the denial of ${deniedMcp.join(', ')} would be dropped and the agent left broader` };
+    const noAgy = [...(allow ?? []), ...deny].filter((n) => TOOL_MAP[n].agy === null);
     if (noAgy.length) return { ok: false, reason: `agy has no tool for ${[...new Set(noAgy)].join(', ')}` };
     if (allow === null && deny.length === 0) return { ok: true, tools: null };
     const granted = new Set(allow === null ? AGY_ALL : allow.flatMap((n) => TOOL_MAP[n]?.agy ?? []));
@@ -172,6 +175,9 @@ export function originOf(data) {
   if (!CUSTOM_HOSTS.includes(v)) return { error: `${ORIGIN_FIELD} must be one of ${CUSTOM_HOSTS.join(', ')}, got ${JSON.stringify(v)}` };
   return { origin: v };
 }
+
+/** A frontmatter line whose key is `field`, bare or quoted (YAML reads "model": and model: as one key). */
+const keyLineRe = (field) => new RegExp(`^(?:${field}|"${field}"|'${field}')[ \t]*:.*$`, 'm');
 
 /** The author's frontmatter block without the origin line. */
 const withoutOrigin = (frontmatter) => frontmatter.replace(ORIGIN_LINE_RE, '').replace(/\n$/, '');
@@ -363,15 +369,20 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash, 
   if (host === origin) {
     // Everything the author wrote stays; the model (and Claude's effort) is replaced only where config names one.
     let fm = withoutOrigin(source.frontmatter);
+    const set = {};
     const setLine = (field, value) => {
-      const re = new RegExp(`^${field}:.*$`, 'm');
+      const re = keyLineRe(field);
       fm = re.test(fm) ? fm.replace(re, `${field}: ${value}`) : `${fm}\n${field}: ${value}`;
+      set[field] = value;
     };
     if (host === 'claude') {
       const resolved = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, 'claude');
       if (cfg.model) setLine('model', resolved.model);
       if (cfg.effort && resolved.effort) setLine('effort', resolved.effort);
-      if (!/^name:/m.test(fm)) fm = `name: ${name}\n${fm}`;
+      if (!keyLineRe('name').test(fm)) {
+        fm = `name: ${name}\n${fm}`;
+        set.name = name;
+      }
     } else if (host === 'opencode') {
       const resolved = resolveHostSettings({ model: cfg.model }, 'opencode');
       if (cfg.model && resolved.model !== 'inherit') setLine('model', opencodeModelRef(resolved.model, overpassProvider));
@@ -379,6 +390,12 @@ export function renderCustomAgent({ host, key, name, source, entry, sourceHash, 
       // agy agent files name the bare enum value (agy/flash renders flash); renderCustomAgent refused any other model above.
       setLine('model', resolveHostSettings({ model: cfg.model }, 'agy').model);
     }
+    // The edited block must still parse, with each field Sterling set holding exactly the value it set
+    // (a duplicated key, or a block value the one-line edit left behind, is refused rather than written).
+    const check = parseSource(`---\n${fm}\n---\n`);
+    if (check.error) return { ok: false, reason: `the frontmatter with Sterling's model lines does not parse (${check.error})` };
+    const wrong = Object.entries(set).filter(([field, value]) => String(check.data[field]) !== String(value));
+    if (wrong.length) return { ok: false, reason: `the frontmatter with Sterling's model lines does not read back ${wrong.map(([f, v]) => `${f}: ${v}`).join(', ')}` };
     return { ok: true, name, content: withStamp(`---\n${fm}\n---`, body, host, key, sourceHash) };
   }
   const refusal = hostRestrictionRefusal(host, origin, data);
