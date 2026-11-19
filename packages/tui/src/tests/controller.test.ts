@@ -204,7 +204,7 @@ test('controller: a fresh dashboard seeds the models catalog with vendor and id 
 });
 
 // decision gemini-4-neon-in-the-system-tab-agy-inherit-is-shown-as-the
-test('controller: the picker shows agy/inherit as the agy session model and selecting it commits agy/inherit', async () => {
+test('controller: the picker shows agy/inherit as the agy session model, and the choice carries the ref agy/inherit', async () => {
   const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
   const ctl = openDashboard(f.storePath);
   try {
