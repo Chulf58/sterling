@@ -16661,7 +16661,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve20) => setTimeout(resolve20, ms));
+  return new Promise((resolve21) => setTimeout(resolve21, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -23539,8 +23539,8 @@ async function boundedModelList(listModels, ms) {
   let timer;
   try {
     const call = Promise.resolve(listModels?.()).then((list) => ({ list }));
-    const late2 = new Promise((resolve20) => {
-      timer = setTimeout(() => resolve20({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
+    const late2 = new Promise((resolve21) => {
+      timer = setTimeout(() => resolve21({ error: new Error(`the model list timed out after ${ms} ms`) }), ms);
     });
     return await Promise.race([call, late2]);
   } catch (e) {
@@ -25071,7 +25071,7 @@ function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
-  return new Promise((resolve20) => {
+  return new Promise((resolve21) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -25079,7 +25079,7 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve20(stepResult(r));
+      resolve21(stepResult(r));
     };
     let child;
     try {
@@ -26004,7 +26004,7 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
   }
   const setOff = (sessionID) => (remember(off, sessionID, true), "off");
-  async function resolve20(root, sessionID, messages) {
+  async function resolve21(root, sessionID, messages) {
     if (off.has(sessionID)) return "off";
     if (roots.has(sessionID)) return "on";
     const kind = await sessionKind(getSession?.(), sessionID, parents);
@@ -26051,7 +26051,7 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     markDisclosed(sessionID, policy);
     return notice;
   }
-  return { resolve: resolve20, disclose, markDisclosed };
+  return { resolve: resolve21, disclose, markDisclosed };
 }
 
 // packages/opencode-plugin/src/claim-handover.mjs
@@ -26645,8 +26645,8 @@ ${due.join("\n\n")}` : "",
     let timer;
     try {
       const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} })).then(() => ({ sent: true }));
-      const late2 = new Promise((resolve20) => {
-        timer = setTimeout(() => resolve20({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      const late2 = new Promise((resolve21) => {
+        timer = setTimeout(() => resolve21({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
       });
       return await Promise.race([call, late2]);
     } catch (e) {
@@ -28539,7 +28539,7 @@ async function checkSessionMove(input, { sessionInfo, env = process.env, home = 
 // packages/opencode-plugin/src/sync.mjs
 import { rmSync as rmSync17 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { join as join54 } from "node:path";
+import { join as join54, resolve as resolve19 } from "node:path";
 
 // scripts/hooks/lib/domain-notice.mjs
 import { spawn as spawn3, spawnSync as spawnSync12 } from "node:child_process";
@@ -28578,7 +28578,7 @@ function mapResult({ error, signal, status, stdout, stderr }) {
 function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
   const { script, error } = mapScript(root);
   if (error) return Promise.resolve({ error });
-  return new Promise((resolve20) => {
+  return new Promise((resolve21) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -28586,7 +28586,7 @@ function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve20(mapResult(r));
+      resolve21(mapResult(r));
     };
     let child;
     try {
@@ -28632,9 +28632,10 @@ ${HEAD} the map proposes adding ${names} to this project's mounts. Nothing was a
 
 // scripts/lib/plugin-auto-update.mjs
 import { spawn as spawn4 } from "node:child_process";
-import { mkdirSync as mkdirSync25, readFileSync as readFileSync34, writeFileSync as writeFileSync19 } from "node:fs";
+import { mkdirSync as mkdirSync25, readFileSync as readFileSync34, renameSync as renameSync14, writeFileSync as writeFileSync19 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { join as join53, resolve as resolve18, sep as sep4 } from "node:path";
+import { randomUUID as randomUUID15 } from "node:crypto";
 
 // scripts/lib/file-lock.mjs
 import { linkSync as linkSync3, mkdirSync as mkdirSync24, readFileSync as readFileSync33, rmSync as rmSync16, statSync as statSync12, writeFileSync as writeFileSync18 } from "node:fs";
@@ -28759,6 +28760,7 @@ async function withFileLock(path, fn, options) {
 
 // scripts/lib/plugin-auto-update.mjs
 var DAY_MS2 = 24 * 60 * 60 * 1e3;
+var HOUR_MS = DAY_MS2 / 24;
 var UPDATE_TIMEOUT_MS = 12e4;
 function cacheDir(env, home) {
   return join53(env.XDG_CACHE_HOME || join53(home, ".cache"), "sterling");
@@ -28768,13 +28770,33 @@ function autoUpdatePaths(env = process.env, home = homedir10()) {
   return { dir, receipt: join53(dir, "plugin-auto-update.json"), lock: join53(dir, "plugin-auto-update.lock") };
 }
 function readReceipt(path) {
+  let r;
   try {
-    const r = JSON.parse(readFileSync34(path, "utf8"));
-    const at = Date.parse(r?.at);
-    return Number.isNaN(at) ? null : { ...r, atMs: at };
+    r = JSON.parse(readFileSync34(path, "utf8"));
   } catch {
-    return null;
+    return { atMs: null };
   }
+  if (!r || typeof r !== "object") return { atMs: null };
+  const at = Date.parse(r.at);
+  return { ...r, atMs: Number.isNaN(at) ? null : at };
+}
+function writeReceipt(paths, { atMs, ...fields }) {
+  mkdirSync25(paths.dir, { recursive: true });
+  const tmp = `${paths.receipt}.tmp-${randomUUID15()}`;
+  writeFileSync19(tmp, `${JSON.stringify(fields)}
+`);
+  renameSync14(tmp, paths.receipt);
+}
+function killTree(child, group, note) {
+  if (group && child.pid) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch (e) {
+      if (e?.code !== "ESRCH") note(`killing process group ${child.pid} failed (${e?.code ?? e?.message})`);
+    }
+  }
+  child.kill("SIGKILL");
 }
 function runOpenCode(args, { timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, command = "opencode" } = {}) {
   return new Promise((done) => {
@@ -28782,21 +28804,29 @@ function runOpenCode(args, { timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, command 
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let timer = null;
     const finish = (r) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       done({ stdout, stderr, timedOut, ...r });
     };
+    const group = process.platform !== "win32";
     let child;
     try {
-      child = spawn4(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      child = spawn4(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: group });
     } catch (error) {
-      return done({ status: null, stdout, stderr, timedOut: false, error });
+      return finish({ status: null, error });
     }
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killTree(child, group, (text) => {
+        stderr += `
+[${text}]`;
+      });
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish({ status: null });
     }, timeoutMs2);
     child.stdout.on("data", (d) => {
       stdout += d;
@@ -28817,51 +28847,74 @@ function failureReason(r, timeoutMs2) {
 function under(dir, path) {
   return resolve18(path).startsWith(resolve18(dir) + sep4);
 }
-async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir10(), nowMs = Date.now, runCommand = runOpenCode, timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS } = {}) {
+async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir10(), nowMs = Date.now, runCommand = runOpenCode, timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, lockWaitMs = timeoutMs2 + 1e4 } = {}) {
   const paths = autoUpdatePaths(env, home);
-  const due = () => {
+  const iso = () => new Date(nowMs()).toISOString();
+  const fresh = (r) => r.atMs !== null && nowMs() - r.atMs < DAY_MS2 && r.atMs - nowMs() <= DAY_MS2;
+  const firstReport = (kind) => {
     const r = readReceipt(paths.receipt);
-    return !r || nowMs() - r.atMs >= DAY_MS2 || r.atMs - nowMs() > DAY_MS2;
+    const last = Date.parse(r.problems?.[kind]);
+    if (!Number.isNaN(last) && nowMs() - last < DAY_MS2 && last - nowMs() <= DAY_MS2) return false;
+    writeReceipt(paths, { ...r, problems: { ...r.problems, [kind]: iso() } });
+    return true;
   };
-  if (!due()) return { status: "not-due" };
+  const pre = readReceipt(paths.receipt);
+  if (fresh(pre) && pre.outcome) return { status: "not-due" };
   if (!pluginRoot || !isInstalledCopy(pluginRoot, { env, home })) return { status: "skipped", reason: "the plugin root is a clone, not an installed copy" };
-  const loaded2 = openCodeLoadedSterling(env, home);
-  if (loaded2.error) return { status: "skipped", reason: `opencode.json is unreadable (${loaded2.error})` };
-  const copy = loaded2.copies.find((c) => c.root && under(c.dir, pluginRoot));
-  if (!copy) return { status: "skipped", reason: "no configured Sterling plugin spec installed this plugin root" };
   let release;
   try {
-    release = await takeFileLock(paths.lock, { waitMs: timeoutMs2 + 1e4 });
+    release = await takeFileLock(paths.lock, { waitMs: lockWaitMs });
   } catch (e) {
-    if (e instanceof LockTimeout) return { status: "not-due" };
-    throw e;
+    if (!(e instanceof LockTimeout)) throw e;
+    const reason = `the update lock ${paths.lock} stayed taken for ${Math.round(lockWaitMs / 1e3)} s, so no update ran and no attempt was recorded`;
+    return { status: "error", kind: "lock", reason, notify: firstReport("lock") };
   }
   try {
-    if (!due()) return { status: "not-due" };
-    const before = openCodeLoadedSterling(env, home).copies.find((c) => c.spec === copy.spec);
+    const r = readReceipt(paths.receipt);
+    if (fresh(r) && r.outcome) return { status: "not-due" };
+    if (fresh(r)) {
+      writeReceipt(paths, { ...r, outcome: "interrupted", reason: "the attempt recorded no outcome; the process running it ended first" });
+      return { status: "interrupted", at: r.at };
+    }
+    const interrupted = r.atMs !== null && !r.outcome ? r.at : void 0;
+    const loaded2 = openCodeLoadedSterling(env, home);
+    if (loaded2.error) {
+      return { status: "error", kind: "config", reason: `${loaded2.configPath} is unreadable (${loaded2.error})`, notify: firstReport("config") };
+    }
+    const copy = loaded2.copies.find((c) => c.root && under(c.dir, pluginRoot));
+    if (!copy) return { status: "skipped", reason: "no configured Sterling plugin spec installed this plugin root" };
+    const attempt = { at: iso(), spec: copy.spec, ...r.problems ? { problems: r.problems } : {} };
+    writeReceipt(paths, attempt);
+    const before = copy;
     const result = await runCommand(["plugin", "update", copy.spec], { timeoutMs: timeoutMs2 });
-    const stamp = (extra) => {
-      mkdirSync25(paths.dir, { recursive: true });
-      writeFileSync19(paths.receipt, `${JSON.stringify({ at: new Date(nowMs()).toISOString(), spec: copy.spec, ...extra })}
-`);
-    };
+    const extra = interrupted ? { interrupted } : {};
     if (result.timedOut || result.error || result.status !== 0) {
       const reason = failureReason(result, timeoutMs2);
-      stamp({ outcome: "failed", reason });
-      return { status: "failed", reason };
+      writeReceipt(paths, { ...attempt, outcome: "failed", reason });
+      return { status: "failed", reason, ...extra };
     }
-    const after = openCodeLoadedSterling(env, home).copies.find((c) => c.spec === copy.spec);
-    const from = before?.version ?? copy.version ?? null;
+    const after = openCodeLoadedSterling(env, home).copies?.find((c) => c.spec === copy.spec);
+    const from = before.version ?? null;
     const to = after?.version ?? null;
     if (after?.root && to && (from === null || compareVersions(to, from) === 1 || compareVersions(to, from) === null && to !== from)) {
-      stamp({ outcome: "updated", from, to });
-      return { status: "updated", from, to, root: after.root };
+      writeReceipt(paths, { ...attempt, outcome: "updated", from, to });
+      return { status: "updated", from, to, root: after.root, ...extra };
     }
-    stamp({ outcome: "unchanged", from, to });
-    return { status: "unchanged", from, to };
+    writeReceipt(paths, { ...attempt, outcome: "unchanged", from, to });
+    return { status: "unchanged", from, to, ...extra };
   } finally {
     release();
   }
+}
+function newerInstalledRoot({ pluginRoot, env = process.env, home = homedir10() }) {
+  if (!pluginRoot) return null;
+  const loaded2 = openCodeLoadedSterling(env, home);
+  if (loaded2.error) return null;
+  const copy = loaded2.copies.find((c) => c.root && under(c.dir, pluginRoot));
+  if (!copy || samePath2(copy.root, pluginRoot)) return null;
+  const from = readPluginVersion(pluginRoot);
+  const to = readPluginVersion(copy.root);
+  return from && to && compareVersions(to, from) === 1 ? { from, to, root: copy.root } : null;
 }
 function createAutoUpdater(deps = {}) {
   const nowMs = deps.nowMs ?? Date.now;
@@ -28872,10 +28925,10 @@ function createAutoUpdater(deps = {}) {
     check(opts = {}) {
       if (flight) return flight;
       flight = checkPluginUpdate({ ...deps, ...opts }).then((r) => {
-        nextAt = nowMs() + (r.status === "skipped" ? DAY_MS2 / 24 : DAY_MS2);
+        nextAt = nowMs() + (r.status === "skipped" || r.status === "error" ? HOUR_MS : DAY_MS2);
         return r;
       }).catch((e) => {
-        nextAt = nowMs() + DAY_MS2 / 24;
+        nextAt = nowMs() + HOUR_MS;
         throw e;
       }).finally(() => {
         flight = null;
@@ -28886,6 +28939,17 @@ function createAutoUpdater(deps = {}) {
 }
 
 // packages/opencode-plugin/src/sync.mjs
+function createSyncShared(deps = {}) {
+  const env = deps.env ?? process.env;
+  const home = deps.home ?? homedir11();
+  return {
+    started: deps.started ?? /* @__PURE__ */ new Set(),
+    updater: deps.updater ?? createAutoUpdater({ env, home, nowMs: deps.nowMs }),
+    state: { root: null, gen: 0, synced: /* @__PURE__ */ new Map() },
+    lanes: /* @__PURE__ */ new Map(),
+    updateRun: null
+  };
+}
 function createSessionSync(deps = {}) {
   const getSession = deps.getSession ?? (() => null);
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
@@ -28893,11 +28957,25 @@ function createSessionSync(deps = {}) {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir11();
   const verdicts = /* @__PURE__ */ new Map();
-  const started = deps.started ?? /* @__PURE__ */ new Set();
-  const inFlight = /* @__PURE__ */ new Set();
+  const shared = deps.shared ?? createSyncShared(deps);
+  const { started, updater, state, lanes } = shared;
   const runs = [];
-  const updater = deps.updater ?? createAutoUpdater({ env, home, nowMs: deps.nowMs });
-  const state = { root: null, gen: 0, synced: /* @__PURE__ */ new Map() };
+  function serial(root, fn) {
+    const prev = lanes.get(root) ?? Promise.resolve();
+    const next = prev.then(() => fn(), () => fn());
+    lanes.set(root, next);
+    const clear = () => {
+      if (lanes.get(root) === next) lanes.delete(root);
+    };
+    next.then(clear, clear);
+    return next;
+  }
+  function queueSync(root, fallbackRoot, applies) {
+    return serial(root, () => {
+      if (applies) state.synced.set(root, state.gen);
+      return run(root, state.root ?? fallbackRoot, applies);
+    });
+  }
   function report(root, text) {
     try {
       addNotice(root, text, now());
@@ -28968,46 +29046,54 @@ function createSessionSync(deps = {}) {
       return false;
     }
   }
-  async function updateOnce(root, pluginRoot) {
+  async function updateOnce(root, runningRoot) {
     let res;
     try {
-      res = await updater.check({ pluginRoot });
+      res = await updater.check({ pluginRoot: runningRoot });
     } catch (e) {
       logLine(root, `plugin auto-update check failed: ${errText2(e)}`);
       report(root, `Sterling: the daily plugin update check FAILED (${errText2(e)}); it retries within the hour. See ${LOG_REL}.`);
       return;
     }
+    if (res.status === "interrupted" || res.interrupted) {
+      const at = res.status === "interrupted" ? res.at : res.interrupted;
+      logLine(root, `plugin auto-update: the attempt started ${at} recorded no outcome`);
+      report(root, `Sterling: the plugin update attempt started ${at} never recorded an outcome; the process running it ended first.${res.status === "interrupted" ? " Sterling tries again tomorrow." : ""} See ${LOG_REL}.`);
+    }
+    if (res.status === "error") {
+      logLine(root, `plugin auto-update did not run (${res.kind}): ${res.reason}`);
+      if (res.notify) report(root, `Sterling: the daily plugin update did not run: ${res.reason}. Sterling retries within the hour and says this once a day. See ${LOG_REL}.`);
+    }
     if (res.status === "failed") {
       logLine(root, `plugin auto-update failed: ${res.reason}`);
       report(root, `Sterling: the daily plugin update FAILED: ${res.reason}. Sterling stays on its installed version and tries again tomorrow. See ${LOG_REL}.`);
-      return;
     }
-    if (res.status !== "updated") return;
-    state.root = res.root;
-    state.gen += 1;
-    logLine(root, `plugin auto-update: ${res.from ?? "(unknown)"}\u2192${res.to}`);
-    let outcome = null;
-    if (!inFlight.has(root)) {
-      inFlight.add(root);
-      state.synced.set(root, state.gen);
-      started.add(root);
+    let landed = res.status === "updated" ? { from: res.from, to: res.to, root: res.root } : null;
+    if (!landed && res.status !== "skipped") {
       try {
-        outcome = await run(root, res.root, true);
-      } finally {
-        inFlight.delete(root);
+        const newer = newerInstalledRoot({ pluginRoot: state.root ?? runningRoot, env, home });
+        if (newer) landed = { ...newer, adopted: true };
+      } catch (e) {
+        logLine(root, `plugin auto-update: reading the installed generation failed: ${errText2(e)}`);
+        report(root, `Sterling: reading which Sterling generation is installed FAILED (${errText2(e)}); this process stays on its current one. See ${LOG_REL}.`);
       }
     }
+    if (!landed || state.root && resolve19(state.root) === resolve19(landed.root)) return;
+    state.root = landed.root;
+    state.gen += 1;
+    logLine(root, `plugin auto-update: ${landed.from ?? "(unknown)"}\u2192${landed.to}${landed.adopted ? " (installed by another OpenCode process)" : ""}`);
+    started.add(root);
+    const outcome = await queueSync(root, landed.root, true);
     const resynced = outcome === "synced" ? "agents re-synced" : outcome === "failed" ? "the agent re-sync FAILED (see the notice above)" : "agents re-sync when this project's next session starts";
-    report(root, `Sterling updated ${res.from ?? "(unknown)"}\u2192${res.to}; ${resynced}. Run /reload when no project on this shared service has in-flight tools or background work.`);
+    const by = landed.adopted ? " (another OpenCode process on this machine installed it)" : "";
+    report(root, `Sterling updated ${landed.from ?? "(unknown)"}\u2192${landed.to}${by}; ${resynced}. Run /reload when no project on this shared service has in-flight tools or background work.`);
   }
   async function syncOnce(root, sessionID) {
     if (inWorkerChild(env)) return;
-    const converge = state.gen > 0 && state.synced.get(root) !== state.gen;
-    const latched = started.has(root) && !converge;
-    const updateDue = updater.due();
-    if (latched && !updateDue) return;
-    const pluginRoot = state.root ?? deps.sterlingRoot ?? sterlingRoot();
+    const converge = () => state.gen > 0 && state.synced.get(root) !== state.gen;
+    if (started.has(root) && !converge() && !updater.due()) return;
     const updateRoot = deps.sterlingRoot ?? sterlingRoot();
+    const pluginRoot = state.root ?? updateRoot;
     let applies;
     let pending;
     try {
@@ -29020,15 +29106,15 @@ function createSessionSync(deps = {}) {
     if (!applies && !pending) return;
     if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
     if (!await verdicts.get(sessionID)) return;
-    if (applies && updater.due()) runs.push(updateOnce(root, updateRoot));
-    const stillConverge = state.gen > 0 && state.synced.get(root) !== state.gen;
-    if (started.has(root) && !stillConverge || inFlight.has(root)) return;
-    if (applies) {
-      started.add(root);
-      state.synced.set(root, state.gen);
+    if (applies && updater.due() && !shared.updateRun) {
+      shared.updateRun = updateOnce(root, updateRoot).finally(() => {
+        shared.updateRun = null;
+      });
+      runs.push(shared.updateRun);
     }
-    inFlight.add(root);
-    runs.push(run(root, state.root ?? pluginRoot, applies).finally(() => inFlight.delete(root)));
+    if (started.has(root) && !converge() || lanes.has(root)) return;
+    if (applies) started.add(root);
+    runs.push(queueSync(root, pluginRoot, applies));
   }
   syncOnce.idle = () => Promise.all(runs).then(() => void 0);
   return syncOnce;
@@ -29105,7 +29191,7 @@ function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, e
 // packages/opencode-plugin/src/server.mjs
 init_dist();
 import { realpathSync as realpathSync12 } from "node:fs";
-import { basename as basename8, dirname as dirname24, join as join56, resolve as resolve19 } from "node:path";
+import { basename as basename8, dirname as dirname24, join as join56, resolve as resolve20 } from "node:path";
 
 // packages/opencode-plugin/src/claim-identity.mjs
 var CLAIM_TOOLS = /* @__PURE__ */ new Set(["board_claim", "board_reaffirm", "board_release", "board_takeover", "board_adopt", "board_update", "board_remove"]);
@@ -29157,7 +29243,7 @@ function sameDirectory(a, b) {
       return realpathSync12(p);
     } catch (e) {
       unresolved ||= `${p}: ${errText2(e)}`;
-      return resolve19(p);
+      return resolve20(p);
     }
   };
   const equal = real(a) === real(b);
@@ -29204,7 +29290,7 @@ function createSterlingServer(deps = {}) {
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   const env = deps.env ?? process.env;
   const swept = /* @__PURE__ */ new Set();
-  const syncStarted = /* @__PURE__ */ new Set();
+  const syncShared = deps.syncSession ? null : createSyncShared({ ...deps, env });
   const locations = /* @__PURE__ */ new Map();
   let last = null;
   async function fenced(name, root, fn) {
@@ -29303,7 +29389,7 @@ function createSterlingServer(deps = {}) {
       }
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, adoptClaims, env });
-    const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
+    const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, shared: syncShared });
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
@@ -29505,7 +29591,7 @@ ${availability}`;
       }
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       const evDir = ev.location?.directory;
-      if (evDir !== void 0 && resolve19(String(evDir)) !== resolve19(directory)) return;
+      if (evDir !== void 0 && resolve20(String(evDir)) !== resolve20(directory)) return;
       if (inWorkerChild(env)) return;
       const root = rootOf();
       if (!root) return;
@@ -29640,7 +29726,7 @@ ${availability}`;
         process.stderr.write("[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n");
         return void 0;
       }
-      const key = resolve19(directory);
+      const key = resolve20(directory);
       let loc = locations.get(key);
       if (!loc) {
         loc = createLocation(directory);

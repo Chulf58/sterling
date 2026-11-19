@@ -9,11 +9,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { autoUpdatePaths, checkPluginUpdate, createAutoUpdater, DAY_MS } from '../lib/plugin-auto-update.mjs';
+import { autoUpdatePaths, checkPluginUpdate, createAutoUpdater, DAY_MS, runOpenCode } from '../lib/plugin-auto-update.mjs';
+import { pidIsAlive, takeFileLock } from '../lib/file-lock.mjs';
 import { openCodeCacheKey, STERLING_GIT_SPEC } from '../lib/sterling-roots.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const { createSessionSync } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'sync.mjs')).href);
+const { createSessionSync, createSyncShared } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'sync.mjs')).href);
 const { NOTICES_REL } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'notices.mjs')).href);
 
 const scratch = [];
@@ -29,25 +30,25 @@ function tmp(prefix) {
 const DAY0 = Date.parse('2026-11-19T08:00:00.000Z');
 
 /** One generation of the installed plugin: <cache>/<key>/<gen>/node_modules/@chulf58/sterling. */
-function installGeneration(home, gen, version) {
+function installGeneration(home, gen, version, { syncDelayMs = 0 } = {}) {
   const key = openCodeCacheKey(STERLING_GIT_SPEC, 'git');
   const root = join(home, '.cache', 'opencode', 'npm', key, String(gen), 'node_modules', '@chulf58', 'sterling');
   mkdirSync(join(root, '.claude-plugin'), { recursive: true });
   mkdirSync(join(root, 'scripts'), { recursive: true });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version }));
   writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version }));
-  writeFileSync(join(root, 'scripts', 'sync-agents.mjs'), 'process.stdout.write("refreshed: implementor\\n\\nRESTART REQUIRED — project subagents load at session start.\\n");\n');
+  writeFileSync(join(root, 'scripts', 'sync-agents.mjs'), `setTimeout(() => process.stdout.write("refreshed: implementor\\n\\nRESTART REQUIRED — project subagents load at session start.\\n"), ${syncDelayMs});\n`);
   writeFileSync(join(root, 'scripts', 'stamp-contract.mjs'), 'process.stdout.write("stamp-contract: 1 already in sync — 1 project(s) processed\\n");\n');
   writeFileSync(join(root, 'scripts', 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
   return root;
 }
 
 /** A temp HOME with the Sterling spec configured and generation 1 (version 1.0.0) installed. */
-function makeMachine() {
+function makeMachine(gen1 = {}) {
   const home = tmp('sterling-pau-home-');
   mkdirSync(join(home, '.config', 'opencode'), { recursive: true });
   writeFileSync(join(home, '.config', 'opencode', 'opencode.json'), JSON.stringify({ plugins: [STERLING_GIT_SPEC] }));
-  const root = installGeneration(home, 1, '1.0.0');
+  const root = installGeneration(home, 1, '1.0.0', gen1);
   const env = { XDG_CACHE_HOME: join(home, '.cache'), XDG_CONFIG_HOME: join(home, '.config'), CLAUDE_CONFIG_DIR: join(home, '.claude'), PATH: process.env.PATH };
   return { home, root, env };
 }
@@ -246,4 +247,205 @@ test('a clone-backed plugin root never runs the update from the plugin', async (
   await syncOnce(project, 'ses_c');
   await syncOnce.idle();
   assert.equal(oc.calls.length, 0);
+});
+
+// ---- review round 1: the real runner, the receipt, operational errors, shared state ----
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const receiptOf = (m) => JSON.parse(readFileSync(autoUpdatePaths(m.env, m.home).receipt, 'utf8'));
+
+test('runOpenCode: at the deadline it settles at once and kills the tree, even when a descendant holds the pipes after the child exits', async () => {
+  const dir = tmp('sterling-pau-runner-');
+  const pidFile = join(dir, 'descendant.pid');
+  // A harmless Node launcher: it starts a descendant that inherits stdout/stderr and sleeps 10 s, then exits itself.
+  const launcher = [
+    "const { spawn } = require('node:child_process');",
+    "const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+    "require('node:fs').writeFileSync(process.argv[1], String(c.pid));",
+    "process.stdout.write('launched\\n');",
+  ].join('\n');
+  const t0 = Date.now();
+  const r = await runOpenCode(['-e', launcher, pidFile], { command: process.execPath, timeoutMs: 400 });
+  const elapsed = Date.now() - t0;
+  assert.equal(r.timedOut, true);
+  assert.equal(r.status, null);
+  assert.ok(elapsed < 3000, `settled ${elapsed} ms after a 400 ms deadline (the descendant sleeps 10 s)`);
+  assert.match(r.stdout, /launched/);
+  if (process.platform !== 'win32') {
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    let alive = pidIsAlive(pid);
+    for (let i = 0; alive && i < 40; i += 1) {
+      await sleep(50);
+      alive = pidIsAlive(pid);
+    }
+    assert.equal(alive, false, 'the descendant was killed with its process group');
+  }
+});
+
+test('the attempt is on record before the command runs, then finalized with its outcome', async () => {
+  const m = makeMachine();
+  let during = null;
+  const run = async () => {
+    during = receiptOf(m);
+    return { status: 0, stdout: '', stderr: '', timedOut: false };
+  };
+  const r = await checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0, runCommand: run });
+  assert.equal(r.status, 'unchanged');
+  assert.equal(during.at, new Date(DAY0).toISOString());
+  assert.equal(during.spec, STERLING_GIT_SPEC);
+  assert.equal('outcome' in during, false, 'while the command runs the attempt has no outcome');
+  assert.equal(receiptOf(m).outcome, 'unchanged');
+  assert.equal(receiptOf(m).at, during.at, 'the same receipt is finalized');
+});
+
+test('an attempt a crashed process left without an outcome: the same day it is reported once as interrupted and nothing runs; the next day it is named and the update runs', async () => {
+  const m = makeMachine();
+  const paths = autoUpdatePaths(m.env, m.home);
+  mkdirSync(paths.dir, { recursive: true });
+  const crashedAt = new Date(DAY0 - 1000).toISOString();
+  writeFileSync(paths.receipt, JSON.stringify({ at: crashedAt, spec: STERLING_GIT_SPEC }));
+  const oc = fakeOpenCode(m.home, [{}]);
+  let t = DAY0;
+  const opts = { pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => t, runCommand: oc.run };
+  const first = await checkPluginUpdate(opts);
+  assert.deepEqual(first, { status: 'interrupted', at: crashedAt });
+  assert.equal(oc.calls.length, 0, 'the crashed attempt counts as the day\'s attempt');
+  assert.equal(receiptOf(m).outcome, 'interrupted');
+  assert.equal(receiptOf(m).at, crashedAt, 'no second attempt marker was added');
+  assert.equal((await checkPluginUpdate(opts)).status, 'not-due', 'said once');
+  assert.equal(oc.calls.length, 0);
+
+  writeFileSync(paths.receipt, JSON.stringify({ at: crashedAt, spec: STERLING_GIT_SPEC }));
+  t = DAY0 + DAY_MS;
+  const next = await checkPluginUpdate(opts);
+  assert.equal(next.status, 'unchanged');
+  assert.equal(next.interrupted, crashedAt);
+  assert.equal(oc.calls.length, 1);
+  assert.equal(receiptOf(m).outcome, 'unchanged');
+});
+
+test('an unreadable OpenCode config is an error, not a skip: notify once a day, no attempt recorded, no command', async () => {
+  const m = makeMachine();
+  writeFileSync(join(m.home, '.config', 'opencode', 'opencode.json'), '{ not json');
+  const oc = fakeOpenCode(m.home, [{}]);
+  let t = DAY0;
+  const opts = { pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => t, runCommand: oc.run };
+  const a = await checkPluginUpdate(opts);
+  assert.equal(a.status, 'error');
+  assert.equal(a.kind, 'config');
+  assert.match(a.reason, /opencode\.json is unreadable/);
+  assert.equal(a.notify, true);
+  assert.equal(receiptOf(m).at, undefined, 'a config failure is no attempt');
+  t += DAY_MS / 24 + 1000;
+  const b = await checkPluginUpdate(opts);
+  assert.equal(b.status, 'error');
+  assert.equal(b.notify, false, 'the notice is deduplicated to once a day through the receipt');
+  t += DAY_MS;
+  assert.equal((await checkPluginUpdate(opts)).notify, true);
+  assert.equal(oc.calls.length, 0);
+});
+
+test('a lock that stays taken is an error naming the lock, never not-due, and records no attempt', async () => {
+  const m = makeMachine();
+  const oc = fakeOpenCode(m.home, [{}]);
+  const release = await takeFileLock(autoUpdatePaths(m.env, m.home).lock);
+  try {
+    const r = await checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0, runCommand: oc.run, lockWaitMs: 100 });
+    assert.equal(r.status, 'error');
+    assert.equal(r.kind, 'lock');
+    assert.match(r.reason, /stayed taken.*no attempt was recorded/);
+    assert.equal(r.notify, true);
+    assert.equal(receiptOf(m).at, undefined, 'no attempt receipt exists');
+    const again = await checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0 + 1000, runCommand: oc.run, lockWaitMs: 100 });
+    assert.equal(again.notify, false);
+  } finally {
+    release();
+  }
+  assert.equal(oc.calls.length, 0);
+});
+
+test('plugin: an operational error gives one loud notice a day; a lock or config failure is never silent', async () => {
+  const m = makeMachine();
+  writeFileSync(join(m.home, '.config', 'opencode', 'opencode.json'), '{ not json');
+  const oc = fakeOpenCode(m.home, [{}]);
+  const clock = { t: DAY0 };
+  const project = makeProject('1.0.0');
+  const syncOnce = pluginSync(m, oc, clock);
+  await syncOnce(project, 'ses_1');
+  await syncOnce.idle();
+  const said = () => noticeTexts(project).filter((x) => /daily plugin update did not run/.test(x));
+  assert.equal(said().length, 1);
+  assert.match(said()[0], /opencode\.json is unreadable/);
+  // The notice was delivered (an unshown notice with the same text is never queued twice).
+  const delivered = () => rmSync(join(project, NOTICES_REL), { force: true });
+  delivered();
+  clock.t += DAY_MS / 24 + 1000;
+  await syncOnce(project, 'ses_1');
+  await syncOnce.idle();
+  assert.equal(said().length, 0, 'the hourly retry does not repeat the notice');
+  clock.t += DAY_MS;
+  await syncOnce(project, 'ses_1');
+  await syncOnce.idle();
+  assert.equal(said().length, 1, 'the next day says it again');
+  assert.equal(oc.calls.length, 0);
+});
+
+/** Two locations of one plugin process, built as server.mjs builds them: one shared state, one sync per location. */
+function twoLocations(m, oc, clock) {
+  const shared = createSyncShared({ env: m.env, home: m.home, nowMs: () => clock.t, updater: createAutoUpdater({ env: m.env, home: m.home, nowMs: () => clock.t, runCommand: oc.run }) });
+  return [pluginSync(m, oc, clock, { shared }), pluginSync(m, oc, clock, { shared })];
+}
+
+test('two locations: an update in location A unlatches a project location B already synced, and B converges from the new root', async () => {
+  const m = makeMachine();
+  const oc = fakeOpenCode(m.home, [{}, { install: { gen: 2, version: '1.1.0' } }]);
+  const clock = { t: DAY0 };
+  const [syncA, syncB] = twoLocations(m, oc, clock);
+  const pa = makeProject('1.0.0');
+  const pb = makeProject('1.0.0');
+  await syncB(pb, 'ses_b1');
+  await syncB.idle();
+  assert.equal(oc.calls.length, 1);
+  assert.equal(markerOf(pb), '1.0.0');
+  clock.t += DAY_MS + 1000;
+  await syncA(pa, 'ses_a1');
+  await syncA.idle();
+  assert.equal(oc.calls.length, 2);
+  assert.equal(markerOf(pa), '1.1.0');
+  await syncB(pb, 'ses_b2');
+  await syncB.idle();
+  assert.equal(markerOf(pb), '1.1.0', 'location B synced pb from the root location A installed');
+  assert.equal(oc.calls.length, 2, 'one update per process, not one per location');
+});
+
+test('two locations, one project: the sync from the older root and the one from the newer root never overlap, so the newer marker wins', async () => {
+  const m = makeMachine({ syncDelayMs: 600 });
+  const oc = fakeOpenCode(m.home, [{ install: { gen: 2, version: '1.1.0' } }]);
+  const clock = { t: DAY0 };
+  const [syncA, syncB] = twoLocations(m, oc, clock);
+  const project = makeProject('0.9.0');
+  await syncB(project, 'ses_b');
+  await syncA(project, 'ses_a');
+  await Promise.all([syncA.idle(), syncB.idle()]);
+  assert.equal(oc.calls.length, 1);
+  assert.equal(markerOf(project), '1.1.0');
+  assert.ok(noticeTexts(project).some((x) => /^Sterling updated 1\.0\.0→1\.1\.0; agents re-synced\./.test(x)), noticeTexts(project).join('\n'));
+});
+
+test('a newer generation another OpenCode process installed today is adopted: this process re-syncs from it without running the update', async () => {
+  const m = makeMachine();
+  const oc = fakeOpenCode(m.home, [{ install: { gen: 2, version: '1.1.0' } }]);
+  const clock = { t: DAY0 };
+  const px = makeProject('1.0.0');
+  const syncX = pluginSync(m, oc, clock);
+  await syncX(px, 'ses_x');
+  await syncX.idle();
+  assert.equal(markerOf(px), '1.1.0');
+  const py = makeProject('1.0.0');
+  const syncY = pluginSync(m, oc, clock);
+  await syncY(py, 'ses_y');
+  await syncY.idle();
+  assert.equal(oc.calls.length, 1, 'the second process found the day\'s attempt done');
+  assert.equal(markerOf(py), '1.1.0', 'and adopted the root the first process installed');
+  assert.ok(noticeTexts(py).some((x) => /^Sterling updated 1\.0\.0→1\.1\.0 \(another OpenCode process on this machine installed it\); agents re-synced\./.test(x)), noticeTexts(py).join('\n'));
 });
