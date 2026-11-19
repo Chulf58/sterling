@@ -82,7 +82,7 @@ import { createSettle, liveDispatch } from './settle.mjs';
 import { onEvaluate as storeGuard } from './store-guard.mjs';
 import { BUSY_TIMEOUT_MS, createProjectStores, openProjectStore } from './store.mjs';
 import { checkSessionMove, isSessionMove, sessionMoveUncheckedRefusal } from './session-move.mjs';
-import { createSessionSync } from './sync.mjs';
+import { createSessionSync, createSyncShared } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
 import { createConductorSessionRecorder, takePromptSeq } from './conductor-session.mjs';
 import { realpathSync } from 'node:fs';
@@ -196,9 +196,10 @@ export function createSterlingServer(deps = {}) {
   const openStore = (dbPath) => baseOpenStore(storeDbPath(dbPath));
   const now = deps.now ?? (() => new Date().toISOString());
   const env = deps.env ?? process.env;
-  // Process-wide, keyed by project root: the roots whose startup sweep ran, and whose post-update sync started.
+  // Process-wide, keyed by project root: the roots whose startup sweep ran; and the post-update
+  // sync state every location shares (started latch, daily update coordinator, newest root, per-project lanes).
   const swept = new Set();
-  const syncStarted = new Set();
+  const syncShared = deps.syncSession ? null : createSyncShared({ ...deps, env });
   // One instance per location directory; `last` is the latest set up, which `handlers` exposes to tests.
   const locations = new Map();
   let last = null;
@@ -328,7 +329,7 @@ export function createSterlingServer(deps = {}) {
       }
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, adoptClaims, env });
-    const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
+    const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, shared: syncShared });
     // Each session's STERLING-DELIVERY policy, shared by child staging and the tool-time deliveries (delivery-policy.mjs).
     const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
     const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
