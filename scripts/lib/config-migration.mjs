@@ -7,13 +7,15 @@
 // Before the transform, a file that has not been through it gets the steps below, once per file, DROP ONLY and
 // reported: migrateRetiredModelKeys (retired models keys, never carried), migrateStaleAgyModels, then
 // moveImplementorHardTask (models.implementor.hard_task into models.implementor-hard, decision
-// hard-implementor-is-its-own-agent-sterling-implementor-hard) and resetOverpassDefaults (removes
-// overpass.roles and sets conductor_bypass, decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max).
+// hard-implementor-is-its-own-agent-sterling-implementor-hard). The old Overpass defaults reset is NOT run: the
+// transform carries the resolved tier, effort and bypass the project actually ran on, and the reset would replace
+// them with defaults first (decision settings-redesign-build-shape-one-legacy-to-canonical-config, "migration carries
+// resolved Overpass tier, effort and bypass, not default tiers").
 // addModelDefaults is retired with the per-host model fields it wrote. A config that cannot be carried is never
 // touched, and a result that fails canonicalConfigSchema is never written.
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { OVERPASS_DEFAULTS_MIGRATION_ID, canonicalConfigSchema, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, resetOverpassDefaults, toCanonicalConfig } from '@sterling/schemas';
+import { canonicalConfigSchema, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, toCanonicalConfig } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -44,16 +46,6 @@ export function describeHardMove(move) {
   if (move.kind === 'moved') return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task ${show(move.hard_task)} moved to models.implementor-hard as ${show(move.entry)}, the sterling/implementor-hard agent's model; change it in the System tab`];
   if (move.kind === 'dropped') return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task dropped (value was ${show(move.hard_task)}); models.implementor-hard ${show(move.entry)} was already set and is kept`];
   return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
-}
-
-/** The report lines of the Overpass defaults reset (resetOverpassDefaults), or none. */
-export function describeOverpassReset(reset) {
-  if (!reset.changed) return [];
-  const lines = [];
-  if (reset.rolesRemoved) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.roles removed (value was ${show(reset.rolesRemoved.value)}); every role now runs on its default tier`);
-  if (reset.bypassSet) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.conductor_bypass set to true (was ${reset.bypassSet.was === undefined ? 'unset' : show(reset.bypassSet.was)}); the conductor keeps its direct model pin`);
-  if (!lines.length) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass defaults already in place; recorded ${OVERPASS_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never reset again`);
-  return lines;
 }
 
 class ConcurrentChange extends Error {}
@@ -119,7 +111,8 @@ export function commitConfigMigration(plan, { beforeRename } = {}) {
 // same compare-and-swap commit. Unlike prepareConfigMigration it does NOT validate the file against the
 // legacy schema first: the transform is the tolerant reader, and a value it cannot carry is a refusal.
 // The legacy one-time steps above run first, once per file, so a file that missed them gets them as a
-// sync would have given them (except the model-defaults add, which one model per agent retires); a file that records CANONICAL_CONFIG_MIGRATION_ID skips them (they
+// sync would have given them (except the model-defaults add, which one model per agent retires, and the
+// Overpass defaults reset, which would discard the tiers the transform carries); a file that records CANONICAL_CONFIG_MIGRATION_ID skips them (they
 // would put legacy fields back). The result must pass canonicalConfigSchema, the strict write check.
 // A role with two models (a Claude model and a different OpenCode model) is never decided here: the
 // plan's status is 'conflicts' and it cannot be committed until the caller passes a resolution for
@@ -169,8 +162,8 @@ export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return refuse('is not a JSON object');
   const applied = Array.isArray(raw.applied_config_migrations) ? raw.applied_config_migrations : [];
   // Retired models keys and stale agy values are dropped (and reported) from EVERY file, canonical or not: the transform
-  // ignores them in memory, but only this step removes them from disk. The hard_task move and the Overpass reset are
-  // legacy-only and run once, for a file that has not been through the transform.
+  // ignores them in memory, but only this step removes them from disk. The hard_task move is legacy-only and runs once,
+  // for a file that has not been through the transform.
   const m = migrateRetiredModelKeys(raw);
   const a = migrateStaleAgyModels(m.config);
   let legacy = a.config;
@@ -179,10 +172,8 @@ export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}
     // addModelDefaults is NOT run here: it wrote the per-host opencode_model defaults (reviewer, sparring)
     // that one model per agent removes, and would make every file that never set one a model conflict.
     const h = moveImplementorHardTask(legacy);
-    const o = resetOverpassDefaults(h.config);
-    if (o.refusal) return refuse(o.refusal);
-    legacy = o.config;
-    legacyLines.push(...describeHardMove(h.move), ...describeOverpassReset(o));
+    legacy = h.config;
+    legacyLines.push(...describeHardMove(h.move));
   }
   let result;
   try {
