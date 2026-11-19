@@ -459,7 +459,11 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
 
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
     try {
-      store.bootstrapCatalogIfAbsent(canonical ?? {}, nowISO);
+      // The catalog is seeded empty and filled by ensureCatalogPinnedModels, which splits each canonical
+      // <provider>/<id> into vendor and id (anthropic ids stay bare) and leaves out the overpass/ and agy/
+      // logical ids. bootstrapCatalogIfAbsent reads every model as a bare id, so seeding it with the
+      // canonical models gave picker entries like anthropic/anthropic/claude-opus-5-5.
+      store.bootstrapCatalogIfAbsent({ models: {} }, nowISO);
       store.ensureCatalogPinnedModels(canonical ?? {});
       const rec = store.query({ types: ['reference_material'], cap: 200 }).find((r) => (r as { catalog?: unknown }).catalog);
       const days = (canonical as { models_catalog?: { staleness_days?: number } } | undefined)?.models_catalog?.staleness_days ?? 45;

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { openDashboard, type DashboardController } from '../controller.js';
-import { SYSTEM_TAB } from '../state.js';
+import { SYSTEM_TAB, modelChoices } from '../state.js';
 
 // The dashboard controller is the host-neutral half of main.ts: the store and
 // config code paths both the terminal TUI and the OpenCode plugin drive. These
@@ -180,3 +180,24 @@ test('controller: the handoff row says why — not set for an absent key, the tr
 });
 
 // decision opencode-only-model-override-per-role-for-openai-picks
+
+test('controller: a fresh dashboard seeds the models catalog with vendor and id split, so the picker never shows anthropic/anthropic/... or a logical overpass/ or agy/ id as a catalog model (item-G review finding 6)', async () => {
+  const f = fixture({ tdd: { enabled: true }, models: { implementor: { model: 'openai/gpt-5.6-terra', effort: 'high' }, scout: { model: 'overpass/agentic-auto' }, librarian: { model: 'agy/flash' } } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    const snap = ctl.roster();
+    assert.ok(snap?.catalog.present, 'the catalog was seeded');
+    const ids = snap!.catalog.entries.map((e) => `${e.vendor ?? 'anthropic'}/${e.id}`);
+    assert.ok(ids.includes('anthropic/claude-opus-5-5'), ids.join(', '));
+    assert.ok(ids.includes('openai/gpt-5.6-terra'), ids.join(', '));
+    assert.deepEqual(snap!.catalog.entries.filter((e) => e.id.includes('/')), [], 'no catalog id carries a provider prefix');
+    const refs = modelChoices(snap!, 'implementor').flatMap((o) => ('ref' in o.choice ? [o.choice.ref] : []));
+    assert.deepEqual(refs.filter((r) => /^anthropic\/anthropic\/|^[^/]+\/(overpass|agy|openai|anthropic)\//.test(r)), [], refs.join(', '));
+    assert.equal(refs.filter((r) => r === 'overpass/agentic-auto').length, 1, 'a tier is offered once, as itself');
+    assert.equal(refs.filter((r) => r === 'agy/flash').length, 1);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
