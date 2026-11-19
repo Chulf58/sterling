@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { openDashboard, type DashboardController } from '../controller.js';
-import { SYSTEM_TAB, modelChoices, systemCursorOf } from '../state.js';
+import { SYSTEM_TAB, modelChoices, pickerSpecs, systemCursorOf } from '../state.js';
 import { applyHandoffToggle } from '../config-writeback.js';
 
 // The dashboard controller is the host-neutral half of main.ts: the store and
@@ -197,6 +197,25 @@ test('controller: a fresh dashboard seeds the models catalog with vendor and id 
     assert.deepEqual(refs.filter((r) => /^anthropic\/anthropic\/|^[^/]+\/(overpass|agy|openai|anthropic)\//.test(r)), [], refs.join(', '));
     assert.equal(refs.filter((r) => r === 'overpass/agentic-auto').length, 1, 'a tier is offered once, as itself');
     assert.equal(refs.filter((r) => r === 'agy/flash').length, 1);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// decision gemini-4-neon-in-the-system-tab-agy-inherit-is-shown-as-the
+test('controller: the picker shows agy/inherit as the agy session model and selecting it commits agy/inherit', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    const choices = modelChoices(ctl.roster()!, 'implementor');
+    const idx = choices.findIndex((o) => 'ref' in o.choice && o.choice.ref === 'agy/inherit');
+    assert.ok(idx >= 0, 'agy/inherit is offered');
+    assert.equal(choices[idx]!.label, 'agy session model (your agy default, e.g. Neon)');
+    assert.deepEqual(choices[idx]!.choice, { ref: 'agy/inherit' });
+    const specs = pickerSpecs(ctl.roster()!, { key: 'implementor', stage: 'model', highlight: 0 } as never);
+    assert.ok(specs.some((s) => s.text === 'agy/inherit  agy session model (your agy default, e.g. Neon)'));
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });

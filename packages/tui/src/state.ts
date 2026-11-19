@@ -336,7 +336,7 @@ export function modelChoices(snap: AgentRosterSnapshot, key: string): Array<{ gr
   const vendors: string[] = [CLAUDE_PROVIDER];
   for (const e of snap.catalog.entries) if (!vendors.includes(e.vendor ?? CLAUDE_PROVIDER)) vendors.push(e.vendor ?? CLAUDE_PROVIDER);
   for (const v of vendors) for (const e of snap.catalog.entries) if ((e.vendor ?? CLAUDE_PROVIDER) === v) add(v, `${v}/${e.id}`, e.label);
-  for (const id of AGY_MODEL_IDS) add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, '');
+  for (const id of AGY_MODEL_IDS) add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, id === 'inherit' ? 'agy session model (your agy default, e.g. Neon)' : '');
   for (const tier of OVERPASS_TIERS) add(OVERPASS_MODEL_NAMESPACE, `${OVERPASS_MODEL_NAMESPACE}/${tier}`, '');
   const current = snap.models[key]?.model;
   if (current !== undefined) add(providerOf(current), current, '(current)');

@@ -13794,7 +13794,7 @@ function modelChoices(snap, key) {
       if ((e.vendor ?? CLAUDE_PROVIDER) === v)
         add(v, `${v}/${e.id}`, e.label);
   for (const id of AGY_MODEL_IDS)
-    add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, "");
+    add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, id === "inherit" ? "agy session model (your agy default, e.g. Neon)" : "");
   for (const tier of OVERPASS_TIERS)
     add(OVERPASS_MODEL_NAMESPACE, `${OVERPASS_MODEL_NAMESPACE}/${tier}`, "");
   const current = snap.models[key]?.model;
