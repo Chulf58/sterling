@@ -58593,7 +58593,7 @@ function dropGuardOnlyAgentEntries(projectDir, names, { tracked = [] } = {}) {
   const keptNote = kept.length ? `KEPT agent entries ${kept.join(", ")}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone` : null;
   if (!removed.length) return keptNote ? { item: PROJECT_CONFIG_REL, status: "skipped", detail: keptNote } : null;
   if (isTracked) {
-    return { item: PROJECT_CONFIG_REL, status: "skipped", detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(", ")} stay and OpenCode still defines those agents although their files were removed; remove those entries by hand (or untrack the file), then rerun /sterling:update`, keptNote].filter(Boolean).join("; ") };
+    return { item: PROJECT_CONFIG_REL, status: "skipped", detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(", ")} stay and OpenCode still defines those agents although their files were removed; remove those entries from it by hand`, keptNote].filter(Boolean).join("; ") };
   }
   for (const name of removed) delete agents[name];
   if (!Object.keys(agents).length) delete config.agent;

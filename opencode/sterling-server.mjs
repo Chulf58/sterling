@@ -25306,11 +25306,25 @@ function unsupportedAgentsLine({ config, configUnreadable, host, root }) {
     noCopy = noCopy.filter((r) => r !== conductor);
     const rel = host === "claude" ? ".claude/agents/conductor.md" : ".opencode/agents/sterling/conductor.md";
     const hostName = host === "claude" ? "Claude Code" : "OpenCode";
+    const head = `the conductor's model ${conductor.model} cannot run on ${hostName}`;
     const fix = `pick a model ${hostName} can run for the conductor in the TUI System tab`;
     const present = root ? existsSync26(join38(root, rel)) : null;
-    if (present === true) parts.push(`the conductor's model ${conductor.model} cannot run on ${hostName}; Sterling kept your edited ${rel} but no longer maintains it, so this session runs that edited copy on whatever model it names, not the configured one; ${fix}`);
-    else if (host === "claude") parts.push(`the conductor's model ${conductor.model} cannot run on Claude Code${present === false ? `, so it has no copy (${rel} is absent) and` : ", so"} this session does NOT run as Sterling's conductor even if .claude/settings.json names it; ${fix}`);
-    else parts.push(`this session runs on OpenCode's default agent, not on Sterling's conductor, because the conductor's model ${conductor.model} cannot run on OpenCode${present === false ? ` (${rel} is absent; default_agent is left as it is)` : ""}; ${fix}`);
+    if (present === true) {
+      parts.push(`${head}; a conductor file Sterling did not remove is present at ${rel}, and it may not run ${conductor.model}; ${fix}`);
+    } else if (present === null) {
+      parts.push(`${head}, so Sterling writes no conductor copy for it; ${fix}`);
+    } else if (host === "claude") {
+      parts.push(`${head}; Sterling wrote no conductor copy (${rel} is absent), so a .claude/settings.json "agent": "conductor" has no conductor file to start; ${fix}`);
+    } else {
+      let defaultAgent;
+      try {
+        defaultAgent = JSON.parse(readFileSync26(join38(root, ".opencode", "opencode.json"), "utf8"))?.default_agent;
+      } catch {
+        defaultAgent = void 0;
+      }
+      const tail = defaultAgent === "sterling/conductor" ? "and default_agent still names it, so OpenCode starts its own default agent instead" : "so if default_agent names sterling/conductor, OpenCode starts its own default agent instead";
+      parts.push(`${head}; Sterling wrote no conductor copy (${rel} is absent), ${tail}; ${fix}`);
+    }
   }
   if (noCopy.length) parts.push(`no ${host === "claude" ? "Claude Code" : host === "opencode" ? "OpenCode" : "agy"} copy of ${noCopy.map(named).join(", ")}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
   if (conflicts.length) parts.push(`${conflicts.map(named).join(", ")}: dispatch refuses until you choose`);
