@@ -43,7 +43,7 @@ export function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const store = storeRootFor(root);
   const { config, configUnreadable } = readProjectConfig(store);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: prMergePath(config) && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: 'opencode' }), unsupportedAgentsLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: prMergePath(config) && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: 'opencode' }), unsupportedAgentsLine({ config, configUnreadable, host: 'opencode', root }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config, configUnreadable };
 }
 
