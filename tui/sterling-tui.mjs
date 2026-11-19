@@ -45047,11 +45047,12 @@ var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 var LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
 function toCanonicalConfig(legacy, opts = {}) {
   if (!isPlainObject(legacy))
-    return { config: legacy, conflicts: [], changes: [] };
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
   const raw = normalizeRawConfig(legacy);
   const out = { ...raw };
   const changes = [];
   const conflicts = [];
+  const origins = {};
   const resolutions = opts.resolutions ?? {};
   const mode = judgeProjectMode(raw.mode, "the config");
   let autoMerge;
@@ -45070,9 +45071,13 @@ function toCanonicalConfig(legacy, opts = {}) {
     const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
     out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
     changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
     out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
     changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   }
   if (autoMerge !== void 0)
     changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
@@ -45100,7 +45105,7 @@ function toCanonicalConfig(legacy, opts = {}) {
   const effective = overpass?.effective === true;
   const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
   if (raw.models !== void 0 && !isPlainObject(raw.models))
-    return { config: out, conflicts, changes };
+    return { config: out, conflicts, changes, origins };
   const models = { ...raw.models ?? {} };
   let modelsChanged = false;
   for (const [role, entry] of Object.entries(models)) {
@@ -45135,6 +45140,8 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     if (model !== void 0)
       next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
     if (entry.effort !== void 0)
       next.effort = entry.effort;
     if (JSON.stringify(next) !== JSON.stringify(entry)) {
@@ -45155,7 +45162,11 @@ function toCanonicalConfig(legacy, opts = {}) {
       const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
       changes.push({ path: `models.${role}`, was: models[role], now: entry });
       models[role] = entry;
+      origins[`models.${role}`] = "overpass";
     }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
     models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
     changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
     if (overpass.conductorRouted) {
@@ -45173,6 +45184,7 @@ function toCanonicalConfig(legacy, opts = {}) {
       if (!isPlainObject(existing) || typeof existing.model !== "string") {
         const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
         models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
         modelsChanged = true;
         changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
       }
@@ -45185,7 +45197,7 @@ function toCanonicalConfig(legacy, opts = {}) {
     delete out.sparring_partner;
     changes.push({ path: "sparring_partner", was: raw.sparring_partner });
   }
-  return { config: out, conflicts, changes };
+  return { config: out, conflicts, changes, origins };
 }
 function parseCanonicalConfig(raw) {
   return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
@@ -58541,22 +58553,23 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsuppor
   }
   return rows;
 }
-function refreshFullAgentModels({ projectDir, pluginRoot }) {
+function refreshFullAgentModels({ projectDir, pluginRoot, fs = {} }) {
   if (!existsSync12(join20(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const configured = configuredFullAgentModels(storeRootFor(projectDir));
   if (configured.refused) return { refused: configured.refused };
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
-  writeFullAgentFiles(staged.writes);
-  const gone = staged.rows.filter((r) => r.status === "removed" && r.item.startsWith(`${STERLING_AGENTS_SUBDIR}/`)).map((r) => r.item.slice(".opencode/agents/".length, -".md".length));
-  const configRow = dropGuardOnlyAgentEntries(projectDir, gone);
+  writeFullAgentFiles(staged.writes, fs);
+  const gone = Object.keys(configured.unsupported ?? {}).filter((name) => ROSTER.includes(name) && !existsSync12(join20(projectDir, STERLING_AGENTS_SUBDIR, `${name}.md`))).map((name) => `sterling/${name}`);
+  const configRow = dropGuardOnlyAgentEntries(projectDir, gone, { tracked });
   return { rows: configRow ? [...staged.rows, configRow] : staged.rows };
 }
-function dropGuardOnlyAgentEntries(projectDir, names) {
+function dropGuardOnlyAgentEntries(projectDir, names, { tracked = [] } = {}) {
   if (!names.length) return null;
   const path = join20(projectDir, PROJECT_CONFIG_REL);
   if (!existsSync12(path)) return null;
+  const isTracked = tracked.includes(PROJECT_CONFIG_REL);
   const before = normalize3(readFileSync13(path, "utf8"));
   let config;
   try {
@@ -58574,18 +58587,22 @@ function dropGuardOnlyAgentEntries(projectDir, names) {
   for (const name of names) {
     if (!Object.hasOwn(agents, name)) continue;
     const text = JSON.stringify(agents[name]);
-    if (text === guardOnly || text === legacyGuardOnly) {
-      delete agents[name];
-      removed.push(name);
-    } else kept.push(name);
+    if (text === guardOnly || text === legacyGuardOnly) removed.push(name);
+    else kept.push(name);
   }
+  const keptNote = kept.length ? `KEPT agent entries ${kept.join(", ")}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone` : null;
+  if (!removed.length) return keptNote ? { item: PROJECT_CONFIG_REL, status: "skipped", detail: keptNote } : null;
+  if (isTracked) {
+    return { item: PROJECT_CONFIG_REL, status: "skipped", detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(", ")} stay and OpenCode still defines those agents although their files were removed; remove those entries by hand (or untrack the file), then rerun /sterling:update`, keptNote].filter(Boolean).join("; ") };
+  }
+  for (const name of removed) delete agents[name];
   if (!Object.keys(agents).length) delete config.agent;
-  const parts = [];
-  if (removed.length) parts.push(`removed the guard-only agent entries of ${removed.join(", ")}, whose agent files were removed`);
-  if (kept.length) parts.push(`KEPT agent entries ${kept.join(", ")}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone`);
-  if (!parts.length) return null;
-  if (removed.length) writeFileAtomic(path, projectConfigText(config));
-  return { item: PROJECT_CONFIG_REL, status: removed.length ? "refreshed" : "skipped", detail: parts.join("; ") };
+  try {
+    writeFileAtomic(path, projectConfigText(config));
+  } catch (err) {
+    return { item: PROJECT_CONFIG_REL, status: "skipped", detail: [`could not be rewritten (${err.code ?? err.message}), so the guard-only agent entries of ${removed.join(", ")} stay and OpenCode still defines those agents; fix the cause, then rerun /sterling:update, which removes them`, keptNote].filter(Boolean).join("; ") };
+  }
+  return { item: PROJECT_CONFIG_REL, status: "refreshed", detail: [`removed the guard-only agent entries of ${removed.join(", ")}, whose agent files are gone`, keptNote].filter(Boolean).join("; ") };
 }
 function writeFullAgentFiles(writes, fs = {}) {
   const done = [];

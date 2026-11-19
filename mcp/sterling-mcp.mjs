@@ -19822,11 +19822,12 @@ var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 var LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
 function toCanonicalConfig(legacy, opts = {}) {
   if (!isPlainObject2(legacy))
-    return { config: legacy, conflicts: [], changes: [] };
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
   const raw = normalizeRawConfig(legacy);
   const out = { ...raw };
   const changes = [];
   const conflicts = [];
+  const origins = {};
   const resolutions = opts.resolutions ?? {};
   const mode = judgeProjectMode(raw.mode, "the config");
   let autoMerge;
@@ -19845,9 +19846,13 @@ function toCanonicalConfig(legacy, opts = {}) {
     const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
     out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
     changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   } else if (autoMerge !== void 0 && isPlainObject2(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
     out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
     changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   }
   if (autoMerge !== void 0)
     changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
@@ -19875,7 +19880,7 @@ function toCanonicalConfig(legacy, opts = {}) {
   const effective = overpass?.effective === true;
   const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
   if (raw.models !== void 0 && !isPlainObject2(raw.models))
-    return { config: out, conflicts, changes };
+    return { config: out, conflicts, changes, origins };
   const models = { ...raw.models ?? {} };
   let modelsChanged = false;
   for (const [role, entry] of Object.entries(models)) {
@@ -19910,6 +19915,8 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     if (model !== void 0)
       next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
     if (entry.effort !== void 0)
       next.effort = entry.effort;
     if (JSON.stringify(next) !== JSON.stringify(entry)) {
@@ -19930,7 +19937,11 @@ function toCanonicalConfig(legacy, opts = {}) {
       const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
       changes.push({ path: `models.${role}`, was: models[role], now: entry });
       models[role] = entry;
+      origins[`models.${role}`] = "overpass";
     }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
     models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
     changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
     if (overpass.conductorRouted) {
@@ -19948,6 +19959,7 @@ function toCanonicalConfig(legacy, opts = {}) {
       if (!isPlainObject2(existing) || typeof existing.model !== "string") {
         const entry = { ...isPlainObject2(existing) ? existing : {}, model: old };
         models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
         modelsChanged = true;
         changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
       }
@@ -19960,7 +19972,7 @@ function toCanonicalConfig(legacy, opts = {}) {
     delete out.sparring_partner;
     changes.push({ path: "sparring_partner", was: raw.sparring_partner });
   }
-  return { config: out, conflicts, changes };
+  return { config: out, conflicts, changes, origins };
 }
 function parseCanonicalConfig(raw) {
   return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
@@ -33475,30 +33487,60 @@ function valueAtPath(doc, path) {
   }
   return cur;
 }
-function legacyWriteIssues(raw, mutated) {
-  let before;
-  try {
-    before = toCanonicalConfig(raw).config;
-  } catch {
-    before = raw;
-  }
-  let after;
-  try {
-    after = toCanonicalConfig(mutated);
-  } catch (e) {
-    return e.message;
-  }
+function legacyWriteIssues(raw, mutated, path) {
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const writtenTop = path.split(".")[0];
+  const tryTransform = (doc) => {
+    try {
+      return toCanonicalConfig(doc);
+    } catch (e) {
+      return e;
+    }
+  };
+  let r = { ...raw };
+  let m = { ...mutated };
+  let after = tryTransform(m);
+  while (after instanceof Error) {
+    const failure = after;
+    const culprit = Object.keys(m).find((k) => {
+      if (k === writtenTop || !same(r[k], m[k]))
+        return false;
+      const { [k]: _gone, ...rest } = m;
+      const probe = tryTransform(rest);
+      return !(probe instanceof Error) || probe.message !== failure.message;
+    });
+    if (culprit === void 0)
+      return failure.message;
+    const { [culprit]: _r, ...restR } = r;
+    const { [culprit]: _m, ...restM } = m;
+    r = restR;
+    m = restM;
+    after = tryTransform(m);
+  }
+  const done = after;
   const hasNow = (c) => Object.prototype.hasOwnProperty.call(c, "now");
-  const fresh = after.changes.filter((c) => !same(valueAtPath(raw, c.path), valueAtPath(mutated, c.path)));
+  const fresh = done.changes.filter((c) => !same(valueAtPath(r, c.path), valueAtPath(m, c.path)));
   if (fresh.length) {
     return fresh.map((c) => hasNow(c) ? `${c.path}: ${JSON.stringify(c.was)} is a legacy form the canonical config stores as ${JSON.stringify(c.now)}; write that instead` : `${c.path}: a retired field the canonical config does not carry (value ${JSON.stringify(c.was)}); the migration would drop it, so the write is refused (decision settings-redesign-build-shape-one-legacy-to-canonical-config)`).join("; ");
   }
-  const checked = canonicalConfigSchema.safeParse(normalizeRawConfig(after.config));
+  const checked = canonicalConfigSchema.safeParse(normalizeRawConfig(done.config));
   if (checked.success)
     return void 0;
-  const judged = (i) => valueAtPath(after.config, i.path) === void 0 ? i.path.slice(0, -1) : i.path;
-  const added = checked.error.issues.filter((i) => i.path.length === 0 || !same(valueAtPath(after.config, judged(i)), valueAtPath(before, judged(i))));
+  const originOf = (p) => {
+    for (let n = p.length; n > 0; n--) {
+      const prefix = p.slice(0, n).join(".");
+      if (Object.prototype.hasOwnProperty.call(done.origins, prefix))
+        return done.origins[prefix];
+    }
+    return p.join(".");
+  };
+  const judged = (i) => valueAtPath(done.config, i.path) === void 0 ? i.path.slice(0, -1) : i.path;
+  const added = checked.error.issues.filter((i) => {
+    if (i.path.length === 0)
+      return true;
+    const origin = originOf(judged(i));
+    return !same(valueAtPath(r, origin), valueAtPath(m, origin));
+  });
   return added.length ? added.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ") : void 0;
 }
 function configSetImpl(repoRoot, path, value, expectedDigest) {
@@ -33625,7 +33667,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!validation.success)
       validationIssues = validation.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
   } else {
-    validationIssues = legacyWriteIssues(raw, mutated);
+    validationIssues = legacyWriteIssues(raw, mutated, path);
   }
   if (validationIssues !== void 0) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${validationIssues}. Nothing was written.`);

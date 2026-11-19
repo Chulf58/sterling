@@ -5907,11 +5907,12 @@ var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 var LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
 function toCanonicalConfig(legacy, opts = {}) {
   if (!isPlainObject(legacy))
-    return { config: legacy, conflicts: [], changes: [] };
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
   const raw = normalizeRawConfig(legacy);
   const out = { ...raw };
   const changes = [];
   const conflicts = [];
+  const origins = {};
   const resolutions = opts.resolutions ?? {};
   const mode2 = judgeProjectMode(raw.mode, "the config");
   let autoMerge;
@@ -5930,9 +5931,13 @@ function toCanonicalConfig(legacy, opts = {}) {
     const derived = mode2 === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
     out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
     changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
     out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
     changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   }
   if (autoMerge !== void 0)
     changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
@@ -5960,7 +5965,7 @@ function toCanonicalConfig(legacy, opts = {}) {
   const effective = overpass?.effective === true;
   const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
   if (raw.models !== void 0 && !isPlainObject(raw.models))
-    return { config: out, conflicts, changes };
+    return { config: out, conflicts, changes, origins };
   const models = { ...raw.models ?? {} };
   let modelsChanged = false;
   for (const [role, entry] of Object.entries(models)) {
@@ -5995,6 +6000,8 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     if (model !== void 0)
       next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
     if (entry.effort !== void 0)
       next.effort = entry.effort;
     if (JSON.stringify(next) !== JSON.stringify(entry)) {
@@ -6015,7 +6022,11 @@ function toCanonicalConfig(legacy, opts = {}) {
       const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
       changes.push({ path: `models.${role}`, was: models[role], now: entry });
       models[role] = entry;
+      origins[`models.${role}`] = "overpass";
     }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
     models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
     changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
     if (overpass.conductorRouted) {
@@ -6033,6 +6044,7 @@ function toCanonicalConfig(legacy, opts = {}) {
       if (!isPlainObject(existing) || typeof existing.model !== "string") {
         const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
         models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
         modelsChanged = true;
         changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
       }
@@ -6045,7 +6057,7 @@ function toCanonicalConfig(legacy, opts = {}) {
     delete out.sparring_partner;
     changes.push({ path: "sparring_partner", was: raw.sparring_partner });
   }
-  return { config: out, conflicts, changes };
+  return { config: out, conflicts, changes, origins };
 }
 function parseCanonicalConfig(raw) {
   return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);

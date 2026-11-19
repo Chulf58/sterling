@@ -5593,11 +5593,12 @@ function parseConfig(raw) {
 }
 function toCanonicalConfig(legacy, opts = {}) {
   if (!isPlainObject(legacy))
-    return { config: legacy, conflicts: [], changes: [] };
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
   const raw = normalizeRawConfig(legacy);
   const out = { ...raw };
   const changes = [];
   const conflicts = [];
+  const origins = {};
   const resolutions = opts.resolutions ?? {};
   const mode = judgeProjectMode(raw.mode, "the config");
   let autoMerge;
@@ -5616,9 +5617,13 @@ function toCanonicalConfig(legacy, opts = {}) {
     const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
     out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
     changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
     out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
     changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   }
   if (autoMerge !== void 0)
     changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
@@ -5646,7 +5651,7 @@ function toCanonicalConfig(legacy, opts = {}) {
   const effective = overpass?.effective === true;
   const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
   if (raw.models !== void 0 && !isPlainObject(raw.models))
-    return { config: out, conflicts, changes };
+    return { config: out, conflicts, changes, origins };
   const models = { ...raw.models ?? {} };
   let modelsChanged = false;
   for (const [role, entry] of Object.entries(models)) {
@@ -5681,6 +5686,8 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     if (model !== void 0)
       next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
     if (entry.effort !== void 0)
       next.effort = entry.effort;
     if (JSON.stringify(next) !== JSON.stringify(entry)) {
@@ -5701,7 +5708,11 @@ function toCanonicalConfig(legacy, opts = {}) {
       const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
       changes.push({ path: `models.${role}`, was: models[role], now: entry });
       models[role] = entry;
+      origins[`models.${role}`] = "overpass";
     }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
     models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
     changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
     if (overpass.conductorRouted) {
@@ -5719,6 +5730,7 @@ function toCanonicalConfig(legacy, opts = {}) {
       if (!isPlainObject(existing) || typeof existing.model !== "string") {
         const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
         models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
         modelsChanged = true;
         changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
       }
@@ -5731,7 +5743,7 @@ function toCanonicalConfig(legacy, opts = {}) {
     delete out.sparring_partner;
     changes.push({ path: "sparring_partner", was: raw.sparring_partner });
   }
-  return { config: out, conflicts, changes };
+  return { config: out, conflicts, changes, origins };
 }
 function parseCanonicalConfig(raw) {
   return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
@@ -23157,6 +23169,7 @@ function requestEffort(res, agent, model, dispatched) {
   const primary = agent === CONDUCTOR_AGENT ? res.conductor : agent === PLAN_AGENT ? res.plan : void 0;
   if (primary !== void 0) return primary?.tier && primary.effort && ref === primary.model ? primary.effort : null;
   if (!dispatched) return null;
+  if (dispatched.explicitModel === true) return null;
   const role = res.routing ? routingKey(res.routing, agent) : agentRole(agent);
   if (typeof role !== "string" || !Object.hasOwn(res.roles ?? {}, role)) return null;
   const route = res.roles[role];
@@ -23182,10 +23195,12 @@ function createLaneDispatches() {
     remember(children, child, key);
   };
   return {
-    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments. */
-    noteDispatch(parentSessionID, callID, args) {
+    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments.
+     *  `explicitModel` is true when the call itself named a model (before the pin filled one in): such a
+     *  lane keeps the model it named and gets no role effort, even when that model equals the role's tier. */
+    noteDispatch(parentSessionID, callID, args, { explicitModel = false } = {}) {
       const key = keyOf(parentSessionID, callID);
-      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), child: null });
+      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), explicitModel: explicitModel === true, child: null });
     },
     linkChild,
     /** A call that ended: linked to `child` when its result names one, else its record is dropped. */
@@ -23197,11 +23212,11 @@ function createLaneDispatches() {
     onEvent(ev) {
       if (ev?.type === "session.tool.progress") linkChild(ev.data?.sessionID, ev.data?.id, ev.data?.metadata?.sessionID);
     },
-    /** { role } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
+    /** { role, explicitModel? } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
     dispatchOf(sessionID, parentID, agent) {
       const call = calls.get(children.get(sessionID));
       if (!call || call.child !== sessionID || typeof parentID !== "string" || call.parent !== parentID || call.role !== agentRole(agent)) return null;
-      return { role: call.role };
+      return call.explicitModel ? { role: call.role, explicitModel: true } : { role: call.role };
     }
   };
 }
@@ -25273,7 +25288,7 @@ function overpassLine({ config, configUnreadable, host }) {
   if (host === "opencode") return `Overpass: ON (provider '${canon.overpass.provider}', config.models \u2014 TUI System tab) \u2014 ${routes}.`;
   return `Overpass: NOT IN EFFECT \u2014 ${routes} are set to Overpass tiers, which only OpenCode can run; this host gets no copy of them.`;
 }
-function unsupportedAgentsLine({ config, configUnreadable, host }) {
+function unsupportedAgentsLine({ config, configUnreadable, host, root }) {
   if (configUnreadable) return "Agents on this host: UNKNOWN \u2014 the project config could not be read, so which agents have no copy here could not be determined. Repair the config.";
   let rows;
   try {
@@ -25284,9 +25299,19 @@ function unsupportedAgentsLine({ config, configUnreadable, host }) {
   if (rows.length === 0) return "";
   const named = (r) => r.host === "*" ? `${r.agent} (two models; run /sterling:update to choose)` : `${r.agent} (${r.model})`;
   const conflicts = rows.filter((r) => r.host === "*");
-  const noCopy = rows.filter((r) => r.host !== "*");
+  let noCopy = rows.filter((r) => r.host !== "*");
   const parts = [];
-  if (host === "claude" && noCopy.some((r) => r.agent === "conductor")) parts.push(`the conductor (${noCopy.find((r) => r.agent === "conductor").model}) has no Claude Code copy, so this session does NOT run as Sterling's conductor even if .claude/settings.json names it; pick an anthropic model for the conductor in the TUI System tab`);
+  const conductor = noCopy.find((r) => r.agent === "conductor");
+  if (conductor && (host === "claude" || host === "opencode")) {
+    noCopy = noCopy.filter((r) => r !== conductor);
+    const rel = host === "claude" ? ".claude/agents/conductor.md" : ".opencode/agents/sterling/conductor.md";
+    const hostName = host === "claude" ? "Claude Code" : "OpenCode";
+    const fix = `pick a model ${hostName} can run for the conductor in the TUI System tab`;
+    const present = root ? existsSync26(join38(root, rel)) : null;
+    if (present === true) parts.push(`the conductor's model ${conductor.model} cannot run on ${hostName}; Sterling kept your edited ${rel} but no longer maintains it, so this session runs that edited copy on whatever model it names, not the configured one; ${fix}`);
+    else if (host === "claude") parts.push(`the conductor's model ${conductor.model} cannot run on Claude Code${present === false ? `, so it has no copy (${rel} is absent) and` : ", so"} this session does NOT run as Sterling's conductor even if .claude/settings.json names it; ${fix}`);
+    else parts.push(`this session runs on OpenCode's default agent, not on Sterling's conductor, because the conductor's model ${conductor.model} cannot run on OpenCode${present === false ? ` (${rel} is absent; default_agent is left as it is)` : ""}; ${fix}`);
+  }
   if (noCopy.length) parts.push(`no ${host === "claude" ? "Claude Code" : host === "opencode" ? "OpenCode" : "agy"} copy of ${noCopy.map(named).join(", ")}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
   if (conflicts.length) parts.push(`${conflicts.map(named).join(", ")}: dispatch refuses until you choose`);
   return `Agents on this host: ${parts.join("; ")}.`;
@@ -25608,7 +25633,7 @@ function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const store = storeRootFor(root);
   const { config, configUnreadable } = readProjectConfig2(store);
   const atClone = Boolean(pluginRoot && samePath2(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: prMergePath(config) && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: "opencode" }), unsupportedAgentsLine({ config, configUnreadable, host: "opencode" }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: prMergePath(config) && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root: store }), storageLine({ config, configUnreadable, root: store }), overpassLine({ config, configUnreadable, host: "opencode" }), unsupportedAgentsLine({ config, configUnreadable, host: "opencode", root }), ...mountedDomainLines({ config, configUnreadable, opener, root: store }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config, configUnreadable };
 }
 function undeclaredSourceBlock(root, config) {
@@ -29749,8 +29774,9 @@ function createSterlingServer(deps = {}) {
       await guardSessionMove(input);
       await applyClaimIdentity(input, { checkoutOfSession });
       await delivery.onBefore(input);
+      const explicitModel = input?.tool === "subagent" && typeof input.input?.model === "string" && input.input.model !== "";
       await axis.onBefore(input);
-      if (input?.tool === "subagent") laneDispatches.noteDispatch(input.sessionID, input.id, input.input);
+      if (input?.tool === "subagent") laneDispatches.noteDispatch(input.sessionID, input.id, input.input, { explicitModel });
       await dispatch.onBefore(input);
     }
     async function onAfter(input) {

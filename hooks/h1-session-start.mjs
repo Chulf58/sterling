@@ -5489,11 +5489,12 @@ function parseConfig(raw) {
 }
 function toCanonicalConfig(legacy, opts = {}) {
   if (!isPlainObject(legacy))
-    return { config: legacy, conflicts: [], changes: [] };
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
   const raw = normalizeRawConfig(legacy);
   const out = { ...raw };
   const changes = [];
   const conflicts = [];
+  const origins = {};
   const resolutions = opts.resolutions ?? {};
   const mode = judgeProjectMode(raw.mode, "the config");
   let autoMerge;
@@ -5512,9 +5513,13 @@ function toCanonicalConfig(legacy, opts = {}) {
     const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
     out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
     changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
     out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
     changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
   }
   if (autoMerge !== void 0)
     changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
@@ -5542,7 +5547,7 @@ function toCanonicalConfig(legacy, opts = {}) {
   const effective = overpass?.effective === true;
   const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
   if (raw.models !== void 0 && !isPlainObject(raw.models))
-    return { config: out, conflicts, changes };
+    return { config: out, conflicts, changes, origins };
   const models = { ...raw.models ?? {} };
   let modelsChanged = false;
   for (const [role, entry] of Object.entries(models)) {
@@ -5577,6 +5582,8 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     if (model !== void 0)
       next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
     if (entry.effort !== void 0)
       next.effort = entry.effort;
     if (JSON.stringify(next) !== JSON.stringify(entry)) {
@@ -5597,7 +5604,11 @@ function toCanonicalConfig(legacy, opts = {}) {
       const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
       changes.push({ path: `models.${role}`, was: models[role], now: entry });
       models[role] = entry;
+      origins[`models.${role}`] = "overpass";
     }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
     models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
     changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
     if (overpass.conductorRouted) {
@@ -5615,6 +5626,7 @@ function toCanonicalConfig(legacy, opts = {}) {
       if (!isPlainObject(existing) || typeof existing.model !== "string") {
         const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
         models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
         modelsChanged = true;
         changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
       }
@@ -5627,7 +5639,7 @@ function toCanonicalConfig(legacy, opts = {}) {
     delete out.sparring_partner;
     changes.push({ path: "sparring_partner", was: raw.sparring_partner });
   }
-  return { config: out, conflicts, changes };
+  return { config: out, conflicts, changes, origins };
 }
 function parseCanonicalConfig(raw) {
   return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
@@ -16932,7 +16944,7 @@ function projectModeLine({ config: config2, configUnreadable: configUnreadable2,
   const ships = localPr ? "this repository has no 'origin' remote, so /sterling:merge merges locally like the direct merge path: no pull request and no Copilot review will happen." : pr ? `work ships as a pull request through /sterling:merge; nothing is merged directly${wf.copilot_loop ? ", and the Copilot review loop follows" : ""}.` : "work ships by direct merge through /sterling:merge.";
   return `${head}${ships} Run ${wf.reviewers} task-end ${wf.reviewers === 1 ? "reviewer" : "reviewers in parallel"}, then one fix round and one re-check.`;
 }
-function unsupportedAgentsLine({ config: config2, configUnreadable: configUnreadable2, host }) {
+function unsupportedAgentsLine({ config: config2, configUnreadable: configUnreadable2, host, root }) {
   if (configUnreadable2) return "Agents on this host: UNKNOWN \u2014 the project config could not be read, so which agents have no copy here could not be determined. Repair the config.";
   let rows;
   try {
@@ -16943,9 +16955,19 @@ function unsupportedAgentsLine({ config: config2, configUnreadable: configUnread
   if (rows.length === 0) return "";
   const named = (r) => r.host === "*" ? `${r.agent} (two models; run /sterling:update to choose)` : `${r.agent} (${r.model})`;
   const conflicts = rows.filter((r) => r.host === "*");
-  const noCopy = rows.filter((r) => r.host !== "*");
+  let noCopy = rows.filter((r) => r.host !== "*");
   const parts = [];
-  if (host === "claude" && noCopy.some((r) => r.agent === "conductor")) parts.push(`the conductor (${noCopy.find((r) => r.agent === "conductor").model}) has no Claude Code copy, so this session does NOT run as Sterling's conductor even if .claude/settings.json names it; pick an anthropic model for the conductor in the TUI System tab`);
+  const conductor = noCopy.find((r) => r.agent === "conductor");
+  if (conductor && (host === "claude" || host === "opencode")) {
+    noCopy = noCopy.filter((r) => r !== conductor);
+    const rel = host === "claude" ? ".claude/agents/conductor.md" : ".opencode/agents/sterling/conductor.md";
+    const hostName = host === "claude" ? "Claude Code" : "OpenCode";
+    const fix = `pick a model ${hostName} can run for the conductor in the TUI System tab`;
+    const present = root ? existsSync13(join23(root, rel)) : null;
+    if (present === true) parts.push(`the conductor's model ${conductor.model} cannot run on ${hostName}; Sterling kept your edited ${rel} but no longer maintains it, so this session runs that edited copy on whatever model it names, not the configured one; ${fix}`);
+    else if (host === "claude") parts.push(`the conductor's model ${conductor.model} cannot run on Claude Code${present === false ? `, so it has no copy (${rel} is absent) and` : ", so"} this session does NOT run as Sterling's conductor even if .claude/settings.json names it; ${fix}`);
+    else parts.push(`this session runs on OpenCode's default agent, not on Sterling's conductor, because the conductor's model ${conductor.model} cannot run on OpenCode${present === false ? ` (${rel} is absent; default_agent is left as it is)` : ""}; ${fix}`);
+  }
   if (noCopy.length) parts.push(`no ${host === "claude" ? "Claude Code" : host === "opencode" ? "OpenCode" : "agy"} copy of ${noCopy.map(named).join(", ")}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
   if (conflicts.length) parts.push(`${conflicts.map(named).join(", ")}: dispatch refuses until you choose`);
   return `Agents on this host: ${parts.join("; ")}.`;
@@ -19027,7 +19049,7 @@ ${storageLine({ config, configUnreadable, root: storeRoot })}`;
 }
 var hostFitContext = "";
 try {
-  const hostFit = unsupportedAgentsLine({ config, configUnreadable, host: "claude" });
+  const hostFit = unsupportedAgentsLine({ config, configUnreadable, host: "claude", root: input.cwd });
   if (hostFit) hostFitContext = `
 
 ${hostFit}`;
