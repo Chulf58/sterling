@@ -197,7 +197,7 @@ export function commitConfigMigration(plan, { beforeRename } = {}) {
 // same compare-and-swap commit. Unlike prepareConfigMigration it does NOT validate the file against the
 // legacy schema first: the transform is the tolerant reader, and a value it cannot carry is a refusal.
 // The legacy one-time steps above run first, once per file, so a file that missed them gets them as a
-// sync would have given them; a file that records CANONICAL_CONFIG_MIGRATION_ID skips them (they
+// sync would have given them (except the model-defaults add, which one model per agent retires); a file that records CANONICAL_CONFIG_MIGRATION_ID skips them (they
 // would put legacy fields back). The result must pass canonicalConfigSchema, the strict write check.
 // A role with two models (a Claude model and a different OpenCode model) is never decided here: the
 // plan's status is 'conflicts' and it cannot be committed until the caller passes a resolution for
@@ -251,12 +251,13 @@ export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}
   if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
     const m = migrateRetiredModelKeys(legacy);
     const a = migrateStaleAgyModels(m.config);
-    const d = addModelDefaults(a.config);
-    const h = moveImplementorHardTask(d.config);
+    // addModelDefaults is NOT run here: it wrote the per-host opencode_model defaults (reviewer, sparring)
+    // that one model per agent removes, and would make every file that never set one a model conflict.
+    const h = moveImplementorHardTask(a.config);
     const o = resetOverpassDefaults(h.config);
     if (o.refusal) return refuse(o.refusal);
     legacy = o.config;
-    legacyLines.push(...describeMigration(m.dropped), ...describeStaleAgy(a.dropped), ...describeAdded(d.added), ...describeHardMove(h.move), ...describeOverpassReset(o));
+    legacyLines.push(...describeMigration(m.dropped), ...describeStaleAgy(a.dropped), ...describeHardMove(h.move), ...describeOverpassReset(o));
   }
   let result;
   try {

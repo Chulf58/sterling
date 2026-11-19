@@ -37,7 +37,9 @@ test('config_set refuses a bad value in a custom entry and a half entry under an
     assert.throws(() => set('models.custom-x', { effort: 'max' }), /would fail schema validation/);
     assert.throws(() => set('models.custom-x', { junk: 1 }), /would fail schema validation/);
     assert.throws(() => set('models.custom-x.agy_model', 'claude-opus-5-5-high'), /agy_model: must be one of/);
-    assert.throws(() => set('models.other-agent', { model: 'claude-sonnet-5-5' }), /effort/);
+    // Changed with the cutover: effort is optional in the canonical shape (unset stays unset), so a half entry
+    // under a non-custom key is half for lacking its MODEL.
+    assert.throws(() => set('models.other-agent', { effort: 'low' }), /model/);
     assert.deepEqual(read(root), {});
   } finally {
     store.close();

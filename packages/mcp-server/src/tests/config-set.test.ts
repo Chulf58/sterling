@@ -13,7 +13,7 @@
 //   → receipt {path, previous_value, value, digest}
 //   ALLOWLIST (positive, policy data, exported as CONFIG_SET_ALLOWLIST):
 //     models.<key>, tdd.enabled, mutation_verification.enabled,
-//     sparring_partner.enabled, sparring_partner.models.openai.model,
+//     sparring_partner.enabled, review.models.openai.model,
 //     delegation.max_concurrent, maintenance_queue.deep_threshold,
 //     delivery.<key>, dispatch_register.stale_minutes, delivery.payload_char_cap
 //   Everything else is REFUSED naming the path and the allowlist.
@@ -35,7 +35,7 @@
 //
 // WHY parseConfig CONTROLS APPEAR BELOW: the test-writer cannot read
 // packages/schemas/src/config.ts (H4). Every fact this file needs ABOUT THE
-// SCHEMA (that a key exists, that '' is a legal sparring_partner.models.openai.model) is
+// SCHEMA (that a key exists, that '' is a legal review.models.openai.model) is
 // therefore established at test time through the canonical schema's own
 // exported parser, as a CONTROL that must pass for the opposite reason before
 // the pin's verdict is read. A control failure names the exact repoint needed.
@@ -92,7 +92,7 @@ function seedDoc(): Record<string, unknown> {
   try {
     built = parseConfig({
       tdd: { enabled: true },
-      sparring_partner: { enabled: true, models: { openai: { model: '' } } },
+      review: { models: { openai: { model: '' } } },
       delegation: { max_concurrent: 5 },
       maintenance_queue: { deep_threshold: 20 },
       delivery: { payload_char_cap: 12000 },
@@ -112,7 +112,7 @@ function seedDoc(): Record<string, unknown> {
   // aimed at a key the schema does not define and needs repointing.
   const required: [string, string][] = [
     ['tdd', 'enabled'],
-    ['sparring_partner.models.openai', 'model'],
+    ['review.models.openai', 'model'],
     ['delegation', 'max_concurrent'],
     ['maintenance_queue', 'deep_threshold'],
     ['delivery', 'payload_char_cap'],
@@ -335,53 +335,53 @@ test('CS-1 CONTROL: config_set tdd.enabled=false lands — receipt digest is sha
 // Each assertion carries its own verdict; none is defence in depth for another.
 
 // ---------------------------------------------------------------------------
-// CS-5 — sparring_partner.models.openai.model (the old sparring_partner.model is converted to it
+// CS-5 — review.models.openai.model (the old sparring_partner.model is converted to it
 // when config is read; vendor-pins step 2, so this pin moved to the new path). The CONTROL establishes, through the
 // canonical schema's own parser, that '' is a legal value (empty = CLI
 // default) BEFORE the pin reads config_set's verdict; if that control fails,
 // its message names the repoint instead of leaving a mystery red.
 // ---------------------------------------------------------------------------
-test("CS-5: sparring_partner.models.openai.model accepts a non-empty model AND '' (empty = CLI default) — the resulting document still validates", () => {
+test("CS-5: review.models.openai.model accepts a non-empty model AND '' (empty = CLI default) — the resulting document still validates", () => {
   const h = harness();
   try {
     // CONTROL, opposite reason: the SCHEMA must permit ''.
     let probe: unknown;
     let probeErr: unknown;
     try {
-      probe = parseConfig({ sparring_partner: { enabled: true, models: { openai: { model: '' } } } });
+      probe = parseConfig({ review: { models: { openai: { model: '' } } } });
     } catch (e) {
       probeErr = e;
     }
     assert.equal(
       probeErr,
       undefined,
-      "CONTROL: the canonical config schema must accept sparring_partner.models.openai.model === '' (empty = CLI default). " +
+      "CONTROL: the canonical config schema must accept review.models.openai.model === '' (empty = CLI default). " +
         `If it refuses '' this pin must be repointed to a non-empty model only. parseConfig threw: ${String(
           probeErr instanceof Error ? probeErr.message : probeErr
         ).replace(/\s+/g, ' ')}`
     );
     assert.equal(
-      (probe as { sparring_partner?: { models?: { openai?: { model?: unknown } } } }).sparring_partner?.models?.openai?.model,
+      (probe as { review?: { models?: { openai?: { model?: unknown } } } }).review?.models?.openai?.model,
       '',
       "CONTROL: '' must survive parsing as '' (not be defaulted away), or the pin below cannot mean what it says"
     );
 
     const call = handler(h.tools);
-    const first = call({ path: 'sparring_partner.models.openai.model', value: 'gpt-5.6-sol' });
+    const first = call({ path: 'review.models.openai.model', value: 'gpt-5.6-sol' });
     assert.equal(first.previous_value, '', 'previous_value is the seed value');
     assert.equal(
-      (JSON.parse(h.read()) as { sparring_partner: { models: { openai: { model: unknown } } } }).sparring_partner.models.openai.model,
+      (JSON.parse(h.read()) as { review: { models: { openai: { model: unknown } } } }).review.models.openai.model,
       'gpt-5.6-sol',
       'a non-empty model lands on disk'
     );
 
-    const back = call({ path: 'sparring_partner.models.openai.model', value: '' });
+    const back = call({ path: 'review.models.openai.model', value: '' });
     assert.equal(back.previous_value, 'gpt-5.6-sol', 'the second write reads the FIRST write back off disk');
     assert.equal(back.value, '', "'' is a legal value, not a missing-argument refusal");
-    const doc = JSON.parse(h.read()) as { sparring_partner: { models: { openai: { model: unknown } } } };
-    assert.equal(doc.sparring_partner.models.openai.model, '', "'' is written, not dropped and not coerced to a default string");
+    const doc = JSON.parse(h.read()) as { review: { models: { openai: { model: unknown } } } };
+    assert.equal(doc.review.models.openai.model, '', "'' is written, not dropped and not coerced to a default string");
     assert.ok(
-      Object.prototype.hasOwnProperty.call(doc.sparring_partner.models.openai, 'model'),
+      Object.prototype.hasOwnProperty.call(doc.review.models.openai, 'model'),
       "setting '' must keep the key present — deleting it is a different document"
     );
     assert.equal(back.digest, sha256(readFileSync(h.configPath)), 'the receipt digest tracks the new bytes');
@@ -423,53 +423,7 @@ test('CS-6: a schema-invalid value on an ALLOWLISTED path is refused with a vali
     h.cleanup();
   }
 });
-// CS-6b — the old sparring_partner.model is converted before validation (vendor
-// pins step 2), so a write to it is still validated as a pin, not silently stripped.
-test('CS-6b: a non-string value written to the old sparring_partner.model is refused as an invalid pin — nothing written', () => {
-  const h = harness(JSON.stringify({ sparring_partner: { enabled: true } }, null, 2));
-  try {
-    const call = handler(h.tools);
-    const before = h.read();
-    const msg = refusalMessage(call, { path: 'sparring_partner.model', value: 42 });
-    assert.match(msg, /sparring_partner\.models\.openai\.model/, 'the refusal names where the old key is read as');
-    assert.equal(h.read(), before, 'nothing written');
-    assert.equal(call({ path: 'sparring_partner.model', value: 'gpt-5.6-sol' }).value, 'gpt-5.6-sol', 'a string still lands on the old path');
-  } finally {
-    h.cleanup();
-  }
-});
-// CS-6c — once sparring_partner.models.openai exists the old path is not read at all
-// (normalizeRawConfig: the new key wins), so a write to it would validate, land on disk
-// and change nothing. Refused, naming the path that is read.
-test('CS-6c: a write to the old sparring_partner.model is refused when sparring_partner.models.openai exists, naming the new path — nothing written', () => {
-  const h = harness(JSON.stringify({ sparring_partner: { enabled: true, models: { openai: { model: 'gpt-6-astra' } } } }, null, 2));
-  try {
-    const call = handler(h.tools);
-    const before = h.read();
-    for (const value of ['gpt-5.6-sol', '', 42]) {
-      const msg = refusalMessage(call, { path: 'sparring_partner.model', value });
-      assert.match(msg, /sparring_partner\.model\b/, 'the refusal names the old path');
-      assert.match(msg, /'sparring_partner\.models\.openai\.model'/, 'and the path to write instead');
-      assert.match(msg, /Nothing was written/);
-      assert.equal(h.read(), before, 'nothing written');
-    }
-    assert.equal(call({ path: 'sparring_partner.models.openai.model', value: 'gpt-5.6-sol' }).value, 'gpt-5.6-sol', 'the new path still takes the write');
-  } finally {
-    h.cleanup();
-  }
-});
 
-// CS-6d — only the openai pin makes the old path dead: with another vendor pinned the
-// old key is still converted to models.openai, so the write keeps working.
-test('CS-6d: with only an anthropic pin the old sparring_partner.model still takes a write', () => {
-  const h = harness(JSON.stringify({ sparring_partner: { enabled: true, models: { anthropic: { model: 'claude-opus-5-5' } } } }, null, 2));
-  try {
-    const call = handler(h.tools);
-    assert.equal(call({ path: 'sparring_partner.model', value: 'gpt-5.6-sol' }).value, 'gpt-5.6-sol');
-  } finally {
-    h.cleanup();
-  }
-});
 // NAMED SABOTAGE (CS-6): drop the whole-document parse (write the mutated
 // object straight out) → no throw, RED on the missing exception AND on the
 // byte-identity assertion. SECOND, INDEPENDENT: validate but write anyway
@@ -743,20 +697,20 @@ test('CS-14: an omitted / undefined `value` is refused — the addressed key sta
     // the strict param schema refuses the omission before the handler runs
     // (CS-10's arm), so this pin lives at the unit surface deliberately.
     const shapes: CallArgs[] = [
-      { path: 'sparring_partner.models.openai.model' } as unknown as CallArgs,
-      { path: 'sparring_partner.models.openai.model', value: undefined },
+      { path: 'review.models.openai.model' } as unknown as CallArgs,
+      { path: 'review.models.openai.model', value: undefined },
     ];
     for (const args of shapes) {
       const msg = refusalMessage(call, args);
       assert.match(msg, /value/i, 'the refusal names the missing/undefined parameter');
       assert.equal(h.read(), before, 'nothing written');
     }
-    const doc = JSON.parse(h.read()) as { sparring_partner: { models: { openai: Record<string, unknown> } } };
+    const doc = JSON.parse(h.read()) as { review: { models: { openai: Record<string, unknown> } } };
     assert.ok(
-      Object.prototype.hasOwnProperty.call(doc.sparring_partner.models.openai, 'model'),
+      Object.prototype.hasOwnProperty.call(doc.review.models.openai, 'model'),
       'the key is STILL PRESENT — assigning undefined would erase it at serialization time while the document still validates'
     );
-    assert.equal(doc.sparring_partner.models.openai.model, '', 'and keeps its previous value');
+    assert.equal(doc.review.models.openai.model, '', 'and keeps its previous value');
   } finally {
     h.cleanup();
   }

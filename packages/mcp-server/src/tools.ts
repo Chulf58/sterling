@@ -8,7 +8,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSy
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, toCanonicalConfig, canonicalConfigSchema, migrateStaleAgyModels, AGY_MODEL_IDS, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, toCanonicalConfig, canonicalConfigSchema, migrateStaleAgyModels, AGY_MODEL_IDS, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1937,7 +1937,8 @@ function configSetImpl(
     wasCanonical = false; // a legacy document the transform cannot carry: the write is judged by parseConfig below
   }
   if (wasCanonical) {
-    const validation = canonicalConfigSchema.safeParse(mutated);
+    // a retired models key is dropped before the check, as it always was (it is reported as unread, never judged)
+    const validation = canonicalConfigSchema.safeParse(normalizeRawConfig(mutated));
     if (!validation.success) validationIssues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
   } else {
     try {

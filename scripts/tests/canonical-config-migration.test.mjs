@@ -39,10 +39,11 @@ test('a work legacy config is rewritten canonical, reported, and reads as work a
 });
 
 test('a document the legacy planner would refuse before migrating is carried, not rejected', (t) => {
-  // A canonical model reference fails the legacy schema's Claude-id check; the canonical planner never runs it.
+  // A canonical model reference failed the legacy schema's Claude-id check; the canonical planner never runs it.
+  // Changed with the cutover: parseConfig, which the legacy planner gates on, is canonical now and accepts it,
+  // so the 'legacy planner refuses it' assertion below is gone; only the canonical planner's result is pinned.
   const dir = project({ mode: 'hobby', models: { 'custom-x': { model: 'openai/gpt-5.6-terra' } }, applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'overpass-defaults-2026-10-23'] });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  assert.equal(prepareConfigMigration(dir).status, 'refused', 'the legacy planner validates first and refuses it');
   const plan = prepareCanonicalConfigMigration(dir);
   assert.equal(plan.status, 'ready', plan.lines.join('\n'));
 });
@@ -64,12 +65,17 @@ test('a two-model role stops the plan until the caller answers it; nothing is wr
   assert.deepEqual(JSON.parse(read(dir)).models.reviewer, { model: 'anthropic/claude-opus-5-5', effort: 'high' });
 });
 
-test('a legacy file that missed the October steps gets them first, so its reviewer conflict surfaces', (t) => {
+// Changed with the cutover: the planner no longer runs addModelDefaults, which wrote the per-host
+// opencode_model defaults of reviewer and sparring. A {} config has chosen no second model, so it migrates
+// with no conflict to ask about, and the reviewer and sparring keep their one shipped model.
+test('a {} config migrates with no model conflict and no per-host model fields', (t) => {
   const dir = project({});
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const plan = prepareCanonicalConfigMigration(dir);
-  assert.equal(plan.status, 'conflicts');
-  assert.deepEqual(plan.conflicts.map((c) => c.role).sort(), ['reviewer', 'sparring']);
+  assert.equal(plan.status, 'ready', plan.lines.join('\n'));
+  assert.deepEqual(plan.conflicts ?? [], []);
+  assert.ok(!JSON.stringify(plan.config).includes('opencode_model'));
+  assert.deepEqual(plan.config.workflow, { merge: 'direct', reviewers: 1, copilot_loop: false, auto_merge_on_clean: true });
 });
 
 test('a canonical file with no migration id is not sent through the legacy steps', (t) => {
