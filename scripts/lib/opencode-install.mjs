@@ -1243,7 +1243,10 @@ export function storeWriteTools(pluginRoot = sterlingRootFrom()) {
  * matches what the System tab shows). The System tab shows the parsed config, so
  * every roster agent with a config.models key (AGENT_MODEL_KEY) pins that role's
  * parsed entry, a schema default included: its one model as OpenCode names it. An agent with no key (the conductor) gets no entry and keeps
- * the pin it has. A config.json that is missing, unreadable or does not validate
+ * the pin it has. A role whose model OpenCode cannot run (an agy/<id>) is in `unsupported`
+ * ({ [name]: reason }) instead: it gets no OpenCode copy, and the copy Sterling wrote earlier is
+ * removed when unedited (planFullAgents; decision settings-redesign-build-shape-one-legacy-to-canonical-config).
+ * A config.json that is missing, unreadable or does not validate
  * yields { refused } with a refused row (P5), and the caller writes no agent.
  */
 export function configuredFullAgentModels(projectDir) {
@@ -1270,6 +1273,7 @@ export function configuredFullAgentModels(projectDir) {
     return leave(`${where} does not validate (${err.message.replace(/\s+/g, ' ')})`);
   }
   const models = {};
+  const unsupported = {};
   for (const name of ROSTER) {
     // resolve the key first: a role without one (the conductor) must never read
     // models['undefined'], which a schema-valid config can carry
@@ -1277,12 +1281,15 @@ export function configuredFullAgentModels(projectDir) {
     if (key === undefined) continue;
     const entry = parsed.models[key];
     if (entry === undefined) continue;
-    // the agent's one model (canonical <provider>/<id>; overpass/<tier> maps through
-    // overpass.provider); a model OpenCode cannot run (an agy/<id>) leaves the agent's pin as it is
-    if (typeof entry.model !== 'string' || !hostRunsModel(entry.model, 'opencode')) continue;
+    // the agent's one model (canonical <provider>/<id>; overpass/<tier> maps through overpass.provider)
+    if (typeof entry.model !== 'string') continue;
+    if (!hostRunsModel(entry.model, 'opencode')) {
+      unsupported[name] = `config.models.${key} is ${entry.model}, which OpenCode cannot run`;
+      continue;
+    }
     models[name] = canonicalOpencodeModelRef(entry.model, parsed.overpass.provider);
   }
-  return { models };
+  return { models, unsupported };
 }
 
 /** The Sterling plugin root above a module: the nearest directory holding agent-templates/registry.json. */
@@ -1368,16 +1375,16 @@ function frontmatterModel(content) {
  * the model its installed, unedited file already pins. Install and update pass every
  * role config.models governs, so for those roles config.models wins over a pin on disk.
  */
-export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const { rows, writes } = stageFullAgents({ projectDir, pluginRoot, tracked, models });
+export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
+  const { rows, writes } = stageFullAgents({ projectDir, pluginRoot, tracked, models, unsupported });
   writeFullAgentFiles(writes);
   return rows;
 }
 
 /** planFullAgents split into the public rows and the staged writes
  *  [{ path, content, previous }] that writeFullAgentFiles commits. */
-function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models });
+function stageFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models, unsupported });
   return {
     rows: planned.map(({ path, content, previous, ...row }) => row),
     writes: planned.filter((r) => r.content !== undefined).map(({ path, content, previous }) => ({ path, content, previous })),
@@ -1410,7 +1417,10 @@ function fullAgentTargets(registry) {
   return targets;
 }
 
-function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+// `unsupported` ({ [name]: reason }, configuredFullAgentModels) names the roles whose model OpenCode
+// cannot run: such a role gets no copy. An unedited copy Sterling wrote is removed, an edited one is
+// kept and reported, and none is created.
+function planFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
   const registry = loadRegistry(join(pluginRoot, 'agent-templates', 'registry.json'));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd(projectDir), STERLING_ROOT: fwd(pluginRoot) };
@@ -1433,9 +1443,19 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
         continue;
       }
       if (sha256(disk.replace(`${m[0]}\n`, '')) !== m[3]) {
+        if (Object.hasOwn(unsupported, name)) {
+          rows.push(refusal(rel, `${rel} was edited after Sterling wrote it, and ${unsupported[name]}, so Sterling would remove it; it is kept and may still run`, `delete it by hand, or pick a model OpenCode can run in the System tab, then rerun /sterling:update`));
+          continue;
+        }
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (Object.hasOwn(unsupported, name)) {
+      rows.push(disk === null
+        ? { item: rel, status: 'skipped', detail: `${unsupported[name]}; no OpenCode copy is created` }
+        : { item: rel, status: 'removed', detail: `${unsupported[name]}; the copy Sterling wrote is removed`, path, content: null, previous: raw });
+      continue;
     }
     if (unsafe.length) {
       // A skip, not a refusal (user-ruled 2026-10-12, decision
@@ -1479,18 +1499,24 @@ export function refreshFullAgentModels({ projectDir, pluginRoot }) {
   if (configured.refused) return { refused: configured.refused };
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
-  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models });
+  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
   writeFullAgentFiles(staged.writes);
   return { rows: staged.rows };
 }
 
-/** Write staged files in order, each atomically, skipping a file that already holds its content. On a failure, the files already
+/** Write staged files in order, each atomically, skipping a file that already holds its content; a write
+ *  whose content is null removes the file. On a failure, the files already
  *  written are put back (restoreFullAgentFiles) and the error is rethrown; a
  *  rollback failure is added to the error message. `fs` is a test seam. */
 export function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
+      if (w.content === null) {
+        rmSync(w.path, { force: true });
+        done.push(w);
+        continue;
+      }
       mkdirSync(dirname(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
@@ -1562,10 +1588,10 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const configured = configuredFullAgentModels(configDir);
   if (configured.refused) rows.push(configured.refused);
   // The agents render first so default_agent is set only when the conductor file is Sterling's.
-  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models ?? {} });
+  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models ?? {}, unsupported: configured.unsupported ?? {} });
   let agentRows = staged.rows;
   if (configured.refused) {
-    agentRows = agentRows.map((r) => (['created', 'refreshed'].includes(r.status) ? { ...r, status: 'skipped', detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r));
+    agentRows = agentRows.map((r) => (['created', 'refreshed', 'removed'].includes(r.status) ? { ...r, status: 'skipped', detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r));
   } else {
     writeFullAgentFiles(staged.writes);
   }

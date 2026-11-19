@@ -753,7 +753,7 @@ test('model change: the changed roster agent is re-rendered with the matching Op
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
 });
 
-test('model change: an agent whose one model is an OpenAI model pins openai/<id>; Claude and Overpass models map as OpenCode names them; agy models leave the pin', () => {
+test('model change: an agent whose one model is an OpenAI model pins openai/<id>; Claude and Overpass models map as OpenCode names them; an agy model removes the copy', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
@@ -764,10 +764,36 @@ test('model change: an agent whose one model is an OpenAI model pins openai/<id>
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
   assert.deepEqual(read('reviewer').match(/^model: .*$/gm), ['model: anthropic/claude-opus-5-5']);
   assert.deepEqual(read('scout').match(/^model: .*$/gm), ['model: overpass/agentic-auto'], 'overpass/<tier> maps through overpass.provider (default overpass)');
-  // An agy model is one OpenCode cannot run: the agent keeps the pin it has.
+  // Changed with finding 3 of the item-G review: an agy model is one OpenCode cannot run, so the agent gets no
+  // OpenCode copy and the unedited copy Sterling wrote is removed (it kept its old pin and stayed runnable before).
   writeConfig(dir, { implementor: { model: 'agy/flash' } });
-  refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
-  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
+  const gone = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(statusOf(gone, '/implementor.md'), 'removed');
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md')), false);
+});
+
+test('an agent on a model OpenCode cannot run gets no copy: a fresh install creates none, an unedited copy is removed, an edited one is kept and reported (item-G review finding 3)', () => {
+  const home = tmp('oc-home-');
+  const fresh = project('hobby');
+  writeConfig(fresh, { scout: { model: 'agy/flash' } });
+  const r = run(fresh, home);
+  assert.equal(statusOf(r, '/scout.md'), 'skipped');
+  assert.match(r.rows.find((x) => x.item.endsWith('/scout.md')).detail, /config\.models\.scout is agy\/flash, which OpenCode cannot run; no OpenCode copy is created/);
+  assert.equal(existsSync(join(fresh, STERLING_AGENTS_SUBDIR, 'scout.md')), false, 'a fresh install creates no copy without a model');
+  assert.equal(statusOf(r, '/implementor.md'), 'created', 'the other roles are installed');
+  const dir = project('hobby');
+  run(dir, home);
+  writeConfig(dir, { scout: { model: 'agy/flash' }, researcher: { model: 'agy/pro' } });
+  const researcher = join(dir, STERLING_AGENTS_SUBDIR, 'researcher.md');
+  const edited = readFileSync(researcher, 'utf8') + '\nmine\n';
+  writeFileSync(researcher, edited);
+  const again = run(dir, home);
+  assert.equal(statusOf(again, '/scout.md'), 'removed');
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false, 'the unedited copy is removed');
+  assert.equal(statusOf(again, '/researcher.md'), 'refused');
+  assert.match(again.rows.find((x) => x.item.endsWith('/researcher.md')).detail, /edited after Sterling wrote it, and config\.models\.researcher is agy\/pro, which OpenCode cannot run, so Sterling would remove it; it is kept/);
+  assert.equal(readFileSync(researcher, 'utf8'), edited, 'the edited copy is kept byte for byte');
+  assert.equal(statusOf(run(dir, home), '/scout.md'), 'skipped', 'a later run creates nothing');
 });
 
 test('writeFullAgentFiles: a write that fails part-way leaves the target intact and restores the files already written', () => {
