@@ -5430,9 +5430,6 @@ function resolveOverpass(config, opts) {
   const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled)
     return { ...base2, effective: false, conductorRouted: false };
-  const mode = judgeProjectMode(cfg.mode, "the config");
-  if (mode !== "work")
-    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== "opencode")
     return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base2, effective: true, conductorRouted: !bypass };
@@ -5441,20 +5438,6 @@ function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
   let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -5479,7 +5462,7 @@ function migrateStaleAgyModels(raw) {
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
+  return parseCanonicalConfig(raw);
 }
 function toCanonicalConfig(legacy, opts = {}) {
   if (!isPlainObject(legacy))
@@ -5600,6 +5583,21 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     modelsChanged = true;
   }
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, "opencode_model")) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === "string" && old.trim() !== "") {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== "string") {
+        const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: "maintenance_worker.opencode_model", was: old });
+    }
+  }
   if (modelsChanged)
     out.models = models;
   if (has(raw, "sparring_partner")) {
@@ -5608,7 +5606,10 @@ function toCanonicalConfig(legacy, opts = {}) {
   }
   return { config: out, conflicts, changes };
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
+function parseCanonicalConfig(raw) {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6053,31 +6054,12 @@ var init_config = __esm({
         // three-state guard used for other config-derived delivery values.
         total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
       }).default({}),
-      // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-      // whether the automatic consult moments (design/review/gate second opinions via
-      // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-      // additive advisory-block pattern (every field has a default; an absent
-      // block still parses) — a project without the
-      // Codex CLI installed still parses and defaults to true; the TUI System tab
-      // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-      // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-      // — this field never stands in for that absence, only for a deliberate OFF.
-      sparring_partner: external_exports.object({
-        enabled: external_exports.boolean().default(true),
-        // Which vendor's model the consult runs on (decision
-        // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-        // 'openai' is the behaviour before the setting existed.
-        vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-        // The model pinned per vendor. Absent = no pin (the host's default). The
-        // old sparring_partner.model is converted to models.openai by
-        // normalizeRawConfig, before this schema strips unknown keys. The default
-        // ships no pin: the decision names no model per vendor.
-        models: vendorPins
-      }).default({}),
+      // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+      // Sterling's Codex integration is gone and the legacy transform drops the key.
       // Reviews (same decision): the vendor policy and the model pinned per vendor.
       // cross_vendor = the other family than the model that wrote the diff; openai
       // and anthropic force one vendor even when that makes reviewer and author the
-      // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+      // same family (user-ruled 2026-10-03). Ships no pin.
       review: external_exports.object({
         policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
         models: vendorPins
@@ -6085,7 +6067,7 @@ var init_config = __esm({
       // TDD-by-default posture toggle (decision foreign_752caf98,
       // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
       // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-      // Mirrors sparring_partner's additive-optional shape exactly — an absent
+      // An additive-optional shape — an absent
       // block still parses with {enabled: true}, and an unknown field inside the
       // block strips silently rather than refusing (forward-compat, non-strict).
       // OFF silences only the automatic default posture: an explicit user ask
@@ -6186,6 +6168,7 @@ var init_config = __esm({
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
     OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+    MAINTENANCE_WORKER_ROLE = "maintenance-worker";
     MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
@@ -6255,6 +6238,8 @@ var init_config = __esm({
       for (const [key, entry] of Object.entries(models)) {
         const e = entry;
         if (e.model === void 0) {
+          if (e.effort === "max")
+            ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
           if (!isCustomAgentKey(key))
             ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: "Required" });
           continue;
@@ -6278,7 +6263,7 @@ var init_config = __esm({
       auto_merge_on_clean: external_exports.boolean().default(true)
     }).strict().default({});
     canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
-    canonicalConfigObject = configSchema.omit({ mode: true, sparring_partner: true, models: true, overpass: true, pr_review: true }).extend({
+    canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
       models: canonicalModelsSchema,
       workflow: workflowSchema,
       overpass: canonicalOverpassSchema,
@@ -12534,9 +12519,9 @@ var init_dist2 = __esm({
        * Keep the models catalog covering every model the System tab pickers must offer
        * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
        * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
-       * models (each role's `model`, and its `opencode_model` and the maintenance worker's
-       * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
-       * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+       * models (each agent's one canonical `model`, <provider>/<id>; overpass/ and agy/ models are
+       * not catalog models, and the maintenance worker's legacy `opencode_model` when a
+       * <provider>/<model> string) and the maintenance worker's Claude model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
        * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
        * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
        * edited or removed, and nothing is written when nothing is missing. The read-modify-write
@@ -12549,8 +12534,14 @@ var init_dist2 = __esm({
         const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
         const refs = /* @__PURE__ */ new Set();
         const addPins = (v) => {
-          if (v?.model)
-            claude.add(v.model);
+          if (typeof v?.model === "string") {
+            if (!v.model.includes("/"))
+              claude.add(v.model);
+            else if (v.model.startsWith("anthropic/"))
+              claude.add(v.model.slice("anthropic/".length));
+            else if (!v.model.startsWith("overpass/") && !v.model.startsWith("agy/") && OPENCODE_MODEL_REF_RE.test(v.model))
+              refs.add(v.model);
+          }
           if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
             refs.add(v.opencode_model);
         };

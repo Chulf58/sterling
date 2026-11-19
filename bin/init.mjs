@@ -5469,9 +5469,6 @@ function resolveOverpass(config, opts) {
   const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled)
     return { ...base2, effective: false, conductorRouted: false };
-  const mode = judgeProjectMode(cfg.mode, "the config");
-  if (mode !== "work")
-    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== "opencode")
     return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base2, effective: true, conductorRouted: !bypass };
@@ -5480,20 +5477,6 @@ function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
   let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -5518,39 +5501,7 @@ function migrateStaleAgyModels(raw) {
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
-}
-function addModelDefaults(raw) {
-  const none = { config: raw, changed: false, added: [] };
-  if (!isPlainObject(raw))
-    return none;
-  const applied = raw.applied_config_migrations;
-  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
-    return none;
-  if ((applied ?? []).includes(MODEL_DEFAULTS_MIGRATION_ID))
-    return none;
-  if (raw.models !== void 0 && !isPlainObject(raw.models))
-    return none;
-  const schemaDefaults = configSchema.shape.models.parse({});
-  const defaults = {
-    ...schemaDefaults,
-    implementor: { ...schemaDefaults.implementor, hard_task: { ...ADDED_IMPLEMENTOR_HARD_TASK, effort: schemaDefaults["implementor-hard"].effort } }
-  };
-  const models = { ...raw.models ?? {} };
-  const added = [];
-  for (const [role, field] of MODEL_DEFAULT_FIELDS) {
-    const entry = models[role];
-    if (entry === void 0) {
-      models[role] = defaults[role];
-      added.push({ role, field: "entry", value: defaults[role] });
-    } else if (isPlainObject(entry) && !Object.prototype.hasOwnProperty.call(entry, field)) {
-      const value = field === "hard_task" ? ADDED_IMPLEMENTOR_HARD_TASK : defaults[role][field];
-      models[role] = { ...entry, [field]: value };
-      added.push({ role, field, value });
-    }
-  }
-  const config = { ...raw, ...added.length ? { models } : {}, applied_config_migrations: [...applied ?? [], MODEL_DEFAULTS_MIGRATION_ID] };
-  return { config, changed: true, added };
+  return parseCanonicalConfig(raw);
 }
 function moveImplementorHardTask(raw) {
   const none = { config: raw, changed: false, move: null };
@@ -5654,8 +5605,6 @@ function unreadConfigKeys(raw) {
     for (const [key, child] of Object.entries(value)) {
       const path = prefix ? `${prefix}.${key}` : key;
       if (!Object.prototype.hasOwnProperty.call(shape, key)) {
-        if (path === "sparring_partner.model")
-          continue;
         if (!(s2._def.catchall instanceof external_exports.ZodNever) && !(prefix === "models" && RETIRED_MODEL_KEYS.includes(key)))
           continue;
         const renamed = CONFIG_KEY_RENAMES[path];
@@ -5665,7 +5614,21 @@ function unreadConfigKeys(raw) {
       }
     }
   };
-  walk(raw, configSchema, "");
+  let doc = raw;
+  try {
+    doc = toCanonicalConfig(raw).config;
+  } catch {
+    doc = raw;
+  }
+  walk(doc, canonicalConfigObject, "");
+  if (isPlainObject(raw) && isPlainObject(raw.models)) {
+    for (const key of Object.keys(raw.models)) {
+      if (!RETIRED_MODEL_KEYS.includes(key))
+        continue;
+      const renamed = CONFIG_KEY_RENAMES[`models.${key}`];
+      out.push(renamed ? { path: `models.${key}`, renamed_to: renamed } : { path: `models.${key}` });
+    }
+  }
   return out;
 }
 function describeUnreadConfigKeys(keys) {
@@ -5791,6 +5754,21 @@ function toCanonicalConfig(legacy, opts = {}) {
     }
     modelsChanged = true;
   }
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, "opencode_model")) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === "string" && old.trim() !== "") {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== "string") {
+        const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: "maintenance_worker.opencode_model", was: old });
+    }
+  }
   if (modelsChanged)
     out.models = models;
   if (has(raw, "sparring_partner")) {
@@ -5799,11 +5777,14 @@ function toCanonicalConfig(legacy, opts = {}) {
   }
   return { config: out, conflicts, changes };
 }
+function parseCanonicalConfig(raw) {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
 function parseCanonicalModels(raw) {
   const config = toCanonicalConfig(raw).config;
   return canonicalModelsSchema.parse(isPlainObject(config) ? config.models : void 0);
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6249,31 +6230,12 @@ var init_config = __esm({
         // three-state guard used for other config-derived delivery values.
         total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
       }).default({}),
-      // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-      // whether the automatic consult moments (design/review/gate second opinions via
-      // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-      // additive advisory-block pattern (every field has a default; an absent
-      // block still parses) — a project without the
-      // Codex CLI installed still parses and defaults to true; the TUI System tab
-      // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-      // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-      // — this field never stands in for that absence, only for a deliberate OFF.
-      sparring_partner: external_exports.object({
-        enabled: external_exports.boolean().default(true),
-        // Which vendor's model the consult runs on (decision
-        // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-        // 'openai' is the behaviour before the setting existed.
-        vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-        // The model pinned per vendor. Absent = no pin (the host's default). The
-        // old sparring_partner.model is converted to models.openai by
-        // normalizeRawConfig, before this schema strips unknown keys. The default
-        // ships no pin: the decision names no model per vendor.
-        models: vendorPins
-      }).default({}),
+      // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+      // Sterling's Codex integration is gone and the legacy transform drops the key.
       // Reviews (same decision): the vendor policy and the model pinned per vendor.
       // cross_vendor = the other family than the model that wrote the diff; openai
       // and anthropic force one vendor even when that makes reviewer and author the
-      // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+      // same family (user-ruled 2026-10-03). Ships no pin.
       review: external_exports.object({
         policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
         models: vendorPins
@@ -6281,7 +6243,7 @@ var init_config = __esm({
       // TDD-by-default posture toggle (decision foreign_752caf98,
       // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
       // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-      // Mirrors sparring_partner's additive-optional shape exactly — an absent
+      // An additive-optional shape — an absent
       // block still parses with {enabled: true}, and an unknown field inside the
       // block strips silently rather than refusing (forward-compat, non-strict).
       // OFF silences only the automatic default posture: an explicit user ask
@@ -6382,6 +6344,7 @@ var init_config = __esm({
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
     OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+    MAINTENANCE_WORKER_ROLE = "maintenance-worker";
     MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
@@ -6425,13 +6388,6 @@ var init_config = __esm({
       "classifiers"
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-    MODEL_DEFAULTS_MIGRATION_ID = "model-defaults-2026-10-23";
-    MODEL_DEFAULT_FIELDS = [
-      ["implementor", "hard_task"],
-      ["reviewer", "opencode_model"],
-      ["sparring", "opencode_model"]
-    ];
-    ADDED_IMPLEMENTOR_HARD_TASK = { model: "claude-opus-5-5" };
     IMPLEMENTOR_HARD_MIGRATION_ID = "implementor-hard-2026-10-23";
     OVERPASS_DEFAULTS_MIGRATION_ID = "overpass-defaults-2026-10-23";
     CONFIG_KEY_RENAMES = {
@@ -6464,6 +6420,8 @@ var init_config = __esm({
       for (const [key, entry] of Object.entries(models)) {
         const e = entry;
         if (e.model === void 0) {
+          if (e.effort === "max")
+            ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
           if (!isCustomAgentKey(key))
             ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: "Required" });
           continue;
@@ -6487,7 +6445,7 @@ var init_config = __esm({
       auto_merge_on_clean: external_exports.boolean().default(true)
     }).strict().default({});
     canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
-    canonicalConfigObject = configSchema.omit({ mode: true, sparring_partner: true, models: true, overpass: true, pr_review: true }).extend({
+    canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
       models: canonicalModelsSchema,
       workflow: workflowSchema,
       overpass: canonicalOverpassSchema,
@@ -6527,6 +6485,10 @@ function hostRunsModel(model, host) {
   if (runs.except?.includes(provider))
     return false;
   return runs.providers === "*" || runs.providers.includes(provider);
+}
+function opencodeModelRef(model, overpassProvider = DEFAULT_OVERPASS_PROVIDER) {
+  const prefix = `${OVERPASS_MODEL_NAMESPACE}/`;
+  return model.startsWith(prefix) ? `${overpassProvider}/${model.slice(prefix.length)}` : model;
 }
 function resolveHostSettings(entry, host) {
   const cap = AGENT_HOST_CAPABILITIES[host];
@@ -14371,9 +14333,9 @@ var init_dist2 = __esm({
        * Keep the models catalog covering every model the System tab pickers must offer
        * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
        * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
-       * models (each role's `model`, and its `opencode_model` and the maintenance worker's
-       * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
-       * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+       * models (each agent's one canonical `model`, <provider>/<id>; overpass/ and agy/ models are
+       * not catalog models, and the maintenance worker's legacy `opencode_model` when a
+       * <provider>/<model> string) and the maintenance worker's Claude model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
        * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
        * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
        * edited or removed, and nothing is written when nothing is missing. The read-modify-write
@@ -14386,8 +14348,14 @@ var init_dist2 = __esm({
         const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
         const refs = /* @__PURE__ */ new Set();
         const addPins = (v) => {
-          if (v?.model)
-            claude.add(v.model);
+          if (typeof v?.model === "string") {
+            if (!v.model.includes("/"))
+              claude.add(v.model);
+            else if (v.model.startsWith("anthropic/"))
+              claude.add(v.model.slice("anthropic/".length));
+            else if (!v.model.startsWith("overpass/") && !v.model.startsWith("agy/") && OPENCODE_MODEL_REF_RE.test(v.model))
+              refs.add(v.model);
+          }
           if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
             refs.add(v.opencode_model);
         };
@@ -16496,11 +16464,6 @@ function describeMigration(dropped) {
 function describeStaleAgy(dropped) {
   return dropped.map((d) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.role}.agy_model dropped (agy accepts only inherit, flash_lite, flash or pro, and drops a subagent with any other model); value was ${show(d.value)}, so the ${d.role} agy agent now runs on model: inherit; pick one of the four in the System tab if you want one`);
 }
-function describeAdded(added) {
-  return added.map(
-    (a) => a.field === "entry" ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role} added as the shipped default ${show(a.value)}, so the System tab shows the model each OpenCode dispatch of this role runs on; change it there` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role}.${a.field} added as ${show(a.value)} (the model the conductor named on these dispatches before); change it in the System tab, or clear it to run the role on its Claude model${a.field === "hard_task" ? " (cleared: no separate hard lane)" : ""}`
-  );
-}
 function describeHardMove(move) {
   if (!move) return [];
   if (move.kind === "moved") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task ${show(move.hard_task)} moved to models.implementor-hard as ${show(move.entry)}, the sterling/implementor-hard agent's model; change it in the System tab`];
@@ -16529,59 +16492,6 @@ function rewritable(projectDir, configPath2, refuse) {
   return { stat };
 }
 var oneLine = (err) => err.message.replace(/\s+/g, " ");
-function prepareConfigMigration(projectDir) {
-  const configPath2 = join20(projectDir, ".sterling", "config.json");
-  if (!existsSync10(configPath2)) return { status: "absent", lines: [] };
-  const shown = configPath2.replace(/\\/g, "/");
-  const refuse = (why) => ({ status: "refused", lines: [`config migration refused: ${shown} ${why}; left untouched`] });
-  const originalBytes = readFileSync13(configPath2);
-  let raw;
-  try {
-    raw = JSON.parse(originalBytes.toString("utf8"));
-    parseConfig(raw);
-  } catch (err) {
-    return refuse(`does not parse or validate (${oneLine(err)})`);
-  }
-  const m = migrateRetiredModelKeys(raw);
-  const a = migrateStaleAgyModels(m.config);
-  const d = addModelDefaults(a.config);
-  const h = moveImplementorHardTask(d.config);
-  const o = resetOverpassDefaults(h.config);
-  if (o.refusal) return refuse(o.refusal);
-  if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: "unchanged", lines: [] };
-  const placed = rewritable(projectDir, configPath2, refuse);
-  if (placed.refused) return placed.refused;
-  const { stat } = placed;
-  try {
-    parseConfig(o.config);
-  } catch (err) {
-    return refuse(`would not validate after the migration (${oneLine(err)})`);
-  }
-  const text = originalBytes.toString("utf8");
-  return {
-    status: "ready",
-    configPath: configPath2,
-    shown,
-    originalBytes,
-    mode: stat.mode & 511,
-    next: JSON.stringify(o.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
-    config: o.config,
-    dropped: m.dropped,
-    staleAgy: a.dropped,
-    added: d.added,
-    hardMove: h.move,
-    overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
-    lines: [
-      ...describeMigration(m.dropped),
-      ...describeStaleAgy(a.dropped),
-      ...describeAdded(d.added),
-      ...d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : [],
-      ...describeHardMove(h.move),
-      ...h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : [],
-      ...describeOverpassReset(o)
-    ]
-  };
-}
 function commitConfigMigration(plan, { beforeRename } = {}) {
   if (plan.status !== "ready") return plan;
   const unchanged = () => {
@@ -16613,6 +16523,92 @@ function commitConfigMigration(plan, { beforeRename } = {}) {
     return { status: "refused", lines: [`config migration refused: ${plan.shown} could not be rewritten (${err.code ?? oneLine(err)}); left untouched`] };
   }
   return { ...plan, status: "migrated" };
+}
+var CANONICAL_CONFIG_MIGRATION_ID = "canonical-config-2026-11-19";
+function isCanonicalAlready(raw) {
+  try {
+    const r = toCanonicalConfig(raw);
+    return r.changes.length === 0 && r.conflicts.length === 0;
+  } catch {
+    return false;
+  }
+}
+var describeValue = (v) => v === void 0 ? "unset" : show(v);
+function describeCanonicalChanges(changes) {
+  return changes.map(
+    (c) => Object.prototype.hasOwnProperty.call(c, "now") ? `${CONFIG_MIGRATION_LINE_PREFIX}${c.path} set to ${show(c.now)} (was ${describeValue(c.was)})` : `${CONFIG_MIGRATION_LINE_PREFIX}${c.path} removed (value was ${show(c.was)})`
+  );
+}
+function describeConflicts(conflicts) {
+  return conflicts.map((c) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${c.role} has two models: Claude Code runs ${show(c.claude.model)}, OpenCode runs ${show(c.opencode.model)}; an agent has one model, so choose one (OpenCode preselected)`);
+}
+function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}) {
+  const configPath2 = join20(projectDir, ".sterling", "config.json");
+  if (!existsSync10(configPath2)) return { status: "absent", lines: [] };
+  const shown = configPath2.replace(/\\/g, "/");
+  const refuse = (why) => ({ status: "refused", lines: [`config migration refused: ${shown} ${why}; left untouched`] });
+  const originalBytes = readFileSync13(configPath2);
+  let raw;
+  try {
+    raw = JSON.parse(originalBytes.toString("utf8"));
+  } catch (err) {
+    return refuse(`is not valid JSON (${oneLine(err)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return refuse("is not a JSON object");
+  const applied = Array.isArray(raw.applied_config_migrations) ? raw.applied_config_migrations : [];
+  let legacy = raw;
+  const legacyLines = [];
+  if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
+    const m = migrateRetiredModelKeys(legacy);
+    const a = migrateStaleAgyModels(m.config);
+    const h = moveImplementorHardTask(a.config);
+    const o = resetOverpassDefaults(h.config);
+    if (o.refusal) return refuse(o.refusal);
+    legacy = o.config;
+    legacyLines.push(...describeMigration(m.dropped), ...describeStaleAgy(a.dropped), ...describeHardMove(h.move), ...describeOverpassReset(o));
+  }
+  let result;
+  try {
+    result = toCanonicalConfig(legacy, { resolutions });
+  } catch (err) {
+    return refuse(`cannot be carried to the canonical shape (${oneLine(err)})`);
+  }
+  const config = result.config;
+  if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID)) config.applied_config_migrations = [...Array.isArray(config.applied_config_migrations) ? config.applied_config_migrations : [], CANONICAL_CONFIG_MIGRATION_ID];
+  if (result.conflicts.length) return { status: "conflicts", conflicts: result.conflicts, lines: describeConflicts(result.conflicts) };
+  if (JSON.stringify(config) === JSON.stringify(raw)) return { status: "unchanged", lines: [] };
+  const placed = rewritable(projectDir, configPath2, refuse);
+  if (placed.refused) return placed.refused;
+  const checked = canonicalConfigSchema.safeParse(config);
+  if (!checked.success) return refuse(`would not validate after the migration (${oneLine(checked.error)})`);
+  const text = originalBytes.toString("utf8");
+  return {
+    status: "ready",
+    configPath: configPath2,
+    shown,
+    originalBytes,
+    mode: placed.stat.mode & 511,
+    next: JSON.stringify(config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
+    config,
+    changes: result.changes,
+    lines: [...legacyLines, ...describeCanonicalChanges(result.changes)]
+  };
+}
+function modelChoicesFromArgs(args) {
+  const resolutions = {};
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== "--model-choice") continue;
+    const value = args[i + 1] ?? "";
+    const m = /^([^=\s]+)=(claude|opencode)$/.exec(value);
+    if (!m) throw new Error(`--model-choice needs <role>=claude|opencode, got ${JSON.stringify(value)}`);
+    resolutions[m[1]] = m[2];
+    i += 1;
+  }
+  return resolutions;
+}
+function describeConflictRefusal(conflicts) {
+  const roles = conflicts.map((c) => c.role);
+  return `refused_model_conflicts: ${roles.join(", ")} each name two models (a Claude model and an OpenCode model) and an agent has one; ask which to keep for each, then rerun with ${roles.map((r) => `--model-choice ${r}=claude|opencode`).join(" ")}; nothing synced`;
 }
 
 // scripts/lib/project-identity.mjs
@@ -19866,17 +19862,6 @@ function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
   if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd7(implementorTemplatePath(pluginRoot2))} disallowedTools (P5)`);
   return tools;
 }
-function opencodeModelRef2(model) {
-  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
-  return `anthropic/${model}`;
-}
-function opencodeModelFor({ model, opencodeModel } = {}) {
-  if (opencodeModel === void 0) return opencodeModelRef2(model);
-  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
-    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
-  }
-  return opencodeModel;
-}
 function configuredFullAgentModels(projectDir) {
   const where = fwd7(join30(projectDir, ".sterling", "config.json"));
   const leave = (why) => ({
@@ -19906,7 +19891,8 @@ function configuredFullAgentModels(projectDir) {
     if (key === void 0) continue;
     const entry = parsed.models[key];
     if (entry === void 0) continue;
-    models[name4] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
+    if (typeof entry.model !== "string" || !hostRunsModel(entry.model, "opencode")) continue;
+    models[name4] = opencodeModelRef(entry.model, parsed.overpass.provider);
   }
   return { models };
 }
@@ -20727,6 +20713,7 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
   [--backup-path <p> | --backup-opt-out]
   [--invoking-project <dir>] [--domain-description <domain>=<text>]...
+  [--model-choice <role>=claude|opencode]...
   [--update-ensure] [--help]
 --target defaults to the current directory. Declaration flags are required only when no recorded config exists.`);
   process.exit(0);
@@ -20814,7 +20801,13 @@ try {
 var configPath = join32(target, ".sterling", "config.json");
 var recorded;
 var rawRecorded;
-var configMigration = prepareConfigMigration(target);
+var modelChoices;
+try {
+  modelChoices = modelChoicesFromArgs(process.argv.slice(2));
+} catch (e) {
+  fail(`init REFUSED: ${e.message}. Nothing was written.`, 2);
+}
+var configMigration = prepareCanonicalConfigMigration(target, { resolutions: modelChoices });
 if (existsSync19(configPath)) {
   try {
     rawRecorded = JSON.parse(readFileSync24(configPath, "utf8"));
@@ -20823,6 +20816,7 @@ if (existsSync19(configPath)) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate \u2014 cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
   }
   if (configMigration.status === "refused") fail(`init REFUSED: ${configMigration.lines[0]}. Nothing was written.`, 2);
+  if (configMigration.status === "conflicts") fail(`init REFUSED: ${describeConflictRefusal(configMigration.conflicts)}. Nothing was written.`, 2);
   if (configMigration.status === "ready") {
     rawRecorded = configMigration.config;
     recorded = parseConfig(rawRecorded);
@@ -20905,10 +20899,10 @@ var expectedConfig = parseConfig({
   // mirror the recorded name on re-runs so a pre-project_name config can still match
   ...(recorded ? recorded.project_name : eff.projectName) !== void 0 ? { project_name: recorded ? recorded.project_name : eff.projectName } : {},
   ...eff.backupPath ? { backup_path: eff.backupPath } : { backup_opt_out: eff.backupOptOut },
-  // a recorded mode is a declaration like the ones above (the parsed copy is compared
+  // a recorded workflow is a declaration like the ones above (the parsed copy is compared
   // below, so a recorded config is not "hand-edited" for carrying one); a fresh config
-  // carries config.workflow instead, written below, and no mode.
-  ...recorded ? { mode: recorded.mode, workflow: recorded.workflow } : {},
+  // takes freshWorkflow, written below.
+  ...recorded ? { workflow: recorded.workflow } : {},
   // a fresh config copies every agent model from the invoking project (above), else
   // takes the shipped models of templates/default-config.json.
   ...!recorded && inheritedModels !== void 0 ? { models: inheritedModels } : {},
@@ -21013,9 +21007,7 @@ for (const m of domainsExisting) {
 }
 var backupDetail = eff.backupPath ? eff.backupPath : "OPTED OUT (recorded; snapshots will skip loudly)";
 if (!recorded) {
-  const { mode: _legacyMode, ...withoutMode } = expectedConfig;
-  if (withoutMode.pr_review && withoutMode.pr_review.auto_merge_on_clean !== void 0) withoutMode.pr_review = { ...withoutMode.pr_review, auto_merge_on_clean: freshWorkflow.auto_merge_on_clean };
-  const fresh = { ...withoutMode, workflow: freshWorkflow };
+  const fresh = { ...expectedConfig, workflow: freshWorkflow };
   if (freshTracked.unknown === null) {
     writeFileSync12(configPath, JSON.stringify(fresh, null, 2));
   } else {
@@ -21370,6 +21362,9 @@ if (claudeHost) {
       refused_local_modification: { status: "refused", detail: "locally modified AND template changed \u2014 overwrite refused (see /sterling:sync-agents guidance below)" },
       foreign_file: { status: "refused", detail: "not Sterling-generated \u2014 never overwritten (see guidance below)" },
       retired: { status: "retired", detail: "removed a clean Sterling-generated agent no longer in the registry" },
+      unsupported: { status: "matches", detail: "no Claude Code copy: its one model is one Claude Code cannot run (see the System tab hosts column)" },
+      unsupported_removed: { status: "retired", detail: "removed the unedited Sterling-generated copy: its one model is one Claude Code cannot run" },
+      unsupported_but_modified: { status: "refused", detail: "its model is one Claude Code cannot run, but the copy was edited \u2014 left untouched (see guidance below)" },
       retired_unrecognized: { status: "refused", detail: "Sterling-marked retired agent has an unrecognized header \u2014 left untouched (see guidance below)" },
       retired_but_modified: { status: "refused", detail: "retired Sterling agent was locally modified \u2014 left untouched (see guidance below)" },
       retired_identity_mismatch: { status: "refused", detail: "retired Sterling agent identity is ambiguous \u2014 left untouched (see guidance below)" },
