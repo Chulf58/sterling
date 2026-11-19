@@ -1112,11 +1112,17 @@ export function ensureConductorActivation(targetDir, agentResults) {
     // Fail closed and say so (P5): the conductor's model is one Claude Code cannot run, so it has no
     // Claude copy (or only an edited one Sterling no longer maintains), while settings.json still turns
     // it on. The "agent" key is NOT cleared: that would silently switch the session to Claude Code's
-    // default behaviour. The sync counts this as a refusal and H1's host-fit line names the conductor.
+    // default behaviour. autoMemoryEnabled is still ensured below (that write is decoupled from the agent
+    // outcome), so settings.json can change, but never its "agent" key. The sync counts this as a refusal
+    // and H1's host-fit line names the conductor.
     // NOT GUARANTEED: what Claude Code does at start with an "agent" naming a missing file is its own
     // behaviour; this only makes the mismatch loud until the model or the setting is changed.
     result.activation = 'refused';
-    result.reason = `${conductorResult.detail ?? 'the conductor has no Claude Code copy'}, but ${settingsPath} still sets "agent": "conductor", so Claude Code starts without Sterling's conductor; pick an anthropic model for models.conductor in the System tab, or remove "agent" from ${settingsPath} by hand`;
+    const why = conductorResult.detail ?? "the conductor's model is one Claude Code cannot run";
+    const fix = `pick an anthropic model for models.conductor in the System tab, or remove "agent" from ${settingsPath} by hand`;
+    result.reason = conductorResult.status === 'unsupported_but_modified'
+      ? `${why}; your edited .claude/agents/conductor.md is kept but Sterling no longer maintains it, and ${settingsPath} still sets "agent": "conductor", so Claude Code runs that edited copy on whatever model it names; ${fix}`
+      : `${why}, so there is no Claude Code conductor copy, but ${settingsPath} still sets "agent": "conductor", so Claude Code starts without Sterling's conductor; ${fix}`;
     console.error(`REFUSED: ${result.reason}`);
   } else if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
     result.activation = 'skipped';

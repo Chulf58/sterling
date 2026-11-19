@@ -554,7 +554,7 @@ try {
 // HOST FIT (lib/operating-state.mjs): agents this host gets no copy of, from the one model each has.
 let hostFitContext = '';
 try {
-  const hostFit = unsupportedAgentsLine({ config, configUnreadable, host: 'claude' });
+  const hostFit = unsupportedAgentsLine({ config, configUnreadable, host: 'claude', root: input.cwd });
   if (hostFit) hostFitContext = `\n\n${hostFit}`;
 } catch {
   // fail-open — a malformed config costs only this line
