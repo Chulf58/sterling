@@ -834,6 +834,25 @@ test('model change: a CRLF Sterling-full agent is refreshed, not mistaken for a 
   assert.equal(statusOf(refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot }), '/implementor.md'), 'refreshed');
 });
 
+// Restored (item-G review loop 3, finding 7; main line 805, stageFullAgentModel): end to end through the refresh's
+// staging, the previous bytes stay raw, so a failed write puts a CRLF agent back byte for byte.
+test('model change: a write that fails part-way through the refresh restores a CRLF agent byte for byte', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const impl = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  const crlf = readFileSync(impl, 'utf8').replace(/\n/g, '\r\n');
+  writeFileSync(impl, crlf);
+  writeConfig(dir, { implementor: { model: 'openai/gpt-5.6-terra', effort: 'high' }, researcher: { model: 'openai/gpt-5.6-terra', effort: 'high' } });
+  let calls = 0;
+  const written = [];
+  const writeFile = (p, c) => { calls += 1; if (calls === 2) throw new Error('ENOSPC: no space left'); written.push(p); writeFileSync(p, c); };
+  assert.throws(() => refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot, fs: { writeFile } }), /ENOSPC/);
+  assert.match(written[0] ?? '', /implementor\.md\.tmp|implementor\.md$/, 'the implementor was written before the failure');
+  assert.equal(readFileSync(impl, 'utf8'), crlf, 'the CRLF file is back byte for byte');
+  assert.equal(statusOf(refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot }), '/implementor.md'), 'refreshed', 'and is still Sterling\'s unedited copy');
+});
+
 test('a config that does not validate refuses the model refresh and writes no agent file', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');

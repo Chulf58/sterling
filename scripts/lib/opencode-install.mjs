@@ -1499,14 +1499,15 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsuppor
  * Sterling-full set was never installed is skipped (nothing is created by it); a config.json that
  * is refused writes nothing and comes back as { refused }.
  */
-export function refreshFullAgentModels({ projectDir, pluginRoot }) {
+export function refreshFullAgentModels({ projectDir, pluginRoot, fs = {} }) {
   if (!existsSync(join(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const configured = configuredFullAgentModels(storeRootFor(projectDir));
   if (configured.refused) return { refused: configured.refused };
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
-  writeFullAgentFiles(staged.writes);
+  // `fs` is writeFullAgentFiles' test seam
+  writeFullAgentFiles(staged.writes, fs);
   // Converges from the current state, not from this run's deletions: every Sterling agent whose model
   // OpenCode cannot run and whose file is not on disk now (removed by this run or an earlier one) has its
   // guard-only entry dropped, so a run whose config write failed is finished by the next one.
