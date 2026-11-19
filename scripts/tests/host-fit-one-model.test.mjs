@@ -372,3 +372,15 @@ test('Claude conductor on a model Claude Code cannot run: activation is refused 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('OpenCode conductor and Plan on an agy model: no overlay model and no substitute; the host-fit line names both (item-G review loop 2, finding 4)', () => {
+  const config = { models: { conductor: { model: 'agy/flash' }, plan: { model: 'agy/pro' } } };
+  const res = overpassResolution(projectRouting(config));
+  assert.equal(res.conductor, null);
+  assert.equal(res.plan, null);
+  assert.deepEqual(desiredOverlay(res), {});
+  assert.equal(expectedSessionModel(res, 'plan'), null, 'no session model to nag about');
+  const line = unsupportedAgentsLine({ config, host: 'opencode' });
+  assert.match(line, /no OpenCode copy of .*conductor \(agy\/flash\)/);
+  assert.match(line, /plan \(agy\/pro\)/);
+});

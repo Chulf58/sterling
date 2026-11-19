@@ -32,7 +32,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { CONDUCTOR_MODEL_KEY, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OverpassUnknownRoleError, PLAN_MODEL_KEY } from '@sterling/schemas';
+import { CONDUCTOR_MODEL_KEY, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OverpassUnknownRoleError, PLAN_MODEL_KEY, hostRunsModel } from '@sterling/schemas';
 import { WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV } from '../../../scripts/hooks/lib/maintenance-worker-opencode.mjs';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, sterlingRootFrom, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
@@ -68,9 +68,11 @@ export function overpassResolution(routing) {
   }
   // A tier's effort is not an OpenCode variant: it is kept as `effort` and sent as the request's
   // reasoning effort on the primary session's own requests (requestEffort).
+  // A selection OpenCode cannot run (an agy/<id>) gets no overlay model and no substitute: the session-start
+  // host-fit line (unsupportedAgentsLine) names it, and the installer gives that agent no copy.
   const selection = (key) => {
     const e = usable(key);
-    if (!e) return null;
+    if (!e || !hostRunsModel(e.canonical, 'opencode')) return null;
     if (!e.effort) return { model: e.model, tier: e.tier };
     return e.tier ? { model: e.model, tier: true, effort: e.effort } : { model: e.model, tier: false, variant: e.effort };
   };

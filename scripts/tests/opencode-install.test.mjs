@@ -1548,3 +1548,27 @@ test('an agent moved to a model OpenCode cannot run is gone from the agent files
   assert.match(row.detail, /KEPT agent entries sterling\/researcher/);
   assert.ok(oc().agent['sterling/implementor'], 'the other agents keep their guard');
 });
+
+test('the conductor and Plan on a model OpenCode cannot run: no copy created, an unedited copy removed, an edited one kept and reported (item-G review loop 2, finding 4)', () => {
+  const home = tmp('oc-home-');
+  const fresh = project('hobby');
+  writeConfig(fresh, { conductor: { model: 'agy/flash' }, plan: { model: 'agy/pro' } });
+  const r = run(fresh, home);
+  assert.equal(statusOf(r, '/sterling/conductor.md'), 'skipped');
+  assert.match(r.rows.find((x) => x.item.endsWith('/sterling/conductor.md')).detail, /config\.models\.conductor is agy\/flash, which OpenCode cannot run; no OpenCode copy is created/);
+  assert.equal(statusOf(r, '.opencode/agents/plan.md'), 'skipped');
+  assert.equal(existsSync(join(fresh, STERLING_AGENTS_SUBDIR, 'conductor.md')), false);
+  assert.equal(existsSync(join(fresh, '.opencode', 'agents', 'plan.md')), false);
+  const dir = project('hobby');
+  run(dir, home);
+  const plan = join(dir, '.opencode', 'agents', 'plan.md');
+  const edited = readFileSync(plan, 'utf8') + '\nmine\n';
+  writeFileSync(plan, edited);
+  writeConfig(dir, { conductor: { model: 'agy/flash' }, plan: { model: 'agy/pro' } });
+  const again = run(dir, home);
+  assert.equal(statusOf(again, '/sterling/conductor.md'), 'removed');
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'conductor.md')), false);
+  assert.equal(statusOf(again, '.opencode/agents/plan.md'), 'refused');
+  assert.match(again.rows.find((x) => x.item.endsWith('.opencode/agents/plan.md')).detail, /config\.models\.plan is agy\/pro, which OpenCode cannot run, so Sterling would remove it; it is kept/);
+  assert.equal(readFileSync(plan, 'utf8'), edited);
+});

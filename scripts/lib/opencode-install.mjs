@@ -68,7 +68,7 @@ export { writeFileAtomic };
 import { OPENCODE_LOADED_SOURCE, RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, SPECS_SOURCE, STERLING_NPM_PACKAGE, installHostOf, openCodeLoadedSterling, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
 import { JSONC_SOURCE, parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
-import { AGENT_MODEL_KEY, hostRunsModel, opencodeModelRef as canonicalOpencodeModelRef, parseConfig } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, hostRunsModel, opencodeModelRef as canonicalOpencodeModelRef, parseConfig } from '@sterling/schemas';
 import { sha256, loadRegistry, agentHosts } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
@@ -1288,6 +1288,12 @@ export function configuredFullAgentModels(projectDir) {
       continue;
     }
     models[name] = canonicalOpencodeModelRef(entry.model, parsed.overpass.provider);
+  }
+  // The conductor and the Plan agent take their model from the opencode.json overlay (overpass.mjs), not
+  // a pin, but host fit applies to them the same way: a model OpenCode cannot run gives no copy.
+  for (const [name, key] of [[CONDUCTOR_ROLE, CONDUCTOR_MODEL_KEY], ['plan', PLAN_MODEL_KEY]]) {
+    const model = parsed.models[key]?.model;
+    if (typeof model === 'string' && !hostRunsModel(model, 'opencode')) unsupported[name] = `config.models.${key} is ${model}, which OpenCode cannot run`;
   }
   return { models, unsupported };
 }
