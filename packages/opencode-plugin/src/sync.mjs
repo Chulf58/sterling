@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { domainMapDue, domainNotice, pendingFileNote, runDomainMapAsync } from '../../../scripts/hooks/lib/domain-notice.mjs';
 import { DOMAIN_MAP_PENDING_REL } from '../../../scripts/lib/update.mjs';
 import { formatOpenCodeRows, materializeTui } from '../../../scripts/lib/opencode-install.mjs';
+import { createAutoUpdater } from '../../../scripts/lib/plugin-auto-update.mjs';
 import { postUpdateApplies, postUpdateSync, runStepAsync } from '../../../scripts/lib/post-update-sync.mjs';
 import { sterlingRoot } from './layer.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
@@ -57,6 +58,10 @@ export function createSessionSync(deps = {}) {
   // Roots with a run in flight, so two requests of one session never start two.
   const inFlight = new Set();
   const runs = [];
+  // The daily update coordinator, and what an update in this process changed: the newest
+  // installed root and a generation count; `synced` is the generation each project last synced from.
+  const updater = deps.updater ?? createAutoUpdater({ env, home, nowMs: deps.nowMs });
+  const state = { root: null, gen: 0, synced: new Map() };
 
   function report(root, text) {
     try {
@@ -109,6 +114,7 @@ export function createSessionSync(deps = {}) {
     const notice = map && (due === 'marker' || outcome === 'synced') ? domainNotice(map, { label: 'OpenCode plugin', note: unremoved }) : null;
     if (notice) lines.push(notice.context.replace(/^\n+/, ''));
     if (lines.length) report(root, lines.join('\n'));
+    return outcome;
   }
 
   /** The npm copy's dashboard, re-materialized after an update: one line per row, or one FAILED line. */
@@ -136,10 +142,56 @@ export function createSessionSync(deps = {}) {
     }
   }
 
+  /**
+   * The daily update (scripts/lib/plugin-auto-update.mjs), run in the background from the
+   * first root session of a project once a day is up; it never rides the `started` latch,
+   * so a long-running shared service checks again the next day. On a newer generation the
+   * installed root becomes this process's sync root (`state`), this project is re-synced
+   * from it at once, and every other project converges at its next request.
+   */
+  async function updateOnce(root, pluginRoot) {
+    let res;
+    try {
+      res = await updater.check({ pluginRoot });
+    } catch (e) {
+      logLine(root, `plugin auto-update check failed: ${errText(e)}`);
+      report(root, `Sterling: the daily plugin update check FAILED (${errText(e)}); it retries within the hour. See ${LOG_REL}.`);
+      return;
+    }
+    if (res.status === 'failed') {
+      logLine(root, `plugin auto-update failed: ${res.reason}`);
+      report(root, `Sterling: the daily plugin update FAILED: ${res.reason}. Sterling stays on its installed version and tries again tomorrow. See ${LOG_REL}.`);
+      return;
+    }
+    if (res.status !== 'updated') return;
+    state.root = res.root;
+    state.gen += 1;
+    logLine(root, `plugin auto-update: ${res.from ?? '(unknown)'}→${res.to}`);
+    let outcome = null;
+    if (!inFlight.has(root)) {
+      inFlight.add(root);
+      state.synced.set(root, state.gen);
+      started.add(root);
+      try {
+        outcome = await run(root, res.root, true);
+      } finally {
+        inFlight.delete(root);
+      }
+    }
+    const resynced = outcome === 'synced' ? 'agents re-synced' : outcome === 'failed' ? 'the agent re-sync FAILED (see the notice above)' : 'agents re-sync when this project\'s next session starts';
+    report(root, `Sterling updated ${res.from ?? '(unknown)'}→${res.to}; ${resynced}. Run /reload when no project on this shared service has in-flight tools or background work.`);
+  }
+
   async function syncOnce(root, sessionID) {
     // The maintenance worker child leaves the sync to the user's process (worker.mjs inWorkerChild).
-    if (started.has(root) || inWorkerChild(env)) return;
-    const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
+    if (inWorkerChild(env)) return;
+    // After an update in this process, a project whose sync ran from an older generation converges again.
+    const converge = state.gen > 0 && state.synced.get(root) !== state.gen;
+    const latched = started.has(root) && !converge;
+    const updateDue = updater.due();
+    if (latched && !updateDue) return;
+    const pluginRoot = state.root ?? deps.sterlingRoot ?? sterlingRoot();
+    const updateRoot = deps.sterlingRoot ?? sterlingRoot();
     let applies;
     let pending;
     try {
@@ -154,10 +206,16 @@ export function createSessionSync(deps = {}) {
     // its pending file while OpenCode runs, and the next root session has to read it.
     if (!applies && !pending) return;
     if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
-    if (!(await verdicts.get(sessionID)) || started.has(root) || inFlight.has(root)) return;
-    if (applies) started.add(root);
+    if (!(await verdicts.get(sessionID))) return;
+    if (applies && updater.due()) runs.push(updateOnce(root, updateRoot));
+    const stillConverge = state.gen > 0 && state.synced.get(root) !== state.gen;
+    if ((started.has(root) && !stillConverge) || inFlight.has(root)) return;
+    if (applies) {
+      started.add(root);
+      state.synced.set(root, state.gen);
+    }
     inFlight.add(root);
-    runs.push(run(root, pluginRoot, applies).finally(() => inFlight.delete(root)));
+    runs.push(run(root, state.root ?? pluginRoot, applies).finally(() => inFlight.delete(root)));
   }
 
   syncOnce.idle = () => Promise.all(runs).then(() => undefined);
