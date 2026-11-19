@@ -37,8 +37,9 @@ import { WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV } from '../../../scripts/hoo
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, sterlingRootFrom, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
 import { readCopyVersion } from '../../../scripts/lib/sterling-roots.mjs';
+import { openCodeCustomAgentKeys } from '../../../scripts/lib/custom-agent-render.mjs';
 import { agentRole } from './agent-name.mjs';
-import { projectRouting } from './dispatch-model.mjs';
+import { projectRouting, routingKey } from './dispatch-model.mjs';
 import { remember } from './bounded.mjs';
 
 export const OVERLAY_REL = '.sterling/overpass-overlay.json';
@@ -65,9 +66,13 @@ export function overpassResolution(routing) {
     const e = usable(key);
     if (e?.tier) roles[key] = { model: e.model, ...(e.effort ? { effort: e.effort } : {}) };
   }
+  // A tier's effort is not an OpenCode variant: it is kept as `effort` and sent as the request's
+  // reasoning effort on the primary session's own requests (requestEffort).
   const selection = (key) => {
     const e = usable(key);
-    return e ? { model: e.model, tier: e.tier, ...(e.effort && !e.tier ? { variant: e.effort } : {}) } : null;
+    if (!e) return null;
+    if (!e.effort) return { model: e.model, tier: e.tier };
+    return e.tier ? { model: e.model, tier: true, effort: e.effort } : { model: e.model, tier: false, variant: e.effort };
   };
   const plan = selection(PLAN_MODEL_KEY);
   const conductor = selection(CONDUCTOR_MODEL_KEY);
@@ -77,7 +82,7 @@ export function overpassResolution(routing) {
 
 /** The project's resolution on this host (overpassResolution). Throws on an unreadable config or a value the transform cannot carry. */
 export function projectOverpass(root) {
-  return overpassResolution(projectRouting(loadConfig(root) ?? {}));
+  return overpassResolution(projectRouting(loadConfig(root) ?? {}, { agentKeys: openCodeCustomAgentKeys(root) }));
 }
 
 /**
@@ -97,7 +102,8 @@ export function dispatchOverpass(root) {
   }
   if (!isObject(config)) return { res: null, unreadable: new Error('it is not a JSON object') };
   // `routing` is what dispatch-model.mjs resolves each dispatch from.
-  const routing = projectRouting(config);
+  // An adopted agent is dispatched by the name OpenCode serves it under; agentKeys maps that to its config key.
+  const routing = projectRouting(config, { agentKeys: openCodeCustomAgentKeys(root) });
   return { res: overpassResolution(routing), unreadable: null, routing };
 }
 
@@ -204,21 +210,29 @@ export function availableAgainLine(res) {
 
 /**
  * The client reasoning effort for one model request of `agent` on `model` (the context
- * hook's Model.Ref, { providerID, id }), or null to leave the request alone. Set only
- * when the request's session is known to come from a dispatch (`dispatched`, from
- * createLaneDispatches().dispatchOf; null when that cannot be told), the agent maps to a role
- * on an Overpass tier with an effort set, and the request runs on exactly that role's tier
- * model. Any other model, a call's own named one included, is never touched.
+ * hook's Model.Ref, { providerID, id }), or null to leave the request alone. Two cases:
+ *   - the conductor's or Plan's own session (agent sterling/conductor or plan, both primary
+ *     agents a dispatch cannot start): its selection is a tier with an effort, and the request
+ *     runs on exactly that tier model;
+ *   - a subagent: set only when the request's session is known to come from a dispatch
+ *     (`dispatched`, from createLaneDispatches().dispatchOf; null when that cannot be told),
+ *     the agent maps to a config key (routingKey: an adopted agent's served name to its
+ *     custom-<slug> key) on an Overpass tier with an effort set, and the request runs on
+ *     exactly that key's tier model.
+ * Any other model, a call's own named one included, is never touched.
  */
 export function requestEffort(res, agent, model, dispatched) {
   if (!res?.effective) return null;
+  if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
+  const ref = `${model.providerID}/${model.id}`;
+  const primary = agent === CONDUCTOR_AGENT ? res.conductor : agent === PLAN_AGENT ? res.plan : undefined;
+  if (primary !== undefined) return primary?.tier && primary.effort && ref === primary.model ? primary.effort : null;
   if (!dispatched) return null;
-  const role = agentRole(agent);
+  const role = res.routing ? routingKey(res.routing, agent) : agentRole(agent);
   if (typeof role !== 'string' || !Object.hasOwn(res.roles ?? {}, role)) return null;
   const route = res.roles[role];
   if (!route?.effort) return null;
-  if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
-  return `${model.providerID}/${model.id}` === route.model ? route.effort : null;
+  return ref === route.model ? route.effort : null;
 }
 
 /**

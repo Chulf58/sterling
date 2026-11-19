@@ -1331,3 +1331,62 @@ test('overlay: a non-tier conductor model writes its effort as the variant; the 
     p.cleanup();
   }
 });
+test('effort: the conductor and Plan selections on a tier keep their effort and send it on their own session requests, on exactly that tier model (item-G review finding 4)', async () => {
+  const p = makeProject({ models: { conductor: { model: 'overpass/agentic-conductor', effort: 'high' }, plan: { model: 'overpass/agentic-high', effort: 'max' } } });
+  const s = await setup(p.dir);
+  try {
+    const res = overpass.projectOverpass(p.dir);
+    assert.deepEqual(res.conductor, { model: 'overpass/agentic-conductor', tier: true, effort: 'high' });
+    assert.deepEqual(res.plan, { model: 'overpass/agentic-high', tier: true, effort: 'max' });
+    assert.deepEqual(overpass.desiredOverlay(res), { plan: { model: 'overpass/agentic-high' }, 'sterling/conductor': { model: 'overpass/agentic-conductor' } }, 'a tier effort is never written as a variant');
+    assert.equal(overpass.requestEffort(res, 'sterling/conductor', { providerID: 'overpass', id: 'agentic-conductor' }, null), 'high');
+    assert.equal(overpass.requestEffort(res, 'plan', { providerID: 'overpass', id: 'agentic-high' }, null), 'max');
+    assert.equal((await request(s, 'sterling/conductor', { providerID: 'overpass', id: 'agentic-conductor' }, {}, 'ses_root')).reasoningEffort, 'high');
+    assert.equal((await request(s, 'plan', { providerID: 'overpass', id: 'agentic-high' }, {}, 'ses_plan')).reasoningEffort, 'max');
+    assert.equal(has(await request(s, 'sterling/conductor', { providerID: 'anthropic', id: 'claude-opus-5-5' }, {}, 'ses_root')), false, 'another model is never touched');
+    assert.equal(has(await request(s, 'plan', { providerID: 'overpass', id: 'agentic-conductor' }, {}, 'ses_plan')), false, "Plan never takes the conductor's tier effort");
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('custom agents: an adopted agent dispatched by its served name gets its custom-<slug> model, effort, route and conflict refusal; a renamed source follows (item-G review finding 7)', async () => {
+  const { syncCustomAgents } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'custom-agent-render.mjs')).href);
+  const KEY = 'custom-team-scout';
+  const src = (name) => `---\nname: ${name}\ndescription: Scouts the team folders\n---\nFind things.\n`;
+  const p = makeProject({ models: { [KEY]: { model: 'openai/gpt-6.1-sol', effort: 'high' } } });
+  mkdirSync(join(p.dir, 'agent-sources'), { recursive: true });
+  writeFileSync(join(p.dir, 'agent-sources', `${KEY}.md`), src('helper'));
+  const render = (config) => syncCustomAgents(p.dir, config, { hosts: ['opencode'] });
+  render({ models: { [KEY]: { model: 'openai/gpt-6.1-sol', effort: 'high' } } });
+  assert.ok(existsSync(join(p.dir, '.opencode', 'agents', 'helper.md')));
+  let s = await setup(p.dir);
+  try {
+    assert.equal((await s.dispatch({ agent: 'helper' })).args.model, 'openai/gpt-6.1-sol#high', 'the served name resolves through its config key');
+    // a tier with an effort: the route is the tier, and the linked lane's request carries the effort
+    writeConfig(p.dir, { models: { [KEY]: { model: 'overpass/agentic-premium', effort: 'max' } } });
+    childSessions(s);
+    assert.equal((await s.dispatch({ agent: 'helper' }, 'call_2')).args.model, 'overpass/agentic-premium');
+    await linkedLane(s, 'helper', 'ses_child1', 'call_3');
+    assert.equal((await request(s, 'helper', { providerID: 'overpass', id: 'agentic-premium' }, {}, 'ses_child1')).reasoningEffort, 'max');
+    // an unresolved two-model legacy entry refuses the dispatch by its served name
+    writeConfig(p.dir, { models: { [KEY]: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } });
+    await assert.rejects(s.dispatch({ agent: 'helper' }, 'call_4'), /refused this subagent dispatch: .*custom-team-scout/);
+  } finally {
+    await s.cleanup();
+  }
+  // rename the source: the served name moves, the old name no longer maps
+  writeConfig(p.dir, { models: { [KEY]: { model: 'openai/gpt-6.1-sol', effort: 'high' } } });
+  writeFileSync(join(p.dir, 'agent-sources', `${KEY}.md`), src('aide'));
+  render({ models: { [KEY]: { model: 'openai/gpt-6.1-sol', effort: 'high' } } });
+  assert.ok(!existsSync(join(p.dir, '.opencode', 'agents', 'helper.md')));
+  s = await setup(p.dir);
+  try {
+    assert.equal((await s.dispatch({ agent: 'aide' })).args.model, 'openai/gpt-6.1-sol#high');
+    assert.equal((await s.dispatch({ agent: 'helper' }, 'call_2')).args.model, undefined, 'the old served name maps to nothing');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});

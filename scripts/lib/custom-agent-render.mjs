@@ -488,6 +488,20 @@ function stampedOutputs(root) {
   return out;
 }
 
+/**
+ * The config key of each adopted agent OpenCode serves, by the name OpenCode serves it under:
+ * Map<name, key> read from the stamps of the copies in .opencode/agents/. A dispatch names the
+ * served name (the source's frontmatter name), while config.models is keyed custom-<slug>, so the
+ * dispatch resolver maps one to the other through this (dispatch-model.mjs routingKey).
+ */
+export function openCodeCustomAgentKeys(projectRoot) {
+  const keys = new Map();
+  for (const o of stampedOutputs(projectRoot)) {
+    if (o.host === 'opencode') keys.set(o.rel.slice('.opencode/agents/'.length, -'.md'.length), o.key);
+  }
+  return keys;
+}
+
 /** True when any host folder holds a stamped custom-agent copy: the sync has outputs to reconcile even with no custom key left. */
 export function hasCustomOutputs(projectRoot) {
   return stampedOutputs(projectRoot).length > 0;

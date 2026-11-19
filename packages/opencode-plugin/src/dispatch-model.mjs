@@ -37,15 +37,17 @@ export function conflictRefusal(role) {
  * through the provider) or { problem }. The eight shipped roles always have an entry (their
  * defaults). `modelsProblem` is set when config.models is not an object. Throws what
  * toCanonicalConfig throws for a legacy value it cannot carry, and for an overpass block or
- * provider that is not valid, so the caller refuses rather than guess a route.
+ * provider that is not valid, so the caller refuses rather than guess a route. `agentKeys`
+ * (Map<served name, config key>, custom-agent-render.mjs openCodeCustomAgentKeys) maps an
+ * adopted agent's served name to its custom-<slug> key; see routingKey.
  */
-export function projectRouting(config) {
+export function projectRouting(config, { agentKeys } = {}) {
   const { config: canon, conflicts } = toCanonicalConfig(isObject(config) ? config : {});
   const overpass = canon.overpass;
   if (overpass !== undefined && !isObject(overpass)) throw new Error(`config.overpass is ${JSON.stringify(overpass)} — it must be an object`);
   const provider = overpass?.provider ?? DEFAULT_OVERPASS_PROVIDER;
   if (typeof provider !== 'string' || !OVERPASS_PROVIDER_RE.test(provider)) throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} — it must be letters, digits, '-', '_' and '.'`);
-  const routing = { provider, conflicts: new Set(conflicts.map((c) => c.role)), entries: {} };
+  const routing = { provider, conflicts: new Set(conflicts.map((c) => c.role)), entries: {}, agentKeys: agentKeys instanceof Map ? agentKeys : new Map() };
   const raw = canon.models;
   if (raw !== undefined && !isObject(raw)) {
     routing.modelsProblem = `config.models is ${JSON.stringify(raw)}, not an object`;
@@ -68,6 +70,13 @@ export function projectRouting(config) {
     add(key, parsed.data[key]);
   }
   return routing;
+}
+
+/** The config.models key an agent name is routed by: an adopted agent's served name maps to its
+ *  custom-<slug> key (routing.agentKeys); any other name is its role (agentRole). */
+export function routingKey(routing, agent) {
+  const role = agentRole(agent);
+  return typeof role === 'string' && routing?.agentKeys?.has(role) ? routing.agentKeys.get(role) : role;
 }
 
 /**
@@ -99,7 +108,7 @@ export function resolveDispatchModel(role, routing) {
  * availability check. Throws conflictRefusal for a role with two models.
  */
 export function dispatchModel(routing, args) {
-  const role = agentRole(args?.agent);
+  const role = routingKey(routing, args?.agent);
   const named = typeof args?.model === 'string' && args.model ? args.model : null;
   // A call that resumes a subagent session (`sessionID` on 2.1.2's subagent tool, the old task_id)
   // keeps that session's own model: a model on the call would beat it and switch a warm session.
