@@ -5703,6 +5703,9 @@ function resolveOverpass(config2, opts) {
   const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled)
     return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== "opencode")
     return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base2, effective: true, conductorRouted: !bypass };
@@ -7317,16 +7320,16 @@ function prepareCanonicalConfigMigration(projectDir, { resolutions: resolutions2
   }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return refuse("is not a JSON object");
   const applied = Array.isArray(raw.applied_config_migrations) ? raw.applied_config_migrations : [];
-  let legacy = raw;
-  const legacyLines = [];
+  const m = migrateRetiredModelKeys(raw);
+  const a = migrateStaleAgyModels(m.config);
+  let legacy = a.config;
+  const legacyLines = [...describeMigration(m.dropped), ...describeStaleAgy(a.dropped)];
   if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
-    const m = migrateRetiredModelKeys(legacy);
-    const a = migrateStaleAgyModels(m.config);
-    const h = moveImplementorHardTask(a.config);
+    const h = moveImplementorHardTask(legacy);
     const o = resetOverpassDefaults(h.config);
     if (o.refusal) return refuse(o.refusal);
     legacy = o.config;
-    legacyLines.push(...describeMigration(m.dropped), ...describeStaleAgy(a.dropped), ...describeHardMove(h.move), ...describeOverpassReset(o));
+    legacyLines.push(...describeHardMove(h.move), ...describeOverpassReset(o));
   }
   let result;
   try {
@@ -12273,7 +12276,7 @@ function stampedOutputs(root) {
   const out = [];
   const scan = (host, rel) => {
     const dir = join16(root, rel);
-    if (!existsSync11(dir) || symlinkIn(root, rel)) return;
+    if (!existsSync11(dir) || symlinkIn(root, rel) || !lstatSync7(dir).isDirectory()) return;
     for (const e of readdirSync6(dir, { withFileTypes: true })) {
       if (host === "agy" ? !e.isDirectory() : !(e.isFile() && e.name.endsWith(".md"))) continue;
       const fileRel = host === "agy" ? `${rel}/${e.name}/agent.md` : `${rel}/${e.name}`;

@@ -5711,6 +5711,9 @@ function resolveOverpass(config, opts) {
   const base3 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled)
     return { ...base3, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base3, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== "opencode")
     return { ...base3, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base3, effective: true, conductorRouted: !bypass };

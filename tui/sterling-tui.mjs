@@ -44919,6 +44919,9 @@ function resolveOverpass(config, opts) {
   const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled)
     return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== "opencode")
     return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base2, effective: true, conductorRouted: !bypass };
@@ -59349,7 +59352,7 @@ function stampedOutputs(root) {
   const out = [];
   const scan = (host2, rel) => {
     const dir = join24(root, rel);
-    if (!existsSync16(dir) || symlinkIn(root, rel)) return;
+    if (!existsSync16(dir) || symlinkIn(root, rel) || !lstatSync8(dir).isDirectory()) return;
     for (const e of readdirSync7(dir, { withFileTypes: true })) {
       if (host2 === "agy" ? !e.isDirectory() : !(e.isFile() && e.name.endsWith(".md"))) continue;
       const fileRel = host2 === "agy" ? `${rel}/${e.name}/agent.md` : `${rel}/${e.name}`;
