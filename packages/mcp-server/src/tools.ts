@@ -1924,7 +1924,7 @@ function configSetImpl(
 
   // A config already in the canonical shape is held to the STRICT canonical check, so a write can
   // never put a retired key (mode, sparring_partner, a per-host model field) back. A legacy config
-  // on disk, not yet migrated by /sterling:update, is read through the one transform (parseConfig),
+  // on disk and awaiting /sterling:update is read through the one transform (parseConfig),
   // which tolerates what is already there (anti_pattern
   // config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes: the write is still
   // validated, never stripped).
