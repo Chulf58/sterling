@@ -1507,24 +1507,30 @@ export function refreshFullAgentModels({ projectDir, pluginRoot }) {
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
   writeFullAgentFiles(staged.writes);
-  const gone = staged.rows.filter((r) => r.status === 'removed' && r.item.startsWith(`${STERLING_AGENTS_SUBDIR}/`)).map((r) => r.item.slice('.opencode/agents/'.length, -'.md'.length));
-  const configRow = dropGuardOnlyAgentEntries(projectDir, gone);
+  // Converges from the current state, not from this run's deletions: every Sterling agent whose model
+  // OpenCode cannot run and whose file is not on disk now (removed by this run or an earlier one) has its
+  // guard-only entry dropped, so a run whose config write failed is finished by the next one.
+  const gone = Object.keys(configured.unsupported ?? {})
+    .filter((name) => ROSTER.includes(name) && !existsSync(join(projectDir, STERLING_AGENTS_SUBDIR, `${name}.md`)))
+    .map((name) => `sterling/${name}`);
+  const configRow = dropGuardOnlyAgentEntries(projectDir, gone, { tracked });
   return { rows: configRow ? [...staged.rows, configRow] : staged.rows };
 }
 
 /**
  * Drop the guard-only `agent["<name>"]` entries Sterling wrote into .opencode/opencode.json for
- * Sterling agents whose file was just removed: OpenCode defines an agent from such an entry alone
+ * Sterling agents whose file is gone because OpenCode cannot run their model: OpenCode defines an agent from such an entry alone
  * (ensureProjectConfig, "An entry for a name OpenCode does not otherwise know creates an agent"), so
  * the agent would stay. An entry that is not exactly Sterling's guard-only one is the user's and is
  * kept, with a row saying so. setupOpenCode needs none of this: its ensureProjectConfig runs after the
  * removal and drops the entry of an agent that is no longer visible. Returns a row, or null when
  * there is nothing to do.
  */
-function dropGuardOnlyAgentEntries(projectDir, names) {
+function dropGuardOnlyAgentEntries(projectDir, names, { tracked = [] } = {}) {
   if (!names.length) return null;
   const path = join(projectDir, PROJECT_CONFIG_REL);
   if (!existsSync(path)) return null;
+  const isTracked = tracked.includes(PROJECT_CONFIG_REL);
   const before = normalize(readFileSync(path, 'utf8'));
   let config;
   try {
@@ -1542,18 +1548,24 @@ function dropGuardOnlyAgentEntries(projectDir, names) {
   for (const name of names) {
     if (!Object.hasOwn(agents, name)) continue;
     const text = JSON.stringify(agents[name]);
-    if (text === guardOnly || text === legacyGuardOnly) {
-      delete agents[name];
-      removed.push(name);
-    } else kept.push(name);
+    if (text === guardOnly || text === legacyGuardOnly) removed.push(name);
+    else kept.push(name);
   }
+  const keptNote = kept.length ? `KEPT agent entries ${kept.join(', ')}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone` : null;
+  if (!removed.length) return keptNote ? { item: PROJECT_CONFIG_REL, status: 'skipped', detail: keptNote } : null;
+  if (isTracked) {
+    // A tracked opencode.json is never written by Sterling (decision
+    // overpass-with-a-tracked-opencode-opencode-json-keep-routing): the stranded entries are reported instead.
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(', ')} stay and OpenCode still defines those agents although their files were removed; remove those entries by hand (or untrack the file), then rerun /sterling:update`, keptNote].filter(Boolean).join('; ') };
+  }
+  for (const name of removed) delete agents[name];
   if (!Object.keys(agents).length) delete config.agent;
-  const parts = [];
-  if (removed.length) parts.push(`removed the guard-only agent entries of ${removed.join(', ')}, whose agent files were removed`);
-  if (kept.length) parts.push(`KEPT agent entries ${kept.join(', ')}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone`);
-  if (!parts.length) return null;
-  if (removed.length) writeFileAtomic(path, projectConfigText(config));
-  return { item: PROJECT_CONFIG_REL, status: removed.length ? 'refreshed' : 'skipped', detail: parts.join('; ') };
+  try {
+    writeFileAtomic(path, projectConfigText(config));
+  } catch (err) {
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: [`could not be rewritten (${err.code ?? err.message}), so the guard-only agent entries of ${removed.join(', ')} stay and OpenCode still defines those agents; fix the cause, then rerun /sterling:update, which removes them`, keptNote].filter(Boolean).join('; ') };
+  }
+  return { item: PROJECT_CONFIG_REL, status: 'refreshed', detail: [`removed the guard-only agent entries of ${removed.join(', ')}, whose agent files are gone`, keptNote].filter(Boolean).join('; ') };
 }
 
 /** Write staged files in order, each atomically, skipping a file that already holds its content; a write

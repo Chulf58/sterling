@@ -1572,3 +1572,54 @@ test('the conductor and Plan on a model OpenCode cannot run: no copy created, an
   assert.match(again.rows.find((x) => x.item.endsWith('.opencode/agents/plan.md')).detail, /config\.models\.plan is agy\/pro, which OpenCode cannot run, so Sterling would remove it; it is kept/);
   assert.equal(readFileSync(plan, 'utf8'), edited);
 });
+
+// Item-G review loop 3, findings 1 and 2: the guard cleanup converges from the unsupported roles and the files on
+// disk, never writes a tracked opencode.json, and a failed or refused write is finished by the next refresh.
+test('guard cleanup: a tracked opencode.json is left byte for byte and the stranded entries are reported', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const ocPath = join(dir, '.opencode', 'opencode.json');
+  git(dir, ['add', '-f', '.opencode/opencode.json']);
+  git(dir, ['commit', '-qm', 'track opencode.json']);
+  const before = readFileSync(ocPath, 'utf8');
+  writeConfig(dir, { scout: { model: 'agy/flash' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false);
+  assert.equal(readFileSync(ocPath, 'utf8'), before, 'a tracked file is never written');
+  const row = r.rows.find((x) => x.item === '.opencode/opencode.json');
+  assert.equal(row.status, 'skipped');
+  assert.match(row.detail, /NOT written: \.opencode\/opencode\.json is tracked by git, so the guard-only agent entries of sterling\/scout stay/);
+});
+
+test('guard cleanup: after a failed write (EACCES) or a malformed opencode.json, the next refresh removes the entry', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const ocDir = join(dir, '.opencode');
+  const ocPath = join(ocDir, 'opencode.json');
+  const oc = () => JSON.parse(readFileSync(ocPath, 'utf8'));
+  writeConfig(dir, { scout: { model: 'agy/flash' } });
+  chmodSync(ocDir, 0o500);
+  let r;
+  try {
+    r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  } finally {
+    chmodSync(ocDir, 0o700);
+  }
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false, 'the agent file went');
+  assert.match(r.rows.find((x) => x.item === '.opencode/opencode.json').detail, /could not be rewritten \(EACCES\)/);
+  assert.ok(oc().agent['sterling/scout'], 'the entry is still there after the failed write');
+  r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(oc().agent['sterling/scout'], undefined, 'the retry removes it although no file was removed this run');
+  // malformed, then repaired
+  writeConfig(dir, { scout: { model: 'agy/flash' }, researcher: { model: 'agy/pro' } });
+  const good = readFileSync(ocPath, 'utf8');
+  writeFileSync(ocPath, '{ not json');
+  r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'researcher.md')), false);
+  assert.match(r.rows.find((x) => x.item === '.opencode/opencode.json').detail, /not valid JSON/);
+  writeFileSync(ocPath, good);
+  refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(oc().agent['sterling/researcher'], undefined, 'after the repair the stranded entry is removed');
+});
