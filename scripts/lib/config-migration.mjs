@@ -1,31 +1,19 @@
-// Drop retired config.models keys from a project's .sterling/config.json, and add the
-// model defaults a live config lacks, for sync-agents and init (board c45a4507). DROP ONLY, never a carry (user-ruled
-// 2026-10-23): the keys have been ignored since the roster rename, so removing
-// one changes no rendered model; each removed value is reported so the user can
-// set the successor by hand. The add step (addModelDefaults in packages/schemas,
-// user-ruled 2026-10-23, "Write it into each config") writes, once per file, the
-// opencode_model of reviewer and sparring and the implementor's hard_task where they are
-// absent, never overwriting a value, and reports each add. The move step
-// (moveImplementorHardTask, decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-// then moves models.implementor.hard_task into models.implementor-hard, once per file, and
-// reports it. The last step (resetOverpassDefaults, decision overpass-per-role-default-tiers-implementor-
-// premium-sparring-premium-max) removes config.overpass.roles and sets overpass.conductor_bypass true,
-// once per file, touching those two keys only. The rewrites are migrateRetiredModelKeys, addModelDefaults,
-// moveImplementorHardTask and resetOverpassDefaults in packages/schemas; this wraps them in two steps so a caller can defer the write:
-//   prepareConfigMigration  reads, parses and plans; writes nothing.
-//   commitConfigMigration   replaces the file only if its bytes are still the ones
-//                           the plan was made from (the compare-and-swap config_set
-//                           in packages/mcp-server uses, mirrored here because a
-//                           bundled bin cannot import the MCP server), keeping the
-//                           file's mode. A concurrent change is refused, never lost.
-// A config that does not parse is never touched, and a migrated config that would
-// not parse is never written.
-// prepareCanonicalConfigMigration (below) is the settings-redesign rewrite into the canonical shape
-// (toCanonicalConfig); it commits through the same commitConfigMigration. The output stays the raw document minus the retired
-// keys plus the added defaults: parseConfig is a gate only, never serialized (it would materialize defaults).
+// The config migration for sync-agents and init (settings redesign, decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config): prepareCanonicalConfigMigration plans the
+// rewrite of `<project>/.sterling/config.json` into the canonical shape (toCanonicalConfig in packages/schemas)
+// and writes nothing; commitConfigMigration replaces the file only if its bytes are still the ones the plan was
+// made from (the compare-and-swap config_set in packages/mcp-server uses, mirrored here because a bundled bin
+// cannot import the MCP server), keeping the file's mode. A concurrent change is refused, never lost.
+// Before the transform, a file that has not been through it gets the steps below, once per file, DROP ONLY and
+// reported: migrateRetiredModelKeys (retired models keys, never carried), migrateStaleAgyModels, then
+// moveImplementorHardTask (models.implementor.hard_task into models.implementor-hard, decision
+// hard-implementor-is-its-own-agent-sterling-implementor-hard) and resetOverpassDefaults (removes
+// overpass.roles and sets conductor_bypass, decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max).
+// addModelDefaults is retired with the per-host model fields it wrote. A config that cannot be carried is never
+// touched, and a result that fails canonicalConfigSchema is never written.
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, addModelDefaults, canonicalConfigSchema, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, parseConfig, resetOverpassDefaults, toCanonicalConfig } from '@sterling/schemas';
+import { OVERPASS_DEFAULTS_MIGRATION_ID, canonicalConfigSchema, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, resetOverpassDefaults, toCanonicalConfig } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -48,15 +36,6 @@ export function describeMigration(dropped) {
 /** One report line per agy_model dropped for not being one of agy's four values (GitHub #310). */
 export function describeStaleAgy(dropped) {
   return dropped.map((d) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.role}.agy_model dropped (agy accepts only inherit, flash_lite, flash or pro, and drops a subagent with any other model); value was ${show(d.value)}, so the ${d.role} agy agent now runs on model: inherit; pick one of the four in the System tab if you want one`);
-}
-
-/** One report line per added default (addModelDefaults). */
-export function describeAdded(added) {
-  return added.map((a) =>
-    a.field === 'entry'
-      ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role} added as the shipped default ${show(a.value)}, so the System tab shows the model each OpenCode dispatch of this role runs on; change it there`
-      : `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role}.${a.field} added as ${show(a.value)} (the model the conductor named on these dispatches before); change it in the System tab, or clear it to run the role on its Claude model${a.field === 'hard_task' ? ' (cleared: no separate hard lane)' : ''}`
-  );
 }
 
 /** The report line of the implementor-hard move (moveImplementorHardTask), or none. */
@@ -95,64 +74,7 @@ function rewritable(projectDir, configPath, refuse) {
 
 const oneLine = (err) => err.message.replace(/\s+/g, ' ');
 
-/** Plan the migration of `<projectDir>/.sterling/config.json` and write nothing.
- *  status: absent (no file), unchanged (no retired key, defaults and the implementor-hard move already applied), ready (a plan to commit) or
- *  refused (the file stays as it is; `lines[0]` says why). */
-export function prepareConfigMigration(projectDir) {
-  const configPath = join(projectDir, '.sterling', 'config.json');
-  if (!existsSync(configPath)) return { status: 'absent', lines: [] };
-  const shown = configPath.replace(/\\/g, '/');
-  const refuse = (why) => ({ status: 'refused', lines: [`config migration refused: ${shown} ${why}; left untouched`] });
-  const originalBytes = readFileSync(configPath);
-  let raw;
-  try {
-    raw = JSON.parse(originalBytes.toString('utf8'));
-    parseConfig(raw);
-  } catch (err) {
-    return refuse(`does not parse or validate (${oneLine(err)})`);
-  }
-  const m = migrateRetiredModelKeys(raw);
-  const a = migrateStaleAgyModels(m.config);
-  const d = addModelDefaults(a.config);
-  const h = moveImplementorHardTask(d.config);
-  const o = resetOverpassDefaults(h.config);
-  if (o.refusal) return refuse(o.refusal);
-  if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: 'unchanged', lines: [] };
-  const placed = rewritable(projectDir, configPath, refuse);
-  if (placed.refused) return placed.refused;
-  const { stat } = placed;
-  try {
-    parseConfig(o.config);
-  } catch (err) {
-    return refuse(`would not validate after the migration (${oneLine(err)})`);
-  }
-  const text = originalBytes.toString('utf8');
-  return {
-    status: 'ready',
-    configPath,
-    shown,
-    originalBytes,
-    mode: stat.mode & 0o777,
-    next: JSON.stringify(o.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
-    config: o.config,
-    dropped: m.dropped,
-    staleAgy: a.dropped,
-    added: d.added,
-    hardMove: h.move,
-    overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
-    lines: [
-      ...describeMigration(m.dropped),
-      ...describeStaleAgy(a.dropped),
-      ...describeAdded(d.added),
-      ...(d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : []),
-      ...describeHardMove(h.move),
-      ...(h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : []),
-      ...describeOverpassReset(o),
-    ],
-  };
-}
-
-/** Commit a plan from prepareConfigMigration. A plan that is not `ready` is returned as it is.
+/** Commit a plan from prepareCanonicalConfigMigration. A plan that is not `ready` is returned as it is.
  *  Returns { ...plan, status: 'migrated' }, or { status: 'refused', lines } when the file changed
  *  since it was read or the write failed (nothing is written). `beforeRename` is a test seam that runs inside the
  *  window between the temp write and the final compare. Residual, as in config_set: the
@@ -285,11 +207,6 @@ export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}
     changes: result.changes,
     lines: [...legacyLines, ...describeCanonicalChanges(result.changes)],
   };
-}
-
-/** prepare and commit in one go (the legacy-steps-only migration; sync-agents and init use migrateProjectConfigCanonical). */
-export function migrateProjectConfig(projectDir, opts) {
-  return commitConfigMigration(prepareConfigMigration(projectDir), opts);
 }
 
 /** Plan and commit the canonical rewrite (prepareCanonicalConfigMigration, then commitConfigMigration).

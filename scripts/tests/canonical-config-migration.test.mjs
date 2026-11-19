@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readProjectMode } from '@sterling/schemas';
-import { CANONICAL_CONFIG_MIGRATION_ID, commitConfigMigration, prepareCanonicalConfigMigration, prepareConfigMigration } from '../lib/config-migration.mjs';
+import { CANONICAL_CONFIG_MIGRATION_ID, commitConfigMigration, prepareCanonicalConfigMigration } from '../lib/config-migration.mjs';
 
 function project(doc) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-canonical-migration-'));
