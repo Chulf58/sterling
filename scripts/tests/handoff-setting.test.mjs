@@ -168,7 +168,7 @@ for (const [mode, on] of COMBOS) {
   });
 }
 
-test('handoff CLI: a non-boolean setting is an ACTIONABLE refusal (exit 3) naming the value; an invalid MODE is not its business', () => {
+test('handoff CLI: a non-boolean setting is an ACTIONABLE refusal (exit 3) naming the value; an invalid MODE refuses the config by name', () => {
   const bad = project({ mode: 'work', handoff: { enabled: 'yes' } });
   const badMode = project({ mode: 'hobbyist', handoff: { enabled: true } });
   try {
@@ -176,9 +176,13 @@ test('handoff CLI: a non-boolean setting is an ACTIONABLE refusal (exit 3) namin
     assert.equal(r.status, 3, r.stdout + r.stderr);
     assert.match(r.stdout, /^handoff projection: REFUSED — .*"yes"/m);
     assert.deepEqual(handoffFiles(bad), []);
+    // Changed with the cutover (item G): parseConfig is canonical and an invalid legacy mode cannot be carried into config.workflow,
+    // so the projection refuses the config by name before writing anything (P5). It used to project, because parseConfig kept the
+    // invalid mode raw and the projection read only the handoff key.
     const m = handoffCli(badMode);
-    assert.equal(m.status, 0, m.stdout + m.stderr);
-    assert.deepEqual(handoffFiles(badMode), HANDOFF_FILES, 'the projection reads the handoff key, never the mode');
+    assert.notEqual(m.status, 0, m.stdout + m.stderr);
+    assert.match(m.stdout + m.stderr, /config\.mode is "hobbyist"/);
+    assert.deepEqual(handoffFiles(badMode), []);
   } finally {
     [bad, badMode].forEach(cleanup);
   }

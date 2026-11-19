@@ -166,6 +166,19 @@ if (linkedWorktree && !workflowError && !shipsPr) {
 // Pre-merge preflight: openProject fails loud on a missing store or malformed
 // config BEFORE anything lands (see the post-merge note below).
 stage('open-project');
+// parseConfig is canonical, so openProject would refuse a config carrying an invalid value as "malformed" (exit 1) before the
+// workflow refusal below could name it (exit 2, as commands/merge.md documents). A config that is valid JSON with an invalid
+// workflow is refused here, first; unreadable JSON keeps openProject's own loud refusal (ruling e13f0fb5).
+if (workflowError) {
+  let readsAsJson = false;
+  try {
+    JSON.parse(readFileSync(join(storeRoot, CONFIG_REL), 'utf8'));
+    readsAsJson = true;
+  } catch {
+    readsAsJson = false;
+  }
+  if (readsAsJson) fail(`direct-merge: ${workflowError?.message ?? workflowError} — refusing; nothing was run.`, 2);
+}
 openProject(storeRoot).store.close();
 
 if (workflowError) fail(`direct-merge: ${workflowError?.message ?? workflowError} — refusing; nothing was run.`, 2);
