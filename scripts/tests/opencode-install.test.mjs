@@ -1609,6 +1609,9 @@ test('guard cleanup: a tracked opencode.json is left byte for byte and the stran
   const row = r.rows.find((x) => x.item === '.opencode/opencode.json');
   assert.equal(row.status, 'skipped');
   assert.match(row.detail, /NOT written: \.opencode\/opencode\.json is tracked by git, so the guard-only agent entries of sterling\/scout stay/);
+  // decision overpass-with-a-tracked-opencode-opencode-json-keep-routing: a tracked file stays tracked; only manual removal of the named entries is offered
+  assert.match(row.detail, /remove those entries from it by hand/);
+  assert.doesNotMatch(row.detail, /untrack|git rm|--cached/i);
 });
 
 test('guard cleanup: after a failed write (EACCES) or a malformed opencode.json, the next refresh removes the entry', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {

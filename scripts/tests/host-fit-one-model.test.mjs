@@ -376,15 +376,16 @@ test('Claude conductor on a model Claude Code cannot run: activation is refused 
     // a settings file that does not turn the conductor on has nothing to refuse
     writeFileSync(settings, JSON.stringify({ autoMemoryEnabled: false }, null, 2) + '\n');
     assert.equal(ensureConductorActivation(dir, [{ name: 'conductor', status: 'unsupported_removed', detail }]).activation, 'skipped');
-    // Changed with loop 3, finding 5: the line tells the unsupported selection apart from the file on disk.
+    // Changed with loop 4, finding 1: the line states the unsupported selection and the observed file, never which
+    // agent the reading session is, and never that a present file is an edited copy.
     const sol = { models: { conductor: { model: 'openai/gpt-6.1-sol' } } };
     const absent = unsupportedAgentsLine({ config: sol, host: 'claude', root: dir });
-    assert.match(absent, /the conductor's model openai\/gpt-6\.1-sol cannot run on Claude Code, so it has no copy \(\.claude\/agents\/conductor\.md is absent\) and this session does NOT run as Sterling's conductor/);
+    assert.match(absent, /the conductor's model openai\/gpt-6\.1-sol cannot run on Claude Code; Sterling wrote no conductor copy \(\.claude\/agents\/conductor\.md is absent\), so a \.claude\/settings\.json "agent": "conductor" has no conductor file to start; pick a model Claude Code can run for the conductor in the TUI System tab/);
     mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
     writeFileSync(join(dir, '.claude', 'agents', 'conductor.md'), '---\nname: conductor\n---\nmine\n');
-    const edited = unsupportedAgentsLine({ config: sol, host: 'claude', root: dir });
-    assert.match(edited, /Sterling kept your edited \.claude\/agents\/conductor\.md but no longer maintains it, so this session runs that edited copy/);
-    assert.doesNotMatch(edited, /has no copy|does NOT run/);
+    const present = unsupportedAgentsLine({ config: sol, host: 'claude', root: dir });
+    assert.match(present, /the conductor's model openai\/gpt-6\.1-sol cannot run on Claude Code; a conductor file Sterling did not remove is present at \.claude\/agents\/conductor\.md, and it may not run openai\/gpt-6\.1-sol/);
+    for (const l of [absent, present, unsupportedAgentsLine({ config: sol, host: 'claude' })]) assert.doesNotMatch(l, /this session|edited|runs that/, l);
     assert.doesNotMatch(unsupportedAgentsLine({ config: sol, host: 'opencode', root: dir }), /conductor/, 'OpenCode runs Sol: nothing to say there');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -399,30 +400,40 @@ test('OpenCode conductor and Plan on an agy model: no overlay model and no subst
   assert.deepEqual(desiredOverlay(res), {});
   assert.equal(expectedSessionModel(res, 'plan'), null, 'no session model to nag about');
   const line = unsupportedAgentsLine({ config, host: 'opencode' });
-  // Changed with loop 3, finding 4: the conductor has its own line, saying what this session runs on.
-  assert.match(line, /this session runs on OpenCode's default agent, not on Sterling's conductor, because the conductor's model agy\/flash cannot run on OpenCode/);
+  // Changed with loop 4, finding 1: with no checkout to look at, the line claims no file state and no session identity.
+  assert.match(line, /the conductor's model agy\/flash cannot run on OpenCode, so Sterling writes no conductor copy for it; pick a model OpenCode can run for the conductor in the TUI System tab/);
+  assert.doesNotMatch(line, /this session/);
   assert.match(line, /plan \(agy\/pro\)/);
 });
 
-test('OpenCode conductor on a model OpenCode cannot run: the session-start lines say this session runs on OpenCode\'s default agent; default_agent is not cleared (item-G review loop 3, finding 4)', async () => {
+test('OpenCode conductor on a model OpenCode cannot run: the session-start lines state the selection and the observed files, never this session\'s identity; default_agent is not cleared (item-G review loop 3 finding 4, loop 4 finding 1)', async () => {
   const { operatingStateLines } = await import('../../packages/opencode-plugin/src/operating-state.mjs');
+  const { ensureFullAgents } = await import('../lib/opencode-install.mjs');
+  const repoRoot = join(import.meta.dirname, '..', '..');
   const dir = scratch('host-fit-oc-conductor-');
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { conductor: { model: 'agy/flash' } } }));
     mkdirSync(join(dir, '.opencode'), { recursive: true });
     writeFileSync(join(dir, '.opencode', 'opencode.json'), JSON.stringify({ default_agent: 'sterling/conductor' }));
-    const { lines } = operatingStateLines(dir, null);
-    const line = lines.find((l) => /default agent/.test(l));
-    assert.ok(line, lines.join('\n'));
-    assert.match(line, /this session runs on OpenCode's default agent, not on Sterling's conductor, because the conductor's model agy\/flash cannot run on OpenCode \(\.opencode\/agents\/sterling\/conductor\.md is absent; default_agent is left as it is\); pick a model OpenCode can run for the conductor in the TUI System tab/);
-    assert.equal(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).default_agent, 'sterling/conductor');
-    // an edited copy kept on disk: the session runs that copy, and the line says so instead
-    mkdirSync(join(dir, '.opencode', 'agents', 'sterling'), { recursive: true });
+    const lineOf = () => operatingStateLines(dir, null).lines.find((l) => /conductor's model/.test(l));
+    const absent = lineOf();
+    assert.match(absent, /the conductor's model agy\/flash cannot run on OpenCode; Sterling wrote no conductor copy \(\.opencode\/agents\/sterling\/conductor\.md is absent\), and default_agent still names it, so OpenCode starts its own default agent instead; pick a model OpenCode can run for the conductor in the TUI System tab/);
+    assert.equal(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).default_agent, 'sterling/conductor', 'default_agent is not cleared');
+    // default_agent naming another agent: the line does not claim it names the conductor
+    writeFileSync(join(dir, '.opencode', 'opencode.json'), JSON.stringify({ default_agent: 'build' }));
+    assert.match(lineOf(), /so if default_agent names sterling\/conductor, OpenCode starts its own default agent instead/);
+    // a child session (a reviewer lane) gets the same line: it is computed from the checkout, with no session in it
+    assert.equal(operatingStateLines(dir, null).lines.find((l) => /conductor's model/.test(l)), lineOf());
+    // an UNMODIFIED Sterling copy on disk: a file is present, and the line says only that
+    ensureFullAgents({ projectDir: dir, pluginRoot: repoRoot, tracked: [], models: {} });
+    assert.ok(existsSync(join(dir, '.opencode', 'agents', 'sterling', 'conductor.md')));
+    const unmodified = lineOf();
+    assert.match(unmodified, /a conductor file Sterling did not remove is present at \.opencode\/agents\/sterling\/conductor\.md, and it may not run agy\/flash/);
+    // an edited copy reads the same: a present file does not prove it was edited
     writeFileSync(join(dir, '.opencode', 'agents', 'sterling', 'conductor.md'), '---\nmode: primary\n---\nmine\n');
-    const kept = operatingStateLines(dir, null).lines.join('\n');
-    assert.match(kept, /Sterling kept your edited \.opencode\/agents\/sterling\/conductor\.md but no longer maintains it/);
-    assert.doesNotMatch(kept, /OpenCode's default agent/);
+    assert.equal(lineOf(), unmodified);
+    for (const l of [absent, unmodified]) assert.doesNotMatch(l, /this session|edited|runs that|default agent, not on/, l);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

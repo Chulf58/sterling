@@ -1557,7 +1557,7 @@ function dropGuardOnlyAgentEntries(projectDir, names, { tracked = [] } = {}) {
   if (isTracked) {
     // A tracked opencode.json is never written by Sterling (decision
     // overpass-with-a-tracked-opencode-opencode-json-keep-routing): the stranded entries are reported instead.
-    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(', ')} stay and OpenCode still defines those agents although their files were removed; remove those entries by hand (or untrack the file), then rerun /sterling:update`, keptNote].filter(Boolean).join('; ') };
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(', ')} stay and OpenCode still defines those agents although their files were removed; remove those entries from it by hand`, keptNote].filter(Boolean).join('; ') };
   }
   for (const name of removed) delete agents[name];
   if (!Object.keys(agents).length) delete config.agent;

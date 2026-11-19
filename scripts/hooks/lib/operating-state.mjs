@@ -215,20 +215,37 @@ export function unsupportedAgentsLine({ config, configUnreadable, host, root }) 
   const conflicts = rows.filter((r) => r.host === '*');
   let noCopy = rows.filter((r) => r.host !== '*');
   const parts = [];
-  // The conductor is the main session itself, not a dispatch, so its line says what THIS session runs on.
-  // The selection being unsupported is one fact; the file on disk is another: an edited copy Sterling would
-  // have removed is kept (unsupported_but_modified), and the session then runs that copy. `root` is the
-  // checkout the agent files live in; without it the file state is not claimed either way.
+  // The conductor gets its own line. It states two observed facts, the unsupported selection and the
+  // file at the conductor's path, and never which agent the reading session is: child sessions (a
+  // reviewer, a lane) receive this line too, and a file being present does not prove whose it is or
+  // whether it was edited. `root` is the checkout the agent files live in; without it the file state is
+  // not claimed.
   const conductor = noCopy.find((r) => r.agent === 'conductor');
   if (conductor && (host === 'claude' || host === 'opencode')) {
     noCopy = noCopy.filter((r) => r !== conductor);
     const rel = host === 'claude' ? '.claude/agents/conductor.md' : '.opencode/agents/sterling/conductor.md';
     const hostName = host === 'claude' ? 'Claude Code' : 'OpenCode';
+    const head = `the conductor's model ${conductor.model} cannot run on ${hostName}`;
     const fix = `pick a model ${hostName} can run for the conductor in the TUI System tab`;
     const present = root ? existsSync(join(root, rel)) : null;
-    if (present === true) parts.push(`the conductor's model ${conductor.model} cannot run on ${hostName}; Sterling kept your edited ${rel} but no longer maintains it, so this session runs that edited copy on whatever model it names, not the configured one; ${fix}`);
-    else if (host === 'claude') parts.push(`the conductor's model ${conductor.model} cannot run on Claude Code${present === false ? `, so it has no copy (${rel} is absent) and` : ', so'} this session does NOT run as Sterling's conductor even if .claude/settings.json names it; ${fix}`);
-    else parts.push(`this session runs on OpenCode's default agent, not on Sterling's conductor, because the conductor's model ${conductor.model} cannot run on OpenCode${present === false ? ` (${rel} is absent; default_agent is left as it is)` : ''}; ${fix}`);
+    if (present === true) {
+      parts.push(`${head}; a conductor file Sterling did not remove is present at ${rel}, and it may not run ${conductor.model}; ${fix}`);
+    } else if (present === null) {
+      parts.push(`${head}, so Sterling writes no conductor copy for it; ${fix}`);
+    } else if (host === 'claude') {
+      parts.push(`${head}; Sterling wrote no conductor copy (${rel} is absent), so a .claude/settings.json "agent": "conductor" has no conductor file to start; ${fix}`);
+    } else {
+      let defaultAgent;
+      try {
+        defaultAgent = JSON.parse(readFileSync(join(root, '.opencode', 'opencode.json'), 'utf8'))?.default_agent;
+      } catch {
+        defaultAgent = undefined;
+      }
+      const tail = defaultAgent === 'sterling/conductor'
+        ? 'and default_agent still names it, so OpenCode starts its own default agent instead'
+        : 'so if default_agent names sterling/conductor, OpenCode starts its own default agent instead';
+      parts.push(`${head}; Sterling wrote no conductor copy (${rel} is absent), ${tail}; ${fix}`);
+    }
   }
   if (noCopy.length) parts.push(`no ${host === 'claude' ? 'Claude Code' : host === 'opencode' ? 'OpenCode' : 'agy'} copy of ${noCopy.map(named).join(', ')}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
   if (conflicts.length) parts.push(`${conflicts.map(named).join(', ')}: dispatch refuses until you choose`);
