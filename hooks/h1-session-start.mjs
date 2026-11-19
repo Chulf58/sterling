@@ -16974,12 +16974,12 @@ function unsupportedAgentsLine({ config: config2, configUnreadable: configUnread
     } else {
       let defaultAgent;
       try {
-        defaultAgent = JSON.parse(readFileSync13(join23(root, ".opencode", "opencode.json"), "utf8"))?.default_agent;
-      } catch {
-        defaultAgent = void 0;
+        const doc = JSON.parse(readFileSync13(join23(root, ".opencode", "opencode.json"), "utf8"));
+        defaultAgent = doc !== null && typeof doc === "object" && !Array.isArray(doc) && doc.default_agent !== void 0 ? `default_agent is ${JSON.stringify(doc.default_agent)}` : "default_agent is not set";
+      } catch (e) {
+        defaultAgent = e?.code === "ENOENT" ? "there is no .opencode/opencode.json" : `default_agent could not be read (${e && e.message || e})`;
       }
-      const tail = defaultAgent === "sterling/conductor" ? "and default_agent still names it, so OpenCode starts its own default agent instead" : "so if default_agent names sterling/conductor, OpenCode starts its own default agent instead";
-      parts.push(`${head}; Sterling wrote no conductor copy (${rel} is absent), ${tail}; ${fix}`);
+      parts.push(`${head}; there is no conductor file at ${rel}; ${defaultAgent}; ${fix}`);
     }
   }
   if (noCopy.length) parts.push(`no ${host === "claude" ? "Claude Code" : host === "opencode" ? "OpenCode" : "agy"} copy of ${noCopy.map(named).join(", ")}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
