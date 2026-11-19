@@ -406,25 +406,31 @@ test('OpenCode conductor and Plan on an agy model: no overlay model and no subst
   assert.match(line, /plan \(agy\/pro\)/);
 });
 
-test('OpenCode conductor on a model OpenCode cannot run: the session-start lines state the selection and the observed files, never this session\'s identity; default_agent is not cleared (item-G review loop 3 finding 4, loop 4 finding 1)', async () => {
+test('OpenCode conductor on a model OpenCode cannot run: the session-start lines state the selection and the observed files, never which agent runs; default_agent is not cleared (item-G review loop 3 finding 4, loops 4 and 5 finding 1)', async () => {
   const { operatingStateLines } = await import('../../packages/opencode-plugin/src/operating-state.mjs');
   const { ensureFullAgents } = await import('../lib/opencode-install.mjs');
   const repoRoot = join(import.meta.dirname, '..', '..');
   const dir = scratch('host-fit-oc-conductor-');
+  const noAgentClaim = /this session|edited|runs that|default agent|starts its own|instead/;
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { conductor: { model: 'agy/flash' } } }));
     mkdirSync(join(dir, '.opencode'), { recursive: true });
-    writeFileSync(join(dir, '.opencode', 'opencode.json'), JSON.stringify({ default_agent: 'sterling/conductor' }));
+    const oc = join(dir, '.opencode', 'opencode.json');
+    writeFileSync(oc, JSON.stringify({ default_agent: 'sterling/conductor' }));
     const lineOf = () => operatingStateLines(dir, null).lines.find((l) => /conductor's model/.test(l));
     const absent = lineOf();
-    assert.match(absent, /the conductor's model agy\/flash cannot run on OpenCode; Sterling wrote no conductor copy \(\.opencode\/agents\/sterling\/conductor\.md is absent\), and default_agent still names it, so OpenCode starts its own default agent instead; pick a model OpenCode can run for the conductor in the TUI System tab/);
-    assert.equal(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).default_agent, 'sterling/conductor', 'default_agent is not cleared');
-    // default_agent naming another agent: the line does not claim it names the conductor
-    writeFileSync(join(dir, '.opencode', 'opencode.json'), JSON.stringify({ default_agent: 'build' }));
-    assert.match(lineOf(), /so if default_agent names sterling\/conductor, OpenCode starts its own default agent instead/);
-    // a child session (a reviewer lane) gets the same line: it is computed from the checkout, with no session in it
-    assert.equal(operatingStateLines(dir, null).lines.find((l) => /conductor's model/.test(l)), lineOf());
+    assert.match(absent, /the conductor's model agy\/flash cannot run on OpenCode; there is no conductor file at \.opencode\/agents\/sterling\/conductor\.md; default_agent is "sterling\/conductor"; pick a model OpenCode can run for the conductor in the TUI System tab/);
+    assert.equal(JSON.parse(readFileSync(oc, 'utf8')).default_agent, 'sterling/conductor', 'default_agent is not cleared');
+    // no file, but an inline primary definition in opencode.json still defines the conductor: no claim about which agent runs
+    writeFileSync(oc, JSON.stringify({ default_agent: 'sterling/conductor', agent: { 'sterling/conductor': { mode: 'primary', prompt: 'inline conductor' } } }));
+    const inline = lineOf();
+    assert.match(inline, /there is no conductor file at \.opencode\/agents\/sterling\/conductor\.md; default_agent is "sterling\/conductor"/);
+    // the observed default_agent is stated as read, whatever it names
+    writeFileSync(oc, JSON.stringify({ default_agent: 'build' }));
+    assert.match(lineOf(), /default_agent is "build"/);
+    writeFileSync(oc, JSON.stringify({}));
+    assert.match(lineOf(), /default_agent is not set/);
     // an UNMODIFIED Sterling copy on disk: a file is present, and the line says only that
     ensureFullAgents({ projectDir: dir, pluginRoot: repoRoot, tracked: [], models: {} });
     assert.ok(existsSync(join(dir, '.opencode', 'agents', 'sterling', 'conductor.md')));
@@ -433,7 +439,43 @@ test('OpenCode conductor on a model OpenCode cannot run: the session-start lines
     // an edited copy reads the same: a present file does not prove it was edited
     writeFileSync(join(dir, '.opencode', 'agents', 'sterling', 'conductor.md'), '---\nmode: primary\n---\nmine\n');
     assert.equal(lineOf(), unmodified);
-    for (const l of [absent, unmodified]) assert.doesNotMatch(l, /this session|edited|runs that|default agent, not on/, l);
+    for (const l of [absent, inline, unmodified]) assert.doesNotMatch(l, noAgentClaim, l);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode child session: a subagent session receives the conductor host-fit line through the plugin context, and it makes no identity claim (item-G review loop 5, finding 2)', async () => {
+  const { SterlingStore } = await import('../../packages/store/dist/index.js');
+  const { createContextHandler } = await import('../../packages/opencode-plugin/src/context.mjs');
+  const repoRoot = join(import.meta.dirname, '..', '..');
+  const dir = scratch('host-fit-oc-child-');
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture', models: { conductor: { model: 'agy/flash' } } }));
+    new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
+    mkdirSync(join(dir, '.opencode'), { recursive: true });
+    writeFileSync(join(dir, '.opencode', 'opencode.json'), JSON.stringify({ default_agent: 'sterling/conductor' }));
+    // ses_child is a reviewer lane under ses_root: OpenCode's session.get answers its parentID
+    const sessions = { ses_root: {}, ses_child: { parentID: 'ses_root' } };
+    const sent = [];
+    const session = { get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }), synthetic: async (arg) => void sent.push(arg) };
+    const h = createContextHandler({
+      openStore: (p) => new SterlingStore(p),
+      now: () => '2026-11-19T12:00:00.000Z',
+      rootOf: () => dir,
+      fenced: async (_n, _r, fn) => fn(),
+      rotationRestore: async () => '',
+      sessionSync: async () => {},
+      pluginRoot: repoRoot,
+      getSession: () => session,
+    });
+    await h.onPrompt({ sessionID: 'ses_child', messageID: 'msg_u', prompt: { text: 'review this' }, delivery: 'immediate' });
+    const childText = sent.filter((c) => c.sessionID === 'ses_child').map((c) => c.text).join('\n');
+    const line = childText.split('\n').find((l) => /conductor's model/.test(l));
+    assert.ok(line, 'the child session receives the host-fit line');
+    assert.match(line, /the conductor's model agy\/flash cannot run on OpenCode; there is no conductor file at \.opencode\/agents\/sterling\/conductor\.md; default_agent is "sterling\/conductor"/);
+    assert.doesNotMatch(line, /this session|default agent|starts its own|instead|runs that/, 'a reviewer lane is not told which agent it is');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
