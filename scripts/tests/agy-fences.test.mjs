@@ -157,8 +157,22 @@ test('GEMINI.md: the agy render of the target template fits agy\'s 24,000-byte c
 test('agy render of the conductor names the agy tools and states the measured limits', () => {
   const rel = 'agent-templates/conductor.md';
   const out = renderAgyText(readFileSync(join(repoRoot, rel), 'utf8'), rel, ALL);
-  for (const needle of ['agy --agent conductor', 'call_mcp_tool', 'invoke_subagent', 'send_message', 'ask_question', 'run_command', '`sterling-ro` server, started with `--read-only`', 'No Stop block']) {
+  for (const needle of ['agy --agent conductor', 'call_mcp_tool', 'invoke_subagent', 'send_message', 'ask_question', 'run_command', '`sterling-ro` server, started with `--read-only`', 'A Stop block fires once per turn']) {
     assert.ok(out.includes(needle), `conductor agy render lacks ${needle}`);
   }
   assert.ok(!out.includes('not in place yet'), 'the conductor no longer says the read-only guard is missing');
+});
+
+test('agy render of the conductor says H10 gives the 35%/50% pressure line on agy, keeps the unverified caveat and the no-window case; Claude and OpenCode renders do not', () => {
+  const rel = 'agent-templates/conductor.md';
+  const src = readFileSync(join(repoRoot, rel), 'utf8');
+  const agy = renderAgyText(src, rel);
+  for (const needle of ['H10 on agy notes pressure at 35% and warns at 50%', '`PLANNER_RESPONSE`', 'Gemini 4 Neon ids at 512000', 'measured against `windows.default`', '**Unverified:** the field names come from the issue report, not from a live agy run']) {
+    assert.ok(agy.includes(needle), `agy render lacks ${needle}`);
+  }
+  assert.ok(!agy.includes('do not promise a context-pressure line'), 'the stale agy claim is gone');
+  for (const render of [renderClaudeText, renderOpenCodeFullText]) {
+    const other = render(src, rel);
+    assert.ok(!other.includes('PLANNER_RESPONSE') && !other.includes('H10 on agy notes pressure'), 'only the agy render carries the agy pressure text');
+  }
 });

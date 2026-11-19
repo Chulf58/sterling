@@ -13447,8 +13447,35 @@ function agyContextTexts(out) {
   if (typeof parsed.systemMessage === "string" && parsed.systemMessage.trim()) texts.push(parsed.systemMessage);
   return texts;
 }
+var AGY_SYSTEM_MESSAGE_MAX_BYTES = 3500;
+function splitForAgy(text, maxBytes = AGY_SYSTEM_MESSAGE_MAX_BYTES) {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return [text];
+  const pieces = [];
+  let cur = "";
+  let curBytes = 0;
+  const push = (seg) => {
+    const b = Buffer.byteLength(seg, "utf8");
+    if (curBytes + b > maxBytes && cur) {
+      pieces.push(cur);
+      cur = "";
+      curBytes = 0;
+    }
+    cur += seg;
+    curBytes += b;
+  };
+  for (const line of text.split(/(?<=\n)/)) {
+    if (Buffer.byteLength(line, "utf8") <= maxBytes) {
+      push(line);
+      continue;
+    }
+    for (const ch of line) push(ch);
+  }
+  if (cur) pieces.push(cur);
+  return pieces;
+}
 function agyInjectEnvelope(texts) {
-  return JSON.stringify(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+  const steps = texts.flatMap((t) => splitForAgy(t)).map((t) => ({ systemMessage: { systemMessage: t } }));
+  return JSON.stringify(steps.length ? { injectSteps: steps } : {});
 }
 function agyBlockReason(text) {
   if (agy.active) agy.errText.push(String(text));
@@ -14566,6 +14593,15 @@ function latestUsage(path) {
     try {
       entry = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (entry.type === "PLANNER_RESPONSE") {
+      sawAssistant = true;
+      if (typeof entry.input_tokens === "number") {
+        const usage2 = { input_tokens: entry.input_tokens };
+        if (typeof entry.cache_read_tokens === "number") usage2.cache_read_input_tokens = entry.cache_read_tokens;
+        return { usage: usage2, model: entry.model, reason: null };
+      }
       continue;
     }
     if (entry.type !== "assistant") continue;

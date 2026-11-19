@@ -5,6 +5,11 @@
     "claude-opus-5": 1000000,
     "claude-sonnet-5": 1000000,
     "claude-haiku-4-5": 200000,
-    "claude-haiku-5-5": 1000000
+    "claude-haiku-5-5": 1000000,
+    "gemini-4-neon-low": 512000,
+    "gemini-4-neon-medium": 512000,
+    "gemini-4-neon-high": 512000,
+    "gemini-4-neon-xhigh": 512000,
+    "gemini-pro-orchestrator-neon": 512000
   }
 }

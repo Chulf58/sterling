@@ -8,8 +8,8 @@ var __export = (target, all) => {
 
 // scripts/sync-agents.mjs
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { dirname as dirname6, join as join17, resolve as resolve9 } from "node:path";
-import { readFileSync as readFileSync13, existsSync as existsSync12 } from "node:fs";
+import { dirname as dirname6, join as join18, resolve as resolve9 } from "node:path";
+import { readFileSync as readFileSync14, existsSync as existsSync13 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -157,9 +157,9 @@ var util;
   };
   util2.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object) => {
     const keys = [];
-    for (const key in object) {
-      if (Object.prototype.hasOwnProperty.call(object, key)) {
-        keys.push(key);
+    for (const key2 in object) {
+      if (Object.prototype.hasOwnProperty.call(object, key2)) {
+        keys.push(key2);
       }
     }
     return keys;
@@ -559,10 +559,10 @@ var ParseStatus = class _ParseStatus {
   static async mergeObjectAsync(status, pairs) {
     const syncPairs = [];
     for (const pair of pairs) {
-      const key = await pair.key;
+      const key2 = await pair.key;
       const value = await pair.value;
       syncPairs.push({
-        key,
+        key: key2,
         value
       });
     }
@@ -571,17 +571,17 @@ var ParseStatus = class _ParseStatus {
   static mergeObjectSync(status, pairs) {
     const finalObject = {};
     for (const pair of pairs) {
-      const { key, value } = pair;
-      if (key.status === "aborted")
+      const { key: key2, value } = pair;
+      if (key2.status === "aborted")
         return INVALID;
       if (value.status === "aborted")
         return INVALID;
-      if (key.status === "dirty")
+      if (key2.status === "dirty")
         status.dirty();
       if (value.status === "dirty")
         status.dirty();
-      if (key.value !== "__proto__" && (typeof value.value !== "undefined" || pair.alwaysSet)) {
-        finalObject[key.value] = value.value;
+      if (key2.value !== "__proto__" && (typeof value.value !== "undefined" || pair.alwaysSet)) {
+        finalObject[key2.value] = value.value;
       }
     }
     return { status: status.value, value: finalObject };
@@ -606,12 +606,12 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path, key) {
+  constructor(parent, value, path, key2) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
     this._path = path;
-    this._key = key;
+    this._key = key2;
   }
   get path() {
     if (!this._cachedPath.length) {
@@ -2356,9 +2356,9 @@ ZodArray.create = (schema, params) => {
 function deepPartialify(schema) {
   if (schema instanceof ZodObject) {
     const newShape = {};
-    for (const key in schema.shape) {
-      const fieldSchema = schema.shape[key];
-      newShape[key] = ZodOptional.create(deepPartialify(fieldSchema));
+    for (const key2 in schema.shape) {
+      const fieldSchema = schema.shape[key2];
+      newShape[key2] = ZodOptional.create(deepPartialify(fieldSchema));
     }
     return new ZodObject({
       ...schema._def,
@@ -2409,29 +2409,29 @@ var ZodObject = class _ZodObject extends ZodType {
     const { shape, keys: shapeKeys } = this._getCached();
     const extraKeys = [];
     if (!(this._def.catchall instanceof ZodNever && this._def.unknownKeys === "strip")) {
-      for (const key in ctx.data) {
-        if (!shapeKeys.includes(key)) {
-          extraKeys.push(key);
+      for (const key2 in ctx.data) {
+        if (!shapeKeys.includes(key2)) {
+          extraKeys.push(key2);
         }
       }
     }
     const pairs = [];
-    for (const key of shapeKeys) {
-      const keyValidator = shape[key];
-      const value = ctx.data[key];
+    for (const key2 of shapeKeys) {
+      const keyValidator = shape[key2];
+      const value = ctx.data[key2];
       pairs.push({
-        key: { status: "valid", value: key },
-        value: keyValidator._parse(new ParseInputLazyPath(ctx, value, ctx.path, key)),
-        alwaysSet: key in ctx.data
+        key: { status: "valid", value: key2 },
+        value: keyValidator._parse(new ParseInputLazyPath(ctx, value, ctx.path, key2)),
+        alwaysSet: key2 in ctx.data
       });
     }
     if (this._def.catchall instanceof ZodNever) {
       const unknownKeys = this._def.unknownKeys;
       if (unknownKeys === "passthrough") {
-        for (const key of extraKeys) {
+        for (const key2 of extraKeys) {
           pairs.push({
-            key: { status: "valid", value: key },
-            value: { status: "valid", value: ctx.data[key] }
+            key: { status: "valid", value: key2 },
+            value: { status: "valid", value: ctx.data[key2] }
           });
         }
       } else if (unknownKeys === "strict") {
@@ -2448,15 +2448,15 @@ var ZodObject = class _ZodObject extends ZodType {
       }
     } else {
       const catchall = this._def.catchall;
-      for (const key of extraKeys) {
-        const value = ctx.data[key];
+      for (const key2 of extraKeys) {
+        const value = ctx.data[key2];
         pairs.push({
-          key: { status: "valid", value: key },
+          key: { status: "valid", value: key2 },
           value: catchall._parse(
-            new ParseInputLazyPath(ctx, value, ctx.path, key)
+            new ParseInputLazyPath(ctx, value, ctx.path, key2)
             //, ctx.child(key), value, getParsedType(value)
           ),
-          alwaysSet: key in ctx.data
+          alwaysSet: key2 in ctx.data
         });
       }
     }
@@ -2464,10 +2464,10 @@ var ZodObject = class _ZodObject extends ZodType {
       return Promise.resolve().then(async () => {
         const syncPairs = [];
         for (const pair of pairs) {
-          const key = await pair.key;
+          const key2 = await pair.key;
           const value = await pair.value;
           syncPairs.push({
-            key,
+            key: key2,
             value,
             alwaysSet: pair.alwaysSet
           });
@@ -2592,8 +2592,8 @@ var ZodObject = class _ZodObject extends ZodType {
   //   }) as any;
   //   return merged;
   // }
-  setKey(key, schema) {
-    return this.augment({ [key]: schema });
+  setKey(key2, schema) {
+    return this.augment({ [key2]: schema });
   }
   // merge<Incoming extends AnyZodObject>(
   //   merging: Incoming
@@ -2624,9 +2624,9 @@ var ZodObject = class _ZodObject extends ZodType {
   }
   pick(mask) {
     const shape = {};
-    for (const key of util.objectKeys(mask)) {
-      if (mask[key] && this.shape[key]) {
-        shape[key] = this.shape[key];
+    for (const key2 of util.objectKeys(mask)) {
+      if (mask[key2] && this.shape[key2]) {
+        shape[key2] = this.shape[key2];
       }
     }
     return new _ZodObject({
@@ -2636,9 +2636,9 @@ var ZodObject = class _ZodObject extends ZodType {
   }
   omit(mask) {
     const shape = {};
-    for (const key of util.objectKeys(this.shape)) {
-      if (!mask[key]) {
-        shape[key] = this.shape[key];
+    for (const key2 of util.objectKeys(this.shape)) {
+      if (!mask[key2]) {
+        shape[key2] = this.shape[key2];
       }
     }
     return new _ZodObject({
@@ -2654,12 +2654,12 @@ var ZodObject = class _ZodObject extends ZodType {
   }
   partial(mask) {
     const newShape = {};
-    for (const key of util.objectKeys(this.shape)) {
-      const fieldSchema = this.shape[key];
-      if (mask && !mask[key]) {
-        newShape[key] = fieldSchema;
+    for (const key2 of util.objectKeys(this.shape)) {
+      const fieldSchema = this.shape[key2];
+      if (mask && !mask[key2]) {
+        newShape[key2] = fieldSchema;
       } else {
-        newShape[key] = fieldSchema.optional();
+        newShape[key2] = fieldSchema.optional();
       }
     }
     return new _ZodObject({
@@ -2669,16 +2669,16 @@ var ZodObject = class _ZodObject extends ZodType {
   }
   required(mask) {
     const newShape = {};
-    for (const key of util.objectKeys(this.shape)) {
-      if (mask && !mask[key]) {
-        newShape[key] = this.shape[key];
+    for (const key2 of util.objectKeys(this.shape)) {
+      if (mask && !mask[key2]) {
+        newShape[key2] = this.shape[key2];
       } else {
-        const fieldSchema = this.shape[key];
+        const fieldSchema = this.shape[key2];
         let newField = fieldSchema;
         while (newField instanceof ZodOptional) {
           newField = newField._def.innerType;
         }
-        newShape[key] = newField;
+        newShape[key2] = newField;
       }
     }
     return new _ZodObject({
@@ -2922,14 +2922,14 @@ function mergeValues(a, b) {
     return { valid: true, data: a };
   } else if (aType === ZodParsedType.object && bType === ZodParsedType.object) {
     const bKeys = util.objectKeys(b);
-    const sharedKeys = util.objectKeys(a).filter((key) => bKeys.indexOf(key) !== -1);
+    const sharedKeys = util.objectKeys(a).filter((key2) => bKeys.indexOf(key2) !== -1);
     const newObj = { ...a, ...b };
-    for (const key of sharedKeys) {
-      const sharedValue = mergeValues(a[key], b[key]);
+    for (const key2 of sharedKeys) {
+      const sharedValue = mergeValues(a[key2], b[key2]);
       if (!sharedValue.valid) {
         return { valid: false };
       }
-      newObj[key] = sharedValue.data;
+      newObj[key2] = sharedValue.data;
     }
     return { valid: true, data: newObj };
   } else if (aType === ZodParsedType.array && bType === ZodParsedType.array) {
@@ -3093,11 +3093,11 @@ var ZodRecord = class _ZodRecord extends ZodType {
     const pairs = [];
     const keyType = this._def.keyType;
     const valueType = this._def.valueType;
-    for (const key in ctx.data) {
+    for (const key2 in ctx.data) {
       pairs.push({
-        key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, key)),
-        value: valueType._parse(new ParseInputLazyPath(ctx, ctx.data[key], ctx.path, key)),
-        alwaysSet: key in ctx.data
+        key: keyType._parse(new ParseInputLazyPath(ctx, key2, ctx.path, key2)),
+        value: valueType._parse(new ParseInputLazyPath(ctx, ctx.data[key2], ctx.path, key2)),
+        alwaysSet: key2 in ctx.data
       });
     }
     if (ctx.common.async) {
@@ -3145,9 +3145,9 @@ var ZodMap = class extends ZodType {
     }
     const keyType = this._def.keyType;
     const valueType = this._def.valueType;
-    const pairs = [...ctx.data.entries()].map(([key, value], index) => {
+    const pairs = [...ctx.data.entries()].map(([key2, value], index) => {
       return {
-        key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"])),
+        key: keyType._parse(new ParseInputLazyPath(ctx, key2, ctx.path, [index, "key"])),
         value: valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"]))
       };
     });
@@ -3155,30 +3155,30 @@ var ZodMap = class extends ZodType {
       const finalMap = /* @__PURE__ */ new Map();
       return Promise.resolve().then(async () => {
         for (const pair of pairs) {
-          const key = await pair.key;
+          const key2 = await pair.key;
           const value = await pair.value;
-          if (key.status === "aborted" || value.status === "aborted") {
+          if (key2.status === "aborted" || value.status === "aborted") {
             return INVALID;
           }
-          if (key.status === "dirty" || value.status === "dirty") {
+          if (key2.status === "dirty" || value.status === "dirty") {
             status.dirty();
           }
-          finalMap.set(key.value, value.value);
+          finalMap.set(key2.value, value.value);
         }
         return { status: status.value, value: finalMap };
       });
     } else {
       const finalMap = /* @__PURE__ */ new Map();
       for (const pair of pairs) {
-        const key = pair.key;
+        const key2 = pair.key;
         const value = pair.value;
-        if (key.status === "aborted" || value.status === "aborted") {
+        if (key2.status === "aborted" || value.status === "aborted") {
           return INVALID;
         }
-        if (key.status === "dirty" || value.status === "dirty") {
+        if (key2.status === "dirty" || value.status === "dirty") {
           status.dirty();
         }
-        finalMap.set(key.value, value.value);
+        finalMap.set(key2.value, value.value);
       }
       return { status: status.value, value: finalMap };
     }
@@ -5047,8 +5047,8 @@ var agentModelEntry = external_exports.object({
 }).strict();
 var CUSTOM_AGENT_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 var CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
-function isCustomAgentKey(key) {
-  return CUSTOM_AGENT_KEY_RE.test(key);
+function isCustomAgentKey(key2) {
+  return CUSTOM_AGENT_KEY_RE.test(key2);
 }
 var customAgentEntry = agentModelEntry.partial();
 var vendorPins = external_exports.object({
@@ -5262,13 +5262,13 @@ var configSchema = external_exports.object({
     // lookup, so a cheap model at low effort like the scout.
     preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
   }).catchall(customAgentEntry).superRefine((models, ctx) => {
-    for (const [key, entry] of Object.entries(models)) {
-      if (isCustomAgentKey(key))
+    for (const [key2, entry] of Object.entries(models)) {
+      if (isCustomAgentKey(key2))
         continue;
       const e = entry;
       for (const field of ["model", "effort"]) {
         if (e[field] === void 0)
-          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, field], message: "Required" });
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, field], message: "Required" });
       }
     }
   }).default({}),
@@ -5767,9 +5767,9 @@ function migrateRetiredModelKeys(raw) {
   const untouched = Object.keys(models).filter((k) => !RETIRED_MODEL_KEYS.includes(k));
   if (retired.length === 0)
     return none(untouched);
-  const dropped = retired.map((key) => {
-    const renamed = CONFIG_KEY_RENAMES[`models.${key}`]?.replace(/^models\./, "");
-    return renamed === void 0 ? { key, value: models[key] } : { key, value: models[key], renamed_to: renamed };
+  const dropped = retired.map((key2) => {
+    const renamed = CONFIG_KEY_RENAMES[`models.${key2}`]?.replace(/^models\./, "");
+    return renamed === void 0 ? { key: key2, value: models[key2] } : { key: key2, value: models[key2], renamed_to: renamed };
   });
   const next = Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k)));
   return { config: { ...raw, models: next }, changed: true, dropped, untouched };
@@ -6152,13 +6152,13 @@ var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=(
 function resolveModelVars(templateContent, label, config2) {
   if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
   const { name } = parseTemplate(templateContent, label);
-  const key = AGENT_MODEL_KEY[name];
-  if (!key) {
+  const key2 = AGENT_MODEL_KEY[name];
+  if (!key2) {
     throw new Error(`model resolution failed for ${label}: agent '${name}' has no AGENT_MODEL_KEY entry \u2014 cannot resolve {{MODEL}}/{{EFFORT}}`);
   }
-  const entry = config2 && config2.models && config2.models[key];
+  const entry = config2 && config2.models && config2.models[key2];
   if (!entry || typeof entry.model !== "string" || typeof entry.effort !== "string") {
-    throw new Error(`model resolution failed for ${label}: config.models['${key}'] is missing model/effort \u2014 a tokenized template needs config.models (P5)`);
+    throw new Error(`model resolution failed for ${label}: config.models['${key2}'] is missing model/effort \u2014 a tokenized template needs config.models (P5)`);
   }
   return { MODEL: entry.model, EFFORT: entry.effort };
 }
@@ -6170,7 +6170,7 @@ function refusesSterlingGrant(entry) {
 }
 function appendExtraTools(frontmatter, name, label, config2) {
   const agentEntry = config2?.agents?.[name];
-  const unknownKey = Object.keys(agentEntry ?? {}).find((key) => key !== "extra_tools");
+  const unknownKey = Object.keys(agentEntry ?? {}).find((key2) => key2 !== "extra_tools");
   if (unknownKey !== void 0) {
     throw new Error(`config.agents.${name}: unknown key '${unknownKey}' (${label}) \u2014 the only key is extra_tools (P5)`);
   }
@@ -6200,8 +6200,8 @@ function appendExtraTools(frontmatter, name, label, config2) {
 function renderInstalledAgent(templateContent, label, { pluginVersion: pluginVersion2, now, vars = {}, config: config2 } = {}) {
   const allVars = { ...vars, ...resolveModelVars(templateContent, label, config2) };
   let substituted = renderClaudeText(templateContent, label);
-  for (const [key, value] of Object.entries(allVars)) {
-    substituted = substituted.split(`{{${key}}}`).join(value);
+  for (const [key2, value] of Object.entries(allVars)) {
+    substituted = substituted.split(`{{${key2}}}`).join(value);
   }
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
@@ -6280,25 +6280,25 @@ var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "websearch", "task"]
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validatePermissionMap(permission, where) {
   if (!permission || typeof permission !== "object" || Array.isArray(permission)) throw new Error(`${where} must be an object`);
-  for (const [key, value] of Object.entries(permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
+  for (const [key2, value] of Object.entries(permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key2)) throw new Error(`${where}: unknown key '${key2}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
     if (typeof value === "string") {
-      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.${key2}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
       continue;
     }
     if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) {
-      throw new Error(`${where}.${key} must be one of ${OPENCODE_PERMISSION_VALUES.join(", ")} or a non-empty map of pattern to verdict`);
+      throw new Error(`${where}.${key2} must be one of ${OPENCODE_PERMISSION_VALUES.join(", ")} or a non-empty map of pattern to verdict`);
     }
     for (const [pattern, verdict] of Object.entries(value)) {
-      if (!pattern.trim() || /[\r\n]/.test(pattern)) throw new Error(`${where}.${key}: a pattern must be one non-empty line, got ${JSON.stringify(pattern)}`);
-      if (!OPENCODE_PERMISSION_VALUES.includes(verdict)) throw new Error(`${where}.${key}[${JSON.stringify(pattern)}]: '${verdict}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+      if (!pattern.trim() || /[\r\n]/.test(pattern)) throw new Error(`${where}.${key2}: a pattern must be one non-empty line, got ${JSON.stringify(pattern)}`);
+      if (!OPENCODE_PERMISSION_VALUES.includes(verdict)) throw new Error(`${where}.${key2}[${JSON.stringify(pattern)}]: '${verdict}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
     }
   }
 }
 function validateOpenCodeEntry(entry, where) {
   const block = entry.opencode;
   if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error(`${where} must be an object`);
-  const unknown = Object.keys(block).find((key) => key !== "permission" && key !== "description");
+  const unknown = Object.keys(block).find((key2) => key2 !== "permission" && key2 !== "description");
   if (unknown !== void 0) throw new Error(`${where}: unknown key '${unknown}' \u2014 the keys are permission and description`);
   if (block.description !== void 0 && (typeof block.description !== "string" || !block.description.trim() || /[\r\n]/.test(block.description))) {
     throw new Error(`${where}.description must be one non-empty line of text`);
@@ -6324,7 +6324,7 @@ function validateHosts(entry, where) {
   const full = entry.opencode_full;
   if (full !== void 0) {
     if (!full || typeof full !== "object" || Array.isArray(full)) throw new Error(`${where}.opencode_full must be an object`);
-    const unknown = Object.keys(full).find((key) => !["path", "mode", "permission"].includes(key));
+    const unknown = Object.keys(full).find((key2) => !["path", "mode", "permission"].includes(key2));
     if (unknown !== void 0) throw new Error(`${where}.opencode_full: unknown key '${unknown}' \u2014 the keys are path, mode and permission`);
     if (full.path !== `.opencode/agents/${entry.name}.md`) {
       throw new Error(`${where}.opencode_full.path must be '.opencode/agents/${entry.name}.md' (directly under .opencode/agents/, named after the agent), got ${JSON.stringify(full.path)}`);
@@ -6382,9 +6382,9 @@ function agentChangesRequireRestart(report2) {
 function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars, config: config2 }) {
   const entries = claudeAgentEntries(loadRegistry(registryPath));
   const registered = new Set(entries.map((entry) => entry.name));
-  for (const key of Object.keys(config2?.agents ?? {})) {
-    if (!registered.has(key)) {
-      throw new Error(`config.agents: '${key}' is not a registered agent (registered: ${[...registered].join(", ")}) \u2014 fix or remove it in .sterling/config.json`);
+  for (const key2 of Object.keys(config2?.agents ?? {})) {
+    if (!registered.has(key2)) {
+      throw new Error(`config.agents: '${key2}' is not a registered agent (registered: ${[...registered].join(", ")}) \u2014 fix or remove it in .sterling/config.json`);
     }
   }
   return entries.map((entry) => {
@@ -7007,19 +7007,19 @@ function portableAgentEntries(registry) {
 }
 function permissionLines(permission, label) {
   if (permission === void 0) return [];
-  const bad = (key, value) => new Error(`opencode permission for ${label}: '${key}: ${JSON.stringify(value)}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} or a map of pattern to one of them (P5)`);
+  const bad = (key2, value) => new Error(`opencode permission for ${label}: '${key2}: ${JSON.stringify(value)}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} or a map of pattern to one of them (P5)`);
   const lines = ["permission:"];
-  for (const [key, value] of Object.entries(permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw bad(key, value);
+  for (const [key2, value] of Object.entries(permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key2)) throw bad(key2, value);
     if (typeof value === "string") {
-      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw bad(key, value);
-      lines.push(`  ${key}: ${value}`);
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw bad(key2, value);
+      lines.push(`  ${key2}: ${value}`);
       continue;
     }
-    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) throw bad(key, value);
-    lines.push(`  ${key}:`);
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) throw bad(key2, value);
+    lines.push(`  ${key2}:`);
     for (const [pattern, verdict] of Object.entries(value)) {
-      if (!pattern.trim() || /[\r\n]/.test(pattern) || !OPENCODE_PERMISSION_VALUES.includes(verdict)) throw bad(`${key}.${pattern}`, verdict);
+      if (!pattern.trim() || /[\r\n]/.test(pattern) || !OPENCODE_PERMISSION_VALUES.includes(verdict)) throw bad(`${key2}.${pattern}`, verdict);
       lines.push(`    ${JSON.stringify(pattern)}: ${verdict}`);
     }
   }
@@ -7617,7 +7617,7 @@ function isPlainObject2(data) {
 }
 function pick(object, keys) {
   const result = {};
-  for (const key of keys) if (object[key] !== void 0) result[key] = object[key];
+  for (const key2 of keys) if (object[key2] !== void 0) result[key2] = object[key2];
   return result;
 }
 var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
@@ -7626,17 +7626,17 @@ var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
     seen: /* @__PURE__ */ new Set()
   }),
   addItem: (carrier, item) => {
-    let key;
+    let key2;
     if (item instanceof Map) {
       if (item.size !== 1) return "cannot resolve an ordered map item";
-      key = item.keys().next().value;
+      key2 = item.keys().next().value;
     } else if (isPlainObject2(item)) {
       const itemKeys = Object.keys(item);
       if (itemKeys.length !== 1) return "cannot resolve an ordered map item";
-      key = itemKeys[0];
+      key2 = itemKeys[0];
     } else return "cannot resolve an ordered map item";
-    if (carrier.seen.has(key)) return "duplicate key in ordered map";
-    carrier.seen.add(key);
+    if (carrier.seen.has(key2)) return "duplicate key in ordered map";
+    carrier.seen.add(key2);
     carrier.list.push(item);
     return "";
   },
@@ -7665,12 +7665,12 @@ var mapTag = defineMappingTag("tag:yaml.org,2002:map", {
   identify: isPlainObject2,
   represent: (o) => {
     const map = /* @__PURE__ */ new Map();
-    for (const key of Object.keys(o)) map.set(key, o[key]);
+    for (const key2 of Object.keys(o)) map.set(key2, o[key2]);
     return map;
   },
-  addPair: (container, key, value) => {
-    if (key !== null && typeof key === "object") return "object-based map does not support complex keys";
-    const normalizedKey = String(key);
+  addPair: (container, key2, value) => {
+    if (key2 !== null && typeof key2 === "object") return "object-based map does not support complex keys";
+    const normalizedKey = String(key2);
     if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
       value,
       enumerable: true,
@@ -7680,13 +7680,13 @@ var mapTag = defineMappingTag("tag:yaml.org,2002:map", {
     else container[normalizedKey] = value;
     return "";
   },
-  has: (container, key) => {
-    if (key !== null && typeof key === "object") return false;
-    return Object.prototype.hasOwnProperty.call(container, String(key));
+  has: (container, key2) => {
+    if (key2 !== null && typeof key2 === "object") return false;
+    return Object.prototype.hasOwnProperty.call(container, String(key2));
   },
   keys: (container) => Object.keys(container),
-  get: (container, key) => {
-    const normalizedKey = String(key);
+  get: (container, key2) => {
+    const normalizedKey = String(key2);
     if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
     return container[normalizedKey];
   }
@@ -7696,15 +7696,15 @@ var setTag = defineMappingTag("tag:yaml.org,2002:set", {
   identify: (data) => data instanceof Set,
   represent: (data) => {
     const map = /* @__PURE__ */ new Map();
-    for (const key of data) map.set(key, null);
+    for (const key2 of data) map.set(key2, null);
     return map;
   },
-  addPair: (container, key, value) => {
+  addPair: (container, key2, value) => {
     if (value !== null) return "cannot resolve a set item";
-    container.add(key);
+    container.add(key2);
     return "";
   },
-  has: (container, key) => container.has(key),
+  has: (container, key2) => container.has(key2),
   keys: (container) => container.keys(),
   get: () => null
 });
@@ -7797,9 +7797,9 @@ var Schema = class Schema2 {
     }
     const implicitScalarAnyFirstChar = implicitScalarTags.filter((tag) => tag.implicitFirstChars === null);
     const keys = /* @__PURE__ */ new Set();
-    for (const tag of implicitScalarTags) if (tag.implicitFirstChars !== null) for (const key of tag.implicitFirstChars) keys.add(key);
+    for (const tag of implicitScalarTags) if (tag.implicitFirstChars !== null) for (const key2 of tag.implicitFirstChars) keys.add(key2);
     const implicitScalarByFirstChar = /* @__PURE__ */ new Map();
-    for (const key of keys) implicitScalarByFirstChar.set(key, implicitScalarTags.filter((tag) => tag.implicitFirstChars === null || tag.implicitFirstChars.indexOf(key) !== -1));
+    for (const key2 of keys) implicitScalarByFirstChar.set(key2, implicitScalarTags.filter((tag) => tag.implicitFirstChars === null || tag.implicitFirstChars.indexOf(key2) !== -1));
     const defaultScalarTag = exact.scalar["tag:yaml.org,2002:str"];
     if (!defaultScalarTag) throw new Error("schema does not define the default scalar tag (tag:yaml.org,2002:str)");
     this.tags = compiledTags;
@@ -7911,44 +7911,44 @@ var DUMP_SCHEMA = YAML11_SCHEMA.withTags({
 });
 var realMapTag = defineMappingTag("tag:yaml.org,2002:map", {
   create: () => /* @__PURE__ */ new Map(),
-  addPair: (container, key, value) => {
-    container.set(key, value);
+  addPair: (container, key2, value) => {
+    container.set(key2, value);
     return "";
   },
-  has: (container, key) => container.has(key),
+  has: (container, key2) => container.has(key2),
   keys: (container) => container.keys(),
-  get: (container, key) => container.get(key),
+  get: (container, key2) => container.get(key2),
   identify: (data) => data instanceof Map || isPlainObject2(data),
   represent: (data) => {
     if (data instanceof Map) return data;
     const map = /* @__PURE__ */ new Map();
     const obj = data;
-    for (const key of Object.keys(obj)) map.set(key, obj[key]);
+    for (const key2 of Object.keys(obj)) map.set(key2, obj[key2]);
     return map;
   }
 });
-function normalizeKey(key) {
-  if (Array.isArray(key)) {
-    const array = Array.prototype.slice.call(key);
+function normalizeKey(key2) {
+  if (Array.isArray(key2)) {
+    const array = Array.prototype.slice.call(key2);
     for (let index = 0; index < array.length; index++) {
       if (Array.isArray(array[index])) return null;
       if (typeof array[index] === "object" && Object.prototype.toString.call(array[index]) === "[object Object]") array[index] = "[object Object]";
     }
     return String(array);
   }
-  if (typeof key === "object" && Object.prototype.toString.call(key) === "[object Object]") return "[object Object]";
-  return String(key);
+  if (typeof key2 === "object" && Object.prototype.toString.call(key2) === "[object Object]") return "[object Object]";
+  return String(key2);
 }
 var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
   create: () => ({}),
   identify: isPlainObject2,
   represent: (o) => {
     const map = /* @__PURE__ */ new Map();
-    for (const key of Object.keys(o)) map.set(key, o[key]);
+    for (const key2 of Object.keys(o)) map.set(key2, o[key2]);
     return map;
   },
-  addPair: (container, key, value) => {
-    const normalizedKey = normalizeKey(key);
+  addPair: (container, key2, value) => {
+    const normalizedKey = normalizeKey(key2);
     if (normalizedKey === null) return "nested arrays are not supported inside keys";
     if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
       value,
@@ -7959,13 +7959,13 @@ var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
     else container[normalizedKey] = value;
     return "";
   },
-  has: (container, key) => {
-    const normalizedKey = normalizeKey(key);
+  has: (container, key2) => {
+    const normalizedKey = normalizeKey(key2);
     return normalizedKey !== null && Object.prototype.hasOwnProperty.call(container, normalizedKey);
   },
   keys: (container) => Object.keys(container),
-  get: (container, key) => {
-    const normalizedKey = String(key);
+  get: (container, key2) => {
+    const normalizedKey = String(key2);
     if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
     return container[normalizedKey];
   }
@@ -8475,16 +8475,16 @@ function mergeSource(state, frame, source, sourceTag) {
     }
   } else throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
 }
-function addMappingValue(state, frame, key, value, tag) {
+function addMappingValue(state, frame, key2, value, tag) {
   state.position = frame.keyPosition;
   if (frame.keyIsMerge) {
     mergeSource(state, frame, value, tag);
     return;
   }
-  if (!state.json && frame.tag.has(frame.value, key) && !frame.overridable?.has(key)) throwError$1(state, "duplicated mapping key");
-  const err = frame.tag.addPair(frame.value, key, value);
+  if (!state.json && frame.tag.has(frame.value, key2) && !frame.overridable?.has(key2)) throwError$1(state, "duplicated mapping key");
+  const err = frame.tag.addPair(frame.value, key2, value);
   if (err) throwError$1(state, err);
-  frame.overridable?.delete(key);
+  frame.overridable?.delete(key2);
 }
 function addValue(state, value, tag) {
   const frame = state.frames[state.frames.length - 1];
@@ -8496,10 +8496,10 @@ function addValue(state, value, tag) {
     const err = frame.tag.addItem(frame.value, value, frame.index++);
     if (err) throwError$1(state, err);
   } else if (frame.hasKey) {
-    const key = frame.key;
+    const key2 = frame.key;
     frame.key = void 0;
     frame.hasKey = false;
-    addMappingValue(state, frame, key, value, tag);
+    addMappingValue(state, frame, key2, value, tag);
   } else {
     frame.key = value;
     frame.keyPosition = state.position;
@@ -10683,23 +10683,23 @@ function guardPermission(permission) {
     if (Object.keys(kept).length !== Object.keys(rules).length) removedShellDeny = true;
     return kept;
   };
-  for (const [key, value] of Object.entries(perm)) {
-    if (SHELL_FAMILY.includes(key)) {
-      if (typeof value === "string") out[key] = value;
-      else if (typeof value !== "object" || value === null || Array.isArray(value)) return { bad: key };
+  for (const [key2, value] of Object.entries(perm)) {
+    if (SHELL_FAMILY.includes(key2)) {
+      if (typeof value === "string") out[key2] = value;
+      else if (typeof value !== "object" || value === null || Array.isArray(value)) return { bad: key2 };
       else {
         const kept = strip(value);
-        if (Object.keys(kept).length || !Object.keys(value).length) out[key] = kept;
+        if (Object.keys(kept).length || !Object.keys(value).length) out[key2] = kept;
       }
       continue;
     }
-    if (key !== "*" && !EDIT_FAMILY.includes(key)) {
-      out[key] = value;
+    if (key2 !== "*" && !EDIT_FAMILY.includes(key2)) {
+      out[key2] = value;
       continue;
     }
     const guarded = withGuard(value, STORE_GUARD_PATTERNS);
-    if (guarded === null) return { bad: key };
-    out[key] = key === "*" ? strip(guarded) : guarded;
+    if (guarded === null) return { bad: key2 };
+    out[key2] = key2 === "*" ? strip(guarded) : guarded;
   }
   if (out.edit === void 0) out.edit = withGuard({}, STORE_GUARD_PATTERNS);
   return { value: out, removedShellDeny };
@@ -11032,9 +11032,9 @@ function configuredFullAgentModels(projectDir) {
   }
   const models = {};
   for (const name of ROSTER) {
-    const key = AGENT_MODEL_KEY[name];
-    if (key === void 0) continue;
-    const entry = parsed.models[key];
+    const key2 = AGENT_MODEL_KEY[name];
+    if (key2 === void 0) continue;
+    const entry = parsed.models[key2];
     if (entry === void 0) continue;
     models[name] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
   }
@@ -11077,16 +11077,16 @@ function substituteInstallVars(text, vars) {
 function substitutePermissionVars(permission, vars, label) {
   if (permission === void 0) return void 0;
   const out = {};
-  for (const [key, value] of Object.entries(permission)) {
+  for (const [key2, value] of Object.entries(permission)) {
     if (typeof value === "string") {
-      out[key] = value;
+      out[key2] = value;
       continue;
     }
-    out[key] = {};
+    out[key2] = {};
     for (const [pattern, verdict] of Object.entries(value)) {
       const rendered = substituteInstallVars(pattern, vars);
       if (/\{\{[A-Z_]+\}\}/.test(rendered)) throw new Error(`opencode permission for ${label}: '${rendered}' keeps an install token no value was given for (P5)`);
-      out[key][rendered] = verdict;
+      out[key2][rendered] = verdict;
     }
   }
   return out;
@@ -11805,17 +11805,17 @@ function detectInstalledHosts(projectRoot, { env = process.env, home = homedir5(
   });
 }
 var yamlString2 = (s) => JSON.stringify(s);
-function stamp(host, key, sourceHash, content) {
-  return `<!-- sterling-custom renderer=${CUSTOM_RENDERER} host=${host} key=${key} source_hash=${sourceHash} content_hash=${sha2564(content)} -->`;
+function stamp(host, key2, sourceHash, content) {
+  return `<!-- sterling-custom renderer=${CUSTOM_RENDERER} host=${host} key=${key2} source_hash=${sourceHash} content_hash=${sha2564(content)} -->`;
 }
-function withStamp(frontmatterBlock, body, host, key, sourceHash) {
+function withStamp(frontmatterBlock, body, host, key2, sourceHash) {
   const content = `${frontmatterBlock}
 ${body}`;
   return `${frontmatterBlock}
-${stamp(host, key, sourceHash, content)}
+${stamp(host, key2, sourceHash, content)}
 ${body}`;
 }
-function renderCustomAgent({ host, key, name, source, entry, sourceHash }) {
+function renderCustomAgent({ host, key: key2, name, source, entry, sourceHash }) {
   const { data, body } = source;
   const cfg = entry ?? {};
   const o = originOf(data);
@@ -11843,7 +11843,7 @@ ${fm}`;
     }
     return { ok: true, name, content: withStamp(`---
 ${fm}
----`, body, host, key, sourceHash) };
+---`, body, host, key2, sourceHash) };
   }
   const refusal3 = hostRestrictionRefusal(host, origin, data);
   if (refusal3) return { ok: false, reason: refusal3 };
@@ -11860,7 +11860,7 @@ ${fm}
     if (tools !== null) lines2.push(`tools: ${tools.join(", ")}`);
     if (denied.length) lines2.push(`disallowedTools: ${denied.join(", ")}`);
     lines2.push("---");
-    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key, sourceHash) };
+    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key2, sourceHash) };
   }
   const translated = translateTools(host, restr);
   if (host === "opencode") {
@@ -11870,13 +11870,13 @@ ${fm}
     if (resolved2.model !== "inherit") lines2.push(`model: ${resolved2.model}`);
     if (translated.rules.length) lines2.push("permission:", ...translated.rules.map((r) => `  ${r.action === "*" ? '"*"' : r.action}: ${r.verdict}`));
     lines2.push("---");
-    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key, sourceHash) };
+    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key2, sourceHash) };
   }
   const resolved = resolveHostSettings({ agy_model: cfg.agy_model }, "agy");
   const lines = ["---", `name: ${name}`, `description: ${yamlString2(data.description)}`, `model: ${resolved.model}`, "mainAgent: false", "subagent: true"];
   if (translated.tools !== null) lines.push("tools:", ...translated.tools.map((t) => `  - ${t}`));
   lines.push("---");
-  return { ok: true, name, content: withStamp(lines.join("\n"), body, host, key, sourceHash) };
+  return { ok: true, name, content: withStamp(lines.join("\n"), body, host, key2, sourceHash) };
 }
 function symlinkIn(root, rel) {
   let p = root;
@@ -11893,7 +11893,7 @@ function symlinkIn(root, rel) {
   }
   return null;
 }
-function inspectTarget(root, rel, host, key, sourcePath, vacated = []) {
+function inspectTarget(root, rel, host, key2, sourcePath, vacated = []) {
   if (vacated.includes(rel)) return { state: "absent" };
   const link = symlinkIn(root, rel);
   if (link) return { state: "refused", reason: `${rel} is reached through the symlink ${link}; Sterling does not write through links` };
@@ -11903,7 +11903,7 @@ function inspectTarget(root, rel, host, key, sourcePath, vacated = []) {
   const disk = normalize5(readFileSync12(path, "utf8"));
   const h = disk.match(STAMP_RE);
   if (!h) return { state: "refused", reason: `${rel} carries no Sterling stamp (a file Sterling did not write); the agent's source is ${sourcePath ?? AGENT_SOURCE_DIR}. Move it aside or delete it, then sync again` };
-  if (h[2] !== host || h[3] !== key) return { state: "refused", reason: `${rel} is stamped for ${h[2]}:${h[3]}, not ${host}:${key}; it is not overwritten` };
+  if (h[2] !== host || h[3] !== key2) return { state: "refused", reason: `${rel} is stamped for ${h[2]}:${h[3]}, not ${host}:${key2}; it is not overwritten` };
   if (sha2564(disk.replace(`${h[0]}
 `, "")) !== h[5]) return { state: "refused", reason: `${rel} was edited after Sterling wrote it; edit the source ${sourcePath} instead, or delete the copy so Sterling can regenerate it` };
   return { state: "owned", disk };
@@ -11935,9 +11935,9 @@ function readSources(root) {
   if (!existsSync11(dir)) return out;
   for (const f of readdirSync5(dir).sort()) {
     if (!f.endsWith(".md")) continue;
-    const key = f.slice(0, -3);
-    if (!CUSTOM_AGENT_KEY_RE.test(key)) continue;
-    out.set(key, { key, path: `${AGENT_SOURCE_DIR}/${f}` });
+    const key2 = f.slice(0, -3);
+    if (!CUSTOM_AGENT_KEY_RE.test(key2)) continue;
+    out.set(key2, { key: key2, path: `${AGENT_SOURCE_DIR}/${f}` });
   }
   return out;
 }
@@ -11950,38 +11950,38 @@ function planCustomAgents(projectRoot, config2, { hosts, pending, vacated = [] }
   if (pending) sources.set(pending.key, { key: pending.key, path: `${AGENT_SOURCE_DIR}/${pending.key}.md`, text: pending.text });
   const live = /* @__PURE__ */ new Set();
   const desired = /* @__PURE__ */ new Set();
-  const slot = (host, key, rel) => `${host}\0${key}\0${rel}`;
-  const refuse = (key, host, reason, path) => result.refused.push({ key, host, reason, ...path ? { path } : {} });
+  const slot = (host, key2, rel) => `${host}\0${key2}\0${rel}`;
+  const refuse = (key2, host, reason, path) => result.refused.push({ key: key2, host, reason, ...path ? { path } : {} });
   const agents = [];
-  for (const [key, src] of sources) {
-    if (!Object.hasOwn(models, key)) {
-      result.skipped.push({ key, reason: `config.models has no ${key} entry` });
+  for (const [key2, src] of sources) {
+    if (!Object.hasOwn(models, key2)) {
+      result.skipped.push({ key: key2, reason: `config.models has no ${key2} entry` });
       continue;
     }
     const full = join16(root, src.path);
     if (src.text === void 0 && symlinkIn(root, src.path)) {
-      refuse(key, "*", `${src.path} is a symlink; Sterling does not read an agent through a link`, src.path);
-      live.add(key);
+      refuse(key2, "*", `${src.path} is a symlink; Sterling does not read an agent through a link`, src.path);
+      live.add(key2);
       continue;
     }
     const text = src.text ?? readFileSync12(full, "utf8");
     const source = parseSource(text);
-    live.add(key);
+    live.add(key2);
     if (source.error) {
-      refuse(key, "*", `${src.path}: ${source.error}`, src.path);
+      refuse(key2, "*", `${src.path}: ${source.error}`, src.path);
       continue;
     }
     const declared = typeof source.data.name === "string" ? source.data.name : void 0;
-    const name = declared ?? key.slice("custom-".length);
+    const name = declared ?? key2.slice("custom-".length);
     if (!CUSTOM_AGENT_SLUG_RE.test(name) || customAgentSlug(name) !== name) {
-      refuse(key, "*", `${src.path}: the agent name ${JSON.stringify(name)} must be lower-case letters, digits and single hyphens to name a file on every host`, src.path);
+      refuse(key2, "*", `${src.path}: the agent name ${JSON.stringify(name)} must be lower-case letters, digits and single hyphens to name a file on every host`, src.path);
       continue;
     }
     if (RESERVED_NAMES.has(name)) {
-      refuse(key, "*", `${src.path}: the name ${name} belongs to a Sterling role, so no host file is written for it`, src.path);
+      refuse(key2, "*", `${src.path}: the name ${name} belongs to a Sterling role, so no host file is written for it`, src.path);
       continue;
     }
-    agents.push({ key, src, source, name, entry: models[key], sourceHash: sha2564(normalize5(text)) });
+    agents.push({ key: key2, src, source, name, entry: models[key2], sourceHash: sha2564(normalize5(text)) });
   }
   const byName = /* @__PURE__ */ new Map();
   for (const a of agents) byName.set(a.name, [...byName.get(a.name) ?? [], a.key]);
@@ -12123,6 +12123,67 @@ function probeClaudeWithOverride({ env = process.env } = {}) {
   throw new Error(`STERLING_CLAUDE_PROBE must be 'ok' or 'absent' (got '${override}')`);
 }
 
+// scripts/lib/claude-md-extras.mjs
+import { existsSync as existsSync12, readFileSync as readFileSync13 } from "node:fs";
+import { join as join17 } from "node:path";
+var BOLD_RE = /^- \*\*(.+?)\*\*/;
+var PLAIN_RE = /^- (.+)$/;
+var FENCE_LINE = /^\s*(```|~~~)/;
+var key = (lead) => lead.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean).slice(0, 3).join(" ");
+function topLevelBullets(text) {
+  const out = [];
+  let inFence = false;
+  text.split("\n").forEach((raw, i) => {
+    if (FENCE_LINE.test(raw)) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+    const bold = BOLD_RE.exec(raw);
+    const lead = bold ? `**${bold[1]}**` : PLAIN_RE.exec(raw)?.[1].trim();
+    if (lead) out.push({ line: i + 1, lead });
+  });
+  return out;
+}
+function foreignBulletsIn(referenceText, fileText) {
+  const known = new Set(topLevelBullets(referenceText).map((b) => key(b.lead)));
+  return topLevelBullets(fileText).filter((b) => !known.has(key(b.lead)));
+}
+function foreignClaudeMdBullets(pluginRoot2, projectDir) {
+  const claudePath = join17(projectDir, "CLAUDE.md");
+  const templatePath = join17(pluginRoot2, "templates", "target-claude-md.md");
+  if (!existsSync12(claudePath) || !existsSync12(templatePath)) return [];
+  return foreignBulletsIn(readFileSync13(templatePath, "utf8"), readFileSync13(claudePath, "utf8")).map((b) => ({ file: "CLAUDE.md", ...b }));
+}
+function foreignGeminiMdBullets(referenceText, projectDir) {
+  const geminiPath = join17(projectDir, "GEMINI.md");
+  if (!existsSync12(geminiPath)) return [];
+  return foreignBulletsIn(referenceText, readFileSync13(geminiPath, "utf8")).map((b) => ({ file: "GEMINI.md", ...b }));
+}
+function foreignBulletWarning({ file = "CLAUDE.md", line, lead }) {
+  const shown = lead.length > 80 ? `${lead.slice(0, 77)}...` : lead;
+  return `\u26A0 ${file}:${line} holds a bullet that is not part of Sterling's layer: ${shown}. Move it to AGENTS.md: every host reads AGENTS.md, while CLAUDE.md and GEMINI.md hold only Sterling's generated layer (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer). Sterling does not edit your file.`;
+}
+var oneLine2 = (err) => String(err?.message ?? err).replace(/\s+/g, " ").trim();
+function claudeMdWarnings(pluginRoot2, projectDir, geminiReference) {
+  const lines = [];
+  try {
+    for (const b of foreignClaudeMdBullets(pluginRoot2, projectDir)) lines.push(foreignBulletWarning(b));
+  } catch (err) {
+    lines.push(`\u26A0 CLAUDE.md check skipped: ${oneLine2(err)}`);
+  }
+  if (geminiReference) {
+    try {
+      if (existsSync12(join17(projectDir, "GEMINI.md"))) {
+        for (const b of foreignGeminiMdBullets(geminiReference(), projectDir)) lines.push(foreignBulletWarning(b));
+      }
+    } catch (err) {
+      lines.push(`\u26A0 GEMINI.md check skipped: ${oneLine2(err)}`);
+    }
+  }
+  return lines;
+}
+
 // scripts/sync-agents.mjs
 var here = dirname6(fileURLToPath2(new URL("../scripts/sync-agents.mjs", import.meta.url).href));
 var pluginRoot = resolve9(here, "..");
@@ -12130,7 +12191,7 @@ var args = process.argv.slice(2);
 var targetIdx = args.indexOf("--target");
 var targetDir = targetIdx !== -1 ? resolve9(args[targetIdx + 1]) : process.cwd();
 var configDir = storeRootFor(targetDir);
-var pluginVersion = JSON.parse(readFileSync13(join17(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
+var pluginVersion = JSON.parse(readFileSync14(join18(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
 var projectMode;
 try {
   projectMode = readProjectMode(configDir);
@@ -12161,11 +12222,11 @@ try {
   process.exit(2);
 }
 var claudeHost = claudeProbe.installed;
-var configPath = join17(configDir, ".sterling", "config.json");
-var configSource = existsSync12(configPath) ? configPath : join17(pluginRoot, "templates", "default-config.json");
+var configPath = join18(configDir, ".sterling", "config.json");
+var configSource = existsSync13(configPath) ? configPath : join18(pluginRoot, "templates", "default-config.json");
 var config;
 try {
-  config = parseConfig(JSON.parse(readFileSync13(configSource, "utf8")));
+  config = parseConfig(JSON.parse(readFileSync14(configSource, "utf8")));
 } catch (err) {
   console.log(`refused_config: ${configSource.replace(/\\/g, "/")} does not validate (${err.message.replace(/\s+/g, " ")}); fix it (the TUI System tab writes config.models), then rerun /sterling:update; nothing synced`);
   process.exit(2);
@@ -12178,9 +12239,9 @@ if (configMigration.status === "refused") {
 }
 if (configMigration.status === "migrated") config = parseConfig(configMigration.config);
 var { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: "" } : syncAgents({
-  templatesDir: join17(pluginRoot, "agent-templates"),
-  registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
-  targetAgentsDir: join17(targetDir, ".claude", "agents"),
+  templatesDir: join18(pluginRoot, "agent-templates"),
+  registryPath: join18(pluginRoot, "agent-templates", "registry.json"),
+  targetAgentsDir: join18(targetDir, ".claude", "agents"),
   pluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
   config
@@ -12247,8 +12308,8 @@ var handoffTarget = cloneTarget === false && handoffEnabled;
 if (cloneTarget === false && !handoffTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED \u2014 ${HANDOFF_OFF_DETAIL}`);
 if (cloneTarget === false && handoffUnmaintained.length) console.log(handoffUnmaintainedNotice(handoffUnmaintained));
 var { report: opencodeReport } = !handoffTarget ? { report: [] } : syncOpenCodeAgents({
-  templatesDir: join17(pluginRoot, "agent-templates"),
-  registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
+  templatesDir: join18(pluginRoot, "agent-templates"),
+  registryPath: join18(pluginRoot, "agent-templates", "registry.json"),
   targetDir
 });
 for (const r of opencodeReport) {
@@ -12270,6 +12331,7 @@ if (claudeHost) {
   }
   if (activationResult.activation === "refused") refused += 1;
 }
+for (const line of claudeMdWarnings(pluginRoot, targetDir, () => renderGeminiMd({ pluginRoot, root: pluginRoot, projectName: "project" }))) console.log(line);
 process.exit(refused > 0 ? 2 : 0);
 /*! Bundled license information:
 

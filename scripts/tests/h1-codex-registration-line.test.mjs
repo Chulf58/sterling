@@ -141,15 +141,22 @@ test('H1: the check reads registration only and never runs a codex binary', () =
 });
 
 // The Claude Code Codex bullet names the one supported route and says what to do when the tool
-// is absent, in the repo's own CLAUDE.md and in the template that init and stamp-contract ship.
+// is absent, in the repo's own AGENTS.md and in the template that init and stamp-contract ship.
+// The repo's own bullet moved from CLAUDE.md to AGENTS.md as one host-neutral bullet (every rule a
+// project adds goes into AGENTS.md; user-ruled 2026-11-19, decision
+// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer), so it is read
+// from there with the same needles. The template keeps its host-fenced Claude Code bullet.
 const claudeCodexBullet = (file) => {
   const text = readFileSync(join(root, file), 'utf8');
+  if (file === 'AGENTS.md') {
+    return text.split('\n').find((l) => l.startsWith('- **Sol, Astra and Terra lanes run through the `codex` MCP tool'));
+  }
   const block = text.match(/<!-- claude-only -->\n((?:(?!<!-- \/claude-only -->)[\s\S])*?)<!-- \/claude-only -->/g)
     .find((b) => b.includes('- **Codex runs through the MCP tool, never the shell.**'));
   return block.split('\n').find((l) => l.startsWith('- **Codex runs through the MCP tool, never the shell.**'));
 };
 
-for (const file of ['CLAUDE.md', 'templates/target-claude-md.md']) {
+for (const file of ['AGENTS.md', 'templates/target-claude-md.md']) {
   test(`${file}: the Claude Code Codex bullet names the pinned 0.153.4 MCP server as the one supported route and says to skip the lane when the tool is absent`, () => {
     const bullet = claudeCodexBullet(file);
     assert.match(bullet, /the pinned Codex 0\.153\.4 MCP server is the one supported route/);

@@ -668,8 +668,41 @@ export function agyContextTexts(out) {
 }
 
 /** The injectSteps envelope for SessionStart / PreInvocation. */
+export const AGY_SYSTEM_MESSAGE_MAX_BYTES = 3500;
+
+/**
+ * Split text into pieces of at most `maxBytes` UTF-8 bytes that rejoin to the original.
+ * Cuts fall after a newline where one fits, else between code points, never inside a character.
+ */
+export function splitForAgy(text, maxBytes = AGY_SYSTEM_MESSAGE_MAX_BYTES) {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return [text];
+  const pieces = [];
+  let cur = '';
+  let curBytes = 0;
+  const push = (seg) => {
+    const b = Buffer.byteLength(seg, 'utf8');
+    if (curBytes + b > maxBytes && cur) {
+      pieces.push(cur);
+      cur = '';
+      curBytes = 0;
+    }
+    cur += seg;
+    curBytes += b;
+  };
+  for (const line of text.split(/(?<=\n)/)) {
+    if (Buffer.byteLength(line, 'utf8') <= maxBytes) {
+      push(line);
+      continue;
+    }
+    for (const ch of line) push(ch); // an over-long line: cut between code points
+  }
+  if (cur) pieces.push(cur);
+  return pieces;
+}
+
 export function agyInjectEnvelope(texts) {
-  return JSON.stringify(texts.length ? { injectSteps: texts.map((t) => ({ systemMessage: { systemMessage: t } })) } : {});
+  const steps = texts.flatMap((t) => splitForAgy(t)).map((t) => ({ systemMessage: { systemMessage: t } }));
+  return JSON.stringify(steps.length ? { injectSteps: steps } : {});
 }
 
 /**
