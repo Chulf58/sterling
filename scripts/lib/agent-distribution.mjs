@@ -1073,6 +1073,8 @@ export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs 
 // refusal would make every /sterling:update on the machine exit 2 for one project's
 // deliberate choice. null counts as absent.
 const CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = new Set(['installed', 'up_to_date', 'refreshed', 'header_repaired']);
+// The conductor's sync results when its model is one Claude Code cannot run (retireAgents).
+const CONDUCTOR_UNSUPPORTED_STATUSES = new Set(['unsupported', 'unsupported_removed', 'unsupported_but_modified']);
 
 export function ensureConductorActivation(targetDir, agentResults) {
   const settingsPath = join(targetDir, '.claude', 'settings.json');
@@ -1106,7 +1108,17 @@ export function ensureConductorActivation(targetDir, agentResults) {
 
   const result = {};
   const conductorResult = (agentResults ?? []).find((r) => r.name === 'conductor');
-  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
+  if (conductorResult && CONDUCTOR_UNSUPPORTED_STATUSES.has(conductorResult.status) && parsed.agent === 'conductor') {
+    // Fail closed and say so (P5): the conductor's model is one Claude Code cannot run, so it has no
+    // Claude copy (or only an edited one Sterling no longer maintains), while settings.json still turns
+    // it on. The "agent" key is NOT cleared: that would silently switch the session to Claude Code's
+    // default behaviour. The sync counts this as a refusal and H1's host-fit line names the conductor.
+    // NOT GUARANTEED: what Claude Code does at start with an "agent" naming a missing file is its own
+    // behaviour; this only makes the mismatch loud until the model or the setting is changed.
+    result.activation = 'refused';
+    result.reason = `${conductorResult.detail ?? 'the conductor has no Claude Code copy'}, but ${settingsPath} still sets "agent": "conductor", so Claude Code starts without Sterling's conductor; pick an anthropic model for models.conductor in the System tab, or remove "agent" from ${settingsPath} by hand`;
+    console.error(`REFUSED: ${result.reason}`);
+  } else if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
     result.activation = 'skipped';
     result.reason = conductorResult
       ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired`

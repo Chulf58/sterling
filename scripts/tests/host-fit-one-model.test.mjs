@@ -11,7 +11,8 @@ import { join } from 'node:path';
 import { canonicalModelsSchema, hostRunsModel, resolveHostSettings, unsupportedAgents } from '@sterling/schemas';
 import { dispatchModel, projectRouting, resolveDispatchModel } from '../../packages/opencode-plugin/src/dispatch-model.mjs';
 import { desiredOverlay, expectedSessionModel, overpassResolution } from '../../packages/opencode-plugin/src/overpass.mjs';
-import { syncAgents } from '../lib/agent-distribution.mjs';
+import { ensureConductorActivation, syncAgents } from '../lib/agent-distribution.mjs';
+import { unsupportedAgentsLine } from '../hooks/lib/operating-state.mjs';
 import { syncCustomAgents } from '../lib/custom-agent-render.mjs';
 import { ensureAgyAgents, readAgyFit, renderAgyAgent } from '../lib/agy-setup.mjs';
 import { buildWorkerArgs, workerModelOf } from '../hooks/lib/maintenance-worker.mjs';
@@ -342,6 +343,31 @@ test('Claude conductor: models.conductor pins its model and effort; a model Clau
     assert.equal(existsSync(file), false, 'Sol on the conductor leaves no Claude copy');
     assert.deepEqual(report.find((r) => r.name === 'conductor'), { name: 'conductor', status: 'unsupported_removed', detail: 'config.models.conductor is openai/gpt-6.1-sol, which Claude Code cannot run (it runs anthropic models only)' });
     assert.equal(run({ conductor: { model: 'overpass/agentic-conductor' } }).report.find((r) => r.name === 'conductor').status, 'unsupported', 'a tier is not a Claude model either');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude conductor on a model Claude Code cannot run: activation is refused loudly and the settings key kept; H1 names the conductor (item-G review loop 2, finding 3)', () => {
+  const dir = scratch('host-fit-activation-');
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    const settings = join(dir, '.claude', 'settings.json');
+    writeFileSync(settings, JSON.stringify({ agent: 'conductor', autoMemoryEnabled: false }, null, 2) + '\n');
+    const before = readFileSync(settings, 'utf8');
+    const detail = 'config.models.conductor is openai/gpt-6.1-sol, which Claude Code cannot run (it runs anthropic models only)';
+    for (const status of ['unsupported_removed', 'unsupported', 'unsupported_but_modified']) {
+      const r = ensureConductorActivation(dir, [{ name: 'conductor', status, detail }]);
+      assert.equal(r.activation, 'refused', status);
+      assert.match(r.reason, /openai\/gpt-6\.1-sol, which Claude Code cannot run .* still sets "agent": "conductor", so Claude Code starts without Sterling's conductor/);
+      assert.equal(readFileSync(settings, 'utf8'), before, 'the agent key is not cleared');
+    }
+    // a settings file that does not turn the conductor on has nothing to refuse
+    writeFileSync(settings, JSON.stringify({ autoMemoryEnabled: false }, null, 2) + '\n');
+    assert.equal(ensureConductorActivation(dir, [{ name: 'conductor', status: 'unsupported_removed', detail }]).activation, 'skipped');
+    const line = unsupportedAgentsLine({ config: { models: { conductor: { model: 'openai/gpt-6.1-sol' } } }, host: 'claude' });
+    assert.match(line, /the conductor \(openai\/gpt-6\.1-sol\) has no Claude Code copy, so this session does NOT run as Sterling's conductor/);
+    assert.doesNotMatch(unsupportedAgentsLine({ config: { models: { conductor: { model: 'openai/gpt-6.1-sol' } } }, host: 'opencode' }), /does NOT run as Sterling's conductor/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
