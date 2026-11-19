@@ -1445,3 +1445,35 @@ test('CS-legacy (loop 2): a file the transform cannot carry still refuses a newl
     h.cleanup();
   }
 });
+
+test('CS-legacy (loop 3): with two uncarryable legacy values, repairing either one in either order lands; a new invalid value is still refused', () => {
+  const seed = JSON.stringify({ overpass: 'bad', maintenance_worker: { opencode_model: 'bogus' } }, null, 2) + '\n';
+  for (const order of [['overpass', 'worker'], ['worker', 'overpass']]) {
+    const h = harness(seed);
+    try {
+      const call = handler(h.tools);
+      for (const step of order) {
+        if (step === 'overpass') call({ path: 'overpass', value: { provider: 'gw' } });
+        // the canonical home of the worker's model: the legacy key is retired, so it is repaired here
+        else call({ path: 'models.maintenance-worker', value: { model: 'openai/gpt-5.6-terra' } });
+      }
+      const after = JSON.parse(h.read());
+      assert.deepEqual(after.overpass, { provider: 'gw' }, order.join(' then '));
+      assert.deepEqual(after.models['maintenance-worker'], { model: 'openai/gpt-5.6-terra' }, order.join(' then '));
+      assert.equal(after.maintenance_worker.opencode_model, 'bogus', 'the unchanged legacy value is left as it was');
+    } finally {
+      h.cleanup();
+    }
+  }
+  const h = harness(seed);
+  try {
+    const call = handler(h.tools);
+    const before = h.read();
+    assert.match(refusalMessage(call, { path: 'maintenance_worker.opencode_model', value: 'still bogus' }), /maintenance_worker\.opencode_model: a retired field/);
+    assert.match(refusalMessage(call, { path: 'models.maintenance-worker', value: { model: 'still bogus' } }), /models\.maintenance-worker\.model/);
+    assert.match(refusalMessage(call, { path: 'models.scout', value: { model: 'not a model' } }), /models\.scout\.model/);
+    assert.equal(h.read(), before, 'nothing written');
+  } finally {
+    h.cleanup();
+  }
+});

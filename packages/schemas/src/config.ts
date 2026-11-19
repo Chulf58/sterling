@@ -1425,6 +1425,10 @@ export interface CanonicalConfigResult {
   config: unknown;
   conflicts: ModelConflict[];
   changes: CanonicalChange[];
+  /** Where a moved value came from: canonical dotted path -> the legacy dotted path it was read from.
+   *  Only moved values are listed (a value read at its own path has no entry). A write check uses it
+   *  to tell an unchanged legacy value from a newly written one. */
+  origins: Record<string, string>;
 }
 
 /** The user's answer to a conflict, keyed by role. */
@@ -1461,11 +1465,12 @@ const LEGACY_OVERPASS_KEYS = ['enabled', 'roles', 'conductor_bypass'] as const;
  * cannot carry, and for a resolution naming a role that has no conflict.
  */
 export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: ConflictResolutions } = {}): CanonicalConfigResult {
-  if (!isPlainObject(legacy)) return { config: legacy, conflicts: [], changes: [] };
+  if (!isPlainObject(legacy)) return { config: legacy, conflicts: [], changes: [], origins: {} };
   const raw = normalizeRawConfig(legacy) as Record<string, unknown>;
   const out: Record<string, unknown> = { ...raw };
   const changes: CanonicalChange[] = [];
   const conflicts: ModelConflict[] = [];
+  const origins: Record<string, string> = {};
   const resolutions = opts.resolutions ?? {};
 
   // workflow, from mode and pr_review.auto_merge_on_clean
@@ -1484,9 +1489,12 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
     const derived = mode === 'work' ? { merge: 'pr', reviewers: 3, copilot_loop: true } : { merge: 'direct', reviewers: 1, copilot_loop: false };
     out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
     changes.push({ path: 'workflow', was: undefined, now: out.workflow });
+    origins.workflow = 'mode';
+    if (autoMerge !== undefined) origins['workflow.auto_merge_on_clean'] = 'pr_review.auto_merge_on_clean';
   } else if (autoMerge !== undefined && isPlainObject(raw.workflow) && !has(raw.workflow, 'auto_merge_on_clean')) {
     out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
     changes.push({ path: 'workflow.auto_merge_on_clean', was: undefined, now: autoMerge });
+    origins['workflow.auto_merge_on_clean'] = 'pr_review.auto_merge_on_clean';
   }
   if (autoMerge !== undefined) changes.push({ path: 'pr_review.auto_merge_on_clean', was: autoMerge });
   if (has(raw, 'mode')) {
@@ -1513,7 +1521,7 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
 
   // models
   const tierOf = (routeModel: string): string => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass!.provider.length + 1)}`;
-  if (raw.models !== undefined && !isPlainObject(raw.models)) return { config: out, conflicts, changes };
+  if (raw.models !== undefined && !isPlainObject(raw.models)) return { config: out, conflicts, changes, origins };
   const models: Record<string, unknown> = { ...((raw.models as Record<string, unknown> | undefined) ?? {}) };
   let modelsChanged = false;
   for (const [role, entry] of Object.entries(models)) {
@@ -1545,6 +1553,7 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
       }
     }
     if (model !== undefined) next.model = model;
+    if (opencode !== undefined && model === opencode) origins[`models.${role}.model`] = `models.${role}.opencode_model`;
     if (entry.effort !== undefined) next.effort = entry.effort;
     if (JSON.stringify(next) !== JSON.stringify(entry)) {
       models[role] = next;
@@ -1563,7 +1572,10 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
       const entry = { model: tierOf(route.model), ...(route.effort === undefined ? {} : { effort: route.effort }) };
       changes.push({ path: `models.${role}`, was: models[role], now: entry });
       models[role] = entry;
+      origins[`models.${role}`] = 'overpass';
     }
+    origins[`models.${PLAN_MODEL_KEY}`] = 'overpass';
+    if (overpass.conductorRouted) origins[`models.${CONDUCTOR_MODEL_KEY}`] = 'overpass';
     models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
     changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: undefined, now: models[PLAN_MODEL_KEY] });
     if (overpass.conductorRouted) {
@@ -1584,6 +1596,7 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
       if (!isPlainObject(existing) || typeof existing.model !== 'string') {
         const entry = { ...(isPlainObject(existing) ? existing : {}), model: old };
         models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = 'maintenance_worker.opencode_model';
         modelsChanged = true;
         changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
       }
@@ -1596,7 +1609,7 @@ export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: Conflic
     delete out.sparring_partner;
     changes.push({ path: 'sparring_partner', was: raw.sparring_partner });
   }
-  return { config: out, conflicts, changes };
+  return { config: out, conflicts, changes, origins };
 }
 
 /** Parse any config, legacy or canonical, into the canonical shape: the transform, then the strict

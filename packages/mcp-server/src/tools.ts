@@ -1769,34 +1769,50 @@ function valueAtPath(doc: unknown, path: string | readonly (string | number)[]):
  * Why a write to a LEGACY config.json (one /sterling:update has not migrated yet) is refused, or
  * undefined when it may land. The transform tolerates what is already on disk, but a write is judged
  * by what it newly introduces (anti_pattern config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes).
- * A value is "already there" only when it is byte-identical (JSON.stringify) to the value at the same
- * path before the write; anything else counts as written now and is refused when it is:
+ * A value counts as already there only when the LEGACY value it comes from is byte-identical
+ * (JSON.stringify) in the file before and after the write; the transform's `origins` give the legacy
+ * path of a moved value (maintenance_worker.opencode_model for models.maintenance-worker.model), and a
+ * value read at its own path is compared there. Refused when the write newly introduces:
  *   - a value the transform would drop (a retired field: mode, a per-host model field, hard_task,
- *     the Overpass switch keys);
- *   - a value the transform would rewrite (a legacy form);
+ *     the Overpass switch keys) or rewrite (a legacy form);
  *   - a value the strict canonical check refuses on the transformed document.
- * When the file before the write cannot be transformed at all, "before" is the raw file itself, so
- * the same three checks still apply to the written document. NOT GUARANTEED: a value moved by the
- * transform to another path (mode becoming workflow) is compared at its transformed path against the
- * raw file, so an invalid value at that path is tolerated only if the raw file held the same value there.
+ * A legacy value the transform cannot carry at all (overpass: "bad") is tolerated while unchanged: the
+ * top-level keys holding such values are set aside, in both documents alike, until the rest transforms,
+ * and the checks run on what is left. A write to such a key itself is judged by the transform.
  */
-function legacyWriteIssues(raw: Record<string, unknown>, mutated: Record<string, unknown>): string | undefined {
-  let before: unknown;
-  try {
-    before = toCanonicalConfig(raw).config;
-  } catch {
-    before = raw;
-  }
-  let after: ReturnType<typeof toCanonicalConfig>;
-  try {
-    after = toCanonicalConfig(mutated);
-  } catch (e) {
-    return (e as Error).message;
-  }
+function legacyWriteIssues(raw: Record<string, unknown>, mutated: Record<string, unknown>, path: string): string | undefined {
   const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+  const writtenTop = path.split('.')[0];
+  const tryTransform = (doc: Record<string, unknown>): ReturnType<typeof toCanonicalConfig> | Error => {
+    try {
+      return toCanonicalConfig(doc);
+    } catch (e) {
+      return e as Error;
+    }
+  };
+  let r = { ...raw };
+  let m = { ...mutated };
+  let after = tryTransform(m);
+  while (after instanceof Error) {
+    const failure: Error = after;
+    // set aside one unchanged top-level key whose removal makes progress (the transform succeeds or fails differently)
+    const culprit = Object.keys(m).find((k) => {
+      if (k === writtenTop || !same(r[k], m[k])) return false;
+      const { [k]: _gone, ...rest } = m;
+      const probe = tryTransform(rest);
+      return !(probe instanceof Error) || probe.message !== failure.message;
+    });
+    if (culprit === undefined) return failure.message;
+    const { [culprit]: _r, ...restR } = r;
+    const { [culprit]: _m, ...restM } = m;
+    r = restR;
+    m = restM;
+    after = tryTransform(m);
+  }
+  const done = after;
   const hasNow = (c: { now?: unknown }): boolean => Object.prototype.hasOwnProperty.call(c, 'now');
   // a change is the file's own when the raw value at its path is byte-identical before and after the write
-  const fresh = after.changes.filter((c) => !same(valueAtPath(raw, c.path), valueAtPath(mutated, c.path)));
+  const fresh = done.changes.filter((c) => !same(valueAtPath(r, c.path), valueAtPath(m, c.path)));
   if (fresh.length) {
     return fresh
       .map((c) =>
@@ -1806,12 +1822,23 @@ function legacyWriteIssues(raw: Record<string, unknown>, mutated: Record<string,
       )
       .join('; ');
   }
-  const checked = canonicalConfigSchema.safeParse(normalizeRawConfig(after.config));
+  const checked = canonicalConfigSchema.safeParse(normalizeRawConfig(done.config));
   if (checked.success) return undefined;
-  // an invalid value is tolerated only when the same path held the byte-identical value before the write; a
-  // MISSING value (a required key) is judged by the object that lacks it, so a new half entry is refused
-  const judged = (i: ZodIssue): readonly (string | number)[] => (valueAtPath(after.config, i.path) === undefined ? i.path.slice(0, -1) : i.path);
-  const added = checked.error.issues.filter((i) => i.path.length === 0 || !same(valueAtPath(after.config, judged(i)), valueAtPath(before, judged(i))));
+  // The legacy path a canonical path was read from: the longest moved prefix in `origins`, else itself.
+  const originOf = (p: readonly (string | number)[]): string => {
+    for (let n = p.length; n > 0; n--) {
+      const prefix = p.slice(0, n).join('.');
+      if (Object.prototype.hasOwnProperty.call(done.origins, prefix)) return done.origins[prefix];
+    }
+    return p.join('.');
+  };
+  // a MISSING value (a required key) is judged by the object that lacks it, so a new half entry is refused
+  const judged = (i: ZodIssue): readonly (string | number)[] => (valueAtPath(done.config, i.path) === undefined ? i.path.slice(0, -1) : i.path);
+  const added = checked.error.issues.filter((i) => {
+    if (i.path.length === 0) return true;
+    const origin = originOf(judged(i));
+    return !same(valueAtPath(r, origin), valueAtPath(m, origin));
+  });
   return added.length ? added.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : undefined;
 }
 
@@ -2001,7 +2028,7 @@ function configSetImpl(
     const validation = canonicalConfigSchema.safeParse(normalizeRawConfig(mutated));
     if (!validation.success) validationIssues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
   } else {
-    validationIssues = legacyWriteIssues(raw, mutated);
+    validationIssues = legacyWriteIssues(raw, mutated, path);
   }
   if (validationIssues !== undefined) {
     throw new Error(`config_set: the resulting config.json would fail schema validation — ${validationIssues}. Nothing was written.`);
