@@ -40,9 +40,11 @@ test('adopted key: custom- plus the path slug; the namespace holds no governed r
 
 // ── config ──
 test('governed roles keep their defaults byte for byte and still need model and effort', () => {
-  assert.deepEqual(parseConfig({}).models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' });
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5' } } }), /effort/);
-  assert.throws(() => parseConfig({ models: { 'my-agent': { model: 'claude-sonnet-5-5' } } }), /effort/, 'a non-custom catchall key keeps both required');
+  assert.deepEqual(parseConfig({}).models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'medium' });
+  // Changed with the cutover: effort is optional in the canonical shape (unset stays unset, decision
+  // one-model-per-agent-an-agent-has-a-single-model-not-a-claude), so only the model stays required.
+  assert.deepEqual(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5' } } }).models.implementor, { model: 'anthropic/claude-sonnet-5-5' });
+  assert.doesNotThrow(() => parseConfig({ models: { 'my-agent': { model: 'claude-sonnet-5-5' } } }));
   assert.throws(() => parseConfig({ models: { 'my-agent': { effort: 'low' } } }), /model/);
   assert.doesNotThrow(() => parseConfig({ models: { 'my-agent': { model: 'claude-sonnet-5-5', effort: 'low' } } }));
 });
@@ -51,12 +53,11 @@ test('a custom-<slug> entry may omit model and effort; what it holds is validate
   const m = parseConfig({ models: { 'custom-team-scout': {} } }).models['custom-team-scout'];
   assert.deepEqual(m, {});
   assert.deepEqual(parseConfig({ models: { 'custom-x': { effort: 'high' } } }).models['custom-x'], { effort: 'high' });
-  assert.deepEqual(parseConfig({ models: { 'custom-x': { agy_model: 'flash' } } }).models['custom-x'], { agy_model: 'flash' });
-  for (const bad of [{ model: 'has space' }, { effort: 'max' }, { junk: 1 }, { opencode_model: 'nope' }, { agy_model: 'claude-opus-5-5-high' }]) {
-    const raw = { models: { 'custom-x': bad } };
-    // a stale agy_model is dropped on load (the existing tolerance); every other bad value fails the parse
-    if ('agy_model' in bad) assert.doesNotThrow(() => parseConfig(raw));
-    else assert.throws(() => configSchema.parse(raw), /./, JSON.stringify(bad));
+  // Changed with the cutover: a per-host model field (opencode_model, agy_model) is no longer a model; the
+  // transform drops agy_model and carries opencode_model as the one model, which the strict check then judges.
+  assert.deepEqual(parseConfig({ models: { 'custom-x': { agy_model: 'flash' } } }).models['custom-x'], {});
+  for (const bad of [{ model: 'has space' }, { effort: 'max' }, { junk: 1 }, { opencode_model: 'nope' }]) {
+    assert.throws(() => parseConfig({ models: { 'custom-x': bad } }), /./, JSON.stringify(bad));
   }
 });
 

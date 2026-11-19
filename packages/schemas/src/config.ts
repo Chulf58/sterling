@@ -1251,6 +1251,14 @@ export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
     doc = raw;
   }
   walk(doc, canonicalConfigObject, '');
+  // The transform drops a retired models key before the walk sees it, so those are named from the raw document.
+  if (isPlainObject(raw) && isPlainObject(raw.models)) {
+    for (const key of Object.keys(raw.models)) {
+      if (!RETIRED_MODEL_KEYS.includes(key)) continue;
+      const renamed = CONFIG_KEY_RENAMES[`models.${key}`];
+      out.push(renamed ? { path: `models.${key}`, renamed_to: renamed } : { path: `models.${key}` });
+    }
+  }
   return out;
 }
 
@@ -1326,6 +1334,7 @@ export const canonicalModelsSchema = z
     for (const [key, entry] of Object.entries(models)) {
       const e = entry as { model?: string; effort?: string };
       if (e.model === undefined) {
+        if (e.effort === 'max') ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'effort'], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
         if (!isCustomAgentKey(key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'model'], message: 'Required' });
         continue;
       }

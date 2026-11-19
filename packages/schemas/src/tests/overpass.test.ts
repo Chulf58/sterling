@@ -11,8 +11,8 @@ const shippedRaw = (): Record<string, unknown> => JSON.parse(readFileSync(join(r
 const on = (extra: Record<string, unknown> = {}) => ({ mode: 'work', overpass: { enabled: true, ...extra } });
 
 // Deliberate default change (user-ruled 2026-10-23, 'Defaults + reset + bypass ON'): conductor_bypass is true by default.
-test('overpass: the schema default and templates/default-config.json agree, and both are off with the conductor bypassed', () => {
-  const expected = { enabled: false, provider: 'overpass', conductor_bypass: true };
+test('overpass: the canonical default and templates/default-config.json agree: only the provider is configured (no enabled, roles or bypass)', () => {
+  const expected = { provider: 'overpass' };
   assert.deepEqual((parseConfig({}) as unknown as { overpass: unknown }).overpass, expected);
   assert.deepEqual(shippedRaw().overpass, expected);
 });
@@ -64,12 +64,16 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
   });
 });
 
-test('overpass: enabled in hobby mode (or with no mode) is configured but not effective, with a reason', () => {
-  for (const cfg of [{ mode: 'hobby', overpass: { enabled: true } }, { overpass: { enabled: true } }]) {
+// Changed with the cutover (decision settings-that-replace-project-mode-merge-path-reviewer-count: Overpass
+// no longer needs work mode): the legacy resolver the migration calls has no mode gate any more.
+test('overpass: enabled in any mode (or with no mode) is effective on OpenCode; on another host it is configured but not effective, with a reason', () => {
+  for (const cfg of [{ mode: 'hobby', overpass: { enabled: true } }, { overpass: { enabled: true } }, { mode: 'work', overpass: { enabled: true } }]) {
     const r = resolveOverpass(cfg, { host: 'opencode' });
     assert.equal(r.configured, true);
-    assert.equal(r.effective, false);
-    assert.match(r.reason ?? '', /work mode only/);
+    assert.equal(r.effective, true);
+    const other = resolveOverpass(cfg, { host: 'claude' });
+    assert.equal(other.effective, false);
+    assert.match(other.reason ?? '', /OpenCode only/);
   }
 });
 
@@ -118,11 +122,8 @@ test('overpass: a present overpass that is not an object throws', () => {
   }
 });
 
-test('overpass: an invalid mode throws when overpass is enabled (the strict mode judge), never reads as hobby', () => {
-  assert.throws(
-    () => resolveOverpass({ mode: 'wrok', overpass: { enabled: true } }, { host: 'opencode' }),
-    ProjectModeError,
-  );
+test('overpass: the mode is not judged by the resolver any more (the transform judges it)', () => {
+  assert.equal(resolveOverpass({ mode: 'wrok', overpass: { enabled: true } }, { host: 'opencode' }).effective, true);
 });
 
 test('judgeProjectMode: the pure judge behind readProjectMode', () => {
@@ -144,7 +145,6 @@ test('overpass: conductor_bypass true keeps effective but turns conductorRouted 
 
 test('overpass: conductorRouted is false whenever overpass is not effective, bypass or not', () => {
   for (const conductor_bypass of [true, false]) {
-    assert.equal(resolveOverpass({ mode: 'hobby', overpass: { enabled: true, conductor_bypass } }, { host: 'opencode' }).conductorRouted, false);
     assert.equal(resolveOverpass(on({ conductor_bypass }), { host: 'claude' }).conductorRouted, false);
     assert.equal(resolveOverpass({ mode: 'work', overpass: { enabled: false, conductor_bypass } }, { host: 'opencode' }).conductorRouted, false);
   }
@@ -298,9 +298,9 @@ test('overpass roles: an unknown role, an unknown field or a bad value throws, e
   }
 });
 
-test('overpass roles: parseConfig keeps an invalid roles value raw instead of throwing', () => {
+test('overpass roles: an invalid roles value is refused loud by the transform, never carried', () => {
   const raw = { overpass: { enabled: true, roles: { conductor: { effort: 'nope' } } } };
-  assert.deepEqual((parseConfig(raw) as unknown as { overpass: unknown }).overpass, raw.overpass);
+  assert.throws(() => parseConfig(raw), /roles/);
 });
 
 // The tiers the user listed (user-stated 2026-10-23), in that order; the System tab tier picker offers them.
