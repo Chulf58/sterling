@@ -33466,6 +33466,44 @@ var StorageTransitionRequiredError = class extends Error {
 function unreadKeyWarnings(path, keys) {
   return keys.filter((k) => k.path === path || path.startsWith(`${k.path}.`)).map((k) => k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`);
 }
+function legacyWriteIssues(raw, mutated, path) {
+  const fmt = (i) => `${i.path.join(".") || "(root)"}: ${i.message}`;
+  let before;
+  try {
+    before = toCanonicalConfig(raw);
+  } catch {
+    before = null;
+  }
+  if (before === null) {
+    try {
+      parseConfig(mutated);
+      return void 0;
+    } catch (e) {
+      return e instanceof ZodError2 ? e.issues.map(fmt).join("; ") : e.message;
+    }
+  }
+  let after;
+  try {
+    after = toCanonicalConfig(mutated);
+  } catch (e) {
+    return e.message;
+  }
+  const hasNow = (c) => Object.prototype.hasOwnProperty.call(c, "now");
+  const key = (c) => `${c.path}\0${JSON.stringify(c.was)}\0${hasNow(c) ? JSON.stringify(c.now) : "-"}`;
+  const known = new Set(before.changes.map(key));
+  const touches = (p) => p === path || p.startsWith(`${path}.`) || path.startsWith(`${p}.`);
+  const fresh = after.changes.filter((c) => !known.has(key(c)) && (!hasNow(c) || touches(c.path)));
+  if (fresh.length) {
+    return fresh.map((c) => hasNow(c) ? `${c.path}: ${JSON.stringify(c.was)} is a legacy form the canonical config stores as ${JSON.stringify(c.now)}; write that instead` : `${c.path}: a retired field the canonical config does not carry (value ${JSON.stringify(c.was)}); the migration would drop it, so the write is refused (decision settings-redesign-build-shape-one-legacy-to-canonical-config)`).join("; ");
+  }
+  const issues = (doc) => {
+    const v = canonicalConfigSchema.safeParse(normalizeRawConfig(doc));
+    return v.success ? [] : v.error.issues.map(fmt);
+  };
+  const had = new Set(issues(before.config));
+  const added = issues(after.config).filter((i) => !had.has(i));
+  return added.length ? added.join("; ") : void 0;
+}
 function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (!repoRoot) {
     throw new Error(`config_set: no project root is known to this server, so .sterling/config.json cannot be resolved.`);
@@ -33590,11 +33628,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!validation.success)
       validationIssues = validation.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
   } else {
-    try {
-      parseConfig(mutated);
-    } catch (e) {
-      validationIssues = e instanceof ZodError2 ? e.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ") : e.message;
-    }
+    validationIssues = legacyWriteIssues(raw, mutated, path);
   }
   if (validationIssues !== void 0) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${validationIssues}. Nothing was written.`);

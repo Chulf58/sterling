@@ -54289,7 +54289,7 @@ function assertCanonical(proposed) {
   }
 }
 var isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-function applyAgentModel(e, onError, path) {
+function applyAgentModel(e, onError, path, seams = {}) {
   try {
     if (e.model !== null && !MODEL_REF_RE.test(e.model))
       throw new Error(`'${e.model}' is not a canonical model (<provider>/<id>). Nothing was written.`);
@@ -54299,7 +54299,7 @@ function applyAgentModel(e, onError, path) {
       const proposed = { ...models, [e.key]: entry };
       assertCanonical({ ...raw, models: proposed });
       return proposed;
-    });
+    }, seams);
     return true;
   } catch (err) {
     onError?.(`model change for '${e.key}' failed \u2014 ${err.message}`);
@@ -57756,7 +57756,7 @@ function findBackslashHookCommands(frontmatter) {
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
 function resolveModelVars(templateContent, label, config) {
-  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return conductorModelVars(templateContent, label, config);
   const { name } = parseTemplate(templateContent, label);
   const key = AGENT_MODEL_KEY[name];
   if (!key) {
@@ -57779,6 +57779,23 @@ function resolveModelVars(templateContent, label, config) {
   }
   if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${key} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
   return { MODEL: entry.model.slice(entry.model.indexOf("/") + 1), EFFORT: entry.effort ?? null };
+}
+function conductorModelVars(templateContent, label, config) {
+  if (!config?.models || typeof config.models !== "object") return {};
+  const { name } = parseTemplate(templateContent, label);
+  if (name !== CONDUCTOR_MODEL_KEY) return {};
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const conflict = conflicts.find((c) => c.role === CONDUCTOR_MODEL_KEY);
+  const raw = conflict ? conflict.claude : canon.models?.[CONDUCTOR_MODEL_KEY];
+  if (raw === void 0) return {};
+  const parsed = canonicalModelsSchema.safeParse({ [CONDUCTOR_MODEL_KEY]: raw });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`model resolution failed for ${label}: config.models.${[CONDUCTOR_MODEL_KEY, ...issue.path.slice(1)].join(".")}: ${issue.message} (P5)`);
+  }
+  const entry = parsed.data[CONDUCTOR_MODEL_KEY];
+  if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${CONDUCTOR_MODEL_KEY} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { conductorPin: { model: entry.model.slice(entry.model.indexOf("/") + 1), effort: entry.effort ?? null } };
 }
 function claudeUnsupportedReason(templateContent, label, config) {
   return resolveModelVars(templateContent, label, config).unsupported ?? null;
@@ -57819,7 +57836,7 @@ function appendExtraTools(frontmatter, name, label, config) {
   return lines.join("\n");
 }
 function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {}, config } = {}) {
-  const modelVars = resolveModelVars(templateContent, label, config);
+  const { conductorPin, ...modelVars } = resolveModelVars(templateContent, label, config);
   if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
   const allVars = { ...vars, ...modelVars };
   let substituted = renderClaudeText(templateContent, label);
@@ -57832,7 +57849,14 @@ function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars
   }
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
-  const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config);
+  let pinned = parsed.frontmatter;
+  if (conductorPin) {
+    if (/^(model|effort):/m.test(pinned)) throw new Error(`${label}: the conductor template already has a model or effort line, so config.models.${CONDUCTOR_MODEL_KEY} cannot be applied (P5)`);
+    pinned = `${pinned}
+model: ${conductorPin.model}${conductorPin.effort ? `
+effort: ${conductorPin.effort}` : ""}`;
+  }
+  const frontmatter = appendExtraTools(pinned, name, label, config);
   const unsubstituted = substituted.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {
     throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value \u2014 refusing to install a half-baked agent (P5)`);
@@ -58312,15 +58336,20 @@ function configuredFullAgentModels(projectDir) {
     return leave(`${where} does not validate (${err.message.replace(/\s+/g, " ")})`);
   }
   const models = {};
+  const unsupported = {};
   for (const name of ROSTER) {
     const key = AGENT_MODEL_KEY[name];
     if (key === void 0) continue;
     const entry = parsed.models[key];
     if (entry === void 0) continue;
-    if (typeof entry.model !== "string" || !hostRunsModel(entry.model, "opencode")) continue;
+    if (typeof entry.model !== "string") continue;
+    if (!hostRunsModel(entry.model, "opencode")) {
+      unsupported[name] = `config.models.${key} is ${entry.model}, which OpenCode cannot run`;
+      continue;
+    }
     models[name] = opencodeModelRef(entry.model, parsed.overpass.provider);
   }
-  return { models };
+  return { models, unsupported };
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname8(fileURLToPath(moduleUrl));
@@ -58381,8 +58410,8 @@ function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
-function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models });
+function stageFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models, unsupported });
   return {
     rows: planned.map(({ path, content, previous, ...row }) => row),
     writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
@@ -58402,7 +58431,7 @@ function fullAgentTargets(registry) {
   }
   return targets;
 }
-function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+function planFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
   const registry = loadRegistry(join20(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot) };
@@ -58425,9 +58454,17 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       }
       if (sha256(disk.replace(`${m[0]}
 `, "")) !== m[3]) {
+        if (Object.hasOwn(unsupported, name)) {
+          rows.push(refusal(rel, `${rel} was edited after Sterling wrote it, and ${unsupported[name]}, so Sterling would remove it; it is kept and may still run`, `delete it by hand, or pick a model OpenCode can run in the System tab, then rerun /sterling:update`));
+          continue;
+        }
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (Object.hasOwn(unsupported, name)) {
+      rows.push(disk === null ? { item: rel, status: "skipped", detail: `${unsupported[name]}; no OpenCode copy is created` } : { item: rel, status: "removed", detail: `${unsupported[name]}; the copy Sterling wrote is removed`, path, content: null, previous: raw });
+      continue;
     }
     if (unsafe.length) {
       const why = `it needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`;
@@ -58456,7 +58493,7 @@ function refreshFullAgentModels({ projectDir, pluginRoot }) {
   if (configured.refused) return { refused: configured.refused };
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
-  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models });
+  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
   writeFullAgentFiles(staged.writes);
   return { rows: staged.rows };
 }
@@ -58464,6 +58501,11 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
+      if (w.content === null) {
+        rmSync4(w.path, { force: true });
+        done.push(w);
+        continue;
+      }
       mkdirSync7(dirname8(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
@@ -59079,7 +59121,9 @@ function translateTools(host2, { tools, disallowedTools }) {
   if (unknown2.length) return { ok: false, reason: `${host2} cannot express the tool name(s) ${unknown2.join(", ")}` };
   if (host2 === "agy") {
     if ((allow ?? []).some((n) => n.startsWith("mcp__"))) return { ok: false, reason: "agy cannot limit MCP tools per agent, so an allowlist naming MCP tools cannot be kept to what it lists" };
-    const noAgy = [...allow ?? [], ...deny.filter((n) => !n.startsWith("mcp__"))].filter((n) => TOOL_MAP[n].agy === null);
+    const deniedMcp = deny.filter((n) => n.startsWith("mcp__"));
+    if (deniedMcp.length) return { ok: false, reason: `agy cannot limit MCP tools per agent, so the denial of ${deniedMcp.join(", ")} would be dropped and the agent left broader` };
+    const noAgy = [...allow ?? [], ...deny].filter((n) => TOOL_MAP[n].agy === null);
     if (noAgy.length) return { ok: false, reason: `agy has no tool for ${[...new Set(noAgy)].join(", ")}` };
     if (allow === null && deny.length === 0) return { ok: true, tools: null };
     const granted2 = new Set(allow === null ? AGY_ALL : allow.flatMap((n) => TOOL_MAP[n]?.agy ?? []));
@@ -59124,6 +59168,7 @@ function originOf(data) {
   if (!CUSTOM_HOSTS.includes(v)) return { error: `${ORIGIN_FIELD} must be one of ${CUSTOM_HOSTS.join(", ")}, got ${JSON.stringify(v)}` };
   return { origin: v };
 }
+var keyLineRe = (field) => new RegExp(`^(?:${field}|"${field}"|'${field}')[ 	]*:.*$`, "m");
 var withoutOrigin = (frontmatter) => frontmatter.replace(ORIGIN_LINE_RE, "").replace(/\n$/, "");
 var OC_ALIAS = { shell: "bash", write: "edit", patch: "edit" };
 var OC_V2_KEYS = ["permissions", "request", "system", "disabled"];
@@ -59264,23 +59309,35 @@ function renderCustomAgent({ host: host2, key, name, source, entry, sourceHash, 
   const srcModel = typeof data.model === "string" ? data.model : void 0;
   if (host2 === origin) {
     let fm = withoutOrigin(source.frontmatter);
+    const set = {};
     const setLine = (field, value) => {
-      const re = new RegExp(`^${field}:.*$`, "m");
+      const re = keyLineRe(field);
       fm = re.test(fm) ? fm.replace(re, `${field}: ${value}`) : `${fm}
 ${field}: ${value}`;
+      set[field] = value;
     };
     if (host2 === "claude") {
       const resolved2 = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, "claude");
       if (cfg.model) setLine("model", resolved2.model);
       if (cfg.effort && resolved2.effort) setLine("effort", resolved2.effort);
-      if (!/^name:/m.test(fm)) fm = `name: ${name}
+      if (!keyLineRe("name").test(fm)) {
+        fm = `name: ${name}
 ${fm}`;
+        set.name = name;
+      }
     } else if (host2 === "opencode") {
       const resolved2 = resolveHostSettings({ model: cfg.model }, "opencode");
       if (cfg.model && resolved2.model !== "inherit") setLine("model", opencodeModelRef(resolved2.model, overpassProvider));
     } else if (cfg.model) {
       setLine("model", resolveHostSettings({ model: cfg.model }, "agy").model);
     }
+    const check = parseSource(`---
+${fm}
+---
+`);
+    if (check.error) return { ok: false, reason: `the frontmatter with Sterling's model lines does not parse (${check.error})` };
+    const wrong = Object.entries(set).filter(([field, value]) => String(check.data[field]) !== String(value));
+    if (wrong.length) return { ok: false, reason: `the frontmatter with Sterling's model lines does not read back ${wrong.map(([f, v]) => `${f}: ${v}`).join(", ")}` };
     return { ok: true, name, content: withStamp(`---
 ${fm}
 ---`, body, host2, key, sourceHash) };
@@ -59922,7 +59979,7 @@ function openDashboard(storePath2, options = {}) {
     }
     let catalog = { present: false, stale: false, staleDate: null, entries: [] };
     try {
-      store.bootstrapCatalogIfAbsent(canonical2 ?? {}, nowISO);
+      store.bootstrapCatalogIfAbsent({ models: {} }, nowISO);
       store.ensureCatalogPinnedModels(canonical2 ?? {});
       const rec = store.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
       const days = canonical2?.models_catalog?.staleness_days ?? 45;
@@ -59959,7 +60016,7 @@ function openDashboard(storePath2, options = {}) {
     let failure;
     if (!applyAgentModel(e, (msg) => {
       failure = msg;
-    }, configPath2)) {
+    }, configPath2, options.configWriteFs)) {
       ui = { ...ui, notice: failure ?? `model change for '${e.key}' failed` };
       return;
     }

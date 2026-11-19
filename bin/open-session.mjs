@@ -9307,15 +9307,20 @@ function configuredFullAgentModels(projectDir) {
     return leave(`${where} does not validate (${err.message.replace(/\s+/g, " ")})`);
   }
   const models = {};
+  const unsupported = {};
   for (const name of ROSTER) {
     const key = AGENT_MODEL_KEY[name];
     if (key === void 0) continue;
     const entry = parsed.models[key];
     if (entry === void 0) continue;
-    if (typeof entry.model !== "string" || !hostRunsModel(entry.model, "opencode")) continue;
+    if (typeof entry.model !== "string") continue;
+    if (!hostRunsModel(entry.model, "opencode")) {
+      unsupported[name] = `config.models.${key} is ${entry.model}, which OpenCode cannot run`;
+      continue;
+    }
     models[name] = opencodeModelRef(entry.model, parsed.overpass.provider);
   }
-  return { models };
+  return { models, unsupported };
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname4(fileURLToPath(moduleUrl));
@@ -9376,8 +9381,8 @@ function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
-function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
-  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models });
+function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {}, unsupported = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models, unsupported });
   return {
     rows: planned.map(({ path, content, previous, ...row }) => row),
     writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
@@ -9397,7 +9402,7 @@ function fullAgentTargets(registry) {
   }
   return targets;
 }
-function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
+function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {}, unsupported = {} }) {
   const registry = loadRegistry(join12(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot2) };
@@ -9420,9 +9425,17 @@ function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models =
       }
       if (sha2562(disk.replace(`${m[0]}
 `, "")) !== m[3]) {
+        if (Object.hasOwn(unsupported, name)) {
+          rows.push(refusal(rel, `${rel} was edited after Sterling wrote it, and ${unsupported[name]}, so Sterling would remove it; it is kept and may still run`, `delete it by hand, or pick a model OpenCode can run in the System tab, then rerun /sterling:update`));
+          continue;
+        }
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (Object.hasOwn(unsupported, name)) {
+      rows.push(disk === null ? { item: rel, status: "skipped", detail: `${unsupported[name]}; no OpenCode copy is created` } : { item: rel, status: "removed", detail: `${unsupported[name]}; the copy Sterling wrote is removed`, path, content: null, previous: raw });
+      continue;
     }
     if (unsafe.length) {
       const why = `it needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`;
@@ -9449,6 +9462,11 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
+      if (w.content === null) {
+        rmSync2(w.path, { force: true });
+        done.push(w);
+        continue;
+      }
       mkdirSync4(dirname4(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
@@ -9499,10 +9517,10 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained, ownAgentPaths: opencodeOwnAgentPaths(pluginRoot2) }));
   const configured = configuredFullAgentModels(configDir);
   if (configured.refused) rows.push(configured.refused);
-  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {} });
+  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {}, unsupported: configured.unsupported ?? {} });
   let agentRows = staged.rows;
   if (configured.refused) {
-    agentRows = agentRows.map((r) => ["created", "refreshed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
+    agentRows = agentRows.map((r) => ["created", "refreshed", "removed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
   } else {
     writeFullAgentFiles(staged.writes);
   }

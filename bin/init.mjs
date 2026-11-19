@@ -5548,27 +5548,6 @@ function moveImplementorHardTask(raw) {
   models["implementor-hard"] = entry;
   return record(models, { kind: "moved", hard_task, entry });
 }
-function resetOverpassDefaults(raw) {
-  const none = { config: raw, changed: false };
-  if (!isPlainObject(raw))
-    return none;
-  const applied = raw.applied_config_migrations;
-  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
-    return none;
-  if ((applied ?? []).includes(OVERPASS_DEFAULTS_MIGRATION_ID))
-    return none;
-  if (raw.overpass !== void 0 && !isPlainObject(raw.overpass)) {
-    return { ...none, refusal: `config.overpass is ${JSON.stringify(raw.overpass)}, not an object, so the Overpass defaults reset cannot be applied` };
-  }
-  const { roles, ...block } = raw.overpass ?? {};
-  const result = { config: raw, changed: true };
-  if (Object.prototype.hasOwnProperty.call(raw.overpass ?? {}, "roles"))
-    result.rolesRemoved = { value: roles };
-  if (block.conductor_bypass !== true)
-    result.bypassSet = { was: block.conductor_bypass };
-  result.config = { ...raw, overpass: { ...block, conductor_bypass: true }, applied_config_migrations: [...applied ?? [], OVERPASS_DEFAULTS_MIGRATION_ID] };
-  return result;
-}
 function migrateRetiredModelKeys(raw) {
   const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
   if (!isPlainObject(raw) || !isPlainObject(raw.models))
@@ -5787,7 +5766,7 @@ function parseCanonicalModels(raw) {
   const config = toCanonicalConfig(raw).config;
   return canonicalModelsSchema.parse(isPlainObject(config) ? config.models : void 0);
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6392,7 +6371,6 @@ var init_config = __esm({
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
     IMPLEMENTOR_HARD_MIGRATION_ID = "implementor-hard-2026-10-23";
-    OVERPASS_DEFAULTS_MIGRATION_ID = "overpass-defaults-2026-10-23";
     CONFIG_KEY_RENAMES = {
       "models.coder": "models.implementor",
       "models.explorer": "models.scout"
@@ -15573,7 +15551,7 @@ function findBackslashHookCommands(frontmatter) {
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
 function resolveModelVars(templateContent, label, config) {
-  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return conductorModelVars(templateContent, label, config);
   const { name: name4 } = parseTemplate(templateContent, label);
   const key = AGENT_MODEL_KEY[name4];
   if (!key) {
@@ -15596,6 +15574,23 @@ function resolveModelVars(templateContent, label, config) {
   }
   if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${key} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
   return { MODEL: entry.model.slice(entry.model.indexOf("/") + 1), EFFORT: entry.effort ?? null };
+}
+function conductorModelVars(templateContent, label, config) {
+  if (!config?.models || typeof config.models !== "object") return {};
+  const { name: name4 } = parseTemplate(templateContent, label);
+  if (name4 !== CONDUCTOR_MODEL_KEY) return {};
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const conflict = conflicts.find((c) => c.role === CONDUCTOR_MODEL_KEY);
+  const raw = conflict ? conflict.claude : canon.models?.[CONDUCTOR_MODEL_KEY];
+  if (raw === void 0) return {};
+  const parsed = canonicalModelsSchema.safeParse({ [CONDUCTOR_MODEL_KEY]: raw });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`model resolution failed for ${label}: config.models.${[CONDUCTOR_MODEL_KEY, ...issue.path.slice(1)].join(".")}: ${issue.message} (P5)`);
+  }
+  const entry = parsed.data[CONDUCTOR_MODEL_KEY];
+  if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${CONDUCTOR_MODEL_KEY} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { conductorPin: { model: entry.model.slice(entry.model.indexOf("/") + 1), effort: entry.effort ?? null } };
 }
 function claudeUnsupportedReason(templateContent, label, config) {
   return resolveModelVars(templateContent, label, config).unsupported ?? null;
@@ -15636,7 +15631,7 @@ function appendExtraTools(frontmatter, name4, label, config) {
   return lines.join("\n");
 }
 function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {}, config } = {}) {
-  const modelVars = resolveModelVars(templateContent, label, config);
+  const { conductorPin, ...modelVars } = resolveModelVars(templateContent, label, config);
   if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
   const allVars = { ...vars, ...modelVars };
   let substituted = renderClaudeText(templateContent, label);
@@ -15649,7 +15644,14 @@ function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars
   }
   const parsed = parseTemplate(substituted, label);
   const { name: name4, body } = parsed;
-  const frontmatter = appendExtraTools(parsed.frontmatter, name4, label, config);
+  let pinned = parsed.frontmatter;
+  if (conductorPin) {
+    if (/^(model|effort):/m.test(pinned)) throw new Error(`${label}: the conductor template already has a model or effort line, so config.models.${CONDUCTOR_MODEL_KEY} cannot be applied (P5)`);
+    pinned = `${pinned}
+model: ${conductorPin.model}${conductorPin.effort ? `
+effort: ${conductorPin.effort}` : ""}`;
+  }
+  const frontmatter = appendExtraTools(pinned, name4, label, config);
   const unsubstituted = substituted.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {
     throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value \u2014 refusing to install a half-baked agent (P5)`);
@@ -16473,14 +16475,6 @@ function describeHardMove(move) {
   if (move.kind === "dropped") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task dropped (value was ${show(move.hard_task)}); models.implementor-hard ${show(move.entry)} was already set and is kept`];
   return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
 }
-function describeOverpassReset(reset) {
-  if (!reset.changed) return [];
-  const lines = [];
-  if (reset.rolesRemoved) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.roles removed (value was ${show(reset.rolesRemoved.value)}); every role now runs on its default tier`);
-  if (reset.bypassSet) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.conductor_bypass set to true (was ${reset.bypassSet.was === void 0 ? "unset" : show(reset.bypassSet.was)}); the conductor keeps its direct model pin`);
-  if (!lines.length) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass defaults already in place; recorded ${OVERPASS_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never reset again`);
-  return lines;
-}
 var ConcurrentChange = class extends Error {
 };
 function rewritable(projectDir, configPath2, refuse) {
@@ -16565,10 +16559,8 @@ function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}) {
   const legacyLines = [...describeMigration(m.dropped), ...describeStaleAgy(a.dropped)];
   if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
     const h = moveImplementorHardTask(legacy);
-    const o = resetOverpassDefaults(h.config);
-    if (o.refusal) return refuse(o.refusal);
-    legacy = o.config;
-    legacyLines.push(...describeHardMove(h.move), ...describeOverpassReset(o));
+    legacy = h.config;
+    legacyLines.push(...describeHardMove(h.move));
   }
   let result;
   try {
@@ -19889,15 +19881,20 @@ function configuredFullAgentModels(projectDir) {
     return leave(`${where} does not validate (${err.message.replace(/\s+/g, " ")})`);
   }
   const models = {};
+  const unsupported = {};
   for (const name4 of ROSTER) {
     const key = AGENT_MODEL_KEY[name4];
     if (key === void 0) continue;
     const entry = parsed.models[key];
     if (entry === void 0) continue;
-    if (typeof entry.model !== "string" || !hostRunsModel(entry.model, "opencode")) continue;
+    if (typeof entry.model !== "string") continue;
+    if (!hostRunsModel(entry.model, "opencode")) {
+      unsupported[name4] = `config.models.${key} is ${entry.model}, which OpenCode cannot run`;
+      continue;
+    }
     models[name4] = opencodeModelRef(entry.model, parsed.overpass.provider);
   }
-  return { models };
+  return { models, unsupported };
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname12(fileURLToPath3(moduleUrl));
@@ -19958,8 +19955,8 @@ function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
-function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
-  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models });
+function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {}, unsupported = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models, unsupported });
   return {
     rows: planned.map(({ path, content, previous, ...row }) => row),
     writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
@@ -19979,7 +19976,7 @@ function fullAgentTargets(registry2) {
   }
   return targets;
 }
-function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
+function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {}, unsupported = {} }) {
   const registry2 = loadRegistry(join30(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const vars = { PROJECT_DIR: fwd7(projectDir), STERLING_ROOT: fwd7(pluginRoot2) };
@@ -20002,9 +19999,17 @@ function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models =
       }
       if (sha256(disk.replace(`${m[0]}
 `, "")) !== m[3]) {
+        if (Object.hasOwn(unsupported, name4)) {
+          rows.push(refusal(rel, `${rel} was edited after Sterling wrote it, and ${unsupported[name4]}, so Sterling would remove it; it is kept and may still run`, `delete it by hand, or pick a model OpenCode can run in the System tab, then rerun /sterling:update`));
+          continue;
+        }
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (Object.hasOwn(unsupported, name4)) {
+      rows.push(disk === null ? { item: rel, status: "skipped", detail: `${unsupported[name4]}; no OpenCode copy is created` } : { item: rel, status: "removed", detail: `${unsupported[name4]}; the copy Sterling wrote is removed`, path, content: null, previous: raw });
+      continue;
     }
     if (unsafe.length) {
       const why = `it needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`;
@@ -20031,6 +20036,11 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
+      if (w.content === null) {
+        rmSync5(w.path, { force: true });
+        done.push(w);
+        continue;
+      }
       mkdirSync8(dirname12(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
@@ -20081,10 +20091,10 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained, ownAgentPaths: opencodeOwnAgentPaths(pluginRoot2) }));
   const configured = configuredFullAgentModels(configDir);
   if (configured.refused) rows.push(configured.refused);
-  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {} });
+  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {}, unsupported: configured.unsupported ?? {} });
   let agentRows = staged.rows;
   if (configured.refused) {
-    agentRows = agentRows.map((r) => ["created", "refreshed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
+    agentRows = agentRows.map((r) => ["created", "refreshed", "removed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
   } else {
     writeFullAgentFiles(staged.writes);
   }

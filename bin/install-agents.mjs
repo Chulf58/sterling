@@ -6220,7 +6220,7 @@ function findBackslashHookCommands(frontmatter) {
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
 function resolveModelVars(templateContent, label, config2) {
-  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return conductorModelVars(templateContent, label, config2);
   const { name } = parseTemplate(templateContent, label);
   const key = AGENT_MODEL_KEY[name];
   if (!key) {
@@ -6243,6 +6243,23 @@ function resolveModelVars(templateContent, label, config2) {
   }
   if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${key} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
   return { MODEL: entry.model.slice(entry.model.indexOf("/") + 1), EFFORT: entry.effort ?? null };
+}
+function conductorModelVars(templateContent, label, config2) {
+  if (!config2?.models || typeof config2.models !== "object") return {};
+  const { name } = parseTemplate(templateContent, label);
+  if (name !== CONDUCTOR_MODEL_KEY) return {};
+  const { config: canon, conflicts } = toCanonicalConfig(config2);
+  const conflict = conflicts.find((c) => c.role === CONDUCTOR_MODEL_KEY);
+  const raw = conflict ? conflict.claude : canon.models?.[CONDUCTOR_MODEL_KEY];
+  if (raw === void 0) return {};
+  const parsed = canonicalModelsSchema.safeParse({ [CONDUCTOR_MODEL_KEY]: raw });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`model resolution failed for ${label}: config.models.${[CONDUCTOR_MODEL_KEY, ...issue.path.slice(1)].join(".")}: ${issue.message} (P5)`);
+  }
+  const entry = parsed.data[CONDUCTOR_MODEL_KEY];
+  if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${CONDUCTOR_MODEL_KEY} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { conductorPin: { model: entry.model.slice(entry.model.indexOf("/") + 1), effort: entry.effort ?? null } };
 }
 function claudeUnsupportedReason(templateContent, label, config2) {
   return resolveModelVars(templateContent, label, config2).unsupported ?? null;
@@ -6283,7 +6300,7 @@ function appendExtraTools(frontmatter, name, label, config2) {
   return lines.join("\n");
 }
 function renderInstalledAgent(templateContent, label, { pluginVersion: pluginVersion2, now, vars = {}, config: config2 } = {}) {
-  const modelVars = resolveModelVars(templateContent, label, config2);
+  const { conductorPin, ...modelVars } = resolveModelVars(templateContent, label, config2);
   if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
   const allVars = { ...vars, ...modelVars };
   let substituted = renderClaudeText(templateContent, label);
@@ -6296,7 +6313,14 @@ function renderInstalledAgent(templateContent, label, { pluginVersion: pluginVer
   }
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
-  const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config2);
+  let pinned = parsed.frontmatter;
+  if (conductorPin) {
+    if (/^(model|effort):/m.test(pinned)) throw new Error(`${label}: the conductor template already has a model or effort line, so config.models.${CONDUCTOR_MODEL_KEY} cannot be applied (P5)`);
+    pinned = `${pinned}
+model: ${conductorPin.model}${conductorPin.effort ? `
+effort: ${conductorPin.effort}` : ""}`;
+  }
+  const frontmatter = appendExtraTools(pinned, name, label, config2);
   const unsubstituted = substituted.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {
     throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value \u2014 refusing to install a half-baked agent (P5)`);
