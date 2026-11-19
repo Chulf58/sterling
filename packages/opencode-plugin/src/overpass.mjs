@@ -221,7 +221,8 @@ export function availableAgainLine(res) {
  *     the agent maps to a config key (routingKey: an adopted agent's served name to its
  *     custom-<slug> key) on an Overpass tier with an effort set, and the request runs on
  *     exactly that key's tier model.
- * Any other model, a call's own named one included, is never touched.
+ * Any other model is never touched, and neither is a lane whose call named its own model, even the tier
+ * model itself (`dispatched.explicitModel`).
  */
 export function requestEffort(res, agent, model, dispatched) {
   if (!res?.effective) return null;
@@ -230,6 +231,8 @@ export function requestEffort(res, agent, model, dispatched) {
   const primary = agent === CONDUCTOR_AGENT ? res.conductor : agent === PLAN_AGENT ? res.plan : undefined;
   if (primary !== undefined) return primary?.tier && primary.effort && ref === primary.model ? primary.effort : null;
   if (!dispatched) return null;
+  // a lane whose call named its own model keeps it as named, with no inherited role effort
+  if (dispatched.explicitModel === true) return null;
   const role = res.routing ? routingKey(res.routing, agent) : agentRole(agent);
   if (typeof role !== 'string' || !Object.hasOwn(res.roles ?? {}, role)) return null;
   const route = res.roles[role];
@@ -283,10 +286,12 @@ export function createLaneDispatches() {
     remember(children, child, key);
   };
   return {
-    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments. */
-    noteDispatch(parentSessionID, callID, args) {
+    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments.
+     *  `explicitModel` is true when the call itself named a model (before the pin filled one in): such a
+     *  lane keeps the model it named and gets no role effort, even when that model equals the role's tier. */
+    noteDispatch(parentSessionID, callID, args, { explicitModel = false } = {}) {
       const key = keyOf(parentSessionID, callID);
-      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), child: null });
+      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), explicitModel: explicitModel === true, child: null });
     },
     linkChild,
     /** A call that ended: linked to `child` when its result names one, else its record is dropped. */
@@ -298,11 +303,11 @@ export function createLaneDispatches() {
     onEvent(ev) {
       if (ev?.type === 'session.tool.progress') linkChild(ev.data?.sessionID, ev.data?.id, ev.data?.metadata?.sessionID);
     },
-    /** { role } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
+    /** { role, explicitModel? } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
     dispatchOf(sessionID, parentID, agent) {
       const call = calls.get(children.get(sessionID));
       if (!call || call.child !== sessionID || typeof parentID !== 'string' || call.parent !== parentID || call.role !== agentRole(agent)) return null;
-      return { role: call.role };
+      return call.explicitModel ? { role: call.role, explicitModel: true } : { role: call.role };
     },
   };
 }

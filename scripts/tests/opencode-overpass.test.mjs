@@ -1200,9 +1200,12 @@ test('effort: never set for another model, a call that named its own model, an u
     await linkedLane(s, 'sterling/researcher', 'ses_child4', 'call_4');
     await linkedLane(s, 'general', 'ses_child5', 'call_5');
     await linkedLane(s, 'sterling/implementor', 'ses_child6', 'call_6', { model: 'overpass/agentic-conductor' });
+    await linkedLane(s, 'sterling/implementor', 'ses_child7', 'call_7', { model: 'overpass/agentic-auto' });
     const cases = [
       ['sterling/implementor', { providerID: 'openai', id: 'gpt-6.1-sol' }, 'ses_child1', 'a direct model'],
       ['sterling/implementor', { providerID: 'overpass', id: 'agentic-conductor' }, 'ses_child6', 'a call that named an overpass model of its own'],
+      // restored (item-G review loop 3): a call that names exactly its role's tier still named it, so no role effort
+      ['sterling/implementor', { providerID: 'overpass', id: 'agentic-auto' }, 'ses_child7', 'a call that named its own role tier'],
       ['sterling/reviewer', LANE, 'ses_child2', 'a reviewer on agentic-high while its tier is agentic-max'],
       ['sterling/implementor', { providerID: 'overpass-agentic', id: 'agentic-high' }, 'ses_child1', 'another provider with the same id'],
       ['sterling/implementor', undefined, 'ses_child1', 'no model on the request'],

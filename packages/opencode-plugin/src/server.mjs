@@ -391,8 +391,10 @@ export function createSterlingServer(deps = {}) {
       // Not fenced: a refused claim call throws, which refuses the tool call (claim-identity.mjs).
       await applyClaimIdentity(input, { checkoutOfSession });
       await delivery.onBefore(input);
+      // read before axis.onBefore, which fills in the resolved model: did the call name its own?
+      const explicitModel = input?.tool === 'subagent' && typeof input.input?.model === 'string' && input.input.model !== '';
       await axis.onBefore(input);
-      if (input?.tool === 'subagent') laneDispatches.noteDispatch(input.sessionID, input.id, input.input);
+      if (input?.tool === 'subagent') laneDispatches.noteDispatch(input.sessionID, input.id, input.input, { explicitModel });
       await dispatch.onBefore(input);
     }
     // H23 matches only the tool's own output, taken before anything is appended,
