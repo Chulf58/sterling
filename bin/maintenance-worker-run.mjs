@@ -5660,6 +5660,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5787,7 +5792,9 @@ function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
 var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
 var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
 var MERGE_PATHS = ["direct", "pr"];
 var MIN_REVIEWERS = 1;
 var MAX_REVIEWERS = 5;
@@ -5815,6 +5822,9 @@ var canonicalModelsSchema = external_exports.object({
     const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
     if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
     }
     if (e.effort === "max" && overpassTier === null) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -5850,10 +5860,11 @@ var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) =>
 
 // packages/schemas/dist/custom-agents.js
 var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
 var AGENT_HOST_CAPABILITIES = Object.freeze({
-  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
 });
 
 // packages/schemas/dist/registry.js
@@ -13463,6 +13474,15 @@ function opencodeStreamJournal(journal, observe = () => {
 // scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_MODEL = "claude-sonnet-5-5";
 var WORKER_EFFORT = "medium";
+var WORKER_MODEL_KEY = "maintenance-worker";
+function workerModelOf(config) {
+  const e = config?.models?.[WORKER_MODEL_KEY];
+  if (e === void 0) return null;
+  if (e === null || typeof e !== "object" || typeof e.model !== "string" || !e.model.trim() || e.effort !== void 0 && typeof e.effort !== "string") {
+    return { error: `config.models.${WORKER_MODEL_KEY} must be {"model": "<provider>/<id>", "effort"?: "<level>"}, got ${JSON.stringify(e)}` };
+  }
+  return { model: e.model.includes("/") ? e.model : `anthropic/${e.model}`, ...e.effort === void 0 ? {} : { effort: e.effort } };
+}
 var WORKER_AGENT_TEMPLATE = "librarian";
 var WORKER_RUN_BUDGET_USD = 5;
 var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
@@ -14044,14 +14064,14 @@ ${judged.join("\n")}
 `;
   return prompt;
 }
-function buildWorkerArgs({ mcpConfig, agentDefinition, budgetUsd: budgetUsd2 = WORKER_RUN_BUDGET_USD }) {
+function buildWorkerArgs({ mcpConfig, agentDefinition, budgetUsd: budgetUsd2 = WORKER_RUN_BUDGET_USD, model, effort }) {
   if (typeof agentDefinition !== "string" || !agentDefinition) throw new Error("buildWorkerArgs needs the worker agent definition (workerAgentDefinition)");
+  const pair = model === void 0 ? { model: WORKER_MODEL, effort: WORKER_EFFORT } : { model, effort };
   return [
     "-p",
     "--model",
-    WORKER_MODEL,
-    "--effort",
-    WORKER_EFFORT,
+    pair.model,
+    ...pair.effort === void 0 ? [] : ["--effort", pair.effort],
     "--agents",
     agentDefinition,
     "--agent",
@@ -14219,19 +14239,19 @@ function launchWorker(opts) {
       const target = debtOwnerRecord(opts.store, t);
       const standing = verdicts.get(t.id);
       const tree = treeFor(target);
-      let own;
+      let own2;
       let siblingsPayable = true;
-      if (tree.unresolved) own = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
+      if (tree.unresolved) own2 = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
       else {
-        own = prove(t, tree.root, tree.head, { prefix: tree.prefix });
+        own2 = prove(t, tree.root, tree.head, { prefix: tree.prefix });
         for (const s2 of linked.get(target?.id ?? t.feature_link) ?? []) if (s2.id !== t.id && !prove(s2, tree.root, tree.head, { prefix: tree.prefix }).payable) siblingsPayable = false;
       }
-      if (own.conductor) {
-        conductorHolds.push({ t, target, p: own });
+      if (own2.conductor) {
+        conductorHolds.push({ t, target, p: own2 });
         return false;
       }
       if (standing && isProvenanceVerdict(standing) && standing.verdict === "needs_conductor") cleared.push(t);
-      if (own.payable && siblingsPayable) return true;
+      if (own2.payable && siblingsPayable) return true;
       waiting.push(t.id);
       return false;
     });
@@ -14253,7 +14273,12 @@ function launchWorker(opts) {
     }
     const host = opts.host ?? "claude";
     if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: "error", detail: failDetail(`unknown runner host '${host}'`) };
-    const model = opts.workerModel ?? opencodeModelOf(opts.config);
+    const own = workerModelOf(opts.config);
+    if (own?.error) return { launched: false, reason: "error", detail: failDetail(own.error) };
+    if (host === "claude" && own && !own.model.startsWith("anthropic/")) {
+      return { launched: false, reason: "error", detail: failDetail(`config.models.${WORKER_MODEL_KEY} is ${own.model}, which the Claude Code runner cannot run; it runs only through OpenCode`) };
+    }
+    const model = opts.workerModel ?? (own && !own.model.startsWith("overpass/") ? own.model : opencodeModelOf(opts.config));
     if (host === "opencode") {
       if (typeof opts.opencodeBin !== "string" || !opts.opencodeBin) return { launched: false, reason: "error", detail: failDetail("the opencode host needs the path of the opencode binary") };
       if (model === null) return { launched: false, reason: "error", detail: failDetail(OPENCODE_MODEL_UNSET) };
@@ -14274,7 +14299,8 @@ function launchWorker(opts) {
     let logFd;
     try {
       writeFileSync4(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : {} } : { host };
+      const ownEffort = opts.workerModel === void 0 && own?.effort ? { opencode_variant: own.effort } : {};
+      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : ownEffort } : { host, ...own ? { claude_model: own.model.slice("anthropic/".length), ...own.effort ? { claude_effort: own.effort } : {} } : {} };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
       const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));
@@ -14566,7 +14592,7 @@ async function runWorker(opts) {
       return { host, bin: ocBin, args: buildOpencodeArgs({ model }), input: opencodePrompt(prompt), env: opencodeEnv({ root: opts.root, config, effort }) };
     }
     if (host !== "claude") throw new Error(`unknown runner host '${host}'`);
-    return { host, bin, input: prompt, args: buildWorkerArgs({ mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd2 : rawBudget }), env: {} };
+    return { host, bin, input: prompt, args: buildWorkerArgs({ mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd2 : rawBudget, model: eligible?.claude_model, effort: eligible?.claude_effort }), env: {} };
   };
   if (opts.dryRun) {
     let run;

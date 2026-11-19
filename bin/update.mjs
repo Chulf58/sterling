@@ -6172,6 +6172,32 @@ function readProjectMode(root) {
     return "hobby";
   return modeOfConfig(parsed, where);
 }
+function workflowOfConfig(parsed, where) {
+  if (parsed === void 0)
+    return workflowSchema.parse(void 0);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProjectWorkflowError(`${where} is not a JSON object \u2014 the workflow settings cannot be read`);
+  }
+  let canonical2;
+  try {
+    canonical2 = toCanonicalConfig(parsed).config;
+  } catch (err) {
+    if (!(err instanceof Error))
+      throw err;
+    throw new ProjectWorkflowError(`${err.message} (in ${where}) \u2014 the workflow settings cannot be read; fix it in the TUI System tab or the file`);
+  }
+  const workflow = canonical2.workflow;
+  const checked = workflowSchema.safeParse(workflow);
+  if (!checked.success) {
+    const issues = checked.error.issues.map((i) => `${["workflow", ...i.path].join(".")}: ${i.message}`).join("; ");
+    throw new ProjectWorkflowError(`config.workflow is invalid in ${where} (${issues}) \u2014 fix it in the TUI System tab or the file`);
+  }
+  return checked.data;
+}
+function readProjectWorkflow(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectWorkflowError, "the workflow settings");
+  return workflowOfConfig(parsed, where);
+}
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
   if (parsed === void 0)
@@ -6181,10 +6207,11 @@ function readProjectIdentity(root) {
   }
   return { project_id: parsed.project_id };
 }
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId;
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId, ProjectWorkflowError;
 var init_project = __esm({
   "packages/schemas/dist/project.js"() {
     "use strict";
+    init_config();
     PROJECT_MODES = ["hobby", "work"];
     ProjectModeError = class extends Error {
       constructor(message) {
@@ -6203,6 +6230,12 @@ var init_project = __esm({
     fwd2 = (p) => p.replace(/\\/g, "/");
     UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+    ProjectWorkflowError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectWorkflowError";
+      }
+    };
   }
 });
 
@@ -6604,7 +6637,7 @@ function parseCanonicalModels(raw) {
   const config = toCanonicalConfig(raw).config;
   return canonicalModelsSchema.parse(isPlainObject(config) ? config.models : void 0);
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_PREFIX, CUSTOM_AGENT_SLUG_RE, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_PREFIX, CUSTOM_AGENT_SLUG_RE, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -7111,6 +7144,11 @@ var init_config = __esm({
       // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // The workflow settings that replace mode (decision
+      // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+      // reader does not report it as unread; its strict judge is workflowOfConfig in
+      // project.ts and canonicalConfigSchema below.
+      workflow: external_exports.unknown().optional(),
       // Where the project's stores live (decision
       // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
       // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -7242,6 +7280,7 @@ var init_config = __esm({
     MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
     CLAUDE_PROVIDER = "anthropic";
     OVERPASS_MODEL_NAMESPACE = "overpass";
+    AGY_MODEL_NAMESPACE = "agy";
     CONDUCTOR_MODEL_KEY = "conductor";
     PLAN_MODEL_KEY = "plan";
     MERGE_PATHS = ["direct", "pr"];
@@ -7271,6 +7310,9 @@ var init_config = __esm({
         const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
         if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
           ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+        }
+        if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
         }
         if (e.effort === "max" && overpassTier === null) {
           ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -7336,24 +7378,48 @@ function customAgentKey(name) {
   const slug = customAgentSlug(name);
   return slug === null ? null : `${CUSTOM_AGENT_KEY_PREFIX}${slug}`;
 }
+function hostRunsModel(model, host) {
+  const ref = model.includes("/") ? model : `${CLAUDE_PROVIDER}/${model}`;
+  const runs = AGENT_HOST_CAPABILITIES[host].runs;
+  if ("models" in runs)
+    return runs.models.includes(ref);
+  const provider = ref.slice(0, ref.indexOf("/"));
+  if (runs.except?.includes(provider))
+    return false;
+  return runs.providers === "*" || runs.providers.includes(provider);
+}
+function opencodeModelRef(model, overpassProvider = DEFAULT_OVERPASS_PROVIDER) {
+  const prefix = `${OVERPASS_MODEL_NAMESPACE}/`;
+  return model.startsWith(prefix) ? `${overpassProvider}/${model.slice(prefix.length)}` : model;
+}
 function resolveHostSettings(entry, host) {
   const cap = AGENT_HOST_CAPABILITIES[host];
   const e = entry ?? {};
   const effortSupported = cap.effortLevels.length > 0;
   let model = INHERIT;
   let modelFrom = "inherit";
+  let modelSupported = true;
+  const canonical2 = typeof e.model === "string" && e.model.includes("/") ? e.model : void 0;
   if (host === "claude") {
-    if (e.model)
+    if (canonical2) {
+      modelSupported = hostRunsModel(canonical2, "claude");
+      ({ model, modelFrom } = { model: modelSupported ? canonical2.slice(CLAUDE_PROVIDER.length + 1) : canonical2, modelFrom: "model" });
+    } else if (e.model)
       ({ model, modelFrom } = { model: e.model, modelFrom: "model" });
   } else if (host === "opencode") {
     if (e.opencode_model)
       ({ model, modelFrom } = { model: e.opencode_model, modelFrom: "override" });
+    else if (canonical2)
+      ({ model, modelFrom } = { model: canonical2, modelFrom: "model" });
     else if (e.model)
       ({ model, modelFrom } = { model: `anthropic/${e.model}`, modelFrom: "model" });
   } else if (e.agy_model) {
     ({ model, modelFrom } = { model: e.agy_model, modelFrom: "override" });
+  } else if (canonical2) {
+    modelSupported = hostRunsModel(canonical2, "agy");
+    ({ model, modelFrom } = { model: modelSupported ? canonical2.slice(AGY_MODEL_NAMESPACE.length + 1) : canonical2, modelFrom: "model" });
   }
-  const out = { host, model, modelFrom, modelSupported: true, effortSupported };
+  const out = { host, model, modelFrom, modelSupported, effortSupported };
   if (e.effort !== void 0) {
     if (cap.effortLevels.includes(e.effort))
       out.effort = e.effort;
@@ -7362,19 +7428,42 @@ function resolveHostSettings(entry, host) {
   }
   return out;
 }
-var AGENT_HOSTS, CLAUDE_EFFORT_LEVELS, AGENT_HOST_CAPABILITIES, INHERIT;
+function twoModelsReason(role) {
+  return `role ${role} has two models; run /sterling:update to choose`;
+}
+function unsupportedAgents(config, hosts = AGENT_HOSTS) {
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const out = conflicts.map((c) => ({ agent: c.role, host: "*", reason: twoModelsReason(c.role) }));
+  const conflicted = new Set(conflicts.map((c) => c.role));
+  const models = canonicalModelsSchema.parse(isPlainObj(canon) && isPlainObj(canon.models) ? canon.models : void 0);
+  for (const agent of Object.keys(models).sort()) {
+    const model = models[agent].model;
+    if (conflicted.has(agent) || model === void 0)
+      continue;
+    for (const host of hosts) {
+      if (agent === PLAN_MODEL_KEY && host !== "opencode")
+        continue;
+      if (!hostRunsModel(model, host))
+        out.push({ agent, host, model, reason: `${host} cannot run ${model}, so it gets no copy of ${agent}` });
+    }
+  }
+  return out;
+}
+var AGENT_HOSTS, CLAUDE_EFFORT_LEVELS, AGY_CANONICAL_MODELS, AGENT_HOST_CAPABILITIES, INHERIT, isPlainObj;
 var init_custom_agents = __esm({
   "packages/schemas/dist/custom-agents.js"() {
     "use strict";
     init_config();
     AGENT_HOSTS = ["claude", "opencode", "agy"];
     CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+    AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
     AGENT_HOST_CAPABILITIES = Object.freeze({
-      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
     });
     INHERIT = "inherit";
+    isPlainObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   }
 });
 
@@ -7587,7 +7676,9 @@ __export(dist_exports, {
   AGENT_HOST_CAPABILITIES: () => AGENT_HOST_CAPABILITIES,
   AGENT_MODEL_KEY: () => AGENT_MODEL_KEY,
   AGENT_TOOL_NAME_RE: () => AGENT_TOOL_NAME_RE,
+  AGY_CANONICAL_MODELS: () => AGY_CANONICAL_MODELS,
   AGY_MODEL_IDS: () => AGY_MODEL_IDS,
+  AGY_MODEL_NAMESPACE: () => AGY_MODEL_NAMESPACE,
   ARTICLE_KINDS: () => ARTICLE_KINDS,
   ARTICLE_STATE_REQUIRES: () => ARTICLE_STATE_REQUIRES,
   AUTHOR_RE: () => AUTHOR_RE,
@@ -7660,6 +7751,7 @@ __export(dist_exports, {
   PROJECT_MODES: () => PROJECT_MODES,
   ProjectIdentityError: () => ProjectIdentityError,
   ProjectModeError: () => ProjectModeError,
+  ProjectWorkflowError: () => ProjectWorkflowError,
   RECORD_TYPES: () => RECORD_TYPES,
   REPO_PATH_FORMAT: () => REPO_PATH_FORMAT,
   REPO_PATH_REFUSALS: () => REPO_PATH_REFUSALS,
@@ -7720,6 +7812,7 @@ __export(dist_exports, {
   handoffEvidenceFileSchema: () => handoffEvidenceFileSchema,
   handoffEvidenceSchema: () => handoffEvidenceSchema,
   headlineRecord: () => headlineRecord,
+  hostRunsModel: () => hostRunsModel,
   isAbsolutePathAnyHost: () => isAbsolutePathAnyHost,
   isBrokerOperation: () => isBrokerOperation,
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
@@ -7750,6 +7843,7 @@ __export(dist_exports, {
   normalizeRepoPath: () => normalizeRepoPath,
   objectShapeFor: () => objectShapeFor,
   openQuestionSchema: () => openQuestionSchema,
+  opencodeModelRef: () => opencodeModelRef,
   parseCanonicalConfig: () => parseCanonicalConfig,
   parseCanonicalModels: () => parseCanonicalModels,
   parseConfig: () => parseConfig,
@@ -7759,6 +7853,7 @@ __export(dist_exports, {
   protectedSpans: () => protectedSpans,
   readProjectIdentity: () => readProjectIdentity,
   readProjectMode: () => readProjectMode,
+  readProjectWorkflow: () => readProjectWorkflow,
   recordSizes: () => recordSizes,
   referenceMaterialSchema: () => referenceMaterialSchema,
   refineSupersession: () => refineSupersession,
@@ -7793,13 +7888,16 @@ __export(dist_exports, {
   todoHandoffSchema: () => todoHandoffSchema,
   todoSchema: () => todoSchema,
   todoWaitFieldsReadSchema: () => todoWaitFieldsReadSchema,
+  twoModelsReason: () => twoModelsReason,
   undeclaredPhaseInterfaces: () => undeclaredPhaseInterfaces,
   unknownFieldsIn: () => unknownFieldsIn,
   unreadConfigKeys: () => unreadConfigKeys,
+  unsupportedAgents: () => unsupportedAgents,
   validateRecord: () => validateRecord,
   verifiableAt: () => verifiableAt,
   workerPolicyItemSchema: () => workerPolicyItemSchema,
   workerPolicySchema: () => workerPolicySchema,
+  workflowOfConfig: () => workflowOfConfig,
   workflowSchema: () => workflowSchema
 });
 var init_dist = __esm({
@@ -16805,17 +16903,20 @@ function refreshAgentsMdKnowledgeFile(path, projected) {
   return r;
 }
 
+// scripts/lib/update.mjs
+init_dist();
+
 // scripts/lib/project-identity.mjs
 init_dist();
-function workIdentityRefusal(root, mode) {
+function identityRefusal(root) {
   let onPostgres;
   try {
     onPostgres = readProjectStorage(root) === "postgres";
   } catch (err) {
     return `project storage cannot be read: ${err.message}`;
   }
-  if (mode !== "work" && !onPostgres) return null;
-  const subject = mode === "work" ? "work-mode project" : "project with storage postgres";
+  if (!onPostgres) return null;
+  const subject = "project with storage postgres";
   try {
     if (readProjectIdentity(root)) return null;
   } catch (err) {
@@ -17718,7 +17819,7 @@ function parseDomainProposal(stdout) {
   return { add: map.proposal.add.map((a) => ({ domain: a.domain, reason: a.reason })), registered: map.registered_by_this_run === true };
 }
 var isFsError = (err) => typeof err?.code === "string" && typeof err?.syscall === "string";
-var isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
+var isProjectReadRefusal = (err) => err instanceof ProjectWorkflowError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
 function handoffRefusalRemedy(repoPath2) {
   return `fix it in ${repoPath2} and rerun /sterling:update (every registered project is refreshed on every run). If it cannot be repaired: retire it (move or delete the project, then \`node scripts/list-projects.mjs --prune-missing\` unregisters it), or set "store_authority": "secondary" in its .sterling/config.json so the refusal becomes a standing one.`;
 }
@@ -17844,20 +17945,19 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report2.projects.push(entry);
-      let projectMode;
       try {
-        projectMode = readProjectMode(p.repo_path);
+        readProjectWorkflow(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
-        log(`  \u2717 ${p.name}: REFUSED \u2014 project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
-        entry.handoff = "refused_project_mode";
+        log(`  \u2717 ${p.name}: REFUSED \u2014 workflow settings: ${err.message}. Nothing was synced or projected for this project; fix config.workflow (TUI System tab) and rerun /sterling:update.`);
+        entry.handoff = "refused_project_workflow";
         fail(2);
         failures++;
         continue;
       }
-      const identityRefusal = workIdentityRefusal(p.repo_path, projectMode);
-      if (identityRefusal) {
-        log(`  \u2717 ${p.name}: REFUSED \u2014 ${identityRefusal}. Nothing was synced or projected for this project.`);
+      const identityRefusal2 = identityRefusal(p.repo_path);
+      if (identityRefusal2) {
+        log(`  \u2717 ${p.name}: REFUSED \u2014 ${identityRefusal2}. Nothing was synced or projected for this project.`);
         entry.handoff = "refused_project_identity";
         fail(2);
         failures++;

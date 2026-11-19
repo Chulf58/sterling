@@ -5,10 +5,6 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync13 } from "node:fs";
-import { join as join17 } from "node:path";
-
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
@@ -5761,6 +5757,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5888,7 +5889,9 @@ function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
 var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
 var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
 var MERGE_PATHS = ["direct", "pr"];
 var MIN_REVIEWERS = 1;
 var MAX_REVIEWERS = 5;
@@ -5916,6 +5919,9 @@ var canonicalModelsSchema = external_exports.object({
     const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
     if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
     }
     if (e.effort === "max" && overpassTier === null) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -5951,10 +5957,11 @@ var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) =>
 
 // packages/schemas/dist/custom-agents.js
 var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
 var AGENT_HOST_CAPABILITIES = Object.freeze({
-  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
 });
 
 // packages/schemas/dist/registry.js
@@ -15874,11 +15881,6 @@ function dispatchOverlapNotice(input2, { now = Date.now() } = {}) {
   }
 }
 
-// scripts/hooks/lib/axis-compose.mjs
-import { existsSync as existsSync12, readFileSync as readFileSync13 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join16 } from "node:path";
-
 // scripts/hooks/lib/retired-terms.mjs
 function retiredTermNotice(store, text) {
   if (!text) return "";
@@ -15917,270 +15919,6 @@ function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
   return t.includes("?") && QUESTION_WORDS_RE.test(t);
 }
-function codexModelPin(root, { opener, toolInput }) {
-  const PIN = "STERLING CODEX MODEL PIN (H20)";
-  const show = (v) => {
-    const s2 = JSON.stringify(String(v ?? ""));
-    return s2.length <= 120 ? s2 : `${s2.slice(0, 120)}\u2026`;
-  };
-  if (!opener) {
-    return {
-      line: `STERLING CODEX MODEL (H20) \u2014 this tool takes no model argument, so the thread keeps the model its opener started with. Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`
-    };
-  }
-  let config = null;
-  let unreadable = null;
-  try {
-    config = loadConfig(root);
-  } catch (e) {
-    unreadable = e && e.message || String(e);
-  }
-  const sp = config && typeof config.sparring_partner === "object" && config.sparring_partner ? config.sparring_partner : null;
-  const lines = [];
-  if (sp && sp.enabled === false) {
-    lines.push(
-      `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
-    );
-  }
-  const callModel = typeof toolInput?.model === "string" && toolInput.model !== "" ? toolInput.model : null;
-  const pinned = sp && sp.models && typeof sp.models === "object" ? sp.models.openai?.model : void 0;
-  const chosen = typeof pinned === "string" ? pinned : sp ? sp.model : void 0;
-  const configured = typeof chosen === "string" && chosen !== "" ? chosen : null;
-  if (callModel !== null) {
-    lines.push(
-      `${PIN} \u2014 this call names model ${show(callModel)} EXPLICITLY, so the call-site value wins and Sterling leaves the input untouched${configured ? ` (config.sparring_partner.model is ${show(configured)} and was not applied)` : ""}.`
-    );
-    return { line: lines.join("\n") };
-  }
-  if (unreadable) {
-    lines.push(
-      `${PIN} \u2014 .sterling/config.json could not be parsed (${show(unreadable)}), so NO model was applied and the Codex CLI default is in force. Fix the config file; a consult is never denied over this.`
-    );
-    return { line: lines.join("\n") };
-  }
-  if (!configured) {
-    lines.push(
-      `${PIN} \u2014 no model is set in config.sparring_partner.model${config ? "" : " (no .sterling/config.json to read)"}, so this consult takes the Codex CLI default. Set one on the TUI System tab row 'Default Codex model'.`
-    );
-    return { line: lines.join("\n") };
-  }
-  lines.push(
-    `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
-  );
-  return { line: lines.join("\n"), model: configured };
-}
-var TomlSyntaxError = class extends Error {
-};
-var TOML_BARE_KEY = /[A-Za-z0-9_-]/;
-var TOML_SCALAR = /[A-Za-z0-9_+\-.:]/;
-var TOML_ESCAPES = { b: "\b", t: "	", n: "\n", f: "\f", r: "\r", e: "\x1B", '"': '"', "\\": "\\" };
-function tomlMcpServerNames(src) {
-  const n = src.length;
-  let i = src.charCodeAt(0) === 65279 ? 1 : 0;
-  const names = /* @__PURE__ */ new Set();
-  const fail = (what) => {
-    throw new TomlSyntaxError(`not valid TOML at line ${src.slice(0, i).split("\n").length}: ${what}`);
-  };
-  const ws = () => {
-    while (src[i] === " " || src[i] === "	") i++;
-  };
-  const newline = () => {
-    if (src[i] === "\n") i += 1;
-    else if (src[i] === "\r" && src[i + 1] === "\n") i += 2;
-    else return false;
-    return true;
-  };
-  const comment = () => {
-    if (src[i] === "#") while (i < n && src[i] !== "\n" && !(src[i] === "\r" && src[i + 1] === "\n")) i++;
-  };
-  const gap = () => {
-    for (; ; ) {
-      ws();
-      comment();
-      if (!newline()) return;
-    }
-  };
-  const endOfLine = () => {
-    ws();
-    comment();
-    if (i < n && !newline()) fail("expected the end of the line");
-  };
-  const escape = () => {
-    const c = src[i + 1];
-    if (c !== void 0 && Object.hasOwn(TOML_ESCAPES, c)) {
-      i += 2;
-      return TOML_ESCAPES[c];
-    }
-    const len = c === "u" ? 4 : c === "U" ? 8 : c === "x" ? 2 : 0;
-    const hex = src.slice(i + 2, i + 2 + len);
-    const code = len && hex.length === len && /^[0-9A-Fa-f]+$/.test(hex) ? parseInt(hex, 16) : -1;
-    if (code < 0 || code > 1114111 || code >= 55296 && code <= 57343) fail("an invalid escape in a string");
-    i += 2 + len;
-    return String.fromCodePoint(code);
-  };
-  const basic = () => {
-    let s2 = "";
-    for (i++; ; ) {
-      const c = src[i];
-      if (c === void 0 || c === "\n" || c === "\r") fail("an unterminated string");
-      if (c === '"') {
-        i++;
-        return s2;
-      }
-      if (c === "\\") s2 += escape();
-      else {
-        s2 += c;
-        i++;
-      }
-    }
-  };
-  const literal = () => {
-    const start = ++i;
-    while (i < n && src[i] !== "'" && src[i] !== "\n") i++;
-    if (src[i] !== "'") fail("an unterminated string");
-    return src.slice(start, i++);
-  };
-  const multiline = (q) => {
-    for (i += 3; ; ) {
-      if (i >= n) fail("an unterminated multiline string");
-      if (q === '"' && src[i] === "\\") i += 2;
-      else if (src[i] === q && src[i + 1] === q && src[i + 2] === q) {
-        let run = 3;
-        while (src[i + run] === q) run++;
-        if (run > 5) fail("too many quotes closing a multiline string");
-        i += run;
-        return;
-      } else i++;
-    }
-  };
-  const key = () => {
-    const parts = [];
-    for (; ; ) {
-      ws();
-      const c = src[i];
-      if (c === '"' || c === "'") {
-        if (src[i + 1] === c && src[i + 2] === c) fail("a multiline string used as a key");
-        parts.push(c === '"' ? basic() : literal());
-      } else {
-        const start = i;
-        while (i < n && TOML_BARE_KEY.test(src[i])) i++;
-        if (i === start) fail("expected a key");
-        parts.push(src.slice(start, i));
-      }
-      ws();
-      if (src[i] !== ".") return parts;
-      i++;
-    }
-  };
-  const value = () => {
-    const c = src[i];
-    if (c === '"' || c === "'") {
-      if (src[i + 1] === c && src[i + 2] === c) multiline(c);
-      else if (c === '"') basic();
-      else literal();
-      return null;
-    }
-    if (c === "[") {
-      for (i++; ; ) {
-        gap();
-        if (src[i] === "]") break;
-        value();
-        gap();
-        if (src[i] === ",") i++;
-        else if (src[i] !== "]") fail("expected , or ] in an array");
-      }
-      i++;
-      return null;
-    }
-    if (c === "{") {
-      const keys = [];
-      for (i++; ; ) {
-        gap();
-        if (src[i] === "}") break;
-        keys.push(key()[0]);
-        if (src[i] !== "=") fail("expected = in an inline table");
-        i++;
-        ws();
-        value();
-        gap();
-        if (src[i] === ",") i++;
-        else if (src[i] !== "}") fail("expected , or } in an inline table");
-      }
-      i++;
-      return keys;
-    }
-    const start = i;
-    while (i < n && TOML_SCALAR.test(src[i])) i++;
-    if (i === start) fail("expected a value");
-    if (/^\d{4}-\d{2}-\d{2}$/.test(src.slice(start, i)) && src[i] === " " && /\d/.test(src[i + 1] ?? "")) {
-      for (i++; i < n && TOML_SCALAR.test(src[i]); ) i++;
-    }
-    return null;
-  };
-  let table = [];
-  let inServerArray = false;
-  while (i < n) {
-    ws();
-    if (newline()) continue;
-    if (i >= n || src[i] === "#") {
-      endOfLine();
-      continue;
-    }
-    if (src[i] === "[") {
-      const array = src[i + 1] === "[";
-      i += array ? 2 : 1;
-      table = key();
-      if (src[i] !== "]" || array && src[i + 1] !== "]") fail("expected ] closing a table header");
-      i += array ? 2 : 1;
-      inServerArray = array && table.length === 1 && table[0] === "mcp_servers";
-      if (table[0] === "mcp_servers" && table.length >= 2) names.add(table[1]);
-      endOfLine();
-      continue;
-    }
-    const path = [...table, ...key()];
-    if (src[i] !== "=") fail("expected = after a key");
-    i++;
-    ws();
-    const inline = value();
-    if (path[0] === "mcp_servers" && !inServerArray) {
-      if (path.length >= 2) names.add(path[1]);
-      else if (inline) for (const k of inline) names.add(k);
-    }
-    endOfLine();
-  }
-  return [...names];
-}
-function codexUserMcpServers(env = process.env) {
-  const file = join16(env.CODEX_HOME || join16(homedir4(), ".codex"), "config.toml");
-  let text;
-  try {
-    text = readFileSync13(file, "utf8");
-  } catch (e) {
-    return e && e.code === "ENOENT" ? { names: [] } : { names: [], error: `${file}: ${e && e.message || e}` };
-  }
-  try {
-    return { names: tomlMcpServerNames(text) };
-  } catch (e) {
-    if (e instanceof TomlSyntaxError) return { names: [], error: `${file}: ${e.message}` };
-    throw e;
-  }
-}
-function codexMcpDisable(toolInput, env = process.env) {
-  const { names, error } = codexUserMcpServers(env);
-  if (error) {
-    return { line: `STERLING CODEX MCP SERVERS (H20) \u2014 the Codex config could not be read (${JSON.stringify(error).slice(0, 200)}), so no user MCP server was disabled on this call.` };
-  }
-  const base2 = toolInput && typeof toolInput.config === "object" && toolInput.config !== null && !Array.isArray(toolInput.config) ? toolInput.config : {};
-  const callerServers = base2.mcp_servers && typeof base2.mcp_servers === "object" && !Array.isArray(base2.mcp_servers) ? base2.mcp_servers : {};
-  const added = names.filter((n) => !Object.hasOwn(callerServers, n));
-  if (added.length === 0) return {};
-  const mcp_servers = { ...callerServers };
-  for (const n of added) mcp_servers[n] = { enabled: false };
-  return {
-    config: { ...base2, mcp_servers },
-    line: `STERLING CODEX MCP SERVERS (H20) \u2014 disabled ${added.length} user MCP server(s) from the Codex config on this call (${added.map((n) => JSON.stringify(n)).join(", ").slice(0, 200)}); a review or consult uses none of them.`
-  };
-}
 function citedInBrief(record, text) {
   const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const id8 = String(record.id ?? "").slice(0, 8);
@@ -16201,7 +15939,6 @@ function composeMechanismAxis(store, opts) {
 }
 function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion2 = surface === "question";
-  const isConsult2 = surface === "consult";
   const isDispatch = surface === "dispatch";
   const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) return null;
@@ -16250,7 +15987,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const fresh = scored.filter((x) => {
     if (x.record.type !== "anti_pattern") return !isKnownDelivered(guard, x.record);
     if (isDispatch && citedInBrief(x.record, briefText)) return false;
-    return isConsult2 ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    return !isKnownDelivered(guard, x.record);
   });
   if (!fresh.length) return null;
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
@@ -16266,7 +16003,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-  const header = isQuestion2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
+  const header = isQuestion2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : (
     // PreToolUse context arrives WITH the dispatch (timing note at the top
     // of this file), so the brief has already gone out: the act this
     // prompts is a correction (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 5).
@@ -16406,31 +16143,9 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
 
 // scripts/hooks/h20-mechanism-axis.mjs
 var input = readStdin();
-function buildModelPin(inp) {
-  if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
-  const root = inp.storeRoot ? String(inp.storeRoot) : "";
-  const sterling = join17(root, ".sterling");
-  if (!existsSync13(join17(sterling, "sterling.db")) && !existsSync13(join17(sterling, "config.json"))) return null;
-  const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
-  const base2 = inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {};
-  const mcp = inp.tool_name === "mcp__codex__codex" ? codexMcpDisable(base2) : {};
-  const line = [pin.line, mcp.line].filter(Boolean).join("\n");
-  if (!pin.model && !mcp.config) return { line };
-  return { line, updatedInput: { ...base2, ...pin.model ? { model: pin.model } : {}, ...mcp.config ? { config: mcp.config } : {} } };
-}
-var pinMemo;
-function modelPin2() {
-  if (pinMemo === void 0) pinMemo = buildModelPin(input);
-  return pinMemo;
-}
 function envelopeFor(extraContext) {
-  const pin = modelPin2();
-  const parts = [];
-  if (pin?.line) parts.push(pin.line);
-  if (extraContext) parts.push(extraContext);
   const hookSpecificOutput = { hookEventName: input.hook_event_name };
-  if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
-  if (parts.length) hookSpecificOutput.additionalContext = parts.join("\n\n");
+  if (extraContext) hookSpecificOutput.additionalContext = extraContext;
   return { hookSpecificOutput };
 }
 function emitEnvelope(extraContext, opts = {}) {
@@ -16446,7 +16161,7 @@ var boardMemo;
 function boardReady() {
   if (boardMemo !== void 0) return boardMemo;
   boardMemo = null;
-  const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
+  const onDispatch = !Array.isArray(input.tool_input?.questions);
   if (!onDispatch || input.agent_id) return boardMemo;
   try {
     const store = openStore(input.cwd);
@@ -16476,19 +16191,17 @@ function markBoardReadyShown() {
 var overlapMemo;
 function overlapNotice() {
   if (overlapMemo === void 0) {
-    const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
+    const onDispatch = !Array.isArray(input.tool_input?.questions);
     overlapMemo = [onDispatch ? dispatchOverlapNotice(input) : null, boardReady()?.line].filter(Boolean).join("\n\n") || null;
   }
   return overlapMemo;
 }
 function finish(extraContext) {
-  const pin = modelPin2();
   const context = [extraContext, overlapNotice()].filter(Boolean).join("\n\n");
-  if (!pin?.line && !pin?.updatedInput && !context) return allow();
+  if (!context) return allow();
   return emitEnvelope(context);
 }
 var isQuestion = Array.isArray(input.tool_input?.questions);
-var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
 function main(input2) {
   try {
     const outgoing = outgoingProposalText(input2.tool_input);
@@ -16500,20 +16213,17 @@ function main(input2) {
       root: input2.cwd,
       outgoing,
       toolInput: input2.tool_input,
-      surface: isQuestion ? "question" : isConsult ? "consult" : "dispatch",
+      surface: isQuestion ? "question" : "dispatch",
       subagentType: input2.tool_input?.subagent_type,
       guardFor: () => readGuard(gPath),
-      pinLine: modelPin2()?.line,
       overlap: overlapNotice(),
       host: "claude"
     });
     warnFanDegraded(store, "H20");
     if (!composed) return finish();
     const { assembled, guard } = composed;
-    const pin = modelPin2();
     const carriage = assembled.text;
     const hookSpecificOutput = { hookEventName: input2.hook_event_name };
-    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
     if (carriage) hookSpecificOutput.additionalContext = carriage;
     return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
@@ -16525,24 +16235,19 @@ function main(input2) {
           writeGuard(gPath, guard);
         } catch (e) {
           process.stderr.write(
-            `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+            `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS; these records stay eligible for delivery again this session.`
           );
         }
       }
     });
   } catch (e) {
     const failure = `H20: mechanism-axis delivery failed: ${e && e.message || e}`;
-    const pin = modelPin2();
     const overlap = overlapNotice();
-    if (overlap && !pin?.line && !pin?.updatedInput) {
+    if (overlap) {
       process.stderr.write(failure);
       return emitEnvelope(`${overlap}
 
 \u26A0 ${failure} \u2014 relevance carriage was SKIPPED for this dispatch.`);
-    }
-    if (pin?.line || pin?.updatedInput) {
-      process.stderr.write(failure);
-      return emitEnvelope(`\u26A0 ${failure} \u2014 the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
     }
     return warnNonBlocking(failure);
   }

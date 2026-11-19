@@ -5447,6 +5447,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5519,7 +5524,9 @@ var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
 var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
 var MERGE_PATHS = ["direct", "pr"];
 var MIN_REVIEWERS = 1;
 var MAX_REVIEWERS = 5;
@@ -5547,6 +5554,9 @@ var canonicalModelsSchema = external_exports.object({
     const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
     if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
     }
     if (e.effort === "max" && overpassTier === null) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -5582,10 +5592,11 @@ var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) =>
 
 // packages/schemas/dist/custom-agents.js
 var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
 var AGENT_HOST_CAPABILITIES = Object.freeze({
-  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
 });
 
 // packages/schemas/dist/registry.js
@@ -6644,7 +6655,7 @@ function renderAgyText(text, label) {
 }
 
 // scripts/lib/agy-setup.mjs
-import { existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readlinkSync, statSync as statSync2, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, rmdirSync, statSync as statSync2, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { basename as basename2, dirname as dirname3, isAbsolute, join as join8, resolve as resolve4 } from "node:path";
 
@@ -6744,11 +6755,8 @@ var TARGET_LEADS = [
   // block found under the OLD lead is replaced by the new bullet under the SAME
   // template-descended guard as the normal replace path.
   "- **Knowledge is born structured.**",
-  // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER below. Codex
-  // stays BEFORE READY TO CLEAR here: leads are processed in order, and READY TO CLEAR
-  // anchors on the Codex bullet, so a sibling missing both gets them back in template order.
-  "- **Codex runs through the MCP tool, never the shell.**",
+  // 2026-09-26: the READY TO CLEAR bullet is NEW to older siblings, so it
+  // arrives through the insert path — see INSERT_AFTER below.
   "- **Say `READY TO CLEAR` plainly when it is time.**",
   // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
   // and the new bullet replacing it reads right after "Ask, don't guess" in the template, so
@@ -6808,8 +6816,7 @@ var TARGET_LEADS = [
 var TARGET_SECTIONS = [{ heading: "## Domains", before: "## Conventions", leads: DOMAINS_LEADS }];
 var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
-  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
-  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
+  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Knowledge is born structured.**"]],
   ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Write plainly; no AI tells.**", ["- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
@@ -6842,7 +6849,6 @@ var RENAMED_LEADS = /* @__PURE__ */ new Map([
 ]);
 var SUBJECT_MARKERS = /* @__PURE__ */ new Map([
   ["- **Concept articles \u2014 capture design the moment it settles", [/^(?=.*\bconcept (articles?|famil(y|ies))\b)(?=.*\b(capture|design|knowledge|record|settles?)\b)/i]],
-  ["- **Codex runs through the MCP tool, never the shell.**", [/^(?=.*\bcodex\b)(?=.*\bmcp\b)/i, /^(?=.*\bcodex\b)(?=.*\b(never|not)\b)(?=.*\bshell\b)/i]],
   // Case-sensitive on purpose: the rule is the literal capitalised line, and 'ready to clear' alone is ordinary English.
   ["- **Say `READY TO CLEAR` plainly when it is time.**", [/\bREADY (TO CLEAR|FOR NEW SESSION)\b/]],
   ["- **Instruction-file proposals replace memory.**", [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],

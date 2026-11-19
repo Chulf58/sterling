@@ -5431,25 +5431,27 @@ function judgeProjectMode(mode, where) {
   }
   return mode;
 }
-function modeOfConfig(parsed, where) {
-  if (parsed.mode !== void 0 || parsed.workflow === void 0)
-    return judgeProjectMode(parsed.mode, where);
-  const workflow = parsed.workflow;
-  if (workflow === null || typeof workflow !== "object" || Array.isArray(workflow)) {
-    throw new ProjectModeError(`config.workflow is ${JSON.stringify(workflow)} in ${where} \u2014 it must be an object; fix it in the TUI System tab or the file`);
-  }
-  const merge = workflow.merge;
-  if (merge === void 0 || merge === "direct")
-    return "hobby";
-  if (merge === "pr")
-    return "work";
-  throw new ProjectModeError(`config.workflow.merge is ${JSON.stringify(merge)} in ${where} \u2014 it must be 'direct' or 'pr'; fix it in the TUI System tab or the file`);
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+function workflowOfConfig(parsed, where) {
   if (parsed === void 0)
-    return "hobby";
-  return modeOfConfig(parsed, where);
+    return workflowSchema.parse(void 0);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProjectWorkflowError(`${where} is not a JSON object \u2014 the workflow settings cannot be read`);
+  }
+  let canonical2;
+  try {
+    canonical2 = toCanonicalConfig(parsed).config;
+  } catch (err) {
+    if (!(err instanceof Error))
+      throw err;
+    throw new ProjectWorkflowError(`${err.message} (in ${where}) \u2014 the workflow settings cannot be read; fix it in the TUI System tab or the file`);
+  }
+  const workflow = canonical2.workflow;
+  const checked = workflowSchema.safeParse(workflow);
+  if (!checked.success) {
+    const issues = checked.error.issues.map((i) => `${["workflow", ...i.path].join(".")}: ${i.message}`).join("; ");
+    throw new ProjectWorkflowError(`config.workflow is invalid in ${where} (${issues}) \u2014 fix it in the TUI System tab or the file`);
+  }
+  return checked.data;
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -5460,10 +5462,11 @@ function readProjectIdentity(root) {
   }
   return { project_id: parsed.project_id };
 }
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId, ProjectWorkflowError;
 var init_project = __esm({
   "packages/schemas/dist/project.js"() {
     "use strict";
+    init_config();
     PROJECT_MODES = ["hobby", "work"];
     ProjectModeError = class extends Error {
       constructor(message) {
@@ -5477,11 +5480,16 @@ var init_project = __esm({
         this.name = "ProjectIdentityError";
       }
     };
-    CONFIG_REL = ".sterling/config.json";
     PROJECT_IDENTITY_REL = ".sterling/project.json";
     fwd = (p) => p.replace(/\\/g, "/");
     UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+    ProjectWorkflowError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectWorkflowError";
+      }
+    };
   }
 });
 
@@ -5597,7 +5605,134 @@ function migrateStaleAgyModels(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_REF_RE, OVERPASS_MODEL_NAMESPACE, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema;
+function toCanonicalConfig(legacy, opts = {}) {
+  if (!isPlainObject(legacy))
+    return { config: legacy, conflicts: [], changes: [] };
+  const raw = normalizeRawConfig(legacy);
+  const out = { ...raw };
+  const changes = [];
+  const conflicts = [];
+  const resolutions = opts.resolutions ?? {};
+  const mode = judgeProjectMode(raw.mode, "the config");
+  let autoMerge;
+  if (raw.pr_review !== void 0) {
+    if (!isPlainObject(raw.pr_review))
+      throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} \u2014 it must be an object`);
+    if (has(raw.pr_review, "auto_merge_on_clean")) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== "boolean")
+        throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} \u2014 it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === void 0) {
+    const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: "workflow", was: void 0, now: out.workflow });
+  } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+  }
+  if (autoMerge !== void 0)
+    changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
+  if (has(raw, "mode")) {
+    delete out.mode;
+    changes.push({ path: "mode", was: raw.mode });
+  }
+  let overpass = null;
+  if (raw.overpass !== void 0) {
+    if (!isPlainObject(raw.overpass))
+      throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} \u2014 it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: "opencode" });
+      const kept = {};
+      for (const [k, v] of Object.entries(block)) {
+        if (LEGACY_OVERPASS_KEYS.includes(k))
+          changes.push({ path: `overpass.${k}`, was: v });
+        else
+          kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+  const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return { config: out, conflicts, changes };
+  const models = { ...raw.models ?? {} };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry))
+      continue;
+    const next = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === "model" || k === "effort" || k === "opencode_model")
+        continue;
+      if (k === "agy_model" || k === "hard_task") {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v;
+    }
+    const claude = typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model)
+      changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== void 0) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === void 0 || opencode === claude) {
+        model = opencode;
+      } else if (resolutions[role] !== void 0) {
+        model = resolutions[role] === "claude" ? claude : opencode;
+      } else if (!(effective && OVERPASS_ROLES.includes(role))) {
+        const effort = typeof entry.effort === "string" ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: "opencode" });
+        model = opencode;
+      }
+    }
+    if (model !== void 0)
+      next.model = model;
+    if (entry.effort !== void 0)
+      next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : void 0;
+    const claude = isPlainObject(entry) && typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : void 0;
+    const answered = isPlainObject(entry) && entry.opencode_model !== void 0 && claude !== void 0 && entry.opencode_model !== claude;
+    if (!answered)
+      throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+    }
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: void 0, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (modelsChanged)
+    out.models = models;
+  if (has(raw, "sparring_partner")) {
+    delete out.sparring_partner;
+    changes.push({ path: "sparring_partner", was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes };
+}
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6101,6 +6236,11 @@ var init_config = __esm({
       // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // The workflow settings that replace mode (decision
+      // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+      // reader does not report it as unread; its strict judge is workflowOfConfig in
+      // project.ts and canonicalConfigSchema below.
+      workflow: external_exports.unknown().optional(),
       // Where the project's stores live (decision
       // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
       // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -6215,7 +6355,11 @@ var init_config = __esm({
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
     MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    CLAUDE_PROVIDER = "anthropic";
     OVERPASS_MODEL_NAMESPACE = "overpass";
+    AGY_MODEL_NAMESPACE = "agy";
+    CONDUCTOR_MODEL_KEY = "conductor";
+    PLAN_MODEL_KEY = "plan";
     MERGE_PATHS = ["direct", "pr"];
     MIN_REVIEWERS = 1;
     MAX_REVIEWERS = 5;
@@ -6243,6 +6387,9 @@ var init_config = __esm({
         const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
         if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
           ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+        }
+        if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
         }
         if (e.effort === "max" && overpassTier === null) {
           ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -6275,20 +6422,46 @@ var init_config = __esm({
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
       }
     }).pipe(canonicalConfigObject);
+    LegacyConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "LegacyConfigError";
+      }
+    };
+    has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
   }
 });
 
 // packages/schemas/dist/custom-agents.js
-var CLAUDE_EFFORT_LEVELS, AGENT_HOST_CAPABILITIES;
+function hostRunsModel(model, host) {
+  const ref = model.includes("/") ? model : `${CLAUDE_PROVIDER}/${model}`;
+  const runs = AGENT_HOST_CAPABILITIES[host].runs;
+  if ("models" in runs)
+    return runs.models.includes(ref);
+  const provider = ref.slice(0, ref.indexOf("/"));
+  if (runs.except?.includes(provider))
+    return false;
+  return runs.providers === "*" || runs.providers.includes(provider);
+}
+function opencodeModelRef(model, overpassProvider = DEFAULT_OVERPASS_PROVIDER) {
+  const prefix = `${OVERPASS_MODEL_NAMESPACE}/`;
+  return model.startsWith(prefix) ? `${overpassProvider}/${model.slice(prefix.length)}` : model;
+}
+function twoModelsReason(role) {
+  return `role ${role} has two models; run /sterling:update to choose`;
+}
+var CLAUDE_EFFORT_LEVELS, AGY_CANONICAL_MODELS, AGENT_HOST_CAPABILITIES;
 var init_custom_agents = __esm({
   "packages/schemas/dist/custom-agents.js"() {
     "use strict";
     init_config();
     CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+    AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
     AGENT_HOST_CAPABILITIES = Object.freeze({
-      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
     });
   }
 });
@@ -14125,7 +14298,7 @@ var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
 var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
-var CONFIG_REL2 = ".sterling/config.json";
+var CONFIG_REL = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
     super(message);
@@ -14151,7 +14324,7 @@ function routedCredentialsPath() {
   return join9(homedir4(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join9(root, CONFIG_REL2);
+  const path = join9(root, CONFIG_REL);
   try {
     lstatSync3(path);
   } catch (e) {
@@ -14737,16 +14910,16 @@ function openRoutedForHook(root, { mount = false } = {}) {
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync4, readFileSync as readFileSync6 } from "node:fs";
 import { join as join10 } from "node:path";
-var CONFIG_REL3 = join10(".sterling", "config.json");
+var CONFIG_REL2 = join10(".sterling", "config.json");
 var STORE_DB_REL = join10(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync4(join10(dir, CONFIG_REL3)) || existsSync4(join10(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync4(join10(dir, CONFIG_REL2)) || existsSync4(join10(dir, STORE_DB_REL)));
 }
 function storeBackend(root) {
   const dbExists = () => existsSync4(join10(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync6(join10(root, CONFIG_REL3), "utf8");
+    text = readFileSync6(join10(root, CONFIG_REL2), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -16110,58 +16283,6 @@ function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
   return t.includes("?") && QUESTION_WORDS_RE.test(t);
 }
-function codexModelPin(root, { opener, toolInput }) {
-  const PIN = "STERLING CODEX MODEL PIN (H20)";
-  const show = (v) => {
-    const s2 = JSON.stringify(String(v ?? ""));
-    return s2.length <= 120 ? s2 : `${s2.slice(0, 120)}\u2026`;
-  };
-  if (!opener) {
-    return {
-      line: `STERLING CODEX MODEL (H20) \u2014 this tool takes no model argument, so the thread keeps the model its opener started with. Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`
-    };
-  }
-  let config = null;
-  let unreadable = null;
-  try {
-    config = loadConfig(root);
-  } catch (e) {
-    unreadable = e && e.message || String(e);
-  }
-  const sp = config && typeof config.sparring_partner === "object" && config.sparring_partner ? config.sparring_partner : null;
-  const lines = [];
-  if (sp && sp.enabled === false) {
-    lines.push(
-      `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
-    );
-  }
-  const callModel = typeof toolInput?.model === "string" && toolInput.model !== "" ? toolInput.model : null;
-  const pinned = sp && sp.models && typeof sp.models === "object" ? sp.models.openai?.model : void 0;
-  const chosen = typeof pinned === "string" ? pinned : sp ? sp.model : void 0;
-  const configured = typeof chosen === "string" && chosen !== "" ? chosen : null;
-  if (callModel !== null) {
-    lines.push(
-      `${PIN} \u2014 this call names model ${show(callModel)} EXPLICITLY, so the call-site value wins and Sterling leaves the input untouched${configured ? ` (config.sparring_partner.model is ${show(configured)} and was not applied)` : ""}.`
-    );
-    return { line: lines.join("\n") };
-  }
-  if (unreadable) {
-    lines.push(
-      `${PIN} \u2014 .sterling/config.json could not be parsed (${show(unreadable)}), so NO model was applied and the Codex CLI default is in force. Fix the config file; a consult is never denied over this.`
-    );
-    return { line: lines.join("\n") };
-  }
-  if (!configured) {
-    lines.push(
-      `${PIN} \u2014 no model is set in config.sparring_partner.model${config ? "" : " (no .sterling/config.json to read)"}, so this consult takes the Codex CLI default. Set one on the TUI System tab row 'Default Codex model'.`
-    );
-    return { line: lines.join("\n") };
-  }
-  lines.push(
-    `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
-  );
-  return { line: lines.join("\n"), model: configured };
-}
 function citedInBrief(record, text) {
   const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const id8 = String(record.id ?? "").slice(0, 8);
@@ -16182,7 +16303,6 @@ function composeMechanismAxis(store, opts) {
 }
 function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion = surface === "question";
-  const isConsult = surface === "consult";
   const isDispatch = surface === "dispatch";
   const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) return null;
@@ -16231,7 +16351,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const fresh = scored.filter((x) => {
     if (x.record.type !== "anti_pattern") return !isKnownDelivered(guard, x.record);
     if (isDispatch && citedInBrief(x.record, briefText)) return false;
-    return isConsult ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    return !isKnownDelivered(guard, x.record);
   });
   if (!fresh.length) return null;
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
@@ -16247,7 +16367,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
+  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : (
     // PreToolUse context arrives WITH the dispatch (timing note at the top
     // of this file), so the brief has already gone out: the act this
     // prompts is a correction (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 5).
@@ -18576,6 +18696,15 @@ function prefixOf(root) {
 }
 
 // scripts/hooks/lib/maintenance-worker.mjs
+var WORKER_MODEL_KEY = "maintenance-worker";
+function workerModelOf(config) {
+  const e = config?.models?.[WORKER_MODEL_KEY];
+  if (e === void 0) return null;
+  if (e === null || typeof e !== "object" || typeof e.model !== "string" || !e.model.trim() || e.effort !== void 0 && typeof e.effort !== "string") {
+    return { error: `config.models.${WORKER_MODEL_KEY} must be {"model": "<provider>/<id>", "effort"?: "<level>"}, got ${JSON.stringify(e)}` };
+  }
+  return { model: e.model.includes("/") ? e.model : `anthropic/${e.model}`, ...e.effort === void 0 ? {} : { effort: e.effort } };
+}
 var WORKER_RUN_BUDGET_USD = 5;
 var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
 var RUN_BATCH_MAX = 12;
@@ -19022,19 +19151,19 @@ function launchWorker(opts) {
       const target = debtOwnerRecord(opts.store, t);
       const standing = verdicts.get(t.id);
       const tree = treeFor(target);
-      let own;
+      let own2;
       let siblingsPayable = true;
-      if (tree.unresolved) own = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
+      if (tree.unresolved) own2 = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
       else {
-        own = prove(t, tree.root, tree.head, { prefix: tree.prefix });
+        own2 = prove(t, tree.root, tree.head, { prefix: tree.prefix });
         for (const s2 of linked.get(target?.id ?? t.feature_link) ?? []) if (s2.id !== t.id && !prove(s2, tree.root, tree.head, { prefix: tree.prefix }).payable) siblingsPayable = false;
       }
-      if (own.conductor) {
-        conductorHolds.push({ t, target, p: own });
+      if (own2.conductor) {
+        conductorHolds.push({ t, target, p: own2 });
         return false;
       }
       if (standing && isProvenanceVerdict(standing) && standing.verdict === "needs_conductor") cleared.push(t);
-      if (own.payable && siblingsPayable) return true;
+      if (own2.payable && siblingsPayable) return true;
       waiting.push(t.id);
       return false;
     });
@@ -19056,7 +19185,12 @@ function launchWorker(opts) {
     }
     const host = opts.host ?? "claude";
     if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: "error", detail: failDetail(`unknown runner host '${host}'`) };
-    const model = opts.workerModel ?? opencodeModelOf(opts.config);
+    const own = workerModelOf(opts.config);
+    if (own?.error) return { launched: false, reason: "error", detail: failDetail(own.error) };
+    if (host === "claude" && own && !own.model.startsWith("anthropic/")) {
+      return { launched: false, reason: "error", detail: failDetail(`config.models.${WORKER_MODEL_KEY} is ${own.model}, which the Claude Code runner cannot run; it runs only through OpenCode`) };
+    }
+    const model = opts.workerModel ?? (own && !own.model.startsWith("overpass/") ? own.model : opencodeModelOf(opts.config));
     if (host === "opencode") {
       if (typeof opts.opencodeBin !== "string" || !opts.opencodeBin) return { launched: false, reason: "error", detail: failDetail("the opencode host needs the path of the opencode binary") };
       if (model === null) return { launched: false, reason: "error", detail: failDetail(OPENCODE_MODEL_UNSET) };
@@ -19077,7 +19211,8 @@ function launchWorker(opts) {
     let logFd;
     try {
       writeFileSync7(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : {} } : { host };
+      const ownEffort = opts.workerModel === void 0 && own?.effort ? { opencode_variant: own.effort } : {};
+      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : ownEffort } : { host, ...own ? { claude_model: own.model.slice("anthropic/".length), ...own.effort ? { claude_effort: own.effort } : {} } : {} };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
       const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));
@@ -22256,7 +22391,7 @@ function looksLikeSterlingSourceTree(dir) {
 
 // scripts/lib/handoff-projection.mjs
 init_dist();
-var CONFIG_REL4 = ".sterling/config.json";
+var CONFIG_REL3 = ".sterling/config.json";
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HandoffSettingError = class extends Error {
 };
@@ -22301,7 +22436,7 @@ function trackedHandoffFiles(root, { spawn: spawn4 = spawnSync4 } = {}) {
   }
   return { files, unknown: null };
 }
-function handoffSettingOf(parsed, root, where = CONFIG_REL4) {
+function handoffSettingOf(parsed, root, where = CONFIG_REL3) {
   const block = parsed?.handoff;
   if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
@@ -22700,6 +22835,97 @@ function formatOpenCodeRows(result) {
   return result.rows.map((r) => `OpenCode ${r.status}: ${r.item}${r.detail ? ` \u2014 ${r.detail}` : ""}`);
 }
 
+// packages/opencode-plugin/src/dispatch-model.mjs
+init_dist();
+var isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+var TIER_PREFIX = `${OVERPASS_MODEL_NAMESPACE}/`;
+function conflictRefusal(role) {
+  return `Sterling refused this subagent dispatch: ${twoModelsReason(role)}. Nothing was sent, on either model.`;
+}
+function projectRouting(config) {
+  const { config: canon, conflicts } = toCanonicalConfig(isObject(config) ? config : {});
+  const overpass = canon.overpass;
+  if (overpass !== void 0 && !isObject(overpass)) throw new Error(`config.overpass is ${JSON.stringify(overpass)} \u2014 it must be an object`);
+  const provider = overpass?.provider ?? DEFAULT_OVERPASS_PROVIDER;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be letters, digits, '-', '_' and '.'`);
+  const routing = { provider, conflicts: new Set(conflicts.map((c) => c.role)), entries: {} };
+  const raw = canon.models;
+  if (raw !== void 0 && !isObject(raw)) {
+    routing.modelsProblem = `config.models is ${JSON.stringify(raw)}, not an object`;
+    return routing;
+  }
+  const add = (key, e) => {
+    if (e.model === void 0) return;
+    const tier = e.model.startsWith(TIER_PREFIX);
+    routing.entries[key] = { canonical: e.model, model: opencodeModelRef(e.model, provider), ...e.effort === void 0 ? {} : { effort: e.effort }, tier };
+  };
+  for (const [key, e] of Object.entries(canonicalModelsSchema.parse({}))) add(key, e);
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    const parsed = canonicalModelsSchema.safeParse({ [key]: value });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      routing.entries[key] = { problem: `config.models.${[key, ...issue.path.slice(1)].join(".")}: ${issue.message}` };
+      continue;
+    }
+    delete routing.entries[key];
+    add(key, parsed.data[key]);
+  }
+  return routing;
+}
+function resolveDispatchModel(role, routing) {
+  if (typeof role !== "string" || !role) return null;
+  if (routing.conflicts.has(role)) return { conflict: true };
+  if (routing.modelsProblem) return { problem: routing.modelsProblem };
+  const entry = Object.hasOwn(routing.entries, role) ? routing.entries[role] : null;
+  if (!entry) return null;
+  if (entry.problem) return { problem: entry.problem };
+  const { model, effort, tier } = entry;
+  if (tier) {
+    const note = `config.models.${role}, the Overpass tier ${entry.canonical} on provider '${routing.provider}'${effort ? ` with effort ${effort} sent as the request's reasoning effort` : ""}`;
+    return { model, variant: void 0, ref: model, note, overpass: true };
+  }
+  return { model, variant: effort, ref: effort ? `${model}#${effort}` : model, note: `config.models.${role}`, overpass: false };
+}
+function dispatchModel(routing, args) {
+  const role = agentRole(args?.agent);
+  const named = typeof args?.model === "string" && args.model ? args.model : null;
+  if (typeof args?.sessionID === "string" && args.sessionID) {
+    return { model: null, line: named ? null : "MODEL: resumed session keeps its own model (config.models is not applied)." };
+  }
+  const res = resolveDispatchModel(role, routing);
+  if (res === null) return { model: null, line: null };
+  if (res.conflict) throw new Error(conflictRefusal(role));
+  if (res.problem) {
+    const text = `config.models is invalid (${res.problem}), so this dispatch was not given a model from it and ${named ? `kept ${named} as the call named` : "runs on the agent's own model"}. Fix the value in .sterling/config.json (TUI System tab).`;
+    return { model: null, line: `MODEL: ${text}`, notice: `Sterling models: ${text}` };
+  }
+  if (named) {
+    const line = named !== res.ref ? `MODEL: kept ${named} as the call named; ${res.note} gives ${res.ref}. Omit the call's model to run on config.models.` : null;
+    return { model: null, line };
+  }
+  return { model: res.ref, line: `MODEL: this dispatch runs on ${res.ref}, from ${res.note}.`, resolved: true, overpass: res.overpass };
+}
+var variantIds = (entry) => Array.isArray(entry?.variants) ? entry.variants.map((v) => typeof v === "string" ? v : v?.id).filter((v) => typeof v === "string") : null;
+function modelListItems(result) {
+  if (Array.isArray(result?.data)) return result.data;
+  return result;
+}
+function checkVariant(ref, list, listError = null) {
+  const hash = ref.lastIndexOf("#");
+  if (hash === -1) return { model: ref, note: null };
+  const base2 = ref.slice(0, hash);
+  const variant = ref.slice(hash + 1);
+  if (listError || !Array.isArray(list)) return { model: ref, note: `(variant ${variant} not checked: OpenCode's model list could not be read${listError ? `: ${listError.message ?? listError}` : ""})` };
+  const slash = base2.indexOf("/");
+  const providerID = base2.slice(0, slash);
+  const id = base2.slice(slash + 1);
+  const entry = list.find((m) => m?.providerID === providerID && (m?.modelID === id || m?.id === id));
+  if (!entry) return { model: ref, note: `(variant ${variant} not checked: ${base2} is not in OpenCode's model list)` };
+  const ids = variantIds(entry) ?? [];
+  if (ids.includes(variant)) return { model: ref, note: null };
+  return { model: base2, note: `(variant ${variant} dropped: OpenCode lists ${ids.length ? `only ${ids.join(", ")}` : "no variants"} for ${base2}, so this dispatch runs on ${base2} with its default effort)` };
+}
+
 // packages/opencode-plugin/src/bounded.mjs
 var SESSION_CACHE_CAP = 512;
 function remember(map, key, value, cap = SESSION_CACHE_CAP) {
@@ -22713,8 +22939,28 @@ function remember(map, key, value, cap = SESSION_CACHE_CAP) {
 var OVERLAY_REL = ".sterling/overpass-overlay.json";
 var PLAN_AGENT = "plan";
 var OWNED_KEYS = ["model", "variant"];
+function overpassResolution(routing) {
+  const usable = (key) => {
+    const e = routing.entries[key];
+    return e && !e.problem && !routing.conflicts.has(key) ? e : null;
+  };
+  const roles = {};
+  for (const key of Object.keys(routing.entries)) {
+    if (key === PLAN_MODEL_KEY || key === CONDUCTOR_MODEL_KEY) continue;
+    const e = usable(key);
+    if (e?.tier) roles[key] = { model: e.model, ...e.effort ? { effort: e.effort } : {} };
+  }
+  const selection = (key) => {
+    const e = usable(key);
+    return e ? { model: e.model, tier: e.tier, ...e.effort && !e.tier ? { variant: e.effort } : {} } : null;
+  };
+  const plan = selection(PLAN_MODEL_KEY);
+  const conductor = selection(CONDUCTOR_MODEL_KEY);
+  const effective = Object.keys(roles).length > 0 || plan?.tier === true || conductor?.tier === true;
+  return { provider: routing.provider, effective, roles, plan, conductor, routing };
+}
 function projectOverpass(root) {
-  return resolveOverpass(loadConfig(root) ?? {}, { host: "opencode" });
+  return overpassResolution(projectRouting(loadConfig(root) ?? {}));
 }
 function dispatchOverpass(root) {
   let config;
@@ -22723,62 +22969,12 @@ function dispatchOverpass(root) {
   } catch (e) {
     return { res: null, unreadable: e };
   }
-  if (!isObject(config)) return { res: null, unreadable: new Error("it is not a JSON object") };
-  return { res: resolveOverpass(config, { host: "opencode" }), unreadable: null, config };
+  if (!isObject2(config)) return { res: null, unreadable: new Error("it is not a JSON object") };
+  const routing = projectRouting(config);
+  return { res: overpassResolution(routing), unreadable: null, routing };
 }
 function overpassUnknownLine(error) {
-  return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
-}
-var BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/;
-var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-function unfencedMarkers(prompt, lineRe) {
-  if (typeof prompt !== "string") return [];
-  let fence = null;
-  const found = [];
-  for (const line of prompt.split(/\r?\n/)) {
-    if (fence) {
-      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
-      continue;
-    }
-    const open2 = FENCE_OPEN.exec(line);
-    if (open2 && !(open2[1][0] === "`" && open2[2].includes("`"))) {
-      fence = open2[1];
-      continue;
-    }
-    const m = lineRe.exec(line);
-    if (m) found.push(m[1].trim());
-  }
-  return found;
-}
-function bypassMarker(prompt) {
-  const reasons = unfencedMarkers(prompt, BYPASS_LINE);
-  if (!reasons.length) return null;
-  return { reason: reasons.every(Boolean) ? reasons[0] : "" };
-}
-function bypassRefusal(why) {
-  return `Sterling refused this subagent dispatch: its brief carries an OVERPASS-BYPASS line but ${why}. A bypass must name the model the call should run on (the call's \`model\`) and say why on the marker line, as "OVERPASS-BYPASS: <reason>". Fix the dispatch and send it again, or drop the line to run on the Overpass tier.`;
-}
-function dispatchPin(res, args) {
-  if (!res.effective) return { model: null, line: null };
-  const lane = laneRoute(res, args?.agent).model;
-  const marker = bypassMarker(args?.prompt);
-  if (marker) {
-    const named = args?.model;
-    if (typeof named !== "string" || !named) throw new Error(bypassRefusal("the call names no model"));
-    if (!marker.reason) throw new Error(bypassRefusal("the marker gives no reason"));
-    return {
-      model: null,
-      line: `OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to ${named} instead of ${lane} (reason: ${marker.reason}).`,
-      notice: `Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to ${named} instead of ${lane} (reason: ${marker.reason}).`
-    };
-  }
-  const asked = args?.model;
-  const replaced = typeof asked === "string" && asked && asked !== lane;
-  return {
-    model: lane,
-    line: replaced ? `OVERPASS: this dispatch ran on ${lane}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null
-  };
+  return `Model routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches get no model from config.models, Overpass tiers included, until it is fixed.`;
 }
 function readInventory({ list, error } = {}) {
   if (error) return { state: "unknown", why: `OpenCode's model list could not be read (${error?.message ?? error})` };
@@ -22804,11 +23000,11 @@ function routeAvailability(inv, ref) {
   if (!ids.has(tier)) return { state: "missing", why: `the provider '${provider}' is loaded, but OpenCode lists no tier '${tier}' on it (it lists ${[...ids].sort().join(", ")})` };
   return { state: "available" };
 }
-function missingRouteRemedy(provider, { bypass = true } = {}) {
-  return `To fix: check the ${provider} credential (the gateway drops its models when it rejects the key), then run /reload in the TUI (or \`opencode reload\`) so OpenCode loads the provider again;` + (bypass ? ' or put a line "OVERPASS-BYPASS: <reason>" in the brief and name a loaded model on the call;' : "") + ' or turn Overpass off with "overpass": {"enabled": false} in .sterling/config.json (TUI System tab).';
+function missingRouteRemedy(provider) {
+  return `To fix: check the ${provider} credential (the gateway drops its models when it rejects the key), then run /reload in the TUI (or \`opencode reload\`) so OpenCode loads the provider again; or choose another model for that agent in config.models (TUI System tab).`;
 }
 function missingRouteRefusal(res, agent, model, why) {
-  return `Sterling refused this subagent dispatch: Overpass is ON but its route ${model} for ${agent || "this agent"} is not available: ${why}. Nothing was sent, and the dispatch is not moved to a direct provider. ${missingRouteRemedy(res.provider)} Then dispatch again.`;
+  return `Sterling refused this subagent dispatch: the Overpass route ${model} for ${agent || "this agent"} is not available: ${why}. Nothing was sent, and the dispatch is not moved to a direct provider. ${missingRouteRemedy(res.provider)} Then dispatch again.`;
 }
 function unknownRouteLine(model, why) {
   return `OVERPASS: Overpass availability UNKNOWN: ${why}; this dispatch was sent to ${model} unchecked, and OpenCode reports it if that model is not loaded.`;
@@ -22819,9 +23015,9 @@ function overpassRoutes(res) {
     if (!byModel.has(model)) byModel.set(model, []);
     byModel.get(model).push(user);
   };
-  if (res.conductorRouted) add(res.conductorModel, "the conductor");
+  if (res.conductor?.tier) add(res.conductor.model, "the conductor");
   for (const [role, route] of Object.entries(res.roles ?? {})) add(route.model, role === MAINTENANCE_WORKER_ROLE ? "the maintenance worker" : role);
-  add(res.laneModel, "Plan and other agents");
+  if (res.plan?.tier) add(res.plan.model, "Plan");
   return [...byModel].map(([model, users]) => ({ model, users }));
 }
 function availabilityLine(res, inv) {
@@ -22836,13 +23032,9 @@ function availabilityLine(res, inv) {
 function availableAgainLine(res) {
   return `STERLING OVERPASS: Overpass is available again: every routed tier model is loaded (${overpassRoutes(res).map((r) => r.model).join(", ")}).`;
 }
-function laneRoute(res, agent) {
-  const role = agentRole(agent);
-  return typeof role === "string" && Object.hasOwn(res.roles ?? {}, role) && res.roles[role] || { model: res.laneModel };
-}
 function requestEffort(res, agent, model, dispatched) {
   if (!res?.effective) return null;
-  if (!dispatched || dispatched.bypassed !== false) return null;
+  if (!dispatched) return null;
   const role = agentRole(agent);
   if (typeof role !== "string" || !Object.hasOwn(res.roles ?? {}, role)) return null;
   const route = res.roles[role];
@@ -22872,7 +23064,7 @@ function createLaneDispatches() {
     /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments. */
     noteDispatch(parentSessionID, callID, args) {
       const key = keyOf(parentSessionID, callID);
-      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), bypassed: bypassMarker(args?.prompt) !== null, child: null });
+      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), child: null });
     },
     linkChild,
     /** A call that ended: linked to `child` when its result names one, else its record is dropped. */
@@ -22884,11 +23076,11 @@ function createLaneDispatches() {
     onEvent(ev) {
       if (ev?.type === "session.tool.progress") linkChild(ev.data?.sessionID, ev.data?.id, ev.data?.metadata?.sessionID);
     },
-    /** { bypassed } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
+    /** { role } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
     dispatchOf(sessionID, parentID, agent) {
       const call = calls.get(children.get(sessionID));
       if (!call || call.child !== sessionID || typeof parentID !== "string" || call.parent !== parentID || call.role !== agentRole(agent)) return null;
-      return { bypassed: call.bypassed };
+      return { role: call.role };
     }
   };
 }
@@ -22901,21 +23093,21 @@ function pluginVersion(moduleUrl = import.meta.url) {
   }
 }
 function overpassRefusal(error, { version } = {}) {
-  const head = `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}).`;
-  const tail = "While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs.";
+  const head = `Sterling refused this subagent dispatch: the model settings in .sterling/config.json cannot be read (${error?.message ?? error}).`;
+  const tail = "While they cannot be read, a dispatch might run on another model than the one chosen for it, so none runs.";
   if (error instanceof OverpassUnknownRoleError) {
-    return `${head} This Sterling plugin is version ${version ?? pluginVersion()} and does not know the role ${JSON.stringify(error.role)}; a newer Sterling most likely wrote it. Run \`opencode plugin update\`, then /reload, so the plugin knows that role. ${tail} Or remove that role from overpass.roles, or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+    return `${head} This Sterling plugin is version ${version ?? pluginVersion()} and does not know the role ${JSON.stringify(error.role)}; a newer Sterling most likely wrote it. Run \`opencode plugin update\`, then /reload, so the plugin knows that role. ${tail} Or remove that role from overpass.roles, then dispatch again.`;
   }
-  return `${head} ${tail} Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+  return `${head} ${tail} Fix that value in .sterling/config.json (TUI System tab), then dispatch again.`;
 }
 function desiredOverlay(res) {
   const out = {};
-  if (!res.effective) return out;
-  out[PLAN_AGENT] = res.laneModel;
-  if (res.conductorRouted) out[CONDUCTOR_AGENT] = res.conductorModel;
+  const want = (sel) => ({ model: sel.model, ...sel.variant ? { variant: sel.variant } : {} });
+  if (res?.plan) out[PLAN_AGENT] = want(res.plan);
+  if (res?.conductor) out[CONDUCTOR_AGENT] = want(res.conductor);
   return out;
 }
-var isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+var isObject2 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function writeText(path, text, fs) {
   mkdirSync13(dirname12(path), { recursive: true });
   writeFileAtomic(path, text, fs);
@@ -22929,8 +23121,8 @@ function readOwnership(root) {
   } catch (e) {
     throw new Error(`${OVERLAY_REL} is not valid JSON (${e.message}); it records which .opencode/opencode.json agent models Sterling wrote for Overpass, so nothing is changed until it is fixed or removed`);
   }
-  if (!isObject(parsed) || !isObject(parsed.agent)) throw new Error(`${OVERLAY_REL} is not an object with an "agent" object; nothing is changed until it is fixed or removed`);
-  if (parsed.pending !== void 0 && !(isObject(parsed.pending) && isObject(parsed.pending.agent) && isObject(parsed.pending.before) && isObject(parsed.pending.after))) {
+  if (!isObject2(parsed) || !isObject2(parsed.agent)) throw new Error(`${OVERLAY_REL} is not an object with an "agent" object; nothing is changed until it is fixed or removed`);
+  if (parsed.pending !== void 0 && !(isObject2(parsed.pending) && isObject2(parsed.pending.agent) && isObject2(parsed.pending.before) && isObject2(parsed.pending.after))) {
     throw new Error(`${OVERLAY_REL} has a "pending" value that is not an interrupted-update record; nothing is changed until it is fixed or removed`);
   }
   if (parsed.pending?.notes !== void 0 && !(Array.isArray(parsed.pending.notes) && parsed.pending.notes.every((n2) => typeof n2 === "string"))) {
@@ -22954,7 +23146,7 @@ function isTracked(root) {
   }
   return out.trim() !== "";
 }
-var TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on their own configured models. Subagent dispatches still route through Overpass.`;
+var TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on the models that file gives them, not on their config.models selections. Subagent dispatches still get their models from config.models.`;
 function strandedNotice(stranded) {
   const parts = stranded.map(({ name, model, prior }) => `agent.${name} (model ${JSON.stringify(model)}; before Overpass: ${describeOwned(prior)})`);
   return `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so it still holds models Sterling wrote: ${parts.join(", ")}. Put the earlier values back by hand if you do not want these.`;
@@ -22975,7 +23167,7 @@ function settlePending(own, agents) {
     const next = Object.hasOwn(pending.agent, name) ? pending.agent[name] : void 0;
     if (next) agent[name] = next;
     else delete agent[name];
-    if (sameOwned(entry, pending.after[name]) || !old || !isObject(entry) || entry.model !== old.wrote || next?.wrote === entry.model) continue;
+    if (sameOwned(entry, pending.after[name]) || !old || !isObject2(entry) || entry.model !== old.wrote || next?.wrote === entry.model) continue;
     notes.push(`agent.${name} had its model or variant changed by hand while a Sterling update of it was unconfirmed, so its model ${JSON.stringify(entry.model)} is taken as yours and stays; before Overpass it had ${describeOwned(old.prior)}`);
   }
   return { own: { agent }, settled: true, notes };
@@ -22992,9 +23184,9 @@ function convergeOverlay(root, res, { fs } = {}) {
     } catch (e) {
       throw new Error(`${PROJECT_CONFIG_REL} is not valid JSON (${e.message}), so the Overpass agent models were not changed`);
     }
-    if (!isObject(config)) throw new Error(`${PROJECT_CONFIG_REL} is not a JSON object, so the Overpass agent models were not changed`);
+    if (!isObject2(config)) throw new Error(`${PROJECT_CONFIG_REL} is not a JSON object, so the Overpass agent models were not changed`);
   }
-  if (config.agent !== void 0 && !isObject(config.agent)) throw new Error(`${PROJECT_CONFIG_REL}: "agent" is not an object, so the Overpass agent models were not changed`);
+  if (config.agent !== void 0 && !isObject2(config.agent)) throw new Error(`${PROJECT_CONFIG_REL}: "agent" is not an object, so the Overpass agent models were not changed`);
   const agents = { ...config.agent ?? {} };
   const { own: settledOwn, settled, notes: recoveryNotes } = settlePending(stored, agents);
   const notes = [...recoveryNotes];
@@ -23011,10 +23203,12 @@ function convergeOverlay(root, res, { fs } = {}) {
     after[name] = entry === void 0 ? null : entry;
   };
   for (const name of [...names].sort()) {
-    const model = want[name];
+    const wanted = want[name];
+    const model = wanted?.model;
+    const variant = wanted?.variant;
     const rec = own.agent[name];
     const entry = agents[name];
-    if (entry !== void 0 && !isObject(entry)) throw new Error(`${PROJECT_CONFIG_REL}: "agent.${name}" is not an object, so the Overpass agent models were not changed`);
+    if (entry !== void 0 && !isObject2(entry)) throw new Error(`${PROJECT_CONFIG_REL}: "agent.${name}" is not an object, so the Overpass agent models were not changed`);
     if (model) {
       const cur = entry ?? {};
       let next = rec;
@@ -23025,17 +23219,20 @@ function convergeOverlay(root, res, { fs } = {}) {
           if (Object.hasOwn(cur, "model")) prior.model = cur.model;
           else delete prior.model;
         }
-        if (Object.hasOwn(cur, "variant")) prior.variant = cur.variant;
+        if (Object.hasOwn(cur, "variant") && cur.variant !== next.wroteVariant) prior.variant = cur.variant;
         next = { ...next, prior };
       }
       next = { ...next, wrote: model };
+      if (variant) next.wroteVariant = variant;
+      else delete next.wroteVariant;
       if (JSON.stringify(next) !== JSON.stringify(rec)) {
         own.agent[name] = next;
         ownChanged = true;
       }
-      if (cur.model !== model || Object.hasOwn(cur, "variant") || entry === void 0) {
+      if (cur.model !== model || cur.variant !== variant || entry === void 0) {
         const updated = { ...cur, model };
-        delete updated.variant;
+        if (variant) updated.variant = variant;
+        else delete updated.variant;
         touch(name, updated);
       }
       continue;
@@ -23053,6 +23250,7 @@ function convergeOverlay(root, res, { fs } = {}) {
     stranded.push({ name, model: rec.wrote, prior: rec.prior });
     const restored = { ...entry };
     delete restored.model;
+    if (rec.wroteVariant !== void 0 && restored.variant === rec.wroteVariant) delete restored.variant;
     if (Object.hasOwn(rec.prior ?? {}, "model")) restored.model = rec.prior.model;
     if (Object.hasOwn(rec.prior ?? {}, "variant") && !Object.hasOwn(restored, "variant")) restored.variant = rec.prior.variant;
     touch(name, rec.created && !Object.keys(restored).length ? void 0 : restored);
@@ -23071,15 +23269,14 @@ function convergeOverlay(root, res, { fs } = {}) {
   return { changed, notes };
 }
 function expectedSessionModel(res, agent) {
-  if (!res.effective) return null;
-  if (agent === CONDUCTOR_AGENT) return res.conductorRouted ? res.conductorModel : null;
-  if (agent === PLAN_AGENT) return res.laneModel;
+  if (agent === CONDUCTOR_AGENT) return res?.conductor?.model ?? null;
+  if (agent === PLAN_AGENT) return res?.plan?.model ?? null;
   return null;
 }
 function mismatchNotice(res, agent, model) {
   const expected = expectedSessionModel(res, agent);
   if (!expected || !model || model === expected) return "";
-  return `STERLING OVERPASS: Overpass is ON but this session runs on ${model}: pick ${expected} in /models or start a new session. Sterling does not switch an open session's model.`;
+  return `STERLING MODELS: config.models gives this agent ${expected}, but this session runs on ${model}: pick ${expected} in /models or start a new session. Sterling does not switch an open session's model.`;
 }
 function createSessionModels() {
   const sessions = /* @__PURE__ */ new Map();
@@ -23098,146 +23295,6 @@ function createSessionModels() {
     },
     get: (sessionID) => sessions.get(sessionID) ?? null
   };
-}
-
-// packages/opencode-plugin/src/dispatch-model.mjs
-init_dist();
-var INTENT_LINE = /^[ \t]*MODEL-INTENT:(.*)$/;
-var PROVIDER_RE = /^[a-z0-9][a-z0-9-]*$/;
-var isObject2 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-function intentRefusal(why) {
-  return `Sterling refused this subagent dispatch: its brief carries a MODEL-INTENT line but ${why}. Use exactly one line, "MODEL-INTENT: hard", "MODEL-INTENT: review-of=<provider>" (the provider the reviewed work was written on, for example openai) or "MODEL-INTENT: fallback=<reason>", or drop the line to run on the role's normal model.`;
-}
-function parseIntent(prompt) {
-  const lines = unfencedMarkers(prompt, INTENT_LINE);
-  if (!lines.length) return { kind: "normal" };
-  if (lines.length > 1) throw new Error(intentRefusal(`it has ${lines.length} of them`));
-  const value = lines[0];
-  if (value === "hard") return { kind: "hard" };
-  const review = /^review-of=(.*)$/.exec(value);
-  if (review) {
-    const author = review[1].trim();
-    if (!PROVIDER_RE.test(author)) throw new Error(intentRefusal(`review-of names ${JSON.stringify(author)}, which is not a provider id such as openai or anthropic`));
-    return { kind: "review-of", author };
-  }
-  const fallback = /^fallback=(.*)$/.exec(value);
-  if (fallback) {
-    const reason = fallback[1].trim();
-    if (!reason) throw new Error(intentRefusal("the fallback gives no reason"));
-    return { kind: "fallback", reason };
-  }
-  throw new Error(intentRefusal(`its value ${JSON.stringify(value)} is not one of hard, review-of=<provider> or fallback=<reason>`));
-}
-var providerOf = (ref) => ref.slice(0, ref.indexOf("/"));
-var claudeRef = (entry) => `anthropic/${entry.model}`;
-function roleEntry(config, role) {
-  const models = migrateStaleAgyModels(config).config?.models;
-  if (models !== void 0 && !isObject2(models)) return { problem: `config.models is ${JSON.stringify(models)}, not an object` };
-  const raw = models ?? {};
-  const parsed = configSchema.shape.models.safeParse(Object.hasOwn(raw, role) ? { [role]: raw[role] } : {});
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    return { problem: `config.models.${[role, ...issue.path.slice(1)].join(".")}: ${issue.message}` };
-  }
-  return { entry: Object.hasOwn(parsed.data, role) ? parsed.data[role] : null };
-}
-function hardRef(model) {
-  if (OPENCODE_MODEL_REF_RE.test(model)) return model;
-  if (CLAUDE_MODEL_ID_RE.test(model)) return `anthropic/${model}`;
-  return null;
-}
-function hardImplementor(config) {
-  const res = resolveDispatchModel("implementor-hard", { kind: "normal" }, config);
-  if (!res || res.problem) return res;
-  const stale = isObject2(config?.models?.implementor) && Object.hasOwn(config.models.implementor, "hard_task");
-  const note = `${res.note} (MODEL-INTENT hard on implementor; dispatch sterling/implementor-hard instead${stale ? "; models.implementor.hard_task is no longer read, and /sterling:update moves it into models.implementor-hard" : ""})`;
-  return { ...res, note };
-}
-function resolveDispatchModel(role, intent, config, mode = null) {
-  if (typeof role !== "string" || !role) return null;
-  if (role === "implementor" && intent.kind === "hard") return hardImplementor(config);
-  const judged = roleEntry(config, role);
-  if (judged.problem) return { problem: judged.problem };
-  const { entry } = judged;
-  if (!entry) return null;
-  const normal = entry.opencode_model ?? claudeRef(entry);
-  let model = normal;
-  let variant = entry.effort;
-  let note = `config.models.${role}`;
-  if (intent.kind === "hard") {
-    if (!entry.hard_task) note = `config.models.${role} (MODEL-INTENT hard, but ${role} has no hard_task, so its normal model)`;
-    else {
-      const ref = hardRef(entry.hard_task.model);
-      if (!ref) return { problem: `config.models.${role}.hard_task.model is ${JSON.stringify(entry.hard_task.model)}, neither a Claude model id nor <provider>/<model>` };
-      model = ref;
-      variant = entry.hard_task.effort ?? entry.effort;
-      note = `config.models.${role}.hard_task (MODEL-INTENT hard)`;
-    }
-  } else if (intent.kind === "review-of") {
-    let judgedMode = mode;
-    if (judgedMode === null) {
-      try {
-        judgedMode = judgeProjectMode(config?.mode, ".sterling/config.json");
-      } catch (e) {
-        return { problem: e.message };
-      }
-    }
-    const alt = claudeRef(entry);
-    if (judgedMode === "work") note = `config.models.${role} (work mode: every pre-PR reviewer runs on the normal reviewer model, whoever wrote the work)`;
-    else if (providerOf(normal) !== intent.author) note = `config.models.${role} (already a different provider from the author's ${intent.author})`;
-    else if (providerOf(alt) !== intent.author) {
-      model = alt;
-      note = `config.models.${role}.model (the author wrote on ${intent.author}, so the dispatch moves to the role's Claude model)`;
-    } else note = `config.models.${role} (CROSS-FAMILY NOT POSSIBLE: the author wrote on ${intent.author} and this role configures no model on another provider)`;
-  } else if (intent.kind === "fallback") {
-    model = claudeRef(entry);
-    note = `config.models.${role}.model (announced fallback: ${intent.reason})`;
-  }
-  return { model, variant, ref: `${model}#${variant}`, note };
-}
-function dispatchModel(config, args) {
-  const intent = parseIntent(args?.prompt);
-  const role = agentRole(args?.agent);
-  const named = typeof args?.model === "string" && args.model ? args.model : null;
-  if (typeof args?.sessionID === "string" && args.sessionID && intent.kind === "normal") {
-    return { model: null, line: named ? null : "MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied)." };
-  }
-  const res = resolveDispatchModel(role, intent, config);
-  if (res === null) {
-    return intent.kind === "normal" ? { model: null, line: null } : { model: null, line: `MODEL: the MODEL-INTENT line was not applied: the agent ${JSON.stringify(args?.agent)} has no config.models entry, so the call ${named ? `kept ${named}` : "runs on the agent's own model"}.` };
-  }
-  if (res.problem) {
-    const text = `config.models is invalid (${res.problem}), so this dispatch was not given a model from it and ${named ? `kept ${named} as the call named` : "runs on the agent's own model"}. Fix the value in .sterling/config.json (TUI System tab).`;
-    return { model: null, line: `MODEL: ${text}`, notice: `Sterling models: ${text}` };
-  }
-  if (named) {
-    const differs = named !== res.ref;
-    const line2 = differs ? `MODEL: kept ${named} as the call named; ${res.note} gives ${res.ref}. Omit the call's model to run on config.models.` : null;
-    const notice = intent.kind === "fallback" ? `Sterling models: fallback dispatch on ${named} (reason: ${intent.reason}).` : void 0;
-    return notice ? { model: null, line: line2 ?? `MODEL: fallback dispatch on ${named} (reason: ${intent.reason}).`, notice } : { model: null, line: line2 };
-  }
-  const line = `MODEL: this dispatch runs on ${res.ref}, from ${res.note}.`;
-  return intent.kind === "fallback" ? { model: res.ref, line, notice: `Sterling models: fallback dispatch on ${res.ref} (reason: ${intent.reason}).`, resolved: true } : { model: res.ref, line, resolved: true };
-}
-var variantIds = (entry) => Array.isArray(entry?.variants) ? entry.variants.map((v) => typeof v === "string" ? v : v?.id).filter((v) => typeof v === "string") : null;
-function modelListItems(result) {
-  if (Array.isArray(result?.data)) return result.data;
-  return result;
-}
-function checkVariant(ref, list, listError = null) {
-  const hash = ref.lastIndexOf("#");
-  if (hash === -1) return { model: ref, note: null };
-  const base2 = ref.slice(0, hash);
-  const variant = ref.slice(hash + 1);
-  if (listError || !Array.isArray(list)) return { model: ref, note: `(variant ${variant} not checked: OpenCode's model list could not be read${listError ? `: ${listError.message ?? listError}` : ""})` };
-  const slash = base2.indexOf("/");
-  const providerID = base2.slice(0, slash);
-  const id = base2.slice(slash + 1);
-  const entry = list.find((m) => m?.providerID === providerID && (m?.modelID === id || m?.id === id));
-  if (!entry) return { model: ref, note: `(variant ${variant} not checked: ${base2} is not in OpenCode's model list)` };
-  const ids = variantIds(entry) ?? [];
-  if (ids.includes(variant)) return { model: ref, note: null };
-  return { model: base2, note: `(variant ${variant} dropped: OpenCode lists ${ids.length ? `only ${ids.join(", ")}` : "no variants"} for ${base2}, so this dispatch runs on ${base2} with its default effort)` };
 }
 
 // packages/opencode-plugin/src/log.mjs
@@ -23639,8 +23696,6 @@ function describeRoutedDomains(config, root) {
 var namedText = (e) => `${e?.constructor?.name ?? e?.name ?? "Error"}: ${errorText2(e)}`;
 
 // packages/opencode-plugin/src/axis.mjs
-var CODEX_OPENERS = /* @__PURE__ */ new Set(["codex_codex", "codex.codex"]);
-var CODEX_TOOL = /^codex[._]/;
 var PENDING_CAP2 = 200;
 var MODEL_LIST_TIMEOUT_MS = 2e3;
 async function boundedModelList(listModels, ms) {
@@ -23660,7 +23715,6 @@ async function boundedModelList(listModels, ms) {
 function axisSurface(tool) {
   if (tool === "subagent") return "dispatch";
   if (tool === "question") return "question";
-  if (typeof tool === "string" && CODEX_TOOL.test(tool)) return "consult";
   return null;
 }
 function resultText(result) {
@@ -23708,13 +23762,6 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
     if (!root) return;
     const args = input.input && typeof input.input === "object" ? input.input : {};
     let pinLine = null;
-    if (surface === "consult") {
-      await fenced("axis", root, () => {
-        const pin = codexModelPin(root, { opener: CODEX_OPENERS.has(input.tool), toolInput: args });
-        if (pin.model && input.input && typeof input.input === "object") input.input.model = pin.model;
-        pinLine = pin.line;
-      });
-    }
     if (surface === "dispatch") {
       let read;
       try {
@@ -23730,12 +23777,12 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
       } else {
         let pin;
         try {
-          pin = read.res.effective ? dispatchPin(read.res, args) : dispatchModel(read.config, args);
+          pin = dispatchModel(read.routing, args);
         } catch (e) {
           reportOverpass(root, e.message);
           throw e;
         }
-        if (read.res.effective && pin.model) {
+        if (pin.overpass && pin.model) {
           const route = routeAvailability(readInventory(await boundedModelList(listModels, modelListTimeoutMs)), pin.model);
           if (route.state === "missing") {
             const message = missingRouteRefusal(read.res, args.agent, pin.model, route.why);
@@ -24022,7 +24069,7 @@ function opencodeBinDefault(execPath = process.execPath) {
   return !isNodeBinary(execPath) && /opencode/i.test(String(execPath ?? "").split(/[\\/]/).pop()) ? execPath : null;
 }
 var MODEL_UNSET_TEXT = `Sterling: the maintenance worker did not run. config maintenance_worker.opencode_model is not set, and the OpenCode worker never falls back to OpenCode's default one. To enable it, add this to .sterling/config.json (any provider/model you can run): "maintenance_worker": { "opencode_model": "<provider>/<model>" }. Until then the queue drains by hand with /sterling:drain.`;
-var OVERPASS_NO_RUNNER_TEXT = "Sterling: the maintenance worker did not run. Overpass is effective, so the worker must run through OpenCode on the Overpass model, but this plugin is not running inside an OpenCode binary. The maintenance queue drains only by hand (/sterling:drain) until it is.";
+var OVERPASS_NO_RUNNER_TEXT = "Sterling: the maintenance worker did not run. Its model in config.models (an Overpass tier or another non-Claude model) runs only through OpenCode, but this plugin is not running inside an OpenCode binary. The maintenance queue drains only by hand (/sterling:drain) until it is.";
 var NO_RUNNER_TEXT = "Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.";
 function createWorkerLaunch({
   openStore,
@@ -24047,27 +24094,38 @@ function createWorkerLaunch({
     const config = loadConfig(root);
     let tierModel = null;
     let tierEffort;
+    let isTier = false;
+    let own = null;
     try {
-      const overpass = resolveOverpass(config, { host: "opencode" });
-      if (overpass.effective) {
-        const route = overpass.roles[MAINTENANCE_WORKER_ROLE];
-        tierModel = route.model;
-        tierEffort = route.effort;
+      const routing = projectRouting(config ?? {});
+      if (routing.conflicts.has(MAINTENANCE_WORKER_ROLE)) throw new Error(twoModelsReason(MAINTENANCE_WORKER_ROLE));
+      if (routing.modelsProblem) throw new Error(routing.modelsProblem);
+      const entry = routing.entries[MAINTENANCE_WORKER_ROLE];
+      if (entry?.problem) throw new Error(entry.problem);
+      own = entry ?? null;
+      if (entry && (entry.tier || !hostRunsModel(entry.canonical, "claude"))) {
+        tierModel = entry.model;
+        tierEffort = entry.effort;
+        isTier = entry.tier;
       }
     } catch (e) {
       skipOnce(root, at, `maintenance worker skipped: ${errText2(e)}`, `Sterling: the maintenance worker did not run. ${errText2(e)}. Fix .sterling/config.json; until then the queue drains by hand with /sterling:drain.`);
       return;
     }
     const ocBin = claudeOnPath() && !tierModel ? null : findOpencode();
+    if (ocBin && !tierModel && own) {
+      tierModel = own.model;
+      tierEffort = own.effort;
+    }
     const runnerHost = ocBin ? { host: "opencode", opencodeBin: ocBin, ...tierModel ? { workerModel: tierModel, ...tierEffort ? { workerEffort: tierEffort } : {} } : {} } : {};
     if (!ocBin && tierModel) {
-      skipOnce(root, at, "maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through", OVERPASS_NO_RUNNER_TEXT);
+      skipOnce(root, at, `maintenance worker skipped: its model ${tierModel} runs only through OpenCode, and no OpenCode binary was found`, OVERPASS_NO_RUNNER_TEXT);
       return;
     }
-    if (tierModel) {
+    if (isTier) {
       const route = routeAvailability(inventoryFor(root) ?? { state: "unknown", why: "no model list was read for this launch" }, tierModel);
       if (route.state === "missing") {
-        const text = `Sterling: the maintenance worker did not run: Overpass is ON but its route ${tierModel} for the maintenance worker is not available: ${route.why}. It is not run on a direct provider instead. ${missingRouteRemedy(tierModel.slice(0, tierModel.indexOf("/")), { bypass: false })} The next settlement checks again.`;
+        const text = `Sterling: the maintenance worker did not run: its Overpass route ${tierModel} is not available: ${route.why}. It is not run on a direct provider instead. ${missingRouteRemedy(tierModel.slice(0, tierModel.indexOf("/")))} The next settlement checks again.`;
         if (missingReported.get(root) !== text) {
           missingReported.set(root, text);
           logLine(root, `maintenance worker skipped: Overpass route ${tierModel} is not available: ${route.why}`);
@@ -24270,6 +24328,7 @@ init_dist2();
 // scripts/lib/update.mjs
 import { closeSync as closeSync7, existsSync as existsSync23, mkdirSync as mkdirSync17, openSync as openSync7, readFileSync as readFileSync22, readdirSync as readdirSync7, readSync as readSync3, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname16, join as join34 } from "node:path";
+init_dist();
 
 // scripts/lib/project-identity.mjs
 init_dist();
@@ -24944,10 +25003,74 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 }
 
 // scripts/hooks/lib/operating-state.mjs
-import { existsSync as existsSync24, readFileSync as readFileSync24 } from "node:fs";
-import { join as join36 } from "node:path";
+import { existsSync as existsSync25, readFileSync as readFileSync25 } from "node:fs";
+import { join as join37 } from "node:path";
 init_dist();
 init_dist2();
+
+// scripts/lib/work-pr.mjs
+init_dist();
+import { spawnSync as spawnSync6 } from "node:child_process";
+import { existsSync as existsSync24, linkSync as linkSync2, mkdirSync as mkdirSync18, readdirSync as readdirSync8, readFileSync as readFileSync24, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync12 } from "node:fs";
+import { dirname as dirname17, join as join36 } from "node:path";
+function noOriginRemote(cwd) {
+  const r = spawnSync6("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
+  return r.status === 0 && !r.stdout.split("\n").map((l) => l.trim()).includes("origin");
+}
+var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
+var prLoopPath = (root) => join36(root, PR_LOOP_REL);
+var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
+  let s2;
+  try {
+    s2 = JSON.parse(readFileSync24(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
+  }
+  const str = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str(s2.repo) || !str(s2.head_sha) || !str(s2.armed_at)) {
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+  }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${rel} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${rel} is settled '${s2.status}' without settled_at`);
+  return s2;
+}
+function readPrLoopEntries(root) {
+  const entries = [];
+  const dir = join36(root, PR_LOOPS_DIR_REL);
+  if (existsSync24(dir)) {
+    for (const name of readdirSync8(dir).sort()) {
+      const m = name.match(/^(\d+)\.json$/);
+      if (!m) continue;
+      const rel = prLoopFileRel(m[1]);
+      const state = parsePrLoopFile(join36(dir, name), rel);
+      if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
+      entries.push({ state, file: join36(dir, name), rel });
+    }
+  }
+  if (existsSync24(prLoopPath(root))) {
+    const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+    if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
+  }
+  return entries;
+}
+function readPrLoops(root) {
+  return readPrLoopEntries(root).map((e) => e.state).sort((a, b) => a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number);
+}
+
+// scripts/hooks/lib/operating-state.mjs
 function readProjectConfig2(cwd) {
   let config = null;
   let configUnreadable = false;
@@ -24986,15 +25109,23 @@ function tddPostureLine({ config, configUnreadable }) {
   const tddOn = config?.tdd?.enabled !== false;
   return `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
 }
-function projectModeLine({ config, configUnreadable, noOrigin = false }) {
+function projectModeLine({ config, configUnreadable, noOrigin = false, root = null }) {
   if (configUnreadable) {
-    return "Project mode: UNKNOWN \u2014 the project config could not be read, so config.mode could not be determined. This is NOT the hobby default: repair the config.";
+    return "Workflow: UNKNOWN \u2014 the project config could not be read, so config.workflow (merge path, Reviewers, Copilot loop) could not be determined. This is NOT the default (direct merge, 1 reviewer, loop off): repair the config.";
   }
-  const mode = config?.mode;
-  if (mode === void 0 || mode === "hobby" || mode === "work") {
-    return `Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" && noOrigin ? "this repository has no 'origin' remote, so /sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen." : mode === "work" ? "work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly." : "work ships by direct merge through /sterling:merge.");
+  let wf;
+  try {
+    wf = workflowOfConfig(config ?? void 0, ".sterling/config.json");
+  } catch (e) {
+    if (!(e instanceof ProjectWorkflowError)) throw e;
+    return `Workflow: INVALID \u2014 ${e.message}. /sterling:merge refuses to act on it until it is fixed (TUI System tab).`;
   }
-  return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+  const pr = wf.merge === "pr";
+  const localPr = pr && (root ? noOriginRemote(root) : noOrigin);
+  const loop = !wf.copilot_loop ? "OFF" : pr ? "ON" : "ON but inactive (needs the pull-request merge path)";
+  const head = `Workflow: merge path ${pr ? "PULL REQUEST" : "DIRECT"} \xB7 Reviewers: ${wf.reviewers} \xB7 Copilot loop: ${loop}` + (pr ? ` \xB7 auto-merge on clean: ${wf.auto_merge_on_clean ? "ON" : "OFF"}` : "") + " (config.workflow \u2014 TUI System tab) \u2014 ";
+  const ships = localPr ? "this repository has no 'origin' remote, so /sterling:merge merges locally like the direct merge path: no pull request and no Copilot review will happen." : pr ? `work ships as a pull request through /sterling:merge; nothing is merged directly${wf.copilot_loop ? ", and the Copilot review loop follows" : ""}.` : "work ships by direct merge through /sterling:merge.";
+  return `${head}${ships} Run ${wf.reviewers} task-end ${wf.reviewers === 1 ? "reviewer" : "reviewers in parallel"}, then one fix round and one re-check.`;
 }
 var routeLabel = ({ model, effort }) => effort ? `${model} at effort ${effort}` : model;
 function overpassRoleRoutes(roles) {
@@ -25026,7 +25157,7 @@ function overpassLine({ config, configUnreadable, host }) {
 }
 var STORAGE_TAIL = "TUI System tab; switch with the move-store skill";
 function storageLine({ config, configUnreadable, root }) {
-  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync24(join36(storeRootFor(root), ".sterling", "config.json"));
+  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync25(join37(storeRootFor(root), ".sterling", "config.json"));
   if (configUnreadable || presentButNull) {
     return "Storage: UNKNOWN \u2014 the project config could not be read, so config.storage could not be determined. This is NOT the SQLite default: repair the config.";
   }
@@ -25062,16 +25193,16 @@ function handoffFilesLine({ config, configUnreadable, root }) {
 }
 var PENDING_ISSUE_REPORTS = "pending-issue-reports.jsonl";
 function pendingIssueReportsLine({ cwd, pluginRoot }) {
-  const path = join36(cwd, ".sterling", PENDING_ISSUE_REPORTS);
-  if (!existsSync24(path)) return "";
+  const path = join37(cwd, ".sterling", PENDING_ISSUE_REPORTS);
+  if (!existsSync25(path)) return "";
   let count;
   try {
-    count = readFileSync24(path, "utf8").split("\n").filter((l) => l.trim()).length;
+    count = readFileSync25(path, "utf8").split("\n").filter((l) => l.trim()).length;
   } catch (e) {
     return `Sterling issue reports: UNKNOWN \u2014 .sterling/${PENDING_ISSUE_REPORTS} could not be read (${e && e.message || e}), so the number of queued reports is not known.`;
   }
   if (count === 0) return "";
-  const flush = pluginRoot ? `\`node "${join36(pluginRoot, "bin", "report-issue.mjs")}" --flush\`` : "Sterling's bin/report-issue.mjs --flush";
+  const flush = pluginRoot ? `\`node "${join37(pluginRoot, "bin", "report-issue.mjs")}" --flush\`` : "Sterling's bin/report-issue.mjs --flush";
   return `Sterling issue reports: ${count} queued in .sterling/${PENDING_ISSUE_REPORTS}, not yet filed on GitHub. Send them with ${flush} once gh is installed and logged in; the next report sends them too.`;
 }
 function mountedDomainLines({ config, configUnreadable, opener, root }) {
@@ -25095,12 +25226,12 @@ function mountedDomainLines({ config, configUnreadable, opener, root }) {
 }
 
 // scripts/lib/post-update-sync.mjs
-import { spawn as spawn2, spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync25, readFileSync as readFileSync25, realpathSync as realpathSync11, statSync as statSync8, writeFileSync as writeFileSync12 } from "node:fs";
+import { spawn as spawn2, spawnSync as spawnSync7 } from "node:child_process";
+import { existsSync as existsSync26, readFileSync as readFileSync26, realpathSync as realpathSync11, statSync as statSync8, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { join as join37, resolve as resolve15 } from "node:path";
+import { join as join38, resolve as resolve15 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
-var SYNC_MARKER_REL = join37(".sterling", "synced-version");
+var SYNC_MARKER_REL = join38(".sterling", "synced-version");
 var HOST_TEXT2 = {
   claude: {
     label: "H1",
@@ -25154,12 +25285,12 @@ function sameRealPath(a, b) {
   return real(a) === real(b);
 }
 function pluginScript(root, name) {
-  const bundled = join37(root, "bin", name);
-  return existsSync25(bundled) ? bundled : join37(root, "scripts", name);
+  const bundled = join38(root, "bin", name);
+  return existsSync26(bundled) ? bundled : join38(root, "scripts", name);
 }
 function readPluginVersion(root) {
   try {
-    const v = JSON.parse(readFileSync25(join37(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync26(join38(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -25175,7 +25306,7 @@ function stepResult({ error, status, stdout, stderr }) {
   return { status: error ? null : status, error, out, tail: out.split("\n").slice(-8).join(" | ") };
 }
 function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
-  const r = spawnSync6(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
+  const r = spawnSync7(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
@@ -25230,19 +25361,19 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated };
 }
 function postUpdateApplies(root, project) {
-  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync25(join37(storeRootFor(project), ".sterling", "config.json"));
+  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync26(join38(storeRootFor(project), ".sterling", "config.json"));
 }
 async function postUpdateSync({ root, project, host = "claude", runStep = runStepSync, env = process.env, home = homedir8() }) {
   const t = hostText(host);
   if (!postUpdateApplies(root, project)) return null;
   const current = readPluginVersion(root);
-  const markerPath = join37(project, SYNC_MARKER_REL);
+  const markerPath = join38(project, SYNC_MARKER_REL);
   let previous = null;
   try {
-    previous = readFileSync25(markerPath, "utf8").trim() || null;
+    previous = readFileSync26(markerPath, "utf8").trim() || null;
   } catch {
   }
-  const manifest = join37(root, ".claude-plugin", "plugin.json");
+  const manifest = join38(root, ".claude-plugin", "plugin.json");
   if (!current) {
     return {
       outcome: "skipped",
@@ -25287,7 +25418,7 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   }
   let warning = "";
   try {
-    writeFileSync12(markerPath, `${current}
+    writeFileSync13(markerPath, `${current}
 `);
   } catch (err) {
     warning = `\u2717 ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) \u2014 the sync ${t.rerun} until it can. `;
@@ -25324,72 +25455,6 @@ function migratedWarning(migrated) {
 function migratedContext(migrated) {
   const { retired, overpass, other } = splitMigrated(migrated);
   return (retired.length ? ` sync-agents removed ${plural2(retired.length, "retired models key")} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join("; ")}.` : "") + (overpass.length ? ` sync-agents reset the Overpass settings in .sterling/config.json, which changes model routing (config.overpass.roles overrides are gone and the conductor bypass is on); tell the user, because the old values are no longer in the file: ${overpass.map(strip).join("; ")}.` : "") + (other.length ? ` sync-agents applied ${plural2(other.length, "other config migration step")} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join("; ")}.` : "");
-}
-
-// scripts/lib/work-pr.mjs
-import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync26, linkSync as linkSync2, mkdirSync as mkdirSync18, readdirSync as readdirSync8, readFileSync as readFileSync26, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync13 } from "node:fs";
-import { dirname as dirname17, join as join38 } from "node:path";
-function noOriginRemote(cwd) {
-  const r = spawnSync7("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
-  return r.status === 0 && !r.stdout.split("\n").map((l) => l.trim()).includes("origin");
-}
-var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
-var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
-var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
-var prLoopPath = (root) => join38(root, PR_LOOP_REL);
-var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
-function parsePrLoopFile(file, rel) {
-  try {
-    return parsePrLoopFileOrThrow(file, rel);
-  } catch (e) {
-    e.rel = rel;
-    throw e;
-  }
-}
-function parsePrLoopFileOrThrow(file, rel) {
-  let s2;
-  try {
-    s2 = JSON.parse(readFileSync26(file, "utf8"));
-  } catch (e) {
-    throw new Error(`${rel} is not valid JSON (${e.message})`);
-  }
-  const str = (v) => typeof v === "string" && v.length > 0;
-  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str(s2.repo) || !str(s2.head_sha) || !str(s2.armed_at)) {
-    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
-  }
-  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
-    throw new Error(`${rel} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
-  }
-  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${rel} is settled '${s2.status}' without settled_at`);
-  return s2;
-}
-function readPrLoopEntries(root) {
-  const entries = [];
-  const dir = join38(root, PR_LOOPS_DIR_REL);
-  if (existsSync26(dir)) {
-    for (const name of readdirSync8(dir).sort()) {
-      const m = name.match(/^(\d+)\.json$/);
-      if (!m) continue;
-      const rel = prLoopFileRel(m[1]);
-      const state = parsePrLoopFile(join38(dir, name), rel);
-      if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
-      entries.push({ state, file: join38(dir, name), rel });
-    }
-  }
-  if (existsSync26(prLoopPath(root))) {
-    const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
-    if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
-  }
-  return entries;
-}
-function readPrLoops(root) {
-  return readPrLoopEntries(root).map((e) => e.state).sort((a, b) => a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number);
-}
-function prLoopStateExists(root) {
-  if (existsSync26(prLoopPath(root))) return true;
-  const dir = join38(root, PR_LOOPS_DIR_REL);
-  return existsSync26(dir) && readdirSync8(dir).some((n2) => /^\d+\.json$/.test(n2));
 }
 
 // packages/opencode-plugin/src/operating-state.mjs
@@ -26878,19 +26943,6 @@ import { join as join44 } from "node:path";
 var errMessage = (e) => String(e && e.message || e);
 var LOOP_FILES = `${PR_LOOPS_DIR_REL}/ or ${PR_LOOP_REL}`;
 function evaluatePrLoops(root) {
-  let mode;
-  try {
-    mode = readProjectMode(root);
-  } catch (e) {
-    if (prLoopStateExists(root)) {
-      return {
-        states: [],
-        degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 PR loop state exists (${LOOP_FILES}) but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
-      };
-    }
-    return { states: [], degraded: null };
-  }
-  if (mode !== "work") return { states: [], degraded: null };
   let loops;
   try {
     loops = readPrLoops(root);
@@ -26903,7 +26955,7 @@ function prLoopNext(state, waitScript, { host = "claude-code" } = {}) {
   const wait = host === "opencode" ? `wait with node "${waitScript}" ${state.pr_url} (add --request-copilot on the first wait after a push) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &` : `wait with node "${waitScript}" ${state.pr_url} (background)`;
   return `run the pr-review-loop skill: ${wait}, disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated|closed> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
 }
-var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
+var prLoopOwedText = (state, next) => `\u2022 PR review loop owed: PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
 var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;
 
 // packages/opencode-plugin/src/pr-loop.mjs

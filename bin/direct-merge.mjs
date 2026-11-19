@@ -5294,33 +5294,39 @@ function readJsonObject(root, rel, ErrorClass, subject) {
   }
   return { where, parsed };
 }
-function judgeProjectMode(mode2, where) {
-  if (mode2 === void 0)
+function judgeProjectMode(mode, where) {
+  if (mode === void 0)
     return "hobby";
-  if (!PROJECT_MODES.includes(mode2)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode2)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  if (!PROJECT_MODES.includes(mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
   }
-  return mode2;
+  return mode;
 }
-function modeOfConfig(parsed, where) {
-  if (parsed.mode !== void 0 || parsed.workflow === void 0)
-    return judgeProjectMode(parsed.mode, where);
-  const workflow = parsed.workflow;
-  if (workflow === null || typeof workflow !== "object" || Array.isArray(workflow)) {
-    throw new ProjectModeError(`config.workflow is ${JSON.stringify(workflow)} in ${where} \u2014 it must be an object; fix it in the TUI System tab or the file`);
-  }
-  const merge = workflow.merge;
-  if (merge === void 0 || merge === "direct")
-    return "hobby";
-  if (merge === "pr")
-    return "work";
-  throw new ProjectModeError(`config.workflow.merge is ${JSON.stringify(merge)} in ${where} \u2014 it must be 'direct' or 'pr'; fix it in the TUI System tab or the file`);
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+function workflowOfConfig(parsed, where) {
   if (parsed === void 0)
-    return "hobby";
-  return modeOfConfig(parsed, where);
+    return workflowSchema.parse(void 0);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProjectWorkflowError(`${where} is not a JSON object \u2014 the workflow settings cannot be read`);
+  }
+  let canonical;
+  try {
+    canonical = toCanonicalConfig(parsed).config;
+  } catch (err) {
+    if (!(err instanceof Error))
+      throw err;
+    throw new ProjectWorkflowError(`${err.message} (in ${where}) \u2014 the workflow settings cannot be read; fix it in the TUI System tab or the file`);
+  }
+  const workflow2 = canonical.workflow;
+  const checked = workflowSchema.safeParse(workflow2);
+  if (!checked.success) {
+    const issues = checked.error.issues.map((i) => `${["workflow", ...i.path].join(".")}: ${i.message}`).join("; ");
+    throw new ProjectWorkflowError(`config.workflow is invalid in ${where} (${issues}) \u2014 fix it in the TUI System tab or the file`);
+  }
+  return checked.data;
+}
+function readProjectWorkflow(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectWorkflowError, "the workflow settings");
+  return workflowOfConfig(parsed, where);
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -5331,10 +5337,11 @@ function readProjectIdentity(root) {
   }
   return { project_id: parsed.project_id };
 }
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId, ProjectWorkflowError;
 var init_project = __esm({
   "packages/schemas/dist/project.js"() {
     "use strict";
+    init_config();
     PROJECT_MODES = ["hobby", "work"];
     ProjectModeError = class extends Error {
       constructor(message) {
@@ -5353,12 +5360,82 @@ var init_project = __esm({
     fwd = (p) => p.replace(/\\/g, "/");
     UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+    ProjectWorkflowError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectWorkflowError";
+      }
+    };
   }
 });
 
 // packages/schemas/dist/config.js
 function isCustomAgentKey(key) {
   return CUSTOM_AGENT_KEY_RE.test(key);
+}
+function resolveOverpassRoles(raw, provider) {
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
+  }
+  const block = raw ?? {};
+  for (const key of Object.keys(block)) {
+    if (!OVERPASS_ROLES.includes(key)) {
+      throw new OverpassUnknownRoleError(key);
+    }
+  }
+  const out = {};
+  for (const role of OVERPASS_ROLES) {
+    const entry = block[role];
+    if (entry !== void 0 && !isPlainObject(entry)) {
+      throw new Error(`config.overpass.roles.${role} is ${JSON.stringify(entry)} \u2014 it must be an object with an optional "tier" and "effort"`);
+    }
+    const fields = entry ?? {};
+    for (const key of Object.keys(fields)) {
+      if (key !== "tier" && key !== "effort")
+        throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} \u2014 only "tier" and "effort" are allowed`);
+    }
+    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
+    if (typeof tier !== "string" || !OVERPASS_TIER_RE.test(tier)) {
+      throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} \u2014 it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
+    }
+    const effort = fields.effort;
+    if (effort !== void 0 && (typeof effort !== "string" || !OVERPASS_EFFORTS.includes(effort))) {
+      throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} \u2014 it must be one of ${OVERPASS_EFFORTS.join(", ")}`);
+    }
+    const chosen = effort ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
+  }
+  return out;
+}
+function resolveOverpass(config, opts) {
+  const cfg = isPlainObject(config) ? config : {};
+  const raw = cfg.overpass;
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} \u2014 it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === void 0 ? false : block.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === void 0 ? true : block.conductor_bypass;
+  if (typeof bypass !== "boolean") {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
+  }
+  const provider = block.provider === void 0 ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const roles = resolveOverpassRoles(block.roles, provider);
+  const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
+  if (!enabled)
+    return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts.host !== "opencode")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
+  return { ...base2, effective: true, conductorRouted: !bypass };
 }
 function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
@@ -5404,7 +5481,134 @@ function migrateStaleAgyModels(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, RETIRED_MODEL_KEYS, isPlainObject, MODEL_REF_RE, OVERPASS_MODEL_NAMESPACE, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema;
+function toCanonicalConfig(legacy, opts = {}) {
+  if (!isPlainObject(legacy))
+    return { config: legacy, conflicts: [], changes: [] };
+  const raw = normalizeRawConfig(legacy);
+  const out = { ...raw };
+  const changes = [];
+  const conflicts = [];
+  const resolutions = opts.resolutions ?? {};
+  const mode = judgeProjectMode(raw.mode, "the config");
+  let autoMerge;
+  if (raw.pr_review !== void 0) {
+    if (!isPlainObject(raw.pr_review))
+      throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} \u2014 it must be an object`);
+    if (has(raw.pr_review, "auto_merge_on_clean")) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== "boolean")
+        throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} \u2014 it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === void 0) {
+    const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: "workflow", was: void 0, now: out.workflow });
+  } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+  }
+  if (autoMerge !== void 0)
+    changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
+  if (has(raw, "mode")) {
+    delete out.mode;
+    changes.push({ path: "mode", was: raw.mode });
+  }
+  let overpass = null;
+  if (raw.overpass !== void 0) {
+    if (!isPlainObject(raw.overpass))
+      throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} \u2014 it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: "opencode" });
+      const kept = {};
+      for (const [k, v] of Object.entries(block)) {
+        if (LEGACY_OVERPASS_KEYS.includes(k))
+          changes.push({ path: `overpass.${k}`, was: v });
+        else
+          kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+  const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return { config: out, conflicts, changes };
+  const models = { ...raw.models ?? {} };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry))
+      continue;
+    const next = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === "model" || k === "effort" || k === "opencode_model")
+        continue;
+      if (k === "agy_model" || k === "hard_task") {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v;
+    }
+    const claude = typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model)
+      changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== void 0) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === void 0 || opencode === claude) {
+        model = opencode;
+      } else if (resolutions[role] !== void 0) {
+        model = resolutions[role] === "claude" ? claude : opencode;
+      } else if (!(effective && OVERPASS_ROLES.includes(role))) {
+        const effort = typeof entry.effort === "string" ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: "opencode" });
+        model = opencode;
+      }
+    }
+    if (model !== void 0)
+      next.model = model;
+    if (entry.effort !== void 0)
+      next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : void 0;
+    const claude = isPlainObject(entry) && typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : void 0;
+    const answered = isPlainObject(entry) && entry.opencode_model !== void 0 && claude !== void 0 && entry.opencode_model !== claude;
+    if (!answered)
+      throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+    }
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: void 0, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (modelsChanged)
+    out.models = models;
+  if (has(raw, "sparring_partner")) {
+    delete out.sparring_partner;
+    changes.push({ path: "sparring_partner", was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes };
+}
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_CLAUDE_MODEL, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5908,6 +6112,11 @@ var init_config = __esm({
       // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // The workflow settings that replace mode (decision
+      // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+      // reader does not report it as unread; its strict judge is workflowOfConfig in
+      // project.ts and canonicalConfigSchema below.
+      workflow: external_exports.unknown().optional(),
       // Where the project's stores live (decision
       // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
       // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5976,9 +6185,39 @@ var init_config = __esm({
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
     MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
+    DEFAULT_OVERPASS_TIER = "agentic-high";
+    DEFAULT_OVERPASS_ROLE_TIERS = {
+      implementor: "agentic-auto",
+      "implementor-hard": "agentic-premium",
+      researcher: DEFAULT_OVERPASS_TIER,
+      scout: "agentic-auto",
+      reviewer: DEFAULT_OVERPASS_TIER,
+      librarian: "agentic-auto",
+      sparring: "agentic-premium-max",
+      preflight: "agentic-auto",
+      "maintenance-worker": "agentic-auto"
+    };
+    DEFAULT_OVERPASS_ROLE_EFFORTS = {
+      implementor: "medium",
+      "implementor-hard": "xhigh",
+      scout: "high",
+      librarian: "high",
+      sparring: "xhigh",
+      preflight: "high",
+      "maintenance-worker": "high"
+    };
+    OverpassUnknownRoleError = class extends Error {
+      role;
+      constructor(role) {
+        super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+        this.name = "OverpassUnknownRoleError";
+        this.role = role;
+      }
+    };
     RETIRED_MODEL_KEYS = [
       "coder",
       "coder_hard",
@@ -5991,7 +6230,11 @@ var init_config = __esm({
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
     MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    CLAUDE_PROVIDER = "anthropic";
     OVERPASS_MODEL_NAMESPACE = "overpass";
+    AGY_MODEL_NAMESPACE = "agy";
+    CONDUCTOR_MODEL_KEY = "conductor";
+    PLAN_MODEL_KEY = "plan";
     MERGE_PATHS = ["direct", "pr"];
     MIN_REVIEWERS = 1;
     MAX_REVIEWERS = 5;
@@ -6019,6 +6262,9 @@ var init_config = __esm({
         const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
         if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
           ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+        }
+        if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
         }
         if (e.effort === "max" && overpassTier === null) {
           ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -6051,20 +6297,29 @@ var init_config = __esm({
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
       }
     }).pipe(canonicalConfigObject);
+    LegacyConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "LegacyConfigError";
+      }
+    };
+    has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
   }
 });
 
 // packages/schemas/dist/custom-agents.js
-var CLAUDE_EFFORT_LEVELS, AGENT_HOST_CAPABILITIES;
+var CLAUDE_EFFORT_LEVELS, AGY_CANONICAL_MODELS, AGENT_HOST_CAPABILITIES;
 var init_custom_agents = __esm({
   "packages/schemas/dist/custom-agents.js"() {
     "use strict";
     init_config();
     CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+    AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
     AGENT_HOST_CAPABILITIES = Object.freeze({
-      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
     });
   }
 });
@@ -6515,14 +6770,14 @@ function buildPgConnectionConfig(creds) {
   };
 }
 function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
-  let mode2;
+  let mode;
   try {
-    mode2 = statSync2(path).mode;
+    mode = statSync2(path).mode;
   } catch (e) {
     throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
   }
-  if ((mode2 & 63) !== 0) {
-    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode2 & 511).toString(8)}); set it to mode 600`);
+  if ((mode & 63) !== 0) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode & 511).toString(8)}); set it to mode 600`);
   }
   let parsed;
   try {
@@ -13742,6 +13997,9 @@ var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NO
 var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
+// scripts/lib/update.mjs
+init_dist();
+
 // scripts/lib/project-identity.mjs
 init_dist();
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
@@ -14032,16 +14290,16 @@ function workingState(root, rel) {
   } catch (e) {
     return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
   }
-  let mode2;
+  let mode;
   let bytes;
   let filters = true;
   try {
     if (st.isSymbolicLink()) {
-      mode2 = "120000";
+      mode = "120000";
       bytes = Buffer.from(readlinkSync(join14(root, rel)));
       filters = false;
     } else if (st.isFile()) {
-      mode2 = st.mode & 73 ? "100755" : "100644";
+      mode = st.mode & 73 ? "100755" : "100644";
       bytes = readFileSync10(join14(root, rel));
     } else return { kind: "unreadable" };
   } catch {
@@ -14049,7 +14307,7 @@ function workingState(root, rel) {
   }
   const r = git2(root, ["hash-object", "--stdin", ...filters ? [`--path=${rel}`] : ["--no-filters"]], bytes);
   const blob = r.out.trim();
-  return r.ok && HEX.test(blob) ? { kind: "file", mode: mode2, blob } : { kind: "unreadable" };
+  return r.ok && HEX.test(blob) ? { kind: "file", mode, blob } : { kind: "unreadable" };
 }
 function observePaths(root, paths, storeRoot2) {
   const id = checkoutIdentity(root, storeRoot2);
@@ -14452,8 +14710,10 @@ function parkedItemResolved(paths, deletedSet, existsFn) {
 
 // scripts/direct-merge.mjs
 init_dist2();
+init_dist();
 
 // scripts/lib/work-pr.mjs
+init_dist();
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSync7, readdirSync as readdirSync3, readFileSync as readFileSync12, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname10, join as join19 } from "node:path";
@@ -14518,7 +14778,7 @@ function noOriginRemote(cwd) {
   const r = spawnSync8("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
   return r.status === 0 && !r.stdout.split("\n").map((l) => l.trim()).includes("origin");
 }
-var NO_ORIGIN_LOCAL_MERGE_NOTICE = "direct-merge: WORK mode, but this repository has no 'origin' remote \u2014 merging LOCALLY like hobby mode. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
+var NO_ORIGIN_LOCAL_MERGE_NOTICE = "direct-merge: the pull-request merge path, but this repository has no 'origin' remote \u2014 merging LOCALLY like the direct merge path. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
 function workPreflight(cwd) {
   const url = spawnSync8("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (url.status !== 0) {
@@ -15091,7 +15351,7 @@ function attestationDisclosureLines({ tool, result, declaredGlobs, subject, drop
 }
 
 // scripts/direct-merge.mjs
-var USAGE = "Usage: node direct-merge.mjs [--target <dir>] [--into <branch>] [--branch <branch>] [--no-push] [--allow-same-version]\n  --target <dir>        project directory (default: the current directory)\n  --into <branch>       base branch to merge into, or the PR base in work mode (default: the default branch)\n  --branch <branch>     must be the checked-out branch (default: the checked-out branch)\n  --no-push             hobby only: merge locally without pushing the base (refused in work mode)\n  --allow-same-version  accept changed files without a version bump\n  -h, --help            print this usage and exit 0";
+var USAGE = "Usage: node direct-merge.mjs [--target <dir>] [--into <branch>] [--branch <branch>] [--no-push] [--allow-same-version]\n  --target <dir>        project directory (default: the current directory)\n  --into <branch>       base branch to merge into, or the PR base on the pull-request merge path (default: the default branch)\n  --branch <branch>     must be the checked-out branch (default: the checked-out branch)\n  --no-push             direct merge path only: merge locally without pushing the base (refused on the pull-request path)\n  --allow-same-version  accept changed files without a version bump\n  -h, --help            print this usage and exit 0";
 (function checkFlags(argv) {
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(USAGE);
@@ -15110,17 +15370,18 @@ var target = arg("--target") ?? process.cwd();
 var linkedWorktree = resolveLinkedWorktree(target);
 var CONFIG_REL4 = ".sterling/config.json";
 var storeRoot = resolveStoreRoot(target, linkedWorktree);
-var mode;
-var modeError;
+var workflow;
+var workflowError;
 try {
-  mode = readProjectMode(storeRoot);
+  workflow = readProjectWorkflow(storeRoot);
 } catch (e) {
-  modeError = e;
+  workflowError = e;
 }
-var noOriginFallback = mode === "work" && isGitRepo(target) && noOriginRemote(target);
-var shipsPr = mode === "work" && !noOriginFallback;
+var prPath = workflow?.merge === "pr";
+var noOriginFallback = prPath && isGitRepo(target) && noOriginRemote(target);
+var shipsPr = prPath && !noOriginFallback;
 if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
-var work = mode === "work" ? installWorkResult({ localFallback: noOriginFallback }) : null;
+var work = prPath ? installWorkResult({ localFallback: noOriginFallback }) : null;
 function emit(report, code = 0) {
   if (work) work.finishLocal(report, code);
   console.log(JSON.stringify(report, null, 2));
@@ -15137,7 +15398,7 @@ stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
 if (linkedWorktree && !existsSync11(join21(storeRoot, CONFIG_REL4))) {
   fail2(
-    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join21(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join21(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its workflow settings cannot be read \u2014 there is no ${CONFIG_REL4} at '${join21(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join21(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to the direct merge path \u2014 refusing; nothing was run.
 Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
     2
   );
@@ -15147,18 +15408,18 @@ if (!linkedWorktree && !existsSync11(join21(target, CONFIG_REL4))) {
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
   if (gitDir && commonDir && realpathSync7(resolve9(target, gitDir)) !== realpathSync7(resolve9(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync7(resolve9(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync7(resolve9(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join21(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to the direct merge path \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
   }
 }
-if (linkedWorktree && !modeError && !shipsPr) {
+if (linkedWorktree && !workflowError && !shipsPr) {
   const head = spawnSync9("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : "<branch>";
   fail2(
     `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' \u2014 refusing before the battery.
-A hobby merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.
+A direct merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.
 Free the branch, then run the merge from the main checkout:
   git -C ${linkedWorktree.mainRoot} worktree remove ${linkedWorktree.worktree}   (or, to keep the worktree: git -C ${linkedWorktree.worktree} checkout --detach)
   git -C ${linkedWorktree.mainRoot} checkout ${wtBranch}
@@ -15168,13 +15429,13 @@ Free the branch, then run the merge from the main checkout:
 }
 stage("open-project");
 openProject(storeRoot).store.close();
-if (modeError) fail2(`direct-merge: ${modeError?.message ?? modeError} \u2014 refusing; nothing was run.`, 2);
+if (workflowError) fail2(`direct-merge: ${workflowError?.message ?? workflowError} \u2014 refusing; nothing was run.`, 2);
 var workRepo;
 if (shipsPr) {
   stage("work-preflight");
   if (process.argv.includes("--no-push")) {
     fail2(
-      "direct-merge: --no-push is refused in WORK mode \u2014 work mode ships by opening a PR, and a PR needs a pushed branch.\nRerun without --no-push, or commit and keep working on the branch until it is ready.",
+      "direct-merge: --no-push is refused on the pull-request merge path (config.workflow.merge) \u2014 it ships by opening a PR, and a PR needs a pushed branch.\nRerun without --no-push, or commit and keep working on the branch until it is ready.",
       2
     );
   }
@@ -15570,11 +15831,15 @@ for (const line of attestationDisclosure) console.error(line);
 if (shipsPr) {
   const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
   if (shipped) work.fail(shipped.error, shipped.exitCode);
-  try {
-    armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
-    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
-  } catch (e) {
-    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+  if (!workflow.copilot_loop) {
+    console.error(`direct-merge: the Copilot review loop is off (config.workflow.copilot_loop \u2014 TUI System tab), so no PR review loop was armed for ${work.state.pr_url}.`);
+  } else {
+    try {
+      armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
+      console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
+    } catch (e) {
+      console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+    }
   }
   work.succeed();
 }

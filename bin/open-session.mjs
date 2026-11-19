@@ -5446,6 +5446,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5572,7 +5577,9 @@ function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
 var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
 var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
 var MERGE_PATHS = ["direct", "pr"];
 var MIN_REVIEWERS = 1;
 var MAX_REVIEWERS = 5;
@@ -5600,6 +5607,9 @@ var canonicalModelsSchema = external_exports.object({
     const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
     if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
     }
     if (e.effort === "max" && overpassTier === null) {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
@@ -5635,10 +5645,11 @@ var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) =>
 
 // packages/schemas/dist/custom-agents.js
 var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
 var AGENT_HOST_CAPABILITIES = Object.freeze({
-  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS },
-  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [] },
-  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [] }
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
 });
 
 // packages/schemas/dist/registry.js
@@ -8678,83 +8689,6 @@ function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, en
   rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot2, installed), fwd2(mcpLauncherPath({ home }))));
   return rows;
 }
-var PINNED_CODEX_REL = ".local/codex-mcp-0.153.4/bin/codex";
-var PINNED_CODEX_INSTALL = "npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4";
-var CODEX_PROBE_TIMEOUT_MS = 1e4;
-var isFile = (p) => existsSync8(p) && statSync3(p).isFile();
-function codexCandidates({ env, home }) {
-  const out = [];
-  const notes = [];
-  const claudeJson = join12(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
-  if (isFile(claudeJson)) {
-    let command;
-    try {
-      command = JSON.parse(readFileSync7(claudeJson, "utf8"))?.mcpServers?.codex?.command;
-    } catch (err) {
-      notes.push(`${fwd2(claudeJson)} not read (${err.message})`);
-    }
-    if (typeof command === "string" && isAbsolute(command)) out.push(command);
-  }
-  out.push(join12(home, PINNED_CODEX_REL));
-  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join12(dir, "codex"));
-  return { candidates: [...new Set(out)].filter(isFile), notes };
-}
-function resolveCodexMcp({ env = process.env, home = homedir5(), nodeBinDir, spawnFn = spawnSync4 }) {
-  const { candidates, notes } = codexCandidates({ env, home });
-  const tried = [...notes];
-  for (const command of candidates) {
-    const r = spawnFn(command, ["mcp-server", "--help"], { encoding: "utf8", timeout: CODEX_PROBE_TIMEOUT_MS, env: { ...env, PATH: codexPath(nodeBinDir) } });
-    const help = `${r.stdout ?? ""}
-${r.stderr ?? ""}`;
-    if (!r.error && r.status === 0 && /\bcodex\s+mcp-server\b/i.test(help)) return { command };
-    tried.push(`${fwd2(command)} (${r.error ? r.error.message : r.status !== 0 ? `exit ${r.status}` : "generic help, no mcp-server subcommand"})`);
-  }
-  return { tried };
-}
-var codexPath = (nodeBinDir) => `${fwd2(nodeBinDir)}:/usr/local/bin:/usr/bin:/bin`;
-function codexServerEntry(command, nodeBinDir) {
-  return {
-    type: "local",
-    command: [fwd2(command), "mcp-server"],
-    environment: { PATH: codexPath(nodeBinDir) },
-    timeout: { startup: 3e4, execution: 9e5 }
-  };
-}
-function ensureCodexServer({ env = process.env, home = homedir5(), nodeBinDir = dirname4(process.execPath), spawnFn = spawnSync4 }) {
-  const path = join12(opencodeConfigDir({ env, home }), "opencode.json");
-  const label = `${fwd2(path)} mcp.servers.codex`;
-  const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
-  if (!found.command) {
-    const tried = found.tried.length ? `tried ${found.tried.join("; ")}` : "no Codex binary found";
-    return { item: label, status: "skipped", detail: `codex MCP for OpenCode SKIPPED: no Codex whose \`mcp-server --help\` prints mcp-server help (${tried}). Install the pinned Codex (${PINNED_CODEX_INSTALL}), then run /sterling:update` };
-  }
-  let config = {};
-  let before = null;
-  if (existsSync8(path)) {
-    before = normalize3(readFileSync7(path, "utf8"));
-    try {
-      config = JSON.parse(before);
-    } catch (err) {
-      return refusal(label, `${fwd2(path)} is not valid JSON (${err.message})`, `fix or remove ${fwd2(path)}, then rerun /sterling:update`);
-    }
-    if (config === null || typeof config !== "object" || Array.isArray(config)) return refusal(label, `${fwd2(path)} is not a JSON object`, `fix or remove ${fwd2(path)}, then rerun /sterling:update`);
-  }
-  const mcp = config.mcp ?? {};
-  if (typeof mcp !== "object" || Array.isArray(mcp)) return refusal(label, `${fwd2(path)}: "mcp" is not an object`, `fix ${fwd2(path)}, then rerun /sterling:update`);
-  const servers = mcp.servers ?? {};
-  if (typeof servers !== "object" || Array.isArray(servers)) return refusal(label, `${fwd2(path)}: "mcp.servers" is not an object`, `fix ${fwd2(path)}, then rerun /sterling:update`);
-  const want = codexServerEntry(found.command, nodeBinDir);
-  const legacy = mcp.codex !== void 0 ? "; a legacy mcp.codex entry is also present, which 2.0.21 drops silently when it carries a timeout" : "";
-  if (servers.codex !== void 0) {
-    if (JSON.stringify(servers.codex) === JSON.stringify(want)) return { item: label, status: "matches", detail: `${fwd2(found.command)}${legacy}` };
-    return { item: label, status: "skipped", detail: `kept: mcp.servers.codex is already set and differs from Sterling's (yours); Sterling's would be ${JSON.stringify(want)}${legacy}` };
-  }
-  config.mcp = { ...mcp, servers: { ...servers, codex: want } };
-  mkdirSync4(dirname4(path), { recursive: true });
-  writeFileSync3(path, `${JSON.stringify(config, null, 2)}
-`);
-  return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd2(found.command)}${legacy}` };
-}
 function git(projectDir, args) {
   const r = spawnSync4("git", args, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd2(projectDir)}: ${r.error.message}`);
@@ -9099,12 +9033,12 @@ function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
   if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(implementorTemplatePath(pluginRoot2))} disallowedTools (P5)`);
   return tools;
 }
-function opencodeModelRef(model) {
+function opencodeModelRef2(model) {
   if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
 }
 function opencodeModelFor({ model, opencodeModel } = {}) {
-  if (opencodeModel === void 0) return opencodeModelRef(model);
+  if (opencodeModel === void 0) return opencodeModelRef2(model);
   if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
     throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
   }
@@ -9310,7 +9244,6 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   const isInstalled = installed ?? isInstalledCopy(pluginRoot2, { env, home });
   const npmCopy = isInstalled && installHostOf(pluginRoot2, { env, home }) === "opencode";
   const rows = installGlobal({ pluginRoot: pluginRoot2, installed: isInstalled, npmCopy, env, home });
-  rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   let handoff;
