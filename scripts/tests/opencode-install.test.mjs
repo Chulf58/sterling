@@ -1526,3 +1526,25 @@ test('a clone or Claude-cache copy keeps today\'s shims and materializes nothing
   assert.equal(existsSync(tuiBase(home)), false);
   assert.doesNotMatch(readFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /loadedMaterializedTui/);
 });
+
+test('an agent moved to a model OpenCode cannot run is gone from the agent files AND from opencode.json; a user-written entry is kept and reported (item-G review loop 2, finding 2)', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const ocPath = join(dir, '.opencode', 'opencode.json');
+  const oc = () => JSON.parse(readFileSync(ocPath, 'utf8'));
+  assert.ok(oc().agent?.['sterling/scout'], 'install wrote a guard entry for the scout');
+  // the user's own entry for the researcher: not Sterling's guard-only entry
+  const mine = oc();
+  mine.agent['sterling/researcher'] = { ...mine.agent['sterling/researcher'], description: 'mine' };
+  writeFileSync(ocPath, JSON.stringify(mine, null, 2) + '\n');
+  writeConfig(dir, { scout: { model: 'agy/flash' }, researcher: { model: 'agy/pro' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false);
+  assert.equal(oc().agent['sterling/scout'], undefined, 'the guard-only entry would define the agent on its own');
+  assert.equal(oc().agent['sterling/researcher'].description, 'mine', 'the user entry is kept');
+  const row = r.rows.find((x) => x.item === '.opencode/opencode.json');
+  assert.match(row.detail, /removed the guard-only agent entries of sterling\/scout/);
+  assert.match(row.detail, /KEPT agent entries sterling\/researcher/);
+  assert.ok(oc().agent['sterling/implementor'], 'the other agents keep their guard');
+});

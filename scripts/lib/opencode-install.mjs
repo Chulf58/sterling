@@ -1501,7 +1501,53 @@ export function refreshFullAgentModels({ projectDir, pluginRoot }) {
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
   writeFullAgentFiles(staged.writes);
-  return { rows: staged.rows };
+  const gone = staged.rows.filter((r) => r.status === 'removed' && r.item.startsWith(`${STERLING_AGENTS_SUBDIR}/`)).map((r) => r.item.slice('.opencode/agents/'.length, -'.md'.length));
+  const configRow = dropGuardOnlyAgentEntries(projectDir, gone);
+  return { rows: configRow ? [...staged.rows, configRow] : staged.rows };
+}
+
+/**
+ * Drop the guard-only `agent["<name>"]` entries Sterling wrote into .opencode/opencode.json for
+ * Sterling agents whose file was just removed: OpenCode defines an agent from such an entry alone
+ * (ensureProjectConfig, "An entry for a name OpenCode does not otherwise know creates an agent"), so
+ * the agent would stay. An entry that is not exactly Sterling's guard-only one is the user's and is
+ * kept, with a row saying so. setupOpenCode needs none of this: its ensureProjectConfig runs after the
+ * removal and drops the entry of an agent that is no longer visible. Returns a row, or null when
+ * there is nothing to do.
+ */
+function dropGuardOnlyAgentEntries(projectDir, names) {
+  if (!names.length) return null;
+  const path = join(projectDir, PROJECT_CONFIG_REL);
+  if (!existsSync(path)) return null;
+  const before = normalize(readFileSync(path, 'utf8'));
+  let config;
+  try {
+    config = JSON.parse(before);
+  } catch (err) {
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: `not valid JSON (${err.message}), so the guard entries of ${names.join(', ')} were NOT removed and OpenCode may still define those agents; fix it, then rerun /sterling:update` };
+  }
+  const agents = config?.agent;
+  if (agents === null || typeof agents !== 'object' || Array.isArray(agents)) return null;
+  const guardOnly = JSON.stringify({ permission: guardPermission(undefined).value });
+  const legacyDeny = { [LEGACY_SHELL_DENIES[0]]: 'deny' };
+  const legacyGuardOnly = JSON.stringify({ permission: { ...guardPermission(undefined).value, shell: legacyDeny, bash: legacyDeny } });
+  const removed = [];
+  const kept = [];
+  for (const name of names) {
+    if (!Object.hasOwn(agents, name)) continue;
+    const text = JSON.stringify(agents[name]);
+    if (text === guardOnly || text === legacyGuardOnly) {
+      delete agents[name];
+      removed.push(name);
+    } else kept.push(name);
+  }
+  if (!Object.keys(agents).length) delete config.agent;
+  const parts = [];
+  if (removed.length) parts.push(`removed the guard-only agent entries of ${removed.join(', ')}, whose agent files were removed`);
+  if (kept.length) parts.push(`KEPT agent entries ${kept.join(', ')}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone`);
+  if (!parts.length) return null;
+  if (removed.length) writeFileAtomic(path, projectConfigText(config));
+  return { item: PROJECT_CONFIG_REL, status: removed.length ? 'refreshed' : 'skipped', detail: parts.join('; ') };
 }
 
 /** Write staged files in order, each atomically, skipping a file that already holds its content; a write
