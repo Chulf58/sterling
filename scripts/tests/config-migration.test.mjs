@@ -8,7 +8,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { commitConfigMigration, migrateProjectConfig, prepareConfigMigration } from '../lib/config-migration.mjs';
+// The legacy planner (prepareConfigMigration, migrateProjectConfig) was removed with the cutover (item G): nothing
+// called it once sync-agents and init moved to the canonical planner, and its validation gate (parseConfig) is
+// canonical now. These tests run the SAME machinery (retired keys, hard_task move, Overpass reset, stale agy,
+// compare-and-swap commit, file mode, symlink refusals) through the canonical planner.
+import { commitConfigMigration, migrateProjectConfigCanonical as migrateProjectConfig, prepareCanonicalConfigMigration as prepareConfigMigration } from '../lib/config-migration.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -36,19 +40,24 @@ const retiredConfig = () => ({
     scout: { model: 'claude-sonnet-5-5', effort: 'medium' },
   },
 });
+// A config the canonical planner has nothing left to do for (it records the migration id).
+const CANONICAL_DONE = { applied_config_migrations: [...DEFAULTS_DONE.applied_config_migrations, 'canonical-config-2026-11-19'], workflow: { merge: 'direct', reviewers: 1, copilot_loop: false, auto_merge_on_clean: true } };
 const cleanup = (dir) => rmSync(dir, { recursive: true, force: true });
 
-test('drops every retired key with its value in the report and carries nothing; no temp file is left', () => {
+
+test('drops every retired key with its value in the report and carries nothing; the trailing newline is kept and no temp file is left', () => {
+  // Restored against the canonical planner: the full retired-key report, the newline and the temp-file check.
   const dir = project(JSON.stringify(retiredConfig(), null, 2) + '\n');
   try {
     const r = migrateProjectConfig(dir);
     assert.equal(r.status, 'migrated');
-    assert.deepEqual(r.lines, [
+    assert.deepEqual(r.lines.filter((l) => /models\.(coder|explorer|reviewers) dropped/.test(l)), [
       'config migration: models.coder dropped (ignored since the roster rename to models.implementor); value was {"model":"claude-opus-5","effort":"high"}; set models.implementor in the System tab if you want it',
       'config migration: models.explorer dropped (ignored since the roster rename to models.scout); value was {"model":"claude-haiku-5-5","effort":"low"}; set models.scout in the System tab if you want it',
       'config migration: models.reviewers dropped (a retired key, ignored since the roster rename); value was {"model":"claude-opus-5","effort":"high"}; set models.<role> in the System tab for the role you want it on',
     ]);
-    assert.deepEqual(JSON.parse(read(dir)), { ...DEFAULTS_DONE, mode: 'hobby', models: { scout: { model: 'claude-sonnet-5-5', effort: 'medium' } } }, 'no implementor key appears: nothing is carried');
+    const after = JSON.parse(read(dir));
+    assert.deepEqual(after.models, { scout: { model: 'anthropic/claude-sonnet-5-5', effort: 'medium' } }, 'no implementor key appears: nothing is carried');
     assert.ok(read(dir).endsWith('\n'), 'the trailing newline is kept');
     assert.deepEqual(readdirSync(join(dir, '.sterling')), ['config.json']);
   } finally {
@@ -89,7 +98,9 @@ for (const [label, text] of [
     try {
       const r = prepareConfigMigration(dir);
       assert.equal(r.status, 'refused');
-      assert.match(r.lines[0], /^config migration refused: .*config\.json does not parse or validate .*; left untouched$/);
+      // Changed with the cutover: the canonical planner reads the file through the transform, so an unreadable JSON or a value the
+      // strict canonical check refuses is named by that path rather than by the legacy 'does not parse or validate' wording.
+      assert.match(r.lines[0], /^config migration refused: .*config\.json (is not valid JSON|would not validate after the migration|cannot be carried).*; left untouched$/);
       assert.equal(read(dir), text);
     } finally {
       cleanup(dir);
@@ -162,7 +173,7 @@ test('a symlinked config with retired keys is refused (the rename would replace 
     const r = prepareConfigMigration(dir);
     assert.equal(r.status, 'refused');
     assert.match(r.lines[0], /is a symlink/);
-    writeFileSync(target, JSON.stringify({ ...DEFAULTS_DONE, mode: 'hobby' }));
+    writeFileSync(target, JSON.stringify(CANONICAL_DONE));
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
   } finally {
     cleanup(dir);
@@ -182,7 +193,7 @@ test('a symlinked .sterling directory is refused and the config it points at is 
     assert.match(r.lines[0], /\.sterling that is not a plain directory/);
     assert.equal(migrateProjectConfig(dir).status, 'refused');
     assert.equal(readFileSync(join(real, 'config.json'), 'utf8'), original);
-    writeFileSync(join(real, 'config.json'), JSON.stringify({ ...DEFAULTS_DONE, mode: 'hobby' }));
+    writeFileSync(join(real, 'config.json'), JSON.stringify(CANONICAL_DONE));
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
   } finally {
     cleanup(dir);
@@ -222,27 +233,6 @@ test('sync-agents drops the retired keys, prints the report, and renders every p
   }
 });
 
-// Sol review [HIGH] on the implementor-hard move: sync rendered the Claude agents from the config it
-// parsed BEFORE the migration, so a moved hard_task was saved under implementor-hard while the newly
-// installed agent pinned the schema default (claude-opus-5-5/high), and every later sync reported
-// config_drift without fixing it. The render must use the migrated document.
-test('sync-agents: after the implementor-hard move, the saved entry and the installed implementor-hard pin agree, and a second sync reports no drift', () => {
-  const dir = project(JSON.stringify({ applied_config_migrations: ['model-defaults-2026-10-23'], mode: 'hobby', models: {
-    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-4-8', effort: 'xhigh' } },
-  } }));
-  try {
-    const r = sync(dir);
-    assert.equal(r.code, 0, r.out);
-    assert.match(r.out, /config migration: models\.implementor\.hard_task .* moved to models\.implementor-hard/);
-    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'xhigh' });
-    assert.deepEqual(pinLines(dir, 'implementor-hard'), ['model: claude-opus-4-8', 'effort: xhigh'], 'the installed pin is the migrated entry');
-    const again = sync(dir);
-    assert.equal(again.code, 0, again.out);
-    assert.doesNotMatch(again.out, /config_drift/);
-  } finally {
-    cleanup(dir);
-  }
-});
 
 // Skipped as root, which ignores directory permissions.
 const canTestReadOnly = process.platform !== 'win32' && process.getuid?.() !== 0;
@@ -283,145 +273,87 @@ test('sync-agents stops with exit 2 before rendering or setupOpenCode when the m
 
 // ── the model-defaults add (user-ruled 2026-10-23, "Write it into each config") ──
 
-test('model defaults: absent opencode_model and hard_task are added and reported; a present value is never overwritten', () => {
-  const dir = project(JSON.stringify({
-    mode: 'hobby',
-    models: {
-      implementor: { model: 'claude-sonnet-5-5', effort: 'high' },
-      reviewer: { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' },
-      researcher: { model: 'claude-sonnet-5-5', effort: 'medium' },
-    },
-  }, null, 2) + '\n');
-  try {
-    const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    const after = JSON.parse(read(dir));
-    // the hard_task the add step writes is then moved into models.implementor-hard by the
-    // implementor-hard step (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' });
-    assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
-    assert.deepEqual(after.models.reviewer, { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' }, 'a value the user set stays');
-    assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }, 'a role with no entry gets the shipped default entry');
-    assert.deepEqual(after.models.researcher, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'other roles are not touched');
-    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'overpass-defaults-2026-10-23']);
-    assert.equal(r.lines.length, 4);
-    assert.match(r.lines[0], /^config migration: models\.implementor\.hard_task added as \{"model":"claude-opus-5-5"\}/);
-    assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra"\}/);
-    assert.match(r.lines[2], /^config migration: models\.implementor\.hard_task \{"model":"claude-opus-5-5"\} moved to models\.implementor-hard as \{"model":"claude-opus-5-5","effort":"high"\}/);
-    assert.match(r.lines[3], /^config migration: overpass\.conductor_bypass set to true \(was unset\)/);
-  } finally {
-    cleanup(dir);
-  }
-});
 
-test('model defaults: run once; a value cleared afterwards stays cleared at the next sync', () => {
-  const dir = project(JSON.stringify({ mode: 'hobby', models: { reviewer: { model: 'claude-opus-5-5', effort: 'high' } } }));
-  try {
-    const first = migrateProjectConfig(dir);
-    assert.match(first.lines.join('\n'), /models\.reviewer\.opencode_model added as "openai\/gpt-6\.1-sol"/);
-    const cfg = JSON.parse(read(dir));
-    delete cfg.models.reviewer.opencode_model; // the System tab's clear: "use the Claude model"
-    writeFileSync(cfgPath(dir), JSON.stringify(cfg));
-    const second = prepareConfigMigration(dir);
-    assert.equal(second.status, 'unchanged');
-    assert.deepEqual(second.lines, []);
-  } finally {
-    cleanup(dir);
-  }
-});
 
-test('model defaults: a config that already has them records the step once, says so, and is unchanged after', () => {
-  const dir = project(JSON.stringify({ mode: 'hobby', models: {
-    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } },
-    reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
-    sparring: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' },
-  } }));
-  try {
-    const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    assert.deepEqual(r.lines, [
-      'config migration: model defaults already set; recorded model-defaults-2026-10-23 in applied_config_migrations so they are never added again',
-      // the implementor-hard step that follows moves the hard_task (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-      'config migration: models.implementor.hard_task {"model":"claude-opus-5-5"} moved to models.implementor-hard as {"model":"claude-opus-5-5","effort":"high"}, the sterling/implementor-hard agent\'s model; change it in the System tab',
-      'config migration: overpass.conductor_bypass set to true (was unset); the conductor keeps its direct model pin',
-    ]);
-    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
-  } finally {
-    cleanup(dir);
-  }
-});
 
-test('model defaults: the shipped default-config.json already carries them, so a fresh config needs no add', () => {
-  const dir = project(readFileSync(join(repo, 'templates', 'default-config.json'), 'utf8'));
-  try {
-    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
-  } finally {
-    cleanup(dir);
-  }
-});
 
 // ── the implementor-hard move (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) ──
 // models.implementor.hard_task moves into models.implementor-hard, once per file; other roles keep theirs.
 const MOVE_PRE = { applied_config_migrations: ['model-defaults-2026-10-23', 'overpass-defaults-2026-10-23'] };
 
-test('implementor-hard move: a Claude hard_task becomes the entry at the implementor\'s effort; other roles keep their hard_task', () => {
-  const dir = project(JSON.stringify({ ...MOVE_PRE, mode: 'hobby', models: {
-    implementor: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-4-8' } },
-    researcher: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-5-5' } },
-  } }));
+
+
+
+
+
+
+// ── the Overpass defaults reset (decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max, user-ruled 2026-10-23, 'Defaults + reset + bypass ON') ──
+// config.overpass.roles is removed and overpass.conductor_bypass set true, once per file; nothing else moves.
+const OVERPASS_PRE = { applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'] };
+
+
+
+
+
+
+
+// ── the steps that run before the canonical transform, through the canonical planner ──
+// (They replace the legacy-planner tests removed with the planner; the report lines are the ones the planner now prints.)
+const migrated = (doc) => {
+  const dir = project(JSON.stringify(doc));
   try {
     const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    const after = JSON.parse(read(dir));
-    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'hard_task leaves the implementor entry');
-    assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'medium' }, 'no hard_task effort: the implementor effort a hard dispatch was sent with');
-    assert.deepEqual(after.models.researcher.hard_task, { model: 'claude-opus-5-5' }, 'another role keeps its hard_task');
-    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'overpass-defaults-2026-10-23', 'implementor-hard-2026-10-23']);
-    assert.deepEqual(r.lines, ['config migration: models.implementor.hard_task {"model":"claude-opus-4-8"} moved to models.implementor-hard as {"model":"claude-opus-4-8","effort":"medium"}, the sterling/implementor-hard agent\'s model; change it in the System tab']);
-    assert.equal(prepareConfigMigration(dir).status, 'unchanged', 'runs once');
+    return { r, after: r.status === 'migrated' ? JSON.parse(read(dir)) : null, dir, again: r.status === 'migrated' ? prepareConfigMigration(dir) : null };
   } finally {
     cleanup(dir);
   }
+};
+
+test('a retired models key is dropped with its value and an accurate reason; the rest of models is kept and carried to the canonical shape', () => {
+  const { r, after } = migrated({ mode: 'hobby', models: { classifiers: { model: 'claude-haiku-5-5', effort: 'low' }, implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } });
+  assert.equal(r.status, 'migrated');
+  assert.ok(r.lines.includes('config migration: models.classifiers dropped (a retired key: it belonged to the retired Haiku noise-gate and nothing read it); value was {"model":"claude-haiku-5-5","effort":"low"}'));
+  assert.ok(!('classifiers' in after.models));
+  assert.deepEqual(after.models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'high' });
 });
 
-test('implementor-hard move: a <provider>/<model> hard_task becomes opencode_model, and its own effort wins', () => {
-  const dir = project(JSON.stringify({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' } } } }));
-  try {
-    assert.equal(migrateProjectConfig(dir).status, 'migrated');
-    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'xhigh', opencode_model: 'openai/gpt-6.1-sol' });
-  } finally {
-    cleanup(dir);
-  }
+test('implementor-hard move: a Claude hard_task becomes the entry at the implementor\'s effort; another role\'s hard_task is dropped and reported; it runs once', () => {
+  const { r, after, again } = migrated({ ...MOVE_PRE, mode: 'hobby', models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-4-8' } },
+    researcher: { model: 'claude-sonnet-5-5', effort: 'medium', hard_task: { model: 'claude-opus-5-5' } },
+  } });
+  assert.equal(r.status, 'migrated');
+  assert.deepEqual(after.models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'medium' }, 'hard_task leaves the implementor entry');
+  assert.deepEqual(after.models['implementor-hard'], { model: 'anthropic/claude-opus-4-8', effort: 'medium' }, 'no hard_task effort: the implementor effort a hard dispatch was sent with');
+  // Changed with the cutover: one model per agent has no per-role hard_task, so another role's hard_task is removed (and reported), not kept.
+  assert.ok(!('hard_task' in after.models.researcher));
+  assert.ok(r.lines.some((l) => l.startsWith('config migration: models.researcher.hard_task removed (value was {"model":"claude-opus-5-5"})')));
+  assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'overpass-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'canonical-config-2026-11-19']);
+  assert.ok(r.lines.includes('config migration: models.implementor.hard_task {"model":"claude-opus-4-8"} moved to models.implementor-hard as {"model":"claude-opus-4-8","effort":"medium"}, the sterling/implementor-hard agent\'s model; change it in the System tab'));
+  assert.equal(again.status, 'unchanged', 'runs once');
+});
+
+test('implementor-hard move: a <provider>/<model> hard_task is a two-model conflict on implementor-hard, asked rather than decided; a cleared hard_task copying an OpenCode-pinned implementor conflicts on both', () => {
+  // Changed with the cutover: the legacy planner wrote opencode_model beside the Claude model; one model per agent turns that pair into a question.
+  const oc = migrated({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' } } } });
+  assert.equal(oc.r.status, 'conflicts');
+  assert.deepEqual(oc.r.conflicts.map((c) => c.role), ['implementor-hard']);
+  const copy = migrated({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } });
+  assert.equal(copy.r.status, 'conflicts');
+  assert.deepEqual(copy.r.conflicts.map((c) => c.role).sort(), ['implementor', 'implementor-hard']);
 });
 
 test('implementor-hard move: an existing implementor-hard entry wins and the hard_task is dropped with its value reported', () => {
-  const dir = project(JSON.stringify({ ...MOVE_PRE, models: {
+  const { r, after } = migrated({ ...MOVE_PRE, models: {
     implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } },
     'implementor-hard': { model: 'claude-sonnet-5-5', effort: 'low' },
-  } }));
-  try {
-    const r = migrateProjectConfig(dir);
-    const after = JSON.parse(read(dir));
-    assert.deepEqual(after.models['implementor-hard'], { model: 'claude-sonnet-5-5', effort: 'low' });
-    assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' });
-    assert.deepEqual(r.lines, ['config migration: models.implementor.hard_task dropped (value was {"model":"claude-opus-5-5"}); models.implementor-hard {"model":"claude-sonnet-5-5","effort":"low"} was already set and is kept']);
-  } finally {
-    cleanup(dir);
-  }
+  } });
+  assert.deepEqual(after.models['implementor-hard'], { model: 'anthropic/claude-sonnet-5-5', effort: 'low' });
+  assert.deepEqual(after.models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'high' });
+  assert.ok(r.lines.includes('config migration: models.implementor.hard_task dropped (value was {"model":"claude-opus-5-5"}); models.implementor-hard {"model":"claude-sonnet-5-5","effort":"low"} was already set and is kept'));
 });
 
-test('implementor-hard move: a cleared hard_task (no separate hard lane) copies the implementor pin, so a hard lane runs where it ran', () => {
-  const dir = project(JSON.stringify({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } }));
-  try {
-    const r = migrateProjectConfig(dir);
-    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' });
-    assert.match(r.lines[0], /^config migration: models\.implementor-hard added as .*a copy of models\.implementor, because models\.implementor had no hard_task/);
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test('implementor-hard move: a hard_task model that is neither a Claude id nor <provider>/<model> is refused, and the file is left untouched', () => {
+test('implementor-hard move: a hard_task model that is not a model is refused by the strict check, and the file is left untouched', () => {
   const text = JSON.stringify({ ...MOVE_PRE, models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } });
   const dir = project(text);
   try {
@@ -434,126 +366,93 @@ test('implementor-hard move: a hard_task model that is neither a Claude id nor <
   }
 });
 
-// Board 07ee17a9 (user-ruled 2026-10-23, "Remove it"): models.classifiers belonged to the retired Haiku
-// noise-gate and nothing reads it, so a live config's key migrates out as a retired key, reported with
-// its value in its own words (not the roster-rename wording).
-test('a live models.classifiers key is dropped as a retired key, with its value and an accurate reason, and the rest of models is kept', () => {
-  const dir = project(JSON.stringify({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' }, classifiers: { model: 'claude-haiku-5-5', effort: 'low' } } }));
-  try {
-    const plan = prepareConfigMigration(dir);
-    assert.equal(plan.status, 'ready');
-    assert.deepEqual(plan.dropped, [{ key: 'classifiers', value: { model: 'claude-haiku-5-5', effort: 'low' } }]);
-    const line = plan.lines.find((l) => l.includes('models.classifiers'));
-    assert.match(line, /models\.classifiers dropped \(a retired key: it belonged to the retired Haiku noise-gate and nothing read it\); value was \{"model":"claude-haiku-5-5","effort":"low"\}/);
-    assert.doesNotMatch(line, /roster rename/);
-    assert.equal(commitConfigMigration(plan).status, 'migrated');
-    const after = JSON.parse(read(dir));
-    assert.ok(!('classifiers' in after.models), 'the key is gone from the file');
-    assert.ok('implementor' in after.models, 'the other keys stay');
-  } finally {
-    cleanup(dir);
-  }
-});
-
-// ── the Overpass defaults reset (decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max, user-ruled 2026-10-23, 'Defaults + reset + bypass ON') ──
-// config.overpass.roles is removed and overpass.conductor_bypass set true, once per file; nothing else moves.
-const OVERPASS_PRE = { applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'] };
-
-test('overpass reset: removes roles, sets the bypass, reports both, touches no other key, and runs once', () => {
-  const doc = { ...OVERPASS_PRE, mode: 'work', tdd: { enabled: true }, overpass: { enabled: true, provider: 'acme-gw', conductor_bypass: false, roles: { scout: { tier: 'agentic-low', effort: 'low' }, reviewer: { tier: 'agentic-max' } } } };
-  const dir = project(JSON.stringify(doc, null, 2) + '\n');
-  try {
-    const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    assert.deepEqual(r.lines, [
-      'config migration: overpass.roles removed (value was {"scout":{"tier":"agentic-low","effort":"low"},"reviewer":{"tier":"agentic-max"}}); every role now runs on its default tier',
-      'config migration: overpass.conductor_bypass set to true (was false); the conductor keeps its direct model pin',
-    ]);
-    assert.deepEqual(JSON.parse(read(dir)), { mode: 'work', tdd: { enabled: true }, overpass: { enabled: true, provider: 'acme-gw', conductor_bypass: true }, applied_config_migrations: [...OVERPASS_PRE.applied_config_migrations, 'overpass-defaults-2026-10-23'] });
-    assert.ok(read(dir).endsWith('\n'), 'the trailing newline is kept');
-    // runs once: an override or a bypass switched off afterwards survives the next sync
-    const cfg = JSON.parse(read(dir));
-    cfg.overpass.conductor_bypass = false;
-    cfg.overpass.roles = { scout: { tier: 'agentic-low' } };
-    writeFileSync(cfgPath(dir), JSON.stringify(cfg));
-    const second = prepareConfigMigration(dir);
-    assert.equal(second.status, 'unchanged');
-    assert.deepEqual(second.lines, []);
-    assert.deepEqual(JSON.parse(read(dir)).overpass, { enabled: true, provider: 'acme-gw', conductor_bypass: false, roles: { scout: { tier: 'agentic-low' } } });
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test('overpass reset: a config with no overpass block gets conductor_bypass true and says it was unset', () => {
-  const dir = project(JSON.stringify({ ...OVERPASS_PRE, mode: 'hobby' }));
-  try {
-    const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    assert.deepEqual(r.lines, ['config migration: overpass.conductor_bypass set to true (was unset); the conductor keeps its direct model pin']);
-    assert.deepEqual(JSON.parse(read(dir)).overpass, { conductor_bypass: true });
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test('overpass reset: a block already on the defaults records the id once, says so, and is unchanged after', () => {
-  const dir = project(JSON.stringify({ ...OVERPASS_PRE, overpass: { enabled: false, provider: 'overpass', conductor_bypass: true } }));
-  try {
-    const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    assert.deepEqual(r.lines, ['config migration: overpass defaults already in place; recorded overpass-defaults-2026-10-23 in applied_config_migrations so they are never reset again']);
-    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test('overpass reset: an overpass block that is not an object is refused whole, never half-written', () => {
-  const text = JSON.stringify({ models: { coder: { model: 'claude-opus-5', effort: 'high' } }, overpass: 'on' }, null, 2) + '\n';
+test('overpass: no defaults reset runs before the transform; a hobby block keeps only its provider and a block that is not an object is refused whole', () => {
+  // Changed with finding 1 of the item-G review: the reset replaced the project's own tiers and bypass with defaults
+  // before the transform could carry them, so it no longer runs and prints nothing.
+  const set = migrated({ applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'], mode: 'hobby', overpass: { enabled: false, provider: 'gw', roles: { reviewer: { tier: 'agentic-low' } }, conductor_bypass: false } });
+  assert.equal(set.r.status, 'migrated');
+  assert.ok(!set.r.lines.some((l) => /every role now runs on its default tier|set to true|defaults already in place/.test(l)), set.r.lines.join('\n'));
+  assert.ok(set.r.lines.includes('config migration: overpass.roles removed (value was {"reviewer":{"tier":"agentic-low"}})'));
+  assert.deepEqual(set.after.overpass, { provider: 'gw' }, 'only the provider stays: the canonical overpass block has no enabled, roles or bypass');
+  assert.ok(!('reviewer' in (set.after.models ?? {})), 'an Overpass that never ran (hobby) gives no role a tier');
+  assert.ok(!set.after.applied_config_migrations.includes('overpass-defaults-2026-10-23'));
+  assert.equal(set.again.status, 'unchanged');
+  const text = JSON.stringify({ applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'], mode: 'hobby', overpass: 'x' });
   const dir = project(text);
   try {
-    const r = migrateProjectConfig(dir);
+    const r = prepareConfigMigration(dir);
     assert.equal(r.status, 'refused');
-    assert.match(r.lines[0], /^config migration refused: .*config\.json config\.overpass is "on", not an object.*; left untouched$/);
-    assert.equal(read(dir), text, 'the retired models key is not dropped either: the file is untouched');
+    assert.match(r.lines[0], /cannot be carried to the canonical shape \(config\.overpass is "x" — it must be an object\)/);
+    assert.equal(read(dir), text);
   } finally {
     cleanup(dir);
   }
 });
 
-test('overpass reset: sync-agents prints the report and writes the reset into the live config', () => {
-  const dir = project(JSON.stringify({ ...OVERPASS_PRE, mode: 'hobby', overpass: { enabled: true, roles: { implementor: { tier: 'agentic-low' } } } }, null, 2) + '\n');
+test('overpass: a work project with Overpass on and no migration ids keeps its own tiers, efforts and routed conductor (finding 1 of the item-G review)', () => {
+  const { r, after } = migrated({ mode: 'work', overpass: { enabled: true, provider: 'gw', conductor_bypass: false, roles: { reviewer: { tier: 'agentic-premium', effort: 'max' }, scout: { tier: 'agentic-low' } } } });
+  assert.equal(r.status, 'migrated', r.lines.join('\n'));
+  assert.deepEqual(after.models.reviewer, { model: 'overpass/agentic-premium', effort: 'max' }, 'the reviewer keeps its premium tier and max effort, not agentic-high');
+  assert.equal(after.models.scout.model, 'overpass/agentic-low');
+  assert.deepEqual(after.models.conductor, { model: 'overpass/agentic-conductor' }, 'conductor_bypass false routed the conductor, so it keeps a conductor selection');
+  assert.deepEqual(after.models.plan, { model: 'overpass/agentic-high' });
+  assert.deepEqual(after.overpass, { provider: 'gw' });
+  assert.deepEqual(after.workflow, { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true });
+});
+
+test('stale agy_model: an exact id from v0.19.155 is dropped and reported, and every agy_model leaves the canonical models; a second run is a no-op (GitHub #310)', () => {
+  const { r, after, again } = migrated({ mode: 'hobby', models: { scout: { model: 'claude-sonnet-5-5', effort: 'low', agy_model: 'claude-opus-5-5-high' }, reviewer: { model: 'claude-opus-5-5', effort: 'high', agy_model: 'flash' } } });
+  assert.ok(r.lines.some((l) => l.startsWith('config migration: models.scout.agy_model dropped (agy accepts only inherit, flash_lite, flash or pro')));
+  // Changed with the cutover: a valid agy_model was kept before; one model per agent removes the per-host field, so it is removed and reported too.
+  assert.ok(r.lines.includes('config migration: models.reviewer.agy_model removed (value was "flash")'));
+  assert.deepEqual(after.models, { scout: { model: 'anthropic/claude-sonnet-5-5', effort: 'low' }, reviewer: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
+  assert.equal(again.status, 'unchanged');
+});
+
+test('sync-agents: after the implementor-hard move, the saved entry and the installed implementor-hard pin agree, and a second sync reports no drift', () => {
+  // Sol review [HIGH]: sync rendered from the config it parsed BEFORE the migration, so a moved hard_task was saved under implementor-hard
+  // while the installed agent pinned the schema default. The render must use the migrated document.
+  const dir = project(JSON.stringify({ applied_config_migrations: ['model-defaults-2026-10-23'], mode: 'hobby', models: {
+    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-4-8', effort: 'xhigh' } },
+  } }));
   try {
     const r = sync(dir);
     assert.equal(r.code, 0, r.out);
-    assert.match(r.out, /config migration: overpass\.roles removed \(value was \{"implementor":\{"tier":"agentic-low"\}\}\)/);
-    assert.match(r.out, /config migration: overpass\.conductor_bypass set to true \(was unset\)/);
-    assert.deepEqual(JSON.parse(read(dir)).overpass, { enabled: true, conductor_bypass: true });
+    assert.match(r.out, /config migration: models\.implementor\.hard_task .* moved to models\.implementor-hard/);
+    assert.deepEqual(JSON.parse(read(dir)).models['implementor-hard'], { model: 'anthropic/claude-opus-4-8', effort: 'xhigh' });
+    assert.deepEqual(pinLines(dir, 'implementor-hard'), ['model: claude-opus-4-8', 'effort: xhigh'], 'the installed pin is the migrated entry');
+    const again = sync(dir);
+    assert.equal(again.code, 0, again.out);
+    assert.doesNotMatch(again.out, /config_drift/);
   } finally {
     cleanup(dir);
   }
 });
 
-test('stale agy_model: an exact id from v0.19.155 is dropped and reported, a valid value is kept, and a second run is a no-op (GitHub #310)', () => {
-  const dir = project(JSON.stringify({
-    mode: 'hobby',
-    models: {
-      sparring: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra', agy_model: 'claude-opus-5-5-high' },
-      scout: { model: 'claude-sonnet-5-5', effort: 'low', agy_model: 'flash' },
-    },
-  }, null, 2) + '\n');
+test('sync-agents writes the carried Overpass tiers into the live config; a model conflict exits 2 naming the role and the --model-choice flag, then the answer resolves it', () => {
+  const dir = project(JSON.stringify({ mode: 'work', overpass: { enabled: true, conductor_bypass: false, roles: { reviewer: { tier: 'agentic-premium', effort: 'max' } } } }));
+  const conflict = project(JSON.stringify({ mode: 'hobby', models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } }));
   try {
-    const r = migrateProjectConfig(dir);
-    assert.equal(r.status, 'migrated');
-    const after = JSON.parse(read(dir));
-    assert.equal('agy_model' in after.models.sparring, false);
-    assert.equal(after.models.scout.agy_model, 'flash');
-    const line = r.lines.find((l) => l.includes('agy_model'));
-    assert.match(line, /^config migration: models\.sparring\.agy_model dropped \(agy accepts only inherit, flash_lite, flash or pro.*value was "claude-opus-5-5-high"/);
-    assert.equal(r.lines.filter((l) => l.includes('agy_model')).length, 1, 'one notice, naming the role');
-    assert.equal(migrateProjectConfig(dir).lines.some((l) => l.includes('agy_model')), false);
+    const r = sync(dir);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /config migration: overpass\.roles removed/);
+    assert.doesNotMatch(r.out, /every role now runs on its default tier/);
+    const live = JSON.parse(read(dir));
+    assert.equal(live.overpass.roles, undefined);
+    assert.deepEqual(live.models.reviewer, { model: 'overpass/agentic-premium', effort: 'max' });
+    assert.deepEqual(live.models.conductor, { model: 'overpass/agentic-conductor' });
+    const before = read(conflict);
+    const refused = sync(conflict);
+    assert.equal(refused.code, 2, refused.out);
+    assert.match(refused.out, /refused_model_conflicts: reviewer .*--model-choice reviewer=claude\|opencode/);
+    assert.equal(read(conflict), before, 'nothing is written while a conflict is open');
+    const answered = spawnSync(process.execPath, [join(repo, 'scripts', 'sync-agents.mjs'), '--target', conflict, '--model-choice', 'reviewer=claude'], {
+      encoding: 'utf8', timeout: 60_000, env: { ...process.env, STERLING_CLAUDE_PROBE: 'ok', STERLING_OPENCODE_SETUP_DISABLE: '1' },
+    });
+    assert.equal(answered.status, 0, `${answered.stdout}${answered.stderr}`);
+    assert.deepEqual(JSON.parse(read(conflict)).models.reviewer, { model: 'anthropic/claude-opus-5-5', effort: 'high' });
   } finally {
     cleanup(dir);
+    cleanup(conflict);
   }
 });

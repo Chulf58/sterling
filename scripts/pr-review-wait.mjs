@@ -140,7 +140,7 @@
 // output carries merge_state_status, review_decision, check_rollup, mergeable_now
 // and awaiting_human_review. A gh failure refuses too.
 // A clean output also carries auto_merge_on_clean (config
-// pr_review.auto_merge_on_clean, absent = on) and merge_authorized (auto_merge
+// workflow.auto_merge_on_clean, legacy pr_review.auto_merge_on_clean; absent = on) and merge_authorized (auto_merge
 // is the same boolean, kept for compatibility). It means the merge is
 // AUTHORIZED, never that it happened: this script never merges. It is the
 // skill's cue to squash-merge the PR, pinned to head_sha (the current,
@@ -307,7 +307,8 @@ function retryDelayMs() {
   return n * 1000;
 }
 
-// config pr_review.auto_merge_on_clean through its strict judge; an unreadable
+// config workflow.auto_merge_on_clean (a legacy pr_review.auto_merge_on_clean is
+// carried by the one transform) through its strict judge, autoMergeOnCleanOf; an unreadable
 // config throws instead of reading as either value.
 function readAutoMergeOnClean() {
   const file = join(storeRoot, '.sterling', 'config.json');
@@ -759,7 +760,7 @@ if (argv.includes('--settle')) {
       // required (UNSTABLE); only a green or absent rollup lets it auto-merge.
       const rollup = state.check_rollup ?? null;
       const withheld = [];
-      if (autoMergeOnClean !== true) withheld.push('the auto-merge switch pr_review.auto_merge_on_clean is off');
+      if (autoMergeOnClean !== true) withheld.push('the auto-merge switch workflow.auto_merge_on_clean is off');
       if (verdict.awaiting_human_review) withheld.push('the PR awaits a required human review');
       else if (verdict.mergeable_now !== true) withheld.push('GitHub does not report the PR mergeable now');
       if (timedOut && PENDING_ROLLUPS.has(rollup)) withheld.push(`the head commit's check rollup is ${rollup}, still not SUCCESS after waiting ${checksWaitedS}s: once the checks finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);

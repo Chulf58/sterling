@@ -12,15 +12,16 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
-import { parseConfig } from '@sterling/schemas';
+import { parseConfig, isCustomAgentKey, readProjectWorkflow, ProjectWorkflowError } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
-import { migrateProjectConfig } from './lib/config-migration.mjs';
+import { describeConflictRefusal, migrateProjectConfigCanonical, modelChoicesFromArgs } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { setupAgy, formatAgyRows, renderGeminiMd } from './lib/agy-setup.mjs';
-import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
+import { hasCustomOutputs, syncCustomAgents } from './lib/custom-agent-render.mjs';
+import { isSterlingClone, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
-import { workIdentityRefusal } from './lib/project-identity.mjs';
+import { identityRefusal as projectIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 import { storeRootFor } from './lib/worktree-root.mjs';
 import { claudeMdWarnings } from './lib/claude-md-extras.mjs';
@@ -37,21 +38,20 @@ const configDir = storeRootFor(targetDir);
 
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 
-// Project mode (decision project-mode-hobby-work-toggle-decides-flow), read
-// from the TARGET's own config. Nothing below depends on which mode it is (the
-// mode decides only how work ships); an INVALID value is still a refusal
-// (exit 2) naming the value, and nothing is synced until it is fixed.
-let projectMode;
+// The workflow settings (config.workflow, or a legacy config.mode through the one
+// transform), read from the TARGET's own config. Nothing below depends on their
+// values (they decide only how work ships and is reviewed); an INVALID value is
+// still a refusal (exit 2) naming the value, and nothing is synced until it is fixed.
 try {
-  projectMode = readProjectMode(configDir);
+  readProjectWorkflow(configDir);
 } catch (err) {
-  if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
-  console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  if (!(err instanceof ProjectWorkflowError) && !(err instanceof ContainmentError)) throw err;
+  console.log(`refused_project_workflow: ${err.message}; nothing synced`);
   process.exit(2);
 }
-// A WORK project must carry its identity (decision
-// work-project-identity-file-sterling-project-json); a project is checked when it is in work mode or its config.storage is postgres.
-const identityRefusal = workIdentityRefusal(configDir, projectMode);
+// A project on Postgres storage must carry its identity (decision
+// work-project-identity-file-sterling-project-json); the workflow settings never require it.
+const identityRefusal = projectIdentityRefusal(configDir);
 if (identityRefusal) {
   console.log(`refused_project_identity: ${identityRefusal}; nothing synced`);
   process.exit(2);
@@ -99,19 +99,33 @@ try {
   process.exit(2);
 }
 
-// Retired config.models keys are dropped from the file and every value is printed; the
-// model defaults are added and models.implementor.hard_task is moved into
-// models.implementor-hard. A refusal (the file changed under the write, or is a symlink)
-// stops the sync here, before any rendering or setupOpenCode call, like the refusals above.
-const configMigration = migrateProjectConfig(configDir);
-for (const line of configMigration.lines) console.log(line);
-if (configMigration.status === 'refused') {
-  console.log('refused_config_migration: .sterling/config.json was not migrated (retired models keys or missing model defaults); rerun /sterling:update once the file is stable; nothing synced');
+// The canonical migration (decision settings-redesign-build-shape-one-legacy-to-canonical-config):
+// a legacy config.json is rewritten once into the canonical shape (workflow, one model per agent,
+// no mode or sparring_partner), after the retired-key drop, model-default add, implementor-hard move
+// and Overpass reset a file that missed them still gets. A role that names two models (a Claude
+// model and an OpenCode model) is never decided here: sync exits 2 naming each role and the rerun
+// flag --model-choice <role>=claude|opencode, and /sterling:update asks the user once per role.
+// A refusal (the file changed under the write, or is a symlink) stops the sync here, before any
+// rendering or setupOpenCode call, like the refusals above.
+let resolutions;
+try {
+  resolutions = modelChoicesFromArgs(args);
+} catch (err) {
+  console.log(`refused_model_choice: ${err.message}; nothing synced`);
   process.exit(2);
 }
-// The migration can change model values (the implementor-hard move), so the agents render
-// from the document just written, never from the parse above (Sol review: a moved hard_task
-// was saved under implementor-hard while the installed agent pinned the schema default).
+const configMigration = migrateProjectConfigCanonical(configDir, { resolutions });
+for (const line of configMigration.lines) console.log(line);
+if (configMigration.status === 'conflicts') {
+  console.log(describeConflictRefusal(configMigration.conflicts));
+  process.exit(2);
+}
+if (configMigration.status === 'refused') {
+  console.log('refused_config_migration: .sterling/config.json was not migrated to the canonical shape; rerun /sterling:update once the file is stable; nothing synced');
+  process.exit(2);
+}
+// The migration changes model values (the one model per agent), so the agents render from the
+// document just written, never from the parse above.
 if (configMigration.status === 'migrated') config = parseConfig(configMigration.config);
 
 const { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: '' } : syncAgents({
@@ -173,6 +187,22 @@ for (const r of agySetup.rows ?? []) {
   if (r.refused) {
     refused += 1;
     console.error('\n' + r.instruction + '\n');
+  }
+}
+
+// Adopted custom agents (config.models.custom-*, GitHub #312): each is agent-sources/<key>.md plus its config
+// entry, and the host files are generated projections of it, so a sync re-renders them for every installed host.
+// A refusal (a file Sterling did not write, an edited copy) is printed loudly and the file is left alone; it does
+// not count toward exit 2, so one edited custom agent never blocks /sterling:update. It also runs when no custom-*
+// key is left but stamped copies are still on disk, so removing the last custom agent removes its generated copies.
+if (Object.keys(config.models ?? {}).some(isCustomAgentKey) || hasCustomOutputs(targetDir)) {
+  try {
+    const custom = syncCustomAgents(targetDir, config);
+    for (const w of custom.written) console.log(`${w.status}: ${w.path} (custom agent ${w.key})`);
+    for (const r of custom.refused) console.log(`custom agent refused: ${r.key} on ${r.host}: ${r.reason}`);
+    for (const r of custom.removed) console.log(`removed: ${r.path} (custom agent ${r.key} is gone)`);
+  } catch (err) {
+    console.log(`custom agents NOT synced: ${err.message}`);
   }
 }
 

@@ -101,11 +101,14 @@ test('no .sterling/config.json: resolveStoreRoute returns null', () => {
   assert.equal(resolveStoreRoute(project(null)), null);
 });
 
-test('storage absent: the SQLite route, whatever the mode says; an invalid mode is not the router\'s business', () => {
-  for (const mode of ['work', 'hobby', 'served', undefined]) {
+test('storage absent: the SQLite route, whatever the valid mode says; an invalid mode refuses the config by name', () => {
+  for (const mode of ['work', 'hobby', undefined]) {
     const route = resolveStoreRoute(project(mode === undefined ? {} : { mode }));
     assert.equal(route?.storage, 'sqlite', `mode ${String(mode)}`);
   }
+  // Changed with the cutover (item G): the router parses the whole config through parseConfig, which is canonical and cannot carry an
+  // invalid legacy mode into config.workflow, so the open refuses by name (P5). It used to ignore the mode, because parseConfig kept it raw.
+  assert.throws(() => resolveStoreRoute(project({ mode: 'served' })), /config\.mode is "served"/);
   assert.equal(resolveStoreRoute(project({ mode: 'work', storage: 'sqlite' }))?.storage, 'sqlite');
 });
 
@@ -113,9 +116,11 @@ test('an invalid storage value is a StoreSettingsError naming it', () => {
   assert.throws(() => resolveStoreRoute(project({ mode: 'work', storage: 'pg' })), (e: unknown) => e instanceof StoreSettingsError && /config\.storage is "pg"/.test((e as Error).message));
 });
 
-test("storage 'postgres' routes to Postgres whatever config.mode says: hobby, work, absent, or unreadable as a mode", () => {
+test("storage 'postgres' routes to Postgres whatever valid config.mode says: hobby, work or absent; an invalid mode refuses by name", () => {
   withHome(UNREACHABLE, () => {
-    for (const mode of ['hobby', 'work', undefined, 'served']) {
+    // Changed with the cutover (item G): see the storage-absent test; an invalid mode no longer reaches the route.
+    assert.throws(() => resolveStoreRoute(project({ mode: 'served', storage: 'postgres' }, randomUUID())), /config\.mode is "served"/);
+    for (const mode of ['hobby', 'work', undefined]) {
       const config = mode === undefined ? { storage: 'postgres' } : { mode, storage: 'postgres' };
       const route = resolveStoreRoute(project(config, randomUUID()));
       assert.equal(route?.storage, 'postgres', `mode ${String(mode)}`);

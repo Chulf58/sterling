@@ -5,11 +5,11 @@
 // branch and sweeps every other fully-merged branch (git branch -d — refuses
 // unmerged, never loses work).
 // Refuses on a dirty tree, or when already on the base.
-// WORK mode (config.mode, decision project-mode-hobby-work-toggle-decides-flow):
-// the same preflight, then push the branch and open or reuse a GitHub PR
-// (scripts/lib/work-pr.mjs) — never a merge, sweep or push of the base.
-// A work repo with no 'origin' remote has no PR path and merges locally like hobby
-// (GitHub issue #39), announced loudly.
+// The PULL-REQUEST merge path (config.workflow.merge 'pr', decision
+// settings-that-replace-project-mode-merge-path-reviewer-count): the same preflight,
+// then push the branch and open or reuse a GitHub PR (scripts/lib/work-pr.mjs) —
+// never a merge, sweep or push of the base. A repo with no 'origin' remote has no PR
+// path and merges locally like the direct path (GitHub issue #39), announced loudly.
 //   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -24,7 +24,7 @@ import { projectRoot } from './hooks/lib/common.mjs';
 import { releaseAfterMerge } from './lib/opencode-release.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
-import { readProjectMode } from './lib/handoff-projection.mjs';
+import { readProjectWorkflow } from '@sterling/schemas';
 import { workPreflight, shipAsPr, openPrsForHead, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, noOriginRemote, NO_ORIGIN_LOCAL_MERGE_NOTICE, PR_LOOPS_DIR_REL } from './lib/work-pr.mjs';
 // Attestation disclosure
 // (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
@@ -36,9 +36,9 @@ import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, 
 const USAGE =
   'Usage: node direct-merge.mjs [--target <dir>] [--into <branch>] [--branch <branch>] [--no-push] [--allow-same-version]\n' +
   '  --target <dir>        project directory (default: the current directory)\n' +
-  '  --into <branch>       base branch to merge into, or the PR base in work mode (default: the default branch)\n' +
+  '  --into <branch>       base branch to merge into, or the PR base on the pull-request merge path (default: the default branch)\n' +
   '  --branch <branch>     must be the checked-out branch (default: the checked-out branch)\n' +
-  '  --no-push             hobby only: merge locally without pushing the base (refused in work mode)\n' +
+  '  --no-push             direct merge path only: merge locally without pushing the base (refused on the pull-request path)\n' +
   '  --allow-same-version  accept changed files without a version bump\n' +
   '  -h, --help            print this usage and exit 0';
 (function checkFlags(argv) {
@@ -67,35 +67,38 @@ const linkedWorktree = resolveLinkedWorktree(target);
 const CONFIG_REL = '.sterling/config.json';
 const storeRoot = resolveStoreRoot(target, linkedWorktree);
 
-// PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
-// key is hobby), and read FIRST so a work-mode run can put every exit through
-// its one result writer. An unreadable or invalid mode is REFUSED only after
-// openProject, so a malformed config keeps its own loud refusal (ruling
-// e13f0fb5). BOUNDARY: the exits before the mode is known — a bad --target
-// argument, and an unreadable/invalid mode — keep today's behaviour (stderr
-// only, no JSON); in work mode every later exit prints one JSON object
-// (installWorkResult in scripts/lib/work-pr.mjs). Hobby is unchanged: fail()
-// below is the shared fail() whenever the mode is not work.
-let mode;
-let modeError;
+// THE WORKFLOW SETTINGS decide the flow (config.workflow, decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config), read ONLY through
+// readProjectWorkflow (no config is the direct merge path; a legacy mode work reads
+// as the pull-request path), and read FIRST so a pull-request run can put every exit
+// through its one result writer. An unreadable or invalid workflow is REFUSED only
+// after openProject, so a malformed config keeps its own loud refusal (ruling
+// e13f0fb5). BOUNDARY: the exits before the workflow is known — a bad --target
+// argument, and an unreadable/invalid workflow — keep today's behaviour (stderr
+// only, no JSON); on the pull-request path every later exit prints one JSON object
+// (installWorkResult in scripts/lib/work-pr.mjs). The direct path is unchanged:
+// fail() below is the shared fail() whenever the merge path is not 'pr'.
+let workflow;
+let workflowError;
 try {
-  mode = readProjectMode(storeRoot);
+  workflow = readProjectWorkflow(storeRoot);
 } catch (e) {
-  modeError = e;
+  workflowError = e;
 }
-// WORK mode in a repo with no 'origin' remote has no PR path (GitHub issue #39;
-// user-ruled 2026-10-08: some projects never have a GitHub repo). It runs as
-// a local merge like hobby, announced loudly below. A work repo WITH origin, or a
-// directory git cannot read, keeps the work flow and its refusals. The configured
-// mode stays 'work' (the stdout envelope keeps its work shape); `shipsPr` says
-// whether the PR flow runs, `noOriginFallback` that the local flow runs instead.
-// The fallback is decided ONCE here and holds for the whole run.
-const noOriginFallback = mode === 'work' && isGitRepo(target) && noOriginRemote(target);
-const shipsPr = mode === 'work' && !noOriginFallback;
+const prPath = workflow?.merge === 'pr';
+// The pull-request path in a repo with no 'origin' remote has no PR (GitHub issue
+// #39; user-ruled 2026-10-08, decision work-mode-without-origin-remote-merges-locally:
+// some projects never have a GitHub repo). It runs as a local merge like the direct
+// path, announced loudly below. A repo WITH origin, or a directory git cannot read,
+// keeps the PR flow and its refusals. The stdout envelope keeps its PR shape;
+// `shipsPr` says whether the PR flow runs, `noOriginFallback` that the local flow
+// runs instead. The fallback is decided ONCE here and holds for the whole run.
+const noOriginFallback = prPath && isGitRepo(target) && noOriginRemote(target);
+const shipsPr = prPath && !noOriginFallback;
 if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
-const work = mode === 'work' ? installWorkResult({ localFallback: noOriginFallback }) : null;
-// The local flow's own report. In work mode (the fallback) it goes through the
-// work envelope so every exit prints ONE object; hobby prints it bare.
+const work = prPath ? installWorkResult({ localFallback: noOriginFallback }) : null;
+// The local flow's own report. On the pull-request path (the fallback) it goes
+// through the PR envelope so every exit prints ONE object; direct prints it bare.
 function emit(report, code = 0) {
   if (work) work.finishLocal(report, code);
   console.log(JSON.stringify(report, null, 2));
@@ -112,18 +115,18 @@ function fail(message, code = 1) {
 stage('git-repo');
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
-// A LINKED WORKTREE IS NEVER DEFAULTED TO HOBBY (board 3adde85e, anti-pattern
-// e76fd6b9). The worktree has no .sterling/ of its own (gitignored), so its mode
-// is the main checkout's, else the worktree's own copy (storeRoot above). When
-// neither config exists, a missing config would read as hobby, so the gate
+// A LINKED WORKTREE IS NEVER DEFAULTED TO THE DIRECT PATH (board 3adde85e,
+// anti-pattern e76fd6b9). The worktree has no .sterling/ of its own (gitignored), so
+// its workflow is the main checkout's, else the worktree's own copy (storeRoot
+// above). When neither config exists, a missing config would read as direct, so the gate
 // refuses by name instead. A worktree of a bare or separate-git-dir main has no
 // main checkout to read at all (resolveLinkedWorktree is null there, and the
 // target's own config is read), so it is caught by git's own git-dir/common-dir
 // difference when the worktree has no config of its own.
 if (linkedWorktree && !existsSync(join(storeRoot, CONFIG_REL))) {
   fail(
-    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read — there is no ${CONFIG_REL} at '${join(linkedWorktree.worktree, CONFIG_REL)}' ` +
-      `or at the main checkout '${join(linkedWorktree.mainRoot, CONFIG_REL)}'. A linked worktree is never defaulted to hobby — refusing; nothing was run.\n` +
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its workflow settings cannot be read — there is no ${CONFIG_REL} at '${join(linkedWorktree.worktree, CONFIG_REL)}' ` +
+      `or at the main checkout '${join(linkedWorktree.mainRoot, CONFIG_REL)}'. A linked worktree is never defaulted to the direct merge path — refusing; nothing was run.\n` +
       `Run it from the main checkout, or restore its ${CONFIG_REL}.`,
     2
   );
@@ -134,24 +137,24 @@ if (!linkedWorktree && !existsSync(join(target, CONFIG_REL))) {
   if (gitDir && commonDir && realpathSync(resolve(target, gitDir)) !== realpathSync(resolve(target, commonDir))) {
     fail(
       `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync(resolve(target, commonDir))}') has no main checkout to read ${CONFIG_REL} from, ` +
-        `and '${join(target, CONFIG_REL)}' does not exist in the worktree. A linked worktree is never defaulted to hobby — refusing; nothing was run.\n` +
+        `and '${join(target, CONFIG_REL)}' does not exist in the worktree. A linked worktree is never defaulted to the direct merge path — refusing; nothing was run.\n` +
         `Run it from a checkout of the project.`,
       2
     );
   }
 }
 
-// HOBBY from a linked worktree cannot complete: the merge checks the base out,
-// and the base is normally checked out in the main tree (git refuses to check a
+// A DIRECT MERGE from a linked worktree cannot complete: the merge checks the base
+// out, and the base is normally checked out in the main tree (git refuses to check a
 // branch out in two worktrees). Refused here, before the store and the battery,
-// with the exact way out. WORK mode only pushes the branch and opens a PR, so it
-// proceeds. An unreadable mode keeps its own refusal below.
-if (linkedWorktree && !modeError && !shipsPr) {
+// with the exact way out. The pull-request path only pushes the branch and opens a
+// PR, so it proceeds. An unreadable workflow keeps its own refusal below.
+if (linkedWorktree && !workflowError && !shipsPr) {
   const head = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : '<branch>';
   fail(
     `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' — refusing before the battery.\n` +
-      `A hobby merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.\n` +
+      `A direct merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.\n` +
       `Free the branch, then run the merge from the main checkout:\n` +
       `  git -C ${linkedWorktree.mainRoot} worktree remove ${linkedWorktree.worktree}   (or, to keep the worktree: git -C ${linkedWorktree.worktree} checkout --detach)\n` +
       `  git -C ${linkedWorktree.mainRoot} checkout ${wtBranch}\n` +
@@ -163,17 +166,30 @@ if (linkedWorktree && !modeError && !shipsPr) {
 // Pre-merge preflight: openProject fails loud on a missing store or malformed
 // config BEFORE anything lands (see the post-merge note below).
 stage('open-project');
+// parseConfig is canonical, so openProject would refuse a config carrying an invalid value as "malformed" (exit 1) before the
+// workflow refusal below could name it (exit 2, as commands/merge.md documents). A config that is valid JSON with an invalid
+// workflow is refused here, first; unreadable JSON keeps openProject's own loud refusal (ruling e13f0fb5).
+if (workflowError) {
+  let readsAsJson = false;
+  try {
+    JSON.parse(readFileSync(join(storeRoot, CONFIG_REL), 'utf8'));
+    readsAsJson = true;
+  } catch {
+    readsAsJson = false;
+  }
+  if (readsAsJson) fail(`direct-merge: ${workflowError?.message ?? workflowError} — refusing; nothing was run.`, 2);
+}
 openProject(storeRoot).store.close();
 
-if (modeError) fail(`direct-merge: ${modeError?.message ?? modeError} — refusing; nothing was run.`, 2);
-// Work-only preconditions, cheap and before the battery: --no-push cannot ship
+if (workflowError) fail(`direct-merge: ${workflowError?.message ?? workflowError} — refusing; nothing was run.`, 2);
+// Pull-request-only preconditions, cheap and before the battery: --no-push cannot ship
 // a PR, and origin and gh must be usable.
 let workRepo;
 if (shipsPr) {
   stage('work-preflight');
   if (process.argv.includes('--no-push')) {
     fail(
-      'direct-merge: --no-push is refused in WORK mode — work mode ships by opening a PR, and a PR needs a pushed branch.\n' +
+      'direct-merge: --no-push is refused on the pull-request merge path (config.workflow.merge) — it ships by opening a PR, and a PR needs a pushed branch.\n' +
         'Rerun without --no-push, or commit and keep working on the branch until it is ready.',
       2
     );
@@ -831,20 +847,27 @@ const attestationDisclosure = (() => {
 })();
 for (const line of attestationDisclosure) console.error(line);
 
-// WORK MODE ends here: push the branch and open or reuse its PR. Nothing below
-// (merge, board nudge, sweep, rebuild, parked sweep, base push) runs — a human
-// merges the PR.
+// THE PULL-REQUEST PATH ends here: push the branch and open or reuse its PR.
+// Nothing below (merge, board nudge, sweep, rebuild, parked sweep, base push)
+// runs — a human or the review loop merges the PR.
 if (shipsPr) {
   const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
   if (shipped) work.fail(shipped.error, shipped.exitCode);
-  // ARM the H10 'PR review loop owed' duty on create AND reuse (slice S3): a
-  // new head is owed a Copilot review. The PR exists either way, so a failed
+  // ARM the H10 'PR review loop owed' duty on create AND reuse (slice S3), only
+  // when the Copilot loop is on (config.workflow.copilot_loop, decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config): a new head is
+  // owed a Copilot review. With the loop off nothing is armed, and a loop armed
+  // earlier stays owed until it settles. The PR exists either way, so a failed
   // write never fails the ship — it is announced loudly instead (P5).
-  try {
-    armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
-    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
-  } catch (e) {
-    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+  if (!workflow.copilot_loop) {
+    console.error(`direct-merge: the Copilot review loop is off (config.workflow.copilot_loop — TUI System tab), so no PR review loop was armed for ${work.state.pr_url}.`);
+  } else {
+    try {
+      armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
+      console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
+    } catch (e) {
+      console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+    }
   }
   work.succeed();
 }
@@ -1097,7 +1120,7 @@ if (noOriginFallback) {
 }
 
 // RELEASE FOR OPENCODE
-// (decision sterling-on-opencode-installs-from-a-git-release-branch-v2): a pushed hobby merge that moved package.json's version
+// (decision sterling-on-opencode-installs-from-a-git-release-branch-v2): a pushed direct merge that moved package.json's version
 // writes the merged tree as a commit on `opencode-release`, tags it v<version>
 // and pushes both; `opencode plugin add/update` follows the tags. Any other
 // merge skips with one line. A refusal (origin unreadable, the tag already names

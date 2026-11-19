@@ -32,10 +32,11 @@ import { fileURLToPath } from 'node:url';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
-import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
+import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
 import { refreshAgentsMdKnowledgeFile } from './agents-md-facts.mjs';
 import { ContainmentError } from './contained-fs.mjs';
-import { workIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
+import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
+import { identityRefusal as projectIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { ensureLauncherIgnores, ensureLaunchers, launcherHistoryLoader, launcherHost, launcherTools, removeRetiredLaunchers } from './launchers.mjs';
 import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
@@ -583,7 +584,7 @@ export function parseDomainProposal(stdout) {
 const isFsError = (err) => typeof err?.code === 'string' && typeof err?.syscall === 'string';
 // The refusals a per-project read may raise: an invalid mode, an invalid
 // handoff setting, an unsafe path, or a filesystem error.
-const isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
+const isProjectReadRefusal = (err) => err instanceof ProjectWorkflowError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
 
 // What to do about a project whose handoff refusal will not go away by itself.
 export function handoffRefusalRemedy(repoPath) {
@@ -801,21 +802,22 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report.projects.push(entry);
-      let projectMode;
+      // The workflow settings (config.workflow, or a legacy config.mode through the one
+      // transform) are read so an invalid value is refused here, before anything is synced.
       try {
-        projectMode = readProjectMode(p.repo_path);
+        readProjectWorkflow(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
-        log(`  ✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
-        entry.handoff = 'refused_project_mode';
+        log(`  ✗ ${p.name}: REFUSED — workflow settings: ${err.message}. Nothing was synced or projected for this project; fix config.workflow (TUI System tab) and rerun /sterling:update.`);
+        entry.handoff = 'refused_project_workflow';
         fail(2);
         failures++;
         continue;
       }
-      // Work-project identity (decision work-project-identity-file-sterling-project-json):
-      // a work project without a valid .sterling/project.json is refused, like an
-      // invalid mode; a project is checked when it is in work mode or its config.storage is postgres.
-      const identityRefusal = workIdentityRefusal(p.repo_path, projectMode);
+      // Project identity (decision work-project-identity-file-sterling-project-json):
+      // a project on Postgres storage without a valid .sterling/project.json is refused
+      // (the workflow settings never require it).
+      const identityRefusal = projectIdentityRefusal(p.repo_path);
       if (identityRefusal) {
         log(`  ✗ ${p.name}: REFUSED — ${identityRefusal}. Nothing was synced or projected for this project.`);
         entry.handoff = 'refused_project_identity';
@@ -870,9 +872,18 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // value). The prefix has a space, so the status filter above never counts them as agent changes;
       // relayed on success here and verbatim in the failure output below.
       const configMigrationLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('config migration: '));
-      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
+      // `unsupported:` is a role whose model Claude Code cannot run and that has no copy: nothing changed.
+      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: ') && !l.startsWith('unsupported: '));
+      const modelConflictLine = r.stdout.split('\n').map((l) => l.trim()).find((l) => l.startsWith('refused_model_conflicts: '));
       Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length, config_migration: configMigrationLines.length });
-      if (r.status === 2) {
+      if (r.status === 2 && modelConflictLine) {
+        // Not a failure of the files: the user has to choose. commands/update.md asks once per role
+        // (OpenCode preselected) and reruns sync-agents with --model-choice <role>=claude|opencode.
+        log(`  ✗ ${p.name}: MODEL CHOICE NEEDED (project at ${p.repo_path}) — ${modelConflictLine}`);
+        entry.model_conflicts = modelConflictLine.slice('refused_model_conflicts: '.length).split(' each name')[0].split(', ');
+        fail(2);
+        failed = true;
+      } else if (r.status === 2) {
         log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         fail(2);
         failed = true;

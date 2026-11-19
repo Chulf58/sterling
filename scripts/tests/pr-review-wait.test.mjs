@@ -1628,6 +1628,20 @@ test('--settle clean: auto_merge is false when the switch is off, and when the P
   } finally {
     f.cleanup();
   }
+  // Settings redesign item C: a canonical config's workflow.auto_merge_on_clean is the switch.
+  const w = makeFixture();
+  try {
+    writeConfig(w, { workflow: { merge: 'pr', copilot_loop: true, auto_merge_on_clean: false } });
+    arm(w);
+    putMerge(w, [mergePage('CLEAN')]);
+    const off = run(w, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(off.code, 0, oneLine(off.stdout + off.stderr));
+    assert.equal(off.out.auto_merge_on_clean, false);
+    assert.equal(off.out.auto_merge, false, 'workflow switch off: a human merges');
+    assert.match(off.out.auto_merge_withheld, /workflow\.auto_merge_on_clean is off/);
+  } finally {
+    w.cleanup();
+  }
   const g = makeFixture();
   try {
     arm(g);
@@ -1644,9 +1658,12 @@ test('--settle clean: auto_merge is false when the switch is off, and when the P
 
 test('--settle clean: an auto-merge switch that is not a boolean (or a pr_review or config root that is not an object, or an unreadable config) refuses before any gh call, loop untouched', () => {
   for (const [raw, pattern] of [
-    [{ pr_review: { auto_merge_on_clean: 'yes' } }, /auto_merge_on_clean must be true or false, got "yes"/],
-    [{ pr_review: { auto_merge_on_clean: 1 } }, /auto_merge_on_clean must be true or false, got 1/],
-    [{ pr_review: 'on' }, /pr_review must be an object/],
+    // CHANGED with the settings redesign (item C): the switch is read through the one
+    // legacy-to-canonical transform, whose messages read "is <value> — it must be ...".
+    [{ pr_review: { auto_merge_on_clean: 'yes' } }, /pr_review\.auto_merge_on_clean is "yes" — it must be true or false/],
+    [{ pr_review: { auto_merge_on_clean: 1 } }, /pr_review\.auto_merge_on_clean is 1 — it must be true or false/],
+    [{ pr_review: 'on' }, /pr_review is "on" — it must be an object/],
+    [{ workflow: { auto_merge_on_clean: 'yes' } }, /config\.workflow is invalid .*workflow\.auto_merge_on_clean/],
     ['null', /config root must be an object, got null/],
     ['7', /config root must be an object, got 7/],
     ['"x"', /config root must be an object, got "x"/],

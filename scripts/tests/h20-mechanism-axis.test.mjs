@@ -518,3 +518,31 @@ for (const lines of SWEEP_LINES) {
     }
   });
 }
+
+// Restored from h20-consult-model-injection.test.mjs M-10 (main lines 621-664), ported from the retired Codex
+// consult to an Agent dispatch; only the Codex model-pin assertion is dropped with the consult. The guard write
+// runs after the envelope is written, in its own failure domain.
+test('H20 (M-10 on Agent dispatch): a guard-write failure after the envelope (EISDIR) exits 0 with exactly one JSON envelope, the context kept, and the failure disclosed on stderr', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(antiPattern('Signal connected at boot but emitter initialises later', 'whenever a node connects a signal in _ready() but finishes initialising LATER', ['game/run/worker_crew.gd']));
+    // a directory where the guard file belongs makes its rename throw EISDIR
+    mkdirSync(join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json'), { recursive: true });
+    const input = { ...dispatch(dir, 'Wire the harvester so it connects its ready signal in _ready(), then finishes initialising the crew later in the boot sequence.'), tool_name: 'Agent', tool_input: { subagent_type: 'implementor', description: 'harvester', prompt: 'Wire the harvester so it connects its ready signal in _ready(), then finishes initialising the crew later in the boot sequence.' } };
+    const r = runHook(input, dir);
+    assert.equal(r.code, 0, 'a bookkeeping-only failure never turns the dispatch into a non-zero exit');
+    let parsed;
+    try {
+      parsed = JSON.parse(r.stdout);
+    } catch {
+      assert.fail(`stdout must be exactly one JSON envelope, got ${r.stdout.length} bytes starting ${JSON.stringify(r.stdout.slice(0, 80))}`);
+    }
+    assert.equal(typeof parsed, 'object');
+    const ctx = parsed?.hookSpecificOutput?.additionalContext;
+    assert.equal(typeof ctx, 'string');
+    assert.match(ctx, /Signal connected at boot but emitter initialises later/, 'the carriage rides in the same envelope');
+    assert.match(r.stderr, /bookkeeping failed AFTER the envelope was written/, 'the failure is disclosed, saying the envelope was already written');
+  } finally {
+    cleanup();
+  }
+});

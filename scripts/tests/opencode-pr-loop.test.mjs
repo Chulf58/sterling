@@ -47,7 +47,7 @@ test('an owed loop raises a notice with the PR link, the wait command and the se
     prLoop.createPrLoopNotice({ now: () => NOW, pluginRoot: '/opt/sterling' })(p.dir);
     const [text, ...rest] = noticeTexts(p.dir);
     assert.equal(rest.length, 0);
-    assert.match(text, /PR review loop owed \(work mode\): PR #7 https:\/\/github\.com\/acme\/widget\/pull\/7/);
+    assert.match(text, /PR review loop owed: PR #7 https:\/\/github\.com\/acme\/widget\/pull\/7/);
     // GitHub issue #100: a bare "(background)" read as "detach the wait" on OpenCode;
     // the user ruled (2026-10-15) the wait runs with the shell tool's background: true.
     assert.match(text, /node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(add --request-copilot on the first wait after a push\) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &/);
@@ -69,8 +69,8 @@ test('issue #104: two PRs armed by /sterling:merge from two worktrees each raise
     notify(p.dir);
     const texts = noticeTexts(p.dir);
     assert.equal(texts.length, 2, texts.join('\n'));
-    assert.match(texts[0], /PR review loop owed \(work mode\): PR #7 /);
-    assert.match(texts[1], /PR review loop owed \(work mode\): PR #8 /);
+    assert.match(texts[0], /PR review loop owed: PR #7 /);
+    assert.match(texts[1], /PR review loop owed: PR #8 /);
     settlePrLoop(p.dir, 'clean', '7', { originRepo: 'github.com/acme/widget', now: NOW });
     markShown(p.dir);
     notify(p.dir);
@@ -90,20 +90,29 @@ test('the first notice per arming is the full text; later ones are the short rem
     notify(p.dir);
     const texts = noticeTexts(p.dir);
     assert.equal(texts.length, 2);
-    assert.match(texts[0], /^• PR review loop owed \(work mode\)/);
+    assert.match(texts[0], /^• PR review loop owed/);
     assert.match(texts[1], /^PR review loop owed: PR #7 .* — next: pr-review-loop skill, then --settle/);
     notify(p.dir);
     assert.equal(noticeTexts(p.dir).length, 2, 'an unshown identical reminder is not stacked');
     writeFileSync(loopFile(p.dir), JSON.stringify({ ...STATE, armed_at: '2026-09-27T10:00:00.000Z' }));
     notify(p.dir);
-    assert.match(noticeTexts(p.dir).at(-1), /^• PR review loop owed \(work mode\)/, 're-arming restores the full text');
+    assert.match(noticeTexts(p.dir).at(-1), /^• PR review loop owed/, 're-arming restores the full text');
   } finally {
     p.cleanup();
   }
 });
 
-test('hobby, unarmed and settled projects raise nothing', () => {
-  for (const [mode, loop] of [['hobby', STATE], ['work', undefined], ['work', { ...STATE, status: 'clean', settled_at: NOW }]]) {
+// Changed with the cutover (item G, user-ruled "Finish owed loops"): the settings do not gate the duty, so a direct-merge project
+// with an armed loop still raises the notice until it settles; only an unarmed or settled loop raises nothing.
+test('unarmed and settled projects raise nothing; a direct-merge project with an armed loop still raises the notice', () => {
+  const armed = makeProject('hobby', STATE);
+  try {
+    prLoop.createPrLoopNotice({ now: () => NOW, pluginRoot: '/opt/sterling' })(armed.dir);
+    assert.match(noticeTexts(armed.dir).join('\n'), /PR review loop owed: PR #7 /);
+  } finally {
+    armed.cleanup();
+  }
+  for (const [mode, loop] of [['work', undefined], ['work', { ...STATE, status: 'clean', settled_at: NOW }]]) {
     const p = makeProject(mode, loop);
     try {
       prLoop.createPrLoopNotice({ now: () => NOW, pluginRoot: '/opt/sterling' })(p.dir);
@@ -140,7 +149,7 @@ test('the plugin raises the notice at an execution end, with or without git, unt
     const cleanup = await plugin.setup(ctx);
     const succeeded = { type: 'session.execution.succeeded', data: { sessionID: 'ses_1' } };
     await plugin.handlers.event(succeeded);
-    assert.match(noticeTexts(p.dir).join('\n'), /PR review loop owed \(work mode\): PR #7/);
+    assert.match(noticeTexts(p.dir).join('\n'), /PR review loop owed: PR #7/);
     writeFileSync(loopFile(p.dir), JSON.stringify({ ...STATE, status: 'clean', settled_at: NOW }));
     markShown(p.dir);
     await plugin.handlers.event(succeeded);

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import {
   buildDashboardState,
+  pickerSpecs,
   initialUi,
   reduce,
   AGENTS_TAB,
@@ -23,6 +24,7 @@ import {
 } from '../state.js';
 import { keyToEvent, windowBlock } from '../render.js';
 import { openDashboard } from '../controller.js';
+import { at, SYS } from './system-nav.js';
 import type { SubagentBlock } from '../subagents.js';
 
 // Board fb516a43 (TUI fix 3 of 4): navigation and scrolling. Each acceptance
@@ -51,13 +53,13 @@ function fixture(): { store: SterlingStore; cleanup: () => void } {
 }
 
 /** 12 catalog models: taller than the 6-line body the picker tests use. */
+/** the picker's options: the 12 catalog models, agy's four ids and the six Overpass tiers */
+const OPTIONS = 12 + 4 + 6;
 const ENTRIES = Array.from({ length: 12 }, (_, i) => ({ id: `claude-m${i}`, label: `model ${i}`, tier: 'opus', status: 'active' }));
 function roster(): AgentRosterSnapshot {
   return {
-    agents: [{ name: 'implementor', installedModel: 'claude-m0', installedEffort: 'low' }],
-    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
-    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
-    configModels: { implementor: { model: 'claude-m0', effort: 'low' } },
+    models: { implementor: { model: 'anthropic/claude-m0', effort: 'low' } },
+    hosts: ['claude', 'opencode'],
     catalog: { present: true, stale: false, staleDate: null, entries: ENTRIES },
   };
 }
@@ -82,24 +84,24 @@ test('picker: the highlight stays on screen as it moves, and ENTER confirms the 
       const line = highlightLine(s);
       return line >= s.scroll && line < s.scroll + 6;
     };
-    let ui = reduce(store, st({ tab: SYSTEM_TAB }), key('ENTER'), vp, undefined, snap).ui;
+    let ui = reduce(store, st({ tab: SYSTEM_TAB, cursor: at(snap, 'sys:implementor') }), key('ENTER'), vp, undefined, snap).ui;
     assert.equal(ui.selector?.stage, 'model');
-    for (let i = 1; i < ENTRIES.length; i++) {
+    for (let i = 1; i < OPTIONS; i++) {
       ui = reduce(store, ui, key('DOWN'), vp, undefined, snap).ui;
       assert.equal(ui.selector?.highlight, i);
       assert.ok(visible(ui), `DOWN to option ${i}: the highlight is inside the window`);
     }
-    for (let i = ENTRIES.length - 2; i >= 0; i--) {
+    for (let i = OPTIONS - 2; i >= 0; i--) {
       ui = reduce(store, ui, key('UP'), vp, undefined, snap).ui;
       assert.ok(visible(ui), `UP to option ${i}: the highlight is inside the window`);
     }
     const back = state(ui);
     assert.ok(back.scroll <= back.rows.find((r) => r.id === 'sys:implementor')!.screenRow, 'back at the first option the row title shows again');
     ui = reduce(store, ui, key('END'), vp, undefined, snap).ui;
-    assert.equal(ui.selector?.highlight, ENTRIES.length - 1, 'End jumps to the last option');
+    assert.equal(ui.selector?.highlight, OPTIONS - 1, 'End jumps to the last option');
     assert.ok(visible(ui));
     ui = reduce(store, ui, key('PAGE_UP'), vp, undefined, snap).ui;
-    assert.equal(ui.selector?.highlight, ENTRIES.length - 1 - 5, 'PgUp moves a page less one line');
+    assert.equal(ui.selector?.highlight, OPTIONS - 1 - 5, 'PgUp moves a page less one line');
     assert.ok(visible(ui));
     ui = reduce(store, ui, key('HOME'), vp, undefined, snap).ui;
     assert.equal(ui.selector?.highlight, 0);
@@ -132,7 +134,7 @@ test('System tab clicks: a row click runs ENTER on that row; a picker option cli
 
     const tdd = click(ui0, yOf(s0, 'sys:tdd_enabled'));
     assert.deepEqual(tdd.effects, [{ type: 'tdd_toggle', enabled: false }], 'a click on the TDD row flips it, as ENTER does');
-    assert.equal(tdd.ui.cursor, 4, 'and moves the cursor there (2 model keys + 2 sparring rows)');
+    assert.equal(tdd.ui.cursor, at(snap, SYS.tdd), 'and moves the cursor there');
 
     const storage = click(ui0, yOf(s0, 'sys:storage'));
     assert.equal(storage.ui, ui0, 'the read-only storage row does nothing');
@@ -145,17 +147,18 @@ test('System tab clicks: a row click runs ENTER on that row; a picker option cli
     assert.deepEqual(open.ui.selector, { key: 'implementor', stage: 'model', highlight: 0 }, 'a click on a model row opens its picker');
     const s1 = state(open.ui);
     const row = s1.rows.find((r) => r.id === 'sys:implementor')!;
-    const firstOption = row.lines.length - ENTRIES.length;
+    const specs = pickerSpecs(snap, open.ui.selector!);
+    const firstOption = row.lines.length - specs.length;
+    const optionLine = (n: number) => firstOption + specs.findIndex((x) => x.option === n);
     const title = click(open.ui, yOf(s1, 'sys:implementor', 0));
     assert.equal(title.ui, open.ui, "the picker's title line does nothing");
-    const picked = click(open.ui, yOf(s1, 'sys:implementor', firstOption + 7));
+    const picked = click(open.ui, yOf(s1, 'sys:implementor', optionLine(7)));
     assert.equal(picked.ui.selector?.stage, 'effort');
-    assert.equal(picked.ui.selector?.model, 'claude-m7', 'the clicked option is the one confirmed');
+    assert.equal(picked.ui.selector?.model, 'anthropic/claude-m7', 'the clicked option is the one confirmed');
     const s2 = state(picked.ui);
     const effortRow = s2.rows.find((r) => r.id === 'sys:implementor')!;
-    const committed = click(picked.ui, yOf(s2, 'sys:implementor', effortRow.lines.length - 3 + 2));
-    assert.deepEqual(committed.effects.map((e) => e.type), ['model_swap']);
-    assert.deepEqual((committed.effects[0] as { to: unknown }).to, { model: 'claude-m7', effort: 'high' }, 'the clicked effort is committed');
+    const committed = click(picked.ui, yOf(s2, 'sys:implementor', effortRow.lines.length - 4 + 3));
+    assert.deepEqual(committed.effects, [{ type: 'agent_model', key: 'implementor', model: 'anthropic/claude-m7', effort: 'high' }], 'the clicked effort is committed');
   } finally {
     cleanup();
   }
@@ -286,7 +289,7 @@ test('Ctrl-C quits at once everywhere: every tab, the Tasks editor, the System p
       ['Agents', st({ tab: AGENTS_TAB })],
       ['System', st({ tab: SYSTEM_TAB })],
       ['System picker', st({ tab: SYSTEM_TAB, selector: { key: 'implementor', stage: 'model', highlight: 3 } })],
-      ['System model field', st({ tab: SYSTEM_TAB, cursor: 3, sparringModelEdit: 'gpt' })],
+      ['System provider field', st({ tab: SYSTEM_TAB, cursor: 3, overpassProviderEdit: 'gw' })],
       ['help', st({ help: { scroll: 0 } })],
       ['q asked', st({ quitConfirm: true, notice: QUIT_PROMPT })],
     ];

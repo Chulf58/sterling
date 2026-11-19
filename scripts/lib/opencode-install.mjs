@@ -26,8 +26,6 @@
 //    The npm copy's dashboard is copied to <home>/.sterling/opencode/tui/<version>/
 //    (materializeTui), because OpenCode gives a TUI bundle its own solid-js only outside
 //    node_modules (the former finding 'opencode plugin installs land under node_modules' (not in the current store)), and the TUI shim loads the newest copy there.
-//    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
-//    written only for a Codex whose `mcp-server --help` prints mcp-server help.
 // 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit and shell deny rules
 //    (repeated under the bash, write and patch aliases, and placed last, since the last match wins),
 //    plus the same guard under agent.<name>.permission for every agent OpenCode can see
@@ -70,7 +68,7 @@ export { writeFileAtomic };
 import { OPENCODE_LOADED_SOURCE, RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, SPECS_SOURCE, STERLING_NPM_PACKAGE, installHostOf, openCodeLoadedSterling, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
 import { JSONC_SOURCE, parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
-import { AGENT_MODEL_KEY, CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, parseConfig } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, hostRunsModel, opencodeModelRef as canonicalOpencodeModelRef, parseConfig } from '@sterling/schemas';
 import { sha256, loadRegistry, agentHosts } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
@@ -581,106 +579,6 @@ export function installGlobal({ pluginRoot, installed, npmCopy = false, env = pr
   }
   rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot, installed), fwd(mcpLauncherPath({ home }))));
   return rows;
-}
-
-// ---------- codex MCP (user scope) -------------------------------------------
-// Board item parity-p4-codex-mcp-lanes-on-opencode-2. The entry
-// shape is the one measured on 2.0.21 (finding
-// codex-mcp-server-runs-under-opencode-2-0-21-servers-shape-october-2026): it lives
-// under mcp.servers, because a legacy mcp.<name> entry carrying a timeout was dropped
-// silently. A Codex qualifies only when `mcp-server --help` prints that subcommand's
-// own help: 0.154+ exits 0 with the generic help (anti_pattern codex-mcp-probe-by-exit-status).
-
-/** The pinned side install (finding codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install), under home. */
-export const PINNED_CODEX_REL = '.local/codex-mcp-0.153.4/bin/codex';
-const PINNED_CODEX_INSTALL = 'npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4';
-const CODEX_PROBE_TIMEOUT_MS = 10_000;
-
-const isFile = (p) => existsSync(p) && statSync(p).isFile();
-
-/**
- * Codex binaries to try, best first: the one Claude Code's user-scope codex server
- * runs (<CLAUDE_CONFIG_DIR or home>/.claude.json, as init reads it), the pinned side
- * install, then every `codex` on PATH.
- */
-function codexCandidates({ env, home }) {
-  const out = [];
-  const notes = [];
-  const claudeJson = join(env.CLAUDE_CONFIG_DIR || home, '.claude.json');
-  if (isFile(claudeJson)) {
-    let command;
-    try {
-      command = JSON.parse(readFileSync(claudeJson, 'utf8'))?.mcpServers?.codex?.command;
-    } catch (err) {
-      // Reported in the row; the other candidates still run.
-      notes.push(`${fwd(claudeJson)} not read (${err.message})`);
-    }
-    if (typeof command === 'string' && isAbsolute(command)) out.push(command);
-  }
-  out.push(join(home, PINNED_CODEX_REL));
-  for (const dir of (env.PATH ?? '').split(':').filter(Boolean)) out.push(join(dir, 'codex'));
-  return { candidates: [...new Set(out)].filter(isFile), notes };
-}
-
-/** The first candidate whose `mcp-server --help` prints mcp-server help, or { tried } when none does. */
-export function resolveCodexMcp({ env = process.env, home = homedir(), nodeBinDir, spawnFn = spawnSync }) {
-  const { candidates, notes } = codexCandidates({ env, home });
-  const tried = [...notes];
-  for (const command of candidates) {
-    const r = spawnFn(command, ['mcp-server', '--help'], { encoding: 'utf8', timeout: CODEX_PROBE_TIMEOUT_MS, env: { ...env, PATH: codexPath(nodeBinDir) } });
-    const help = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
-    if (!r.error && r.status === 0 && /\bcodex\s+mcp-server\b/i.test(help)) return { command };
-    tried.push(`${fwd(command)} (${r.error ? r.error.message : r.status !== 0 ? `exit ${r.status}` : 'generic help, no mcp-server subcommand'})`);
-  }
-  return { tried };
-}
-
-const codexPath = (nodeBinDir) => `${fwd(nodeBinDir)}:/usr/local/bin:/usr/bin:/bin`;
-
-/** The measured entry: PATH carries the node bin dir because codex is a `#!/usr/bin/env node` script. */
-export function codexServerEntry(command, nodeBinDir) {
-  return {
-    type: 'local',
-    command: [fwd(command), 'mcp-server'],
-    environment: { PATH: codexPath(nodeBinDir) },
-    timeout: { startup: 30000, execution: 900000 },
-  };
-}
-
-/** Merge mcp.servers.codex into <opencode config dir>/opencode.json; every other key is kept. */
-export function ensureCodexServer({ env = process.env, home = homedir(), nodeBinDir = dirname(process.execPath), spawnFn = spawnSync }) {
-  const path = join(opencodeConfigDir({ env, home }), 'opencode.json');
-  const label = `${fwd(path)} mcp.servers.codex`;
-  const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
-  if (!found.command) {
-    const tried = found.tried.length ? `tried ${found.tried.join('; ')}` : 'no Codex binary found';
-    return { item: label, status: 'skipped', detail: `codex MCP for OpenCode SKIPPED: no Codex whose \`mcp-server --help\` prints mcp-server help (${tried}). Install the pinned Codex (${PINNED_CODEX_INSTALL}), then run /sterling:update` };
-  }
-  let config = {};
-  let before = null;
-  if (existsSync(path)) {
-    before = normalize(readFileSync(path, 'utf8'));
-    try {
-      config = JSON.parse(before);
-    } catch (err) {
-      return refusal(label, `${fwd(path)} is not valid JSON (${err.message})`, `fix or remove ${fwd(path)}, then rerun /sterling:update`);
-    }
-    if (config === null || typeof config !== 'object' || Array.isArray(config)) return refusal(label, `${fwd(path)} is not a JSON object`, `fix or remove ${fwd(path)}, then rerun /sterling:update`);
-  }
-  const mcp = config.mcp ?? {};
-  if (typeof mcp !== 'object' || Array.isArray(mcp)) return refusal(label, `${fwd(path)}: "mcp" is not an object`, `fix ${fwd(path)}, then rerun /sterling:update`);
-  const servers = mcp.servers ?? {};
-  if (typeof servers !== 'object' || Array.isArray(servers)) return refusal(label, `${fwd(path)}: "mcp.servers" is not an object`, `fix ${fwd(path)}, then rerun /sterling:update`);
-  const want = codexServerEntry(found.command, nodeBinDir);
-  const legacy = mcp.codex !== undefined ? '; a legacy mcp.codex entry is also present, which 2.0.21 drops silently when it carries a timeout' : '';
-  if (servers.codex !== undefined) {
-    if (JSON.stringify(servers.codex) === JSON.stringify(want)) return { item: label, status: 'matches', detail: `${fwd(found.command)}${legacy}` };
-    return { item: label, status: 'skipped', detail: `kept: mcp.servers.codex is already set and differs from Sterling's (yours); Sterling's would be ${JSON.stringify(want)}${legacy}` };
-  }
-  config.mcp = { ...mcp, servers: { ...servers, codex: want } };
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
-  return { item: label, status: before === null ? 'created' : 'refreshed', detail: `${fwd(found.command)}${legacy}` };
 }
 
 // ---------- per project -----------------------------------------------------
@@ -1340,38 +1238,15 @@ export function storeWriteTools(pluginRoot = sterlingRootFrom()) {
 }
 
 /**
- * The OpenCode model for a config.models Claude model id: OpenCode names a model
- * provider/model, and Claude models come from its `anthropic` provider.
- */
-export function opencodeModelRef(model) {
-  // the value lands on a frontmatter `model:` line, so a newline or YAML syntax is refused
-  if (typeof model !== 'string' || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
-  return `anthropic/${model}`;
-}
-
-/**
- * The OpenCode model for one config.models role (decision
- * opencode-only-model-override-per-role-for-openai-picks): the role's
- * OpenCode-only override when it is set (for example openai/gpt-5.6-terra),
- * else anthropic/<the role's Claude model>. A malformed override is refused,
- * because the value lands on a frontmatter `model:` line.
- */
-export function opencodeModelFor({ model, opencodeModel } = {}) {
-  if (opencodeModel === undefined) return opencodeModelRef(model);
-  if (typeof opencodeModel !== 'string' || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
-    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
-  }
-  return opencodeModel;
-}
-
-/**
  * The OpenCode model each Sterling-full roster agent pins on install and update
  * (user-ruled 2026-10-09, "Yes, apply on install": a fresh machine or an update
  * matches what the System tab shows). The System tab shows the parsed config, so
  * every roster agent with a config.models key (AGENT_MODEL_KEY) pins that role's
- * parsed entry, a schema default included: its opencode_model override, else
- * anthropic/<model>. An agent with no key (the conductor) gets no entry and keeps
- * the pin it has. A config.json that is missing, unreadable or does not validate
+ * parsed entry, a schema default included: its one model as OpenCode names it. An agent with no key (the conductor) gets no entry and keeps
+ * the pin it has. A role whose model OpenCode cannot run (an agy/<id>) is in `unsupported`
+ * ({ [name]: reason }) instead: it gets no OpenCode copy, and the copy Sterling wrote earlier is
+ * removed when unedited (planFullAgents; decision settings-redesign-build-shape-one-legacy-to-canonical-config).
+ * A config.json that is missing, unreadable or does not validate
  * yields { refused } with a refused row (P5), and the caller writes no agent.
  */
 export function configuredFullAgentModels(projectDir) {
@@ -1398,6 +1273,7 @@ export function configuredFullAgentModels(projectDir) {
     return leave(`${where} does not validate (${err.message.replace(/\s+/g, ' ')})`);
   }
   const models = {};
+  const unsupported = {};
   for (const name of ROSTER) {
     // resolve the key first: a role without one (the conductor) must never read
     // models['undefined'], which a schema-valid config can carry
@@ -1405,9 +1281,21 @@ export function configuredFullAgentModels(projectDir) {
     if (key === undefined) continue;
     const entry = parsed.models[key];
     if (entry === undefined) continue;
-    models[name] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
+    // the agent's one model (canonical <provider>/<id>; overpass/<tier> maps through overpass.provider)
+    if (typeof entry.model !== 'string') continue;
+    if (!hostRunsModel(entry.model, 'opencode')) {
+      unsupported[name] = `config.models.${key} is ${entry.model}, which OpenCode cannot run`;
+      continue;
+    }
+    models[name] = canonicalOpencodeModelRef(entry.model, parsed.overpass.provider);
   }
-  return { models };
+  // The conductor and the Plan agent take their model from the opencode.json overlay (overpass.mjs), not
+  // a pin, but host fit applies to them the same way: a model OpenCode cannot run gives no copy.
+  for (const [name, key] of [[CONDUCTOR_ROLE, CONDUCTOR_MODEL_KEY], ['plan', PLAN_MODEL_KEY]]) {
+    const model = parsed.models[key]?.model;
+    if (typeof model === 'string' && !hostRunsModel(model, 'opencode')) unsupported[name] = `config.models.${key} is ${model}, which OpenCode cannot run`;
+  }
+  return { models, unsupported };
 }
 
 /** The Sterling plugin root above a module: the nearest directory holding agent-templates/registry.json. */
@@ -1493,16 +1381,16 @@ function frontmatterModel(content) {
  * the model its installed, unedited file already pins. Install and update pass every
  * role config.models governs, so for those roles config.models wins over a pin on disk.
  */
-export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const { rows, writes } = stageFullAgents({ projectDir, pluginRoot, tracked, models });
+export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
+  const { rows, writes } = stageFullAgents({ projectDir, pluginRoot, tracked, models, unsupported });
   writeFullAgentFiles(writes);
   return rows;
 }
 
 /** planFullAgents split into the public rows and the staged writes
  *  [{ path, content, previous }] that writeFullAgentFiles commits. */
-function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models });
+function stageFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models, unsupported });
   return {
     rows: planned.map(({ path, content, previous, ...row }) => row),
     writes: planned.filter((r) => r.content !== undefined).map(({ path, content, previous }) => ({ path, content, previous })),
@@ -1535,7 +1423,10 @@ function fullAgentTargets(registry) {
   return targets;
 }
 
-function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+// `unsupported` ({ [name]: reason }, configuredFullAgentModels) names the roles whose model OpenCode
+// cannot run: such a role gets no copy. An unedited copy Sterling wrote is removed, an edited one is
+// kept and reported, and none is created.
+function planFullAgents({ projectDir, pluginRoot, tracked, models = {}, unsupported = {} }) {
   const registry = loadRegistry(join(pluginRoot, 'agent-templates', 'registry.json'));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd(projectDir), STERLING_ROOT: fwd(pluginRoot) };
@@ -1558,9 +1449,19 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
         continue;
       }
       if (sha256(disk.replace(`${m[0]}\n`, '')) !== m[3]) {
+        if (Object.hasOwn(unsupported, name)) {
+          rows.push(refusal(rel, `${rel} was edited after Sterling wrote it, and ${unsupported[name]}, so Sterling would remove it; it is kept and may still run`, `delete it by hand, or pick a model OpenCode can run in the System tab, then rerun /sterling:update`));
+          continue;
+        }
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (Object.hasOwn(unsupported, name)) {
+      rows.push(disk === null
+        ? { item: rel, status: 'skipped', detail: `${unsupported[name]}; no OpenCode copy is created` }
+        : { item: rel, status: 'removed', detail: `${unsupported[name]}; the copy Sterling wrote is removed`, path, content: null, previous: raw });
+      continue;
     }
     if (unsafe.length) {
       // A skip, not a refusal (user-ruled 2026-10-12, decision
@@ -1592,44 +1493,95 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
 }
 
 /**
- * The System-tab model swap on OpenCode: re-render the project's Sterling-full set,
- * pinning the OpenCode model for the role on every swapped roster agent: the role's
- * `opencodeModel` override when set, else anthropic/<model>. A project whose
- * Sterling-full set was never installed is skipped; nothing is created.
+ * Re-render the project's Sterling-full OpenCode agents from config.models, the same render
+ * setupOpenCode's agent step runs (configuredFullAgentModels, then stageFullAgents). The System
+ * tab calls it after a model change so the OpenCode copies follow at once. A project whose
+ * Sterling-full set was never installed is skipped (nothing is created by it); a config.json that
+ * is refused writes nothing and comes back as { refused }.
  */
-export function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
+export function refreshFullAgentModels({ projectDir, pluginRoot, fs = {} }) {
   if (!existsSync(join(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelFor({ model, opencodeModel });
-  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const configured = configuredFullAgentModels(storeRootFor(projectDir));
+  if (configured.refused) return { refused: configured.refused };
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
-  return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
+  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
+  // `fs` is writeFullAgentFiles' test seam
+  writeFullAgentFiles(staged.writes, fs);
+  // Converges from the current state, not from this run's deletions: every Sterling agent whose model
+  // OpenCode cannot run and whose file is not on disk now (removed by this run or an earlier one) has its
+  // guard-only entry dropped, so a run whose config write failed is finished by the next one.
+  const gone = Object.keys(configured.unsupported ?? {})
+    .filter((name) => ROSTER.includes(name) && !existsSync(join(projectDir, STERLING_AGENTS_SUBDIR, `${name}.md`)))
+    .map((name) => `sterling/${name}`);
+  const configRow = dropGuardOnlyAgentEntries(projectDir, gone, { tracked });
+  return { rows: configRow ? [...staged.rows, configRow] : staged.rows };
 }
 
 /**
- * swapFullAgentModel staged, for a caller that must keep other files in step:
- * every render and every refusal check runs here and nothing is written. Returns
- * { skipped } when the Sterling-full set was never installed, else { rows, writes },
- * where writes is [{ path, content, previous }] for the files the swap would
- * change (previous is null for a file it would create). A caller commits with
- * writeFullAgentFiles and undoes with restoreFullAgentFiles.
+ * Drop the guard-only `agent["<name>"]` entries Sterling wrote into .opencode/opencode.json for
+ * Sterling agents whose file is gone because OpenCode cannot run their model: OpenCode defines an agent from such an entry alone
+ * (ensureProjectConfig, "An entry for a name OpenCode does not otherwise know creates an agent"), so
+ * the agent would stay. An entry that is not exactly Sterling's guard-only one is the user's and is
+ * kept, with a row saying so. setupOpenCode needs none of this: its ensureProjectConfig runs after the
+ * removal and drops the entry of an agent that is no longer visible. Returns a row, or null when
+ * there is nothing to do.
  */
-export function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync(join(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelFor({ model, opencodeModel });
-  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
-  const ls = git(projectDir, ['ls-files', '--', '.opencode']);
-  const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
-  return stageFullAgents({ projectDir, pluginRoot, tracked, models });
+function dropGuardOnlyAgentEntries(projectDir, names, { tracked = [] } = {}) {
+  if (!names.length) return null;
+  const path = join(projectDir, PROJECT_CONFIG_REL);
+  if (!existsSync(path)) return null;
+  const isTracked = tracked.includes(PROJECT_CONFIG_REL);
+  const before = normalize(readFileSync(path, 'utf8'));
+  let config;
+  try {
+    config = JSON.parse(before);
+  } catch (err) {
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: `not valid JSON (${err.message}), so the guard entries of ${names.join(', ')} were NOT removed and OpenCode may still define those agents; fix it, then rerun /sterling:update` };
+  }
+  const agents = config?.agent;
+  if (agents === null || typeof agents !== 'object' || Array.isArray(agents)) return null;
+  const guardOnly = JSON.stringify({ permission: guardPermission(undefined).value });
+  const legacyDeny = { [LEGACY_SHELL_DENIES[0]]: 'deny' };
+  const legacyGuardOnly = JSON.stringify({ permission: { ...guardPermission(undefined).value, shell: legacyDeny, bash: legacyDeny } });
+  const removed = [];
+  const kept = [];
+  for (const name of names) {
+    if (!Object.hasOwn(agents, name)) continue;
+    const text = JSON.stringify(agents[name]);
+    if (text === guardOnly || text === legacyGuardOnly) removed.push(name);
+    else kept.push(name);
+  }
+  const keptNote = kept.length ? `KEPT agent entries ${kept.join(', ')}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone` : null;
+  if (!removed.length) return keptNote ? { item: PROJECT_CONFIG_REL, status: 'skipped', detail: keptNote } : null;
+  if (isTracked) {
+    // A tracked opencode.json is never written by Sterling (decision
+    // overpass-with-a-tracked-opencode-opencode-json-keep-routing): the stranded entries are reported instead.
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: [`NOT written: ${PROJECT_CONFIG_REL} is tracked by git, so the guard-only agent entries of ${removed.join(', ')} stay and OpenCode still defines those agents although their files were removed; remove those entries from it by hand`, keptNote].filter(Boolean).join('; ') };
+  }
+  for (const name of removed) delete agents[name];
+  if (!Object.keys(agents).length) delete config.agent;
+  try {
+    writeFileAtomic(path, projectConfigText(config));
+  } catch (err) {
+    return { item: PROJECT_CONFIG_REL, status: 'skipped', detail: [`could not be rewritten (${err.code ?? err.message}), so the guard-only agent entries of ${removed.join(', ')} stay and OpenCode still defines those agents; fix the cause, then rerun /sterling:update, which removes them`, keptNote].filter(Boolean).join('; ') };
+  }
+  return { item: PROJECT_CONFIG_REL, status: 'refreshed', detail: [`removed the guard-only agent entries of ${removed.join(', ')}, whose agent files are gone`, keptNote].filter(Boolean).join('; ') };
 }
 
-/** Write staged files in order, each atomically, skipping a file that already holds its content. On a failure, the files already
+/** Write staged files in order, each atomically, skipping a file that already holds its content; a write
+ *  whose content is null removes the file. On a failure, the files already
  *  written are put back (restoreFullAgentFiles) and the error is rethrown; a
  *  rollback failure is added to the error message. `fs` is a test seam. */
 export function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
+      if (w.content === null) {
+        rmSync(w.path, { force: true });
+        done.push(w);
+        continue;
+      }
       mkdirSync(dirname(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
@@ -1679,7 +1631,6 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
   const npmCopy = isInstalled && installHostOf(pluginRoot, { env, home }) === 'opencode';
   const rows = installGlobal({ pluginRoot, installed: isInstalled, npmCopy, env, home });
-  rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   let handoff;
@@ -1702,10 +1653,10 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const configured = configuredFullAgentModels(configDir);
   if (configured.refused) rows.push(configured.refused);
   // The agents render first so default_agent is set only when the conductor file is Sterling's.
-  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models ?? {} });
+  const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models ?? {}, unsupported: configured.unsupported ?? {} });
   let agentRows = staged.rows;
   if (configured.refused) {
-    agentRows = agentRows.map((r) => (['created', 'refreshed'].includes(r.status) ? { ...r, status: 'skipped', detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r));
+    agentRows = agentRows.map((r) => (['created', 'refreshed', 'removed'].includes(r.status) ? { ...r, status: 'skipped', detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r));
   } else {
     writeFullAgentFiles(staged.writes);
   }

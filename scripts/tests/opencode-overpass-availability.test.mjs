@@ -27,7 +27,9 @@ before(async () => {
   worker = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'worker.mjs')).href);
 });
 
-const ON = { mode: 'work', overpass: { enabled: true } };
+// Canonical shape (decision overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi): an agent is routed when its
+// one model in config.models is overpass/<tier>. There is no switch and no work-mode gate.
+const ON = { models: { implementor: { model: 'overpass/agentic-auto' }, reviewer: { model: 'overpass/agentic-high' }, 'maintenance-worker': { model: 'overpass/agentic-auto' } } };
 // OpenCode 2.1.2's ctx.model.list() shape: { location, data: [Model.Info] }.
 const model = (providerID, id) => ({ providerID, id, variants: [] });
 const DIRECT = [model('anthropic', 'claude-opus-5-5'), model('openai', 'gpt-6.1-sol')];
@@ -106,7 +108,7 @@ const notices = (dir) => {
   const p = join(dir, server.NOTICES_REL);
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')).map((n) => n.text).join('\n') : '';
 };
-const REMEDIES = [/credential/, /\/reload/, /OVERPASS-BYPASS: <reason>/, /"overpass": \{"enabled": false\}/];
+const REMEDIES = [/credential/, /\/reload/, /choose another model for that agent in config\.models/];
 
 test('provider missing: the session is told Overpass is ON but not available, and a dispatch is refused with the fix steps', async () => {
   const p = makeProject(ON);
@@ -119,17 +121,17 @@ test('provider missing: the session is told Overpass is ON but not available, an
     let input;
     await assert.rejects(
       (async () => {
-        input = { tool: 'subagent', id: 'call_x', sessionID: 'ses_root', input: { agent: 'sterling/implementor', description: 'd', prompt: 'p', model: 'openai/gpt-6.1-sol' } };
+        input = { tool: 'subagent', id: 'call_x', sessionID: 'ses_root', input: { agent: 'sterling/implementor', description: 'd', prompt: 'p' } };
         await s.ctx.hooks.tool['execute.before'](input);
       })(),
       (e) => {
-        assert.match(e.message, /^Sterling refused this subagent dispatch: Overpass is ON but its route overpass\/agentic-auto for sterling\/implementor is not available/);
+        assert.match(e.message, /^Sterling refused this subagent dispatch: the Overpass route overpass\/agentic-auto for sterling\/implementor is not available/);
         assert.match(e.message, /OpenCode lists no model from the provider 'overpass'/);
         for (const re of REMEDIES) assert.match(e.message, re);
         return true;
       }
     );
-    assert.equal(input.input.model, 'openai/gpt-6.1-sol', 'a refused call is stopped, not rerouted');
+    assert.equal(Object.hasOwn(input.input, 'model'), false, 'a refused call is stopped, not rerouted');
     assert.match(notices(p.dir) + readFileSync(join(p.dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8'), /route overpass\/agentic-auto/, 'the refusal is logged');
   } finally {
     await s.cleanup();
@@ -168,7 +170,7 @@ test('inventory timeout or failure: UNKNOWN on the session, and the dispatch goe
     assert.match(text, /Overpass ON, availability UNKNOWN/);
     assert.match(text, /timed out after 30 ms/);
     assert.doesNotMatch(text, /not available|Overpass: OFF/);
-    const sent = await s.dispatch({ model: 'openai/gpt-6.1-sol' });
+    const sent = await s.dispatch({});
     assert.equal(sent.args.model, 'overpass/agentic-auto');
     assert.match(sent.result, /Overpass availability UNKNOWN: OpenCode's model list could not be read \(the model list timed out after 30 ms\); this dispatch was sent to overpass\/agentic-auto unchecked/);
 
@@ -190,13 +192,13 @@ test('inventory timeout or failure: UNKNOWN on the session, and the dispatch goe
   }
 });
 
-test('OVERPASS-BYPASS with a loaded model runs while the Overpass provider is missing', async () => {
+test('a call that names its own loaded model runs while the Overpass provider is missing (a pin is not checked)', async () => {
   const p = makeProject(ON);
   const s = await setup(p.dir, DIRECT);
   try {
-    const sent = await s.dispatch({ model: 'openai/gpt-6.1-sol', prompt: 'Review it.\nOVERPASS-BYPASS: Sol review lane' });
+    const sent = await s.dispatch({ model: 'openai/gpt-6.1-sol', prompt: 'Review it.' });
     assert.equal(sent.args.model, 'openai/gpt-6.1-sol');
-    assert.match(sent.result, /OVERPASS-BYPASS: Overpass bypassed for this dispatch/);
+    assert.match(sent.result, /MODEL: kept openai\/gpt-6\.1-sol as the call named/);
     assert.doesNotMatch(sent.result, /refused|not available/);
   } finally {
     await s.cleanup();
@@ -225,7 +227,7 @@ test('recovery: once the tier model is listed, the next dispatch runs and the se
 });
 
 test('session line: shown once per session per state, never while Overpass is off or every route is loaded', async () => {
-  for (const [config, data] of [[{ mode: 'work' }, DIRECT], [ON, [...DIRECT, ...TIERS]]]) {
+  for (const [config, data] of [[{}, DIRECT], [ON, [...DIRECT, ...TIERS]]]) {
     const p = makeProject(config);
     const s = await setup(p.dir, data);
     try {
@@ -264,8 +266,8 @@ test('worker launch: a missing maintenance-worker route skips the launch with a 
     launchWorkerFor(p.dir, '2026-11-17T10:00:00.000Z');
     assert.deepEqual(launches, []);
     const text = notices(p.dir);
-    assert.match(text, /the maintenance worker did not run: Overpass is ON but its route overpass\/agentic-auto for the maintenance worker is not available/);
-    for (const re of [/credential/, /\/reload/, /"overpass": \{"enabled": false\}/]) assert.match(text, re);
+    assert.match(text, /the maintenance worker did not run: its Overpass route overpass\/agentic-auto is not available/);
+    for (const re of [/credential/, /\/reload/, /choose another model for that agent in config\.models/]) assert.match(text, re);
 
     inventory = overpass.readInventory({ list: TIERS });
     launchWorkerFor(p.dir, '2026-11-17T10:01:00.000Z');
@@ -283,7 +285,10 @@ test('worker launch: a missing maintenance-worker route skips the launch with a 
 });
 
 test('worker launch through settlement: the plugin reads the model list before it settles and skips a worker whose route is missing', async () => {
-  const p = makeProject(ON, { withGit: true });
+  // The legacy shape (work mode, enabled): settlement still parses config.json with the legacy configSchema, which
+  // refuses an overpass/<tier> model in config.models (reported to the conductor), so this path is pinned through the
+  // legacy-to-canonical transform, which gives the maintenance worker its tier.
+  const p = makeProject({ mode: 'work', overpass: { enabled: true } }, { withGit: true });
   const launches = [];
   const s = await setup(p.dir, DIRECT, { launchWorker: (o) => launches.push(o), opencodeBin: () => '/opt/opencode/bin/opencode' });
   try {
@@ -291,7 +296,7 @@ test('worker launch through settlement: the plugin reads the model list before i
     await s.plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
     await s.plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
     assert.deepEqual(launches, []);
-    assert.match(notices(p.dir), /the maintenance worker did not run: Overpass is ON but its route overpass\/agentic-auto/);
+    assert.match(notices(p.dir), /the maintenance worker did not run: its Overpass route overpass\/agentic-auto/);
     s.inventory.data = TIERS;
     await s.plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
     assert.equal(launches.length, 1, 'the next settlement after the route loads launches the worker');

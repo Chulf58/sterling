@@ -5246,9 +5246,9 @@ export class SterlingStore {
    * Keep the models catalog covering every model the System tab pickers must offer
    * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
    * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
-   * models (each role's `model`, and its `opencode_model` and the maintenance worker's
-   * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
-   * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+   * models (each agent's one canonical `model`, <provider>/<id>; overpass/ and agy/ models are
+   * not catalog models, and the maintenance worker's legacy `opencode_model` when a
+   * <provider>/<model> string) and the maintenance worker's Claude model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
    * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
    * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
    * edited or removed, and nothing is written when nothing is missing. The read-modify-write
@@ -5264,13 +5264,17 @@ export class SterlingStore {
         | undefined;
 
     const cfg = config as {
-      models?: Record<string, { model?: string; opencode_model?: string } | null | undefined>;
+      models?: Record<string, { model?: string } | null | undefined>;
       maintenance_worker?: { opencode_model?: unknown } | null;
     };
     const claude = new Set<string>([MAINTENANCE_WORKER_CLAUDE_MODEL]);
     const refs = new Set<string>();
     const addPins = (v: { model?: string; opencode_model?: unknown } | null | undefined): void => {
-      if (v?.model) claude.add(v.model);
+      if (typeof v?.model === 'string') {
+        if (!v.model.includes('/')) claude.add(v.model);
+        else if (v.model.startsWith('anthropic/')) claude.add(v.model.slice('anthropic/'.length));
+        else if (!v.model.startsWith('overpass/') && !v.model.startsWith('agy/') && OPENCODE_MODEL_REF_RE.test(v.model)) refs.add(v.model);
+      }
       if (typeof v?.opencode_model === 'string' && OPENCODE_MODEL_REF_RE.test(v.opencode_model)) refs.add(v.opencode_model);
     };
     for (const v of Object.values(parseConfig({}).models)) addPins(v);

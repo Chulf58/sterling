@@ -8,7 +8,7 @@ var __export = (target, all) => {
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID8, createHash as createHash6 } from "node:crypto";
 import { spawn, spawnSync as spawnSync8 } from "node:child_process";
-import { readFileSync as readFileSync17, writeFileSync as writeFileSync10, writeSync as writeSync3, rmSync as rmSync8, existsSync as existsSync14, mkdirSync as mkdirSync12, renameSync as renameSync9 } from "node:fs";
+import { readFileSync as readFileSync16, writeFileSync as writeFileSync10, writeSync as writeSync2, rmSync as rmSync8, existsSync as existsSync14, mkdirSync as mkdirSync11, renameSync as renameSync9 } from "node:fs";
 import { join as join22, basename as basename4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5165,7 +5165,6 @@ var ProjectIdentityError = class extends Error {
     this.name = "ProjectIdentityError";
   }
 };
-var CONFIG_REL = ".sterling/config.json";
 var PROJECT_IDENTITY_REL = ".sterling/project.json";
 var fwd = (p) => p.replace(/\\/g, "/");
 var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -5217,12 +5216,6 @@ function judgeProjectMode(mode, where) {
   }
   return mode;
 }
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0)
-    return "hobby";
-  return judgeProjectMode(parsed.mode, where);
-}
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
   if (parsed === void 0)
@@ -5249,6 +5242,11 @@ var agentModelEntry = external_exports.object({
   opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
   agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
+var CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+function isCustomAgentKey(key) {
+  return CUSTOM_AGENT_KEY_RE.test(key);
+}
+var customAgentEntry = agentModelEntry.partial();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
   anthropic: modelPin.optional()
@@ -5458,7 +5456,17 @@ var configSchema = external_exports.object({
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
     preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
-  }).catchall(agentModelEntry).default({}),
+  }).catchall(customAgentEntry).superRefine((models, ctx) => {
+    for (const [key, entry] of Object.entries(models)) {
+      if (isCustomAgentKey(key))
+        continue;
+      const e = entry;
+      for (const field of ["model", "effort"]) {
+        if (e[field] === void 0)
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, field], message: "Required" });
+      }
+    }
+  }).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -5661,31 +5669,12 @@ var configSchema = external_exports.object({
     // three-state guard used for other config-derived delivery values.
     total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
-  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-  // whether the automatic consult moments (design/review/gate second opinions via
-  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern (every field has a default; an absent
-  // block still parses) — a project without the
-  // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-  // — this field never stands in for that absence, only for a deliberate OFF.
-  sparring_partner: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    // Which vendor's model the consult runs on (decision
-    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-    // 'openai' is the behaviour before the setting existed.
-    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-    // The model pinned per vendor. Absent = no pin (the host's default). The
-    // old sparring_partner.model is converted to models.openai by
-    // normalizeRawConfig, before this schema strips unknown keys. The default
-    // ships no pin: the decision names no model per vendor.
-    models: vendorPins
-  }).default({}),
+  // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+  // Sterling's Codex integration is gone and the legacy transform drops the key.
   // Reviews (same decision): the vendor policy and the model pinned per vendor.
   // cross_vendor = the other family than the model that wrote the diff; openai
   // and anthropic force one vendor even when that makes reviewer and author the
-  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  // same family (user-ruled 2026-10-03). Ships no pin.
   review: external_exports.object({
     policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
     models: vendorPins
@@ -5693,7 +5682,7 @@ var configSchema = external_exports.object({
   // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-  // Mirrors sparring_partner's additive-optional shape exactly — an absent
+  // An additive-optional shape — an absent
   // block still parses with {enabled: true}, and an unknown field inside the
   // block strips silently rather than refusing (forward-compat, non-strict).
   // OFF silences only the automatic default posture: an explicit user ask
@@ -5720,6 +5709,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5786,7 +5780,106 @@ var configSchema = external_exports.object({
   // Written by sync and init only.
   applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
+var DEFAULT_OVERPASS_PROVIDER = "overpass";
+var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+var MAINTENANCE_WORKER_ROLE = "maintenance-worker";
 var MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
+var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
+var DEFAULT_OVERPASS_TIER = "agentic-high";
+var DEFAULT_OVERPASS_ROLE_TIERS = {
+  implementor: "agentic-auto",
+  "implementor-hard": "agentic-premium",
+  researcher: DEFAULT_OVERPASS_TIER,
+  scout: "agentic-auto",
+  reviewer: DEFAULT_OVERPASS_TIER,
+  librarian: "agentic-auto",
+  sparring: "agentic-premium-max",
+  preflight: "agentic-auto",
+  "maintenance-worker": "agentic-auto"
+};
+var DEFAULT_OVERPASS_ROLE_EFFORTS = {
+  implementor: "medium",
+  "implementor-hard": "xhigh",
+  scout: "high",
+  librarian: "high",
+  sparring: "xhigh",
+  preflight: "high",
+  "maintenance-worker": "high"
+};
+var OverpassUnknownRoleError = class extends Error {
+  role;
+  constructor(role) {
+    super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+    this.name = "OverpassUnknownRoleError";
+    this.role = role;
+  }
+};
+function resolveOverpassRoles(raw, provider) {
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
+  }
+  const block = raw ?? {};
+  for (const key of Object.keys(block)) {
+    if (!OVERPASS_ROLES.includes(key)) {
+      throw new OverpassUnknownRoleError(key);
+    }
+  }
+  const out = {};
+  for (const role of OVERPASS_ROLES) {
+    const entry = block[role];
+    if (entry !== void 0 && !isPlainObject(entry)) {
+      throw new Error(`config.overpass.roles.${role} is ${JSON.stringify(entry)} \u2014 it must be an object with an optional "tier" and "effort"`);
+    }
+    const fields = entry ?? {};
+    for (const key of Object.keys(fields)) {
+      if (key !== "tier" && key !== "effort")
+        throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} \u2014 only "tier" and "effort" are allowed`);
+    }
+    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
+    if (typeof tier !== "string" || !OVERPASS_TIER_RE.test(tier)) {
+      throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} \u2014 it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
+    }
+    const effort = fields.effort;
+    if (effort !== void 0 && (typeof effort !== "string" || !OVERPASS_EFFORTS.includes(effort))) {
+      throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} \u2014 it must be one of ${OVERPASS_EFFORTS.join(", ")}`);
+    }
+    const chosen = effort ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
+  }
+  return out;
+}
+function resolveOverpass(config, opts) {
+  const cfg = isPlainObject(config) ? config : {};
+  const raw = cfg.overpass;
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} \u2014 it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === void 0 ? false : block.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === void 0 ? true : block.conductor_bypass;
+  if (typeof bypass !== "boolean") {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
+  }
+  const provider = block.provider === void 0 ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const roles = resolveOverpassRoles(block.roles, provider);
+  const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
+  if (!enabled)
+    return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts.host !== "opencode")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
+  return { ...base2, effective: true, conductorRouted: !bypass };
+}
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -5802,20 +5895,6 @@ function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
   let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -5840,8 +5919,252 @@ function migrateStaleAgyModels(raw) {
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
+  return parseCanonicalConfig(raw);
 }
+var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
+var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
+var CONDUCTOR_MODEL_KEY = "conductor";
+var PLAN_MODEL_KEY = "plan";
+var MERGE_PATHS = ["direct", "pr"];
+var MIN_REVIEWERS = 1;
+var MAX_REVIEWERS = 5;
+var canonicalModelEntry = external_exports.object({
+  model: external_exports.string().regex(MODEL_REF_RE, "model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto"),
+  effort: external_exports.enum(OVERPASS_EFFORTS).optional()
+}).strict();
+var canonicalModelsSchema = external_exports.object({
+  implementor: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  "implementor-hard": canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  researcher: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  scout: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" }),
+  librarian: canonicalModelEntry.default({ model: "anthropic/claude-haiku-5-5", effort: "low" }),
+  reviewer: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  sparring: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  preflight: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" })
+}).catchall(canonicalModelEntry.partial()).superRefine((models, ctx) => {
+  for (const [key, entry] of Object.entries(models)) {
+    const e = entry;
+    if (e.model === void 0) {
+      if (e.effort === "max")
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+      if (!isCustomAgentKey(key))
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: "Required" });
+      continue;
+    }
+    const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+    if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
+    }
+    if (e.effort === "max" && overpassTier === null) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+    }
+  }
+}).default({});
+var workflowSchema = external_exports.object({
+  merge: external_exports.enum(MERGE_PATHS).default("direct"),
+  reviewers: external_exports.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+  copilot_loop: external_exports.boolean().default(false),
+  auto_merge_on_clean: external_exports.boolean().default(true)
+}).strict().default({});
+var canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
+var canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
+  models: canonicalModelsSchema,
+  workflow: workflowSchema,
+  overpass: canonicalOverpassSchema,
+  // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+});
+var CANONICAL_RETIRED_KEYS = ["mode", "sparring_partner"];
+var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) => {
+  if (!isPlainObject(raw))
+    return;
+  for (const key of CANONICAL_RETIRED_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(raw, key))
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key], message: `${key} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+  }
+  if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, "auto_merge_on_clean")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
+  }
+}).pipe(canonicalConfigObject);
+var LegacyConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LegacyConfigError";
+  }
+};
+var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+var LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
+function toCanonicalConfig(legacy, opts = {}) {
+  if (!isPlainObject(legacy))
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
+  const raw = normalizeRawConfig(legacy);
+  const out = { ...raw };
+  const changes = [];
+  const conflicts = [];
+  const origins = {};
+  const resolutions = opts.resolutions ?? {};
+  const mode = judgeProjectMode(raw.mode, "the config");
+  let autoMerge;
+  if (raw.pr_review !== void 0) {
+    if (!isPlainObject(raw.pr_review))
+      throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} \u2014 it must be an object`);
+    if (has(raw.pr_review, "auto_merge_on_clean")) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== "boolean")
+        throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} \u2014 it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === void 0) {
+    const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  }
+  if (autoMerge !== void 0)
+    changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
+  if (has(raw, "mode")) {
+    delete out.mode;
+    changes.push({ path: "mode", was: raw.mode });
+  }
+  let overpass = null;
+  if (raw.overpass !== void 0) {
+    if (!isPlainObject(raw.overpass))
+      throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} \u2014 it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: "opencode" });
+      const kept = {};
+      for (const [k, v] of Object.entries(block)) {
+        if (LEGACY_OVERPASS_KEYS.includes(k))
+          changes.push({ path: `overpass.${k}`, was: v });
+        else
+          kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+  const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return { config: out, conflicts, changes, origins };
+  const models = { ...raw.models ?? {} };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry))
+      continue;
+    const next = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === "model" || k === "effort" || k === "opencode_model")
+        continue;
+      if (k === "agy_model" || k === "hard_task") {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v;
+    }
+    const claude = typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model)
+      changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== void 0) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === void 0 || opencode === claude) {
+        model = opencode;
+      } else if (resolutions[role] !== void 0) {
+        model = resolutions[role] === "claude" ? claude : opencode;
+      } else if (!(effective && OVERPASS_ROLES.includes(role))) {
+        const effort = typeof entry.effort === "string" ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: "opencode" });
+        model = opencode;
+      }
+    }
+    if (model !== void 0)
+      next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
+    if (entry.effort !== void 0)
+      next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : void 0;
+    const claude = isPlainObject(entry) && typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : void 0;
+    const answered = isPlainObject(entry) && entry.opencode_model !== void 0 && claude !== void 0 && entry.opencode_model !== claude;
+    if (!answered)
+      throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+      origins[`models.${role}`] = "overpass";
+    }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: void 0, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, "opencode_model")) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === "string" && old.trim() !== "") {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== "string") {
+        const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: "maintenance_worker.opencode_model", was: old });
+    }
+  }
+  if (modelsChanged)
+    out.models = models;
+  if (has(raw, "sparring_partner")) {
+    delete out.sparring_partner;
+    changes.push({ path: "sparring_partner", was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes, origins };
+}
+function parseCanonicalConfig(raw) {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
+
+// packages/schemas/dist/custom-agents.js
+var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
+var AGENT_HOST_CAPABILITIES = Object.freeze({
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
+});
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -11936,9 +12259,9 @@ var SterlingStore = class _SterlingStore {
    * Keep the models catalog covering every model the System tab pickers must offer
    * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
    * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
-   * models (each role's `model`, and its `opencode_model` and the maintenance worker's
-   * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
-   * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+   * models (each agent's one canonical `model`, <provider>/<id>; overpass/ and agy/ models are
+   * not catalog models, and the maintenance worker's legacy `opencode_model` when a
+   * <provider>/<model> string) and the maintenance worker's Claude model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
    * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
    * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
    * edited or removed, and nothing is written when nothing is missing. The read-modify-write
@@ -11951,8 +12274,14 @@ var SterlingStore = class _SterlingStore {
     const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
     const refs = /* @__PURE__ */ new Set();
     const addPins = (v) => {
-      if (v?.model)
-        claude.add(v.model);
+      if (typeof v?.model === "string") {
+        if (!v.model.includes("/"))
+          claude.add(v.model);
+        else if (v.model.startsWith("anthropic/"))
+          claude.add(v.model.slice("anthropic/".length));
+        else if (!v.model.startsWith("overpass/") && !v.model.startsWith("agy/") && OPENCODE_MODEL_REF_RE.test(v.model))
+          refs.add(v.model);
+      }
       if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
         refs.add(v.opencode_model);
     };
@@ -12385,7 +12714,7 @@ var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
 var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
-var CONFIG_REL2 = ".sterling/config.json";
+var CONFIG_REL = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
     super(message);
@@ -12411,7 +12740,7 @@ function routedCredentialsPath() {
   return join7(homedir3(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join7(root, CONFIG_REL2);
+  const path = join7(root, CONFIG_REL);
   try {
     lstatSync3(path);
   } catch (e) {
@@ -12999,16 +13328,16 @@ function openRoutedForHook(root, { mount = false } = {}) {
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync3, readFileSync as readFileSync5 } from "node:fs";
 import { join as join8 } from "node:path";
-var CONFIG_REL3 = join8(".sterling", "config.json");
+var CONFIG_REL2 = join8(".sterling", "config.json");
 var STORE_DB_REL = join8(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync3(join8(dir, CONFIG_REL3)) || existsSync3(join8(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync3(join8(dir, CONFIG_REL2)) || existsSync3(join8(dir, STORE_DB_REL)));
 }
 function storeBackend(root) {
   const dbExists = () => existsSync3(join8(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync5(join8(root, CONFIG_REL3), "utf8");
+    text = readFileSync5(join8(root, CONFIG_REL2), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -14743,21 +15072,8 @@ function publishNotice(cwd, text, { sessionId } = {}) {
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
-// scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync, constants } from "node:fs";
-var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
-
-// scripts/lib/handoff-projection.mjs
-var HANDOFF_DOCS_DIR = "docs/sterling";
-var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
-var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
-     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
-     your commit message rather than editing it. -->`;
-var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
-var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
-
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync11, linkSync as linkSync2, mkdirSync as mkdirSync10, readdirSync as readdirSync5, readFileSync as readFileSync14, renameSync as renameSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync11, linkSync as linkSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync4, readFileSync as readFileSync13, renameSync as renameSync7, unlinkSync, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname13, join as join19 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
@@ -14775,7 +15091,7 @@ function parsePrLoopFile(file, rel) {
 function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
-    s2 = JSON.parse(readFileSync14(file, "utf8"));
+    s2 = JSON.parse(readFileSync13(file, "utf8"));
   } catch (e) {
     throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
@@ -14793,7 +15109,7 @@ function readPrLoopEntries(root) {
   const entries = [];
   const dir = join19(root, PR_LOOPS_DIR_REL);
   if (existsSync11(dir)) {
-    for (const name of readdirSync5(dir).sort()) {
+    for (const name of readdirSync4(dir).sort()) {
       const m = name.match(/^(\d+)\.json$/);
       if (!m) continue;
       const rel = prLoopFileRel(m[1]);
@@ -14811,29 +15127,11 @@ function readPrLoopEntries(root) {
 function readPrLoops(root) {
   return readPrLoopEntries(root).map((e) => e.state).sort((a, b) => a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number);
 }
-function prLoopStateExists(root) {
-  if (existsSync11(prLoopPath(root))) return true;
-  const dir = join19(root, PR_LOOPS_DIR_REL);
-  return existsSync11(dir) && readdirSync5(dir).some((n) => /^\d+\.json$/.test(n));
-}
 
 // scripts/hooks/lib/pr-loop-duty.mjs
 var errMessage = (e) => String(e && e.message || e);
 var LOOP_FILES = `${PR_LOOPS_DIR_REL}/ or ${PR_LOOP_REL}`;
 function evaluatePrLoops(root) {
-  let mode;
-  try {
-    mode = readProjectMode(root);
-  } catch (e) {
-    if (prLoopStateExists(root)) {
-      return {
-        states: [],
-        degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 PR loop state exists (${LOOP_FILES}) but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
-      };
-    }
-    return { states: [], degraded: null };
-  }
-  if (mode !== "work") return { states: [], degraded: null };
   let loops;
   try {
     loops = readPrLoops(root);
@@ -14850,13 +15148,13 @@ function prLoopNext(state, waitScript, { host = "claude-code" } = {}) {
   const wait = host === "opencode" ? `wait with node "${waitScript}" ${state.pr_url} (add --request-copilot on the first wait after a push) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &` : `wait with node "${waitScript}" ${state.pr_url} (background)`;
   return `run the pr-review-loop skill: ${wait}, disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated|closed> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
 }
-var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
+var prLoopOwedText = (state, next) => `\u2022 PR review loop owed: PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
 var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync6, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync6, readFileSync as readFileSync15, renameSync as renameSync8, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
+import { closeSync as closeSync5, existsSync as existsSync12, mkdirSync as mkdirSync10, openSync as openSync5, readFileSync as readFileSync14, renameSync as renameSync8, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync7, writeFileSync as writeFileSync9, appendFileSync } from "node:fs";
 import { dirname as dirname14, isAbsolute as isAbsolute3, join as join20, resolve as resolve8, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -14873,6 +15171,15 @@ var OPENCODE_ALLOWED_TOOLS = [
 ];
 
 // scripts/hooks/lib/maintenance-worker.mjs
+var WORKER_MODEL_KEY = "maintenance-worker";
+function workerModelOf(config) {
+  const e = config?.models?.[WORKER_MODEL_KEY];
+  if (e === void 0) return null;
+  if (e === null || typeof e !== "object" || typeof e.model !== "string" || !e.model.trim() || e.effort !== void 0 && typeof e.effort !== "string") {
+    return { error: `config.models.${WORKER_MODEL_KEY} must be {"model": "<provider>/<id>", "effort"?: "<level>"}, got ${JSON.stringify(e)}` };
+  }
+  return { model: e.model.includes("/") ? e.model : `anthropic/${e.model}`, ...e.effort === void 0 ? {} : { effort: e.effort } };
+}
 var WORKER_RUN_BUDGET_USD = 5;
 var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing", "retired_term_use"];
 var RUN_BATCH_MAX = 12;
@@ -14941,7 +15248,7 @@ function pluginRootFrom(moduleUrl = import.meta.url) {
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync15(path, "utf8"));
+    return JSON.parse(readFileSync14(path, "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     return { unreadable: String(e?.message ?? e) };
@@ -14961,7 +15268,7 @@ function journalLines(root, files = null) {
   for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
-      text = readFileSync15(path, "utf8");
+      text = readFileSync14(path, "utf8");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
       throw e;
@@ -15105,7 +15412,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   if (!tryCreate()) {
     if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
     try {
-      mkdirSync11(paths.takeover);
+      mkdirSync10(paths.takeover);
     } catch (e) {
       if (e?.code !== "EEXIST") throw e;
       let age = 0;
@@ -15133,7 +15440,7 @@ function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
   const path = join20(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync15(path, "utf8"));
+    parsed = JSON.parse(readFileSync14(path, "utf8"));
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
@@ -15148,7 +15455,7 @@ function resolveMcpConfig(pluginRoot2, projectRoot, policy = null) {
 function readWorkerPrompt(pluginRoot2) {
   const path = join20(pluginRoot2, "templates", "maintenance-worker-prompt.md");
   try {
-    return readFileSync15(path, "utf8");
+    return readFileSync14(path, "utf8");
   } catch (e) {
     throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
   }
@@ -15159,12 +15466,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync11(dirname14(state), { recursive: true });
+  mkdirSync10(dirname14(state), { recursive: true });
   writeFileSync9(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync11(dirname14(log), { recursive: true });
+  mkdirSync10(dirname14(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -15300,19 +15607,19 @@ function launchWorker(opts) {
       const target = debtOwnerRecord(opts.store, t);
       const standing = verdicts.get(t.id);
       const tree = treeFor(target);
-      let own;
+      let own2;
       let siblingsPayable = true;
-      if (tree.unresolved) own = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
+      if (tree.unresolved) own2 = { payable: false, conductor: true, holds: [{ hold: "conductor", why: tree.unresolved }] };
       else {
-        own = prove(t, tree.root, tree.head, { prefix: tree.prefix });
+        own2 = prove(t, tree.root, tree.head, { prefix: tree.prefix });
         for (const s2 of linked.get(target?.id ?? t.feature_link) ?? []) if (s2.id !== t.id && !prove(s2, tree.root, tree.head, { prefix: tree.prefix }).payable) siblingsPayable = false;
       }
-      if (own.conductor) {
-        conductorHolds.push({ t, target, p: own });
+      if (own2.conductor) {
+        conductorHolds.push({ t, target, p: own2 });
         return false;
       }
       if (standing && isProvenanceVerdict(standing) && standing.verdict === "needs_conductor") cleared.push(t);
-      if (own.payable && siblingsPayable) return true;
+      if (own2.payable && siblingsPayable) return true;
       waiting.push(t.id);
       return false;
     });
@@ -15334,7 +15641,12 @@ function launchWorker(opts) {
     }
     const host = opts.host ?? "claude";
     if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: "error", detail: failDetail(`unknown runner host '${host}'`) };
-    const model = opts.workerModel ?? opencodeModelOf(opts.config);
+    const own = workerModelOf(opts.config);
+    if (own?.error) return { launched: false, reason: "error", detail: failDetail(own.error) };
+    if (host === "claude" && own && !own.model.startsWith("anthropic/")) {
+      return { launched: false, reason: "error", detail: failDetail(`config.models.${WORKER_MODEL_KEY} is ${own.model}, which the Claude Code runner cannot run; it runs only through OpenCode`) };
+    }
+    const model = opts.workerModel ?? (own && !own.model.startsWith("overpass/") ? own.model : opencodeModelOf(opts.config));
     if (host === "opencode") {
       if (typeof opts.opencodeBin !== "string" || !opts.opencodeBin) return { launched: false, reason: "error", detail: failDetail("the opencode host needs the path of the opencode binary") };
       if (model === null) return { launched: false, reason: "error", detail: failDetail(OPENCODE_MODEL_UNSET) };
@@ -15346,7 +15658,7 @@ function launchWorker(opts) {
     readWorkerPrompt(pluginRoot2);
     const runner = join20(pluginRoot2, "bin", "maintenance-worker-run.mjs");
     if (!existsSync12(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync11(dirname14(paths.lock), { recursive: true });
+    mkdirSync10(dirname14(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
@@ -15355,7 +15667,8 @@ function launchWorker(opts) {
     let logFd;
     try {
       writeFileSync9(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : {} } : { host };
+      const ownEffort = opts.workerModel === void 0 && own?.effort ? { opencode_variant: own.effort } : {};
+      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : ownEffort } : { host, ...own ? { claude_model: own.model.slice("anthropic/".length), ...own.effort ? { claude_effort: own.effort } : {} } : {} };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
       const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));
@@ -15404,7 +15717,7 @@ function launchWorker(opts) {
         })
       );
       rotateIfLarge(paths.log);
-      logFd = openSync6(paths.log, "a");
+      logFd = openSync5(paths.log, "a");
       stage = "spawn";
       const child = opts.spawn(
         process.execPath,
@@ -15420,7 +15733,7 @@ function launchWorker(opts) {
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
-      if (logFd !== void 0) closeSync6(logFd);
+      if (logFd !== void 0) closeSync5(logFd);
       if (!launched) releaseLock(paths, token);
     }
   } catch (e) {
@@ -15447,7 +15760,7 @@ var TOOLS_MISSING_RE = new RegExp(
 
 // scripts/hooks/lib/session-duties.mjs
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync13, readFileSync as readFileSync16, readdirSync as readdirSync6 } from "node:fs";
+import { existsSync as existsSync13, readFileSync as readFileSync15, readdirSync as readdirSync5 } from "node:fs";
 import { join as join21 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
@@ -15581,7 +15894,7 @@ function readKnowledgeWrites(root) {
   const errorText2 = (e) => e && typeof e.code === "string" && e.code || "unknown error";
   let names;
   try {
-    names = readdirSync6(join21(root, KNOWLEDGE_WRITES_DIR_REL));
+    names = readdirSync5(join21(root, KNOWLEDGE_WRITES_DIR_REL));
   } catch (e) {
     if (e && e.code === "ENOENT") return { latestAt, unreadable };
     unreadable.push({ file: KNOWLEDGE_WRITES_DIR_REL, error: errorText2(e) });
@@ -15592,7 +15905,7 @@ function readKnowledgeWrites(root) {
     const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
     let text;
     try {
-      text = readFileSync16(join21(root, file), "utf8");
+      text = readFileSync15(join21(root, file), "utf8");
     } catch (e) {
       if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText2(e) });
       continue;
@@ -15732,7 +16045,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   const recentTouches = [];
   for (const f of [touchesFile, `${touchesFile}.claim`]) {
     try {
-      if (existsSync14(f)) recentTouches.push(...parseTouchesContent(readFileSync17(f, "utf8")));
+      if (existsSync14(f)) recentTouches.push(...parseTouchesContent(readFileSync16(f, "utf8")));
     } catch {
     }
   }
@@ -15756,7 +16069,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   }
   if (stampIds.size) {
     try {
-      mkdirSync12(join22(cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync11(join22(cwd, ".sterling", "transient"), { recursive: true });
       await withRegisterLock(
         cwd,
         () => {
@@ -15768,7 +16081,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
             }
           }
           const transient = join22(cwd, ".sterling", "transient");
-          mkdirSync12(transient, { recursive: true });
+          mkdirSync11(transient, { recursive: true });
           const tmpPath = join22(transient, `${basename4(registerPath2)}.tmp-${process.pid}`);
           writeFileSync10(tmpPath, JSON.stringify(fresh));
           renameSync9(tmpPath, registerPath2);
@@ -15846,7 +16159,7 @@ try {
     try {
       const pluginDir = pluginRoot(import.meta.url);
       if (!pluginDir) return { error: "the Sterling plugin root was not found" };
-      const raw = JSON.parse(readFileSync17(join22(pluginDir, "templates", "context-windows.json"), "utf8"));
+      const raw = JSON.parse(readFileSync16(join22(pluginDir, "templates", "context-windows.json"), "utf8"));
       if (!raw || typeof raw.windows !== "object" || raw.windows === null || Array.isArray(raw.windows)) {
         return { error: 'templates/context-windows.json has no "windows" object' };
       }
@@ -15905,7 +16218,7 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...sourceFields, at: now };
         }
       }
-      mkdirSync12(join22(input.cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync11(join22(input.cwd, ".sterling", "transient"), { recursive: true });
       writeFileSync10(join22(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
@@ -15938,7 +16251,7 @@ try {
   const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${defaultWindowNote()}${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync17(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync16(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
@@ -15948,7 +16261,7 @@ try {
   const gaugeMarker = join22(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync17(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync16(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
@@ -15958,7 +16271,7 @@ try {
   const sharedWarnMarker = join22(input.cwd, ".sterling", "transient", "shared-windows-warned.json");
   const sharedWarnSpent = () => {
     try {
-      return JSON.parse(readFileSync17(sharedWarnMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync16(sharedWarnMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
@@ -15971,7 +16284,7 @@ try {
       const buf = Buffer.from(text, "utf8");
       let off = 0;
       while (off < buf.length) {
-        const n = writeSync3(2, buf, off, buf.length - off);
+        const n = writeSync2(2, buf, off, buf.length - off);
         if (!(n > 0)) throw new Error("fd 2 wrote nothing");
         off += n;
       }
@@ -16047,7 +16360,7 @@ try {
       let orphanedTouches = [];
       if (existsSync14(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync17(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync16(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
@@ -16055,7 +16368,7 @@ try {
       let freshTouches = [];
       try {
         renameSync9(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync17(touchesClaimPath, "utf8"));
+        freshTouches = parseTouchesContent(readFileSync16(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
@@ -16103,7 +16416,7 @@ try {
   let sessionEvents = [];
   try {
     if (existsSync14(eventsPath)) {
-      const raw = JSON.parse(readFileSync17(eventsPath, "utf8"));
+      const raw = JSON.parse(readFileSync16(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
@@ -16222,7 +16535,7 @@ try {
   const deferralNoted = (() => {
     if (!deferralKey || !hasSession) return false;
     try {
-      const raw = JSON.parse(readFileSync17(deferralNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync16(deferralNotedPath, "utf8"));
       return raw.session_id === input.session_id && raw.key === deferralKey;
     } catch {
       return false;
@@ -16246,7 +16559,7 @@ try {
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
-      const raw = JSON.parse(readFileSync17(dispatchUnknownNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync16(dispatchUnknownNotedPath, "utf8"));
       if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
       if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
       return new Set(raw.keys);
@@ -16298,7 +16611,7 @@ try {
     if (!state) return null;
     const spent = (() => {
       try {
-        const m = JSON.parse(readFileSync17(prLoopNaggedPath, "utf8"));
+        const m = JSON.parse(readFileSync16(prLoopNaggedPath, "utf8"));
         return hasSession && m.session_id === input.session_id && m.armed_at === state.armed_at;
       } catch {
         return false;
@@ -16383,7 +16696,7 @@ try {
   const graceSpentIds = (() => {
     if (!existsSync14(nagMarker)) return /* @__PURE__ */ new Set();
     try {
-      const m = JSON.parse(readFileSync17(nagMarker, "utf8"));
+      const m = JSON.parse(readFileSync16(nagMarker, "utf8"));
       return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
     } catch {
       return null;
@@ -16702,7 +17015,7 @@ try {
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
-        const raw = JSON.parse(readFileSync17(dutyNaggedMarker, "utf8"));
+        const raw = JSON.parse(readFileSync16(dutyNaggedMarker, "utf8"));
         if (raw.session_id !== input.session_id) return null;
         if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
         return raw;

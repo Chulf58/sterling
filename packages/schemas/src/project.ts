@@ -20,6 +20,9 @@
 // not defended (the same accepted risk as scripts/lib/contained-fs.mjs).
 import { lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+// config.ts imports judgeProjectMode from here; both sides use the other only inside
+// functions, so the cycle is safe at module evaluation.
+import { toCanonicalConfig, workflowSchema, type MergePath } from './config.js';
 
 export const PROJECT_MODES = ['hobby', 'work'] as const;
 export type ProjectMode = (typeof PROJECT_MODES)[number];
@@ -103,17 +106,83 @@ export function judgeProjectMode(mode: unknown, where: string): ProjectMode {
   return mode as ProjectMode;
 }
 
+// The mode a config document stands for. A canonical config (decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config) has no mode, only
+// workflow.merge: until the mode's readers move to workflow, 'pr' reads as work and
+// 'direct' (or no merge) as hobby. A document with a mode is judged by its mode.
+export function modeOfConfig(parsed: Record<string, unknown>, where: string): ProjectMode {
+  if (parsed.mode !== undefined || parsed.workflow === undefined) return judgeProjectMode(parsed.mode, where);
+  const workflow = parsed.workflow;
+  if (workflow === null || typeof workflow !== 'object' || Array.isArray(workflow)) {
+    throw new ProjectModeError(`config.workflow is ${JSON.stringify(workflow)} in ${where} — it must be an object; fix it in the TUI System tab or the file`);
+  }
+  const merge = (workflow as Record<string, unknown>).merge;
+  if (merge === undefined || merge === 'direct') return 'hobby';
+  if (merge === 'pr') return 'work';
+  throw new ProjectModeError(`config.workflow.merge is ${JSON.stringify(merge)} in ${where} — it must be 'direct' or 'pr'; fix it in the TUI System tab or the file`);
+}
+
 export function readProjectMode(root: string): ProjectMode {
   const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, 'the project mode');
   if (parsed === undefined) return 'hobby';
-  return judgeProjectMode(parsed.mode, where);
+  return modeOfConfig(parsed, where);
+}
+
+// The workflow settings that replace the mode (decisions
+// settings-that-replace-project-mode-merge-path-reviewer-count and
+// settings-redesign-build-shape-one-legacy-to-canonical-config): merge path, reviewer
+// count, Copilot loop and auto-merge on clean. A legacy document goes through the one
+// transform (toCanonicalConfig), so mode work reads as {pr, 3, loop on} and hobby or no
+// mode as {direct, 1, loop off}; a canonical document's workflow is read as written,
+// absent fields taking the schema defaults. No config file is the defaults. A document
+// the transform cannot carry, or a workflow that fails the schema, throws
+// ProjectWorkflowError: the workflow is never guessed.
+export class ProjectWorkflowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectWorkflowError';
+  }
+}
+
+export interface ProjectWorkflow {
+  merge: MergePath;
+  reviewers: number;
+  copilot_loop: boolean;
+  auto_merge_on_clean: boolean;
+}
+
+/** The pure half of readProjectWorkflow: an already-parsed config document (undefined = no file). */
+export function workflowOfConfig(parsed: unknown, where: string): ProjectWorkflow {
+  if (parsed === undefined) return workflowSchema.parse(undefined);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ProjectWorkflowError(`${where} is not a JSON object — the workflow settings cannot be read`);
+  }
+  let canonical: unknown;
+  try {
+    canonical = toCanonicalConfig(parsed).config;
+  } catch (err) {
+    if (!(err instanceof Error)) throw err;
+    throw new ProjectWorkflowError(`${err.message} (in ${where}) — the workflow settings cannot be read; fix it in the TUI System tab or the file`);
+  }
+  const workflow = (canonical as Record<string, unknown>).workflow;
+  const checked = workflowSchema.safeParse(workflow);
+  if (!checked.success) {
+    const issues = checked.error.issues.map((i) => `${['workflow', ...i.path].join('.')}: ${i.message}`).join('; ');
+    throw new ProjectWorkflowError(`config.workflow is invalid in ${where} (${issues}) — fix it in the TUI System tab or the file`);
+  }
+  return checked.data;
+}
+
+export function readProjectWorkflow(root: string): ProjectWorkflow {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectWorkflowError, 'the workflow settings');
+  return workflowOfConfig(parsed, where);
 }
 
 // The project's durable identity: `{ project_id }` from .sterling/project.json,
 // null when the file is absent, a ProjectIdentityError when it exists but is not
 // a JSON object holding a UUID v4 `project_id`. Other keys are ignored, never
 // returned. Absent is not an error here: whether it matters is the caller's
-// (a work-mode project needs it; a hobby project never reads it).
+// (a project on Postgres storage needs it; the workflow settings never do).
 export function readProjectIdentity(root: string): { project_id: string } | null {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, 'the project identity');
   if (parsed === undefined) return null;

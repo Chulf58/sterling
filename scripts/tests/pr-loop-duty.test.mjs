@@ -32,10 +32,14 @@ test('a work project with an owed loop returns its state and nothing degraded', 
   }
 });
 
-test('hobby, mode-less, unarmed and settled projects owe nothing', () => {
+// CHANGED with the settings redesign (user-ruled "Finish owed loops", decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config): this used to pin that
+// a hobby or mode-less project owes nothing even with a loop armed, and that an
+// unreadable mode hid an armed loop behind a degraded line. The settings no longer gate
+// the duty: an armed loop stays owed until it settles, whatever the merge path, the
+// Copilot loop setting or the config's validity says now. Unarmed and settled still owe nothing.
+test('unarmed and settled projects owe nothing; an armed owed loop is owed whatever the settings say', () => {
   for (const [mode, loop] of [
-    ['hobby', STATE],
-    [undefined, STATE],
     ['work', undefined],
     ['work', { ...STATE, status: 'clean', settled_at: '2026-09-26T11:00:00.000Z' }],
   ]) {
@@ -46,30 +50,30 @@ test('hobby, mode-less, unarmed and settled projects owe nothing', () => {
       p.cleanup();
     }
   }
-});
-
-test('an unreadable pr-loop.json in a work project is disclosed, never read as settled', () => {
-  const p = project('work', '{not json');
-  try {
-    const r = duty.evaluatePrLoop(p.dir);
-    assert.equal(r.state, null);
-    assert.match(r.degraded, /PR review loop: \.sterling\/transient\/pr-loop\.json is unreadable .*UNKNOWN/);
-  } finally {
-    p.cleanup();
+  for (const config of [{ mode: 'hobby' }, {}, { mode: 'nonsense' }, { workflow: { merge: 'direct' } }, { workflow: { merge: 'pr', copilot_loop: false } }]) {
+    const p = project(undefined, STATE);
+    try {
+      writeFileSync(join(p.dir, '.sterling', 'config.json'), JSON.stringify(config));
+      assert.deepEqual(duty.evaluatePrLoop(p.dir), { state: STATE, degraded: null }, JSON.stringify(config));
+    } finally {
+      p.cleanup();
+    }
   }
 });
 
-test('an unreadable mode with an armed loop present is disclosed; without the file it is silent', () => {
-  const p = project('nonsense', STATE);
-  const q = project('nonsense');
+test('an owed loop survives switching the Copilot loop off: still owed until it is settled', () => {
+  const p = project(undefined);
   try {
-    const r = duty.evaluatePrLoop(p.dir);
-    assert.equal(r.state, null);
-    assert.match(r.degraded, /project mode is unreadable .*state was not evaluated/);
-    assert.deepEqual(duty.evaluatePrLoop(q.dir), { state: null, degraded: null });
+    writeFileSync(join(p.dir, '.sterling', 'config.json'), JSON.stringify({ workflow: { merge: 'pr', copilot_loop: true } }));
+    work.armPrLoop(p.dir, armArgs(7));
+    writeFileSync(join(p.dir, '.sterling', 'config.json'), JSON.stringify({ workflow: { merge: 'pr', copilot_loop: false } }));
+    assert.equal(duty.evaluatePrLoop(p.dir).state?.pr_number, 7, 'switching the loop off does not cancel the owed loop');
+    writeFileSync(join(p.dir, '.sterling', 'config.json'), JSON.stringify({ workflow: { merge: 'direct' } }));
+    assert.equal(duty.evaluatePrLoop(p.dir).state?.pr_number, 7, 'nor does switching to the direct merge path');
+    work.settlePrLoop(p.dir, 'clean', 7, { originRepo: ORIGIN });
+    assert.deepEqual(duty.evaluatePrLoop(p.dir), { state: null, degraded: null }, 'settling ends it');
   } finally {
     p.cleanup();
-    q.cleanup();
   }
 });
 
@@ -78,7 +82,7 @@ test('the next-action text names the wait script, the PR and the settle command'
   assert.match(next, /pr-review-loop skill: wait with node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(background\)/);
   assert.match(next, /--settle <clean\|capped\|escalated\|closed> --pr 7/);
   const full = duty.prLoopOwedText(STATE, next);
-  assert.match(full, /^• PR review loop owed \(work mode\): PR #7 .* \(head aaaaaaa, armed 2026-09-26T10:00:00\.000Z\) — run the pr-review-loop skill/);
+  assert.match(full, /^• PR review loop owed: PR #7 .* \(head aaaaaaa, armed 2026-09-26T10:00:00\.000Z\) — run the pr-review-loop skill/);
   assert.match(duty.prLoopReminderText(STATE), /^PR review loop owed: PR #7 https:\/\/github\.com\/acme\/widget\/pull\/7 — next: pr-review-loop skill, then --settle clean\|capped\|escalated\|closed --pr 7\.$/);
 });
 

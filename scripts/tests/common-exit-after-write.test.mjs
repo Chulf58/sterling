@@ -18,6 +18,7 @@
 // (a), which never references common.mjs, still parse and run standalone.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once, EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -805,26 +806,31 @@ test('(j) exit never fires before a pending write settles; onWritten runs exactl
 // a consult that would otherwise produce an envelope.
 // ---------------------------------------------------------------------------
 
-test('(l) CONTROL: the same h20 codex consult with stdout OPEN exits 0 and emits one updatedInput envelope carrying the model pin; PIN: with the stdout read end destroyed it exits non-zero, naming its own stdout failure and never crashing unhandled', async () => {
+test('(l) CONTROL: the same h20 dispatch with stdout OPEN exits 0 and emits one envelope carrying the hazard pointer; PIN: with the stdout read end destroyed it exits non-zero, naming its own stdout failure and never crashing unhandled', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h20-closed-stdout-'));
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(
-      join(dir, '.sterling', 'config.json'),
-      JSON.stringify({ sparring_partner: { enabled: true, model: 'gpt-5.6-sol' } }),
-    );
-    // An empty store is sufficient: the sparring_partner.model pin alone
-    // makes h20 emit an updatedInput envelope even with no knowledge records
-    // seeded (fixture shape per scripts/tests/h20-consult-model-injection.test.mjs
-    // M-C0/M-6 — the model pin line is always emitted for a codex consult).
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({}));
+    // Changed with the Codex removal (settings redesign D): the codex consult envelope this test used (a sparring_partner.model pin
+    // always emitted for mcp__codex__codex) no longer exists. The envelope now comes from a seeded anti_pattern matching an implementor
+    // dispatch's brief (fixture shape per scripts/tests/h20-dispatch-lead-hazard.test.mjs); the two-arm structure is unchanged.
     const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const NOW = '2026-09-30T12:00:00.000Z';
+    store.create({
+      id: randomUUID(), type: 'anti_pattern', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [],
+      scope: 'project', stack_tags: [], slug: 'breach-countdown-hazard-1',
+      title: 'Breach countdown widget hazard 1 re-triggers a HUD timer reload mid-breach',
+      trigger: 'Any breach countdown widget that shows countdown seconds while the HUD timer subsystem reloads during a breach — the reload restarts the seconds from zero.',
+      guidance: 'guidance', wrong_way: 'wrong way', right_way: 'right way 1', source_evidence: 'evidence', basis: 'codebase', file_keys: [],
+    }, { operation_id: randomUUID() });
     store.close();
 
     const h20 = join(HOOKS, 'h20-mechanism-axis.mjs');
     const HOOK_INPUT = JSON.stringify({
       hook_event_name: 'PreToolUse',
-      tool_name: 'mcp__codex__codex',
-      tool_input: { prompt: 'x' },
+      tool_name: 'Agent',
+      session_id: 's1',
+      tool_input: { subagent_type: 'implementor', prompt: 'Fix the breach countdown widget so the countdown seconds survive when the HUD timer reloads during a breach.' },
       cwd: dir,
     });
 
@@ -844,7 +850,7 @@ test('(l) CONTROL: the same h20 codex consult with stdout OPEN exits 0 and emits
       assert.equal(
         code,
         0,
-        `CONTROL: with stdout open, an envelope-producing codex consult must exit 0 — got ${code}; stderr: ${stderr.slice(0, 300)}`,
+        `CONTROL: with stdout open, an envelope-producing dispatch must exit 0 — got ${code}; stderr: ${stderr.slice(0, 300)}`,
       );
       const text = stdout.toString('utf8').trim();
       let parsed;
@@ -854,14 +860,11 @@ test('(l) CONTROL: the same h20 codex consult with stdout OPEN exits 0 and emits
         assert.fail(`CONTROL: stdout must be exactly ONE JSON object — parse failed (${err.message}); stdout: ${text.slice(0, 300)}`);
       }
       assert.equal(typeof parsed, 'object', 'CONTROL: the envelope is a JSON object');
-      assert.ok(
-        parsed && parsed.hookSpecificOutput && parsed.hookSpecificOutput.updatedInput,
-        `CONTROL: the envelope carries hookSpecificOutput.updatedInput — got ${text.slice(0, 300)}`,
-      );
+      assert.ok(parsed && parsed.hookSpecificOutput, `CONTROL: the envelope carries hookSpecificOutput — got ${text.slice(0, 300)}`);
       assert.match(
-        JSON.stringify(parsed.hookSpecificOutput.updatedInput),
-        /gpt-5\.6-sol/,
-        'CONTROL: the updatedInput carries the sparring_partner.model pin from the fixture config — this is the payload the PIN arm must never silently lose',
+        JSON.stringify(parsed.hookSpecificOutput),
+        /Breach countdown widget hazard 1/,
+        'CONTROL: the envelope carries the seeded hazard — this is the payload the PIN arm must never silently lose',
       );
     }
 
@@ -872,7 +875,7 @@ test('(l) CONTROL: the same h20 codex consult with stdout OPEN exits 0 and emits
         cwd: dir,
       });
       child.stdout.destroy();
-      child.stdin.end(HOOK_INPUT);
+      child.stdin.end(HOOK_INPUT.replace('"session_id":"s1"', '"session_id":"s2"')); // a fresh session: the CONTROL arm's delivery marked the hazard shown for s1, so s1 would emit nothing
       let stderr = '';
       child.stderr.on('data', (c) => {
         stderr += c.toString('utf8');
@@ -881,7 +884,7 @@ test('(l) CONTROL: the same h20 codex consult with stdout OPEN exits 0 and emits
       assert.notEqual(
         code,
         0,
-        `a codex-consult envelope that fails to deliver (stdout destroyed) must never exit 0 — got exit ${code}; stderr: ${stderr.slice(0, 300)}`,
+        `a dispatch envelope that fails to deliver (stdout destroyed) must never exit 0 — got exit ${code}; stderr: ${stderr.slice(0, 300)}`,
       );
       // ... and non-zero for the RIGHT reason: the helper's own disclosure of a
       // failed stdout hand-off, not an unrelated crash that happens to be

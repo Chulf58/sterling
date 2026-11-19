@@ -225,7 +225,7 @@ test('work-mode config only in the main checkout, none in the worktree: the gate
     assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     const out = JSON.parse(r.stdout);
     assert.equal(out.mode, 'work');
-    assert.match(out.error, /--no-push is refused in WORK mode/);
+    assert.match(out.error, /--no-push is refused on the pull-request merge path/);
     assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
     assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no hobby merge battery ran');
   } finally {
@@ -240,7 +240,7 @@ test('linked worktree whose mode cannot be read anywhere: refuses with exit 2 na
     assert.equal(r.status, 2, `exit 2 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     assert.ok(r.stderr.includes(join(p.wt, '.sterling', 'config.json')), `names the worktree config path: ${oneLine(r.stderr)}`);
     assert.ok(r.stderr.includes(join(p.dir, '.sterling', 'config.json')), `names the main checkout config path: ${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /never defaulted to hobby/);
+    assert.match(r.stderr, /never defaulted to the direct merge path/); // Changed with item C's wording: hobby became the direct merge path
     assert.ok(!/worktree remove/.test(r.stderr), `not the hobby refusal: ${oneLine(r.stderr)}`);
     assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no battery ran');
     assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
@@ -261,8 +261,8 @@ test('work-mode config only in the WORKTREE (none in the main checkout): it is r
     assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     const out = JSON.parse(r.stdout);
     assert.equal(out.mode, 'work');
-    assert.match(out.error, /--no-push is refused in WORK mode/);
-    assert.ok(!/cannot be read|never defaulted to hobby/.test(r.stderr), `not the unreadable-mode refusal: ${oneLine(r.stderr)}`);
+    assert.match(out.error, /--no-push is refused on the pull-request merge path/);
+    assert.ok(!/cannot be read|never defaulted to the direct merge path/.test(r.stderr), `not the unreadable-mode refusal: ${oneLine(r.stderr)}`);
     assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no hobby merge battery ran');
     assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
   } finally {
@@ -287,7 +287,7 @@ test('linked worktree of a BARE main (no main checkout to read the mode from): r
     assert.equal(r.status, 2, `exit 2 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     assert.ok(r.stderr.includes(wt), `names the worktree: ${oneLine(r.stderr)}`);
     assert.ok(r.stderr.includes(bare), `names the common git dir: ${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /never defaulted to hobby/);
+    assert.match(r.stderr, /never defaulted to the direct merge path/); // Changed with item C's wording: hobby became the direct merge path
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -298,11 +298,12 @@ test('linked worktree of a BARE main (no main checkout to read the mode from): r
 // push the base. The gate reads the main checkout's config and refuses hobby in
 // a worktree (tests above); the command doc must say so next to the hobby
 // default, or the doc keeps steering a reader to the wrong mode.
-test('commands/merge.md: the "missing key is hobby" rule names the linked-worktree exception (mode from the main checkout, hobby refused there)', () => {
+test('commands/merge.md: the "missing setting is direct" rule names the linked-worktree exception (mode from the main checkout, hobby refused there)', () => {
   const doc = readFileSync(join(root, 'commands', 'merge.md'), 'utf8');
-  const para = doc.split('\n').find((l) => l.includes('**Project mode decides the flow**'));
-  assert.ok(para, 'the project-mode paragraph exists');
-  assert.match(para, /a missing key is `hobby`/);
+  // Changed with item C: the paragraph is 'The merge path decides the flow' and the default is the direct merge path, not hobby.
+  const para = doc.split('\n').find((l) => l.includes('**The merge path decides the flow**'));
+  assert.ok(para, 'the merge-path paragraph exists');
+  assert.match(para, /a missing setting is `direct`/);
   assert.match(para, /linked git worktree/, 'the paragraph names the linked worktree case');
   assert.match(para, /main checkout's `\.sterling\/config\.json`/, 'it says where a worktree run reads its mode');
   assert.match(para, /never merges into or pushes the base/, 'it says a worktree never pushes the base');

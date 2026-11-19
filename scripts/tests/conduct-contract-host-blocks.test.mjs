@@ -20,6 +20,8 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // sha256 of templates/target-claude-md.md before the host blocks (a2f5c31). The Claude render
 // must stay byte-identical to it until a deliberate wording change moves this pin.
+// Moved 2026-11-19 (from c26bc2bb…): the two Codex lane bullets left the template (decision
+// decommission-the-codex-model-setting-codex-is-no-longer-used).
 // Moved 2026-10-02 (from 3b6c6d1e…): the deliberate rewrite of the "Stamp Sterling's version when
 // reporting on Sterling" bullet for report-issue.mjs (decision
 // projects-file-sterling-issues-as-scrubbed-github-issues-automatically).
@@ -75,7 +77,7 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // Moved 2026-11-19 (from 54e6d215…): the instruction-file proposal bullet always targets AGENTS.md, since
 // CLAUDE.md and GEMINI.md hold only Sterling's generated layer (user-ruled 2026-11-19, decision
 // project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer; GitHub issue #319).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'c26bc2bb4043f8271e381d6be88f3ffb0fe8afb017df0606c2de60eb83ab8849';
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '878646342ba6e1e2f26438e632f35f354adb77ab62ad08ca2d0846e280b1040f';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
@@ -105,7 +107,7 @@ test('the Claude render of the template is byte-identical to the template before
 test('the template fences are valid and every claude-only block is paired, except the @AGENTS.md import', () => {
   assert.deepEqual(validateFences(template(), 'target-claude-md.md', { allHosts: true }), []);
   const pairs = layer.hostBlockPairs(template());
-  assert.equal(pairs.length, 14, 'the import plus the 13 lines the old phrase map rewrote');
+  assert.equal(pairs.length, 13, 'the import plus the 12 lines the old phrase map rewrote (the Sol, Astra and Terra pair left with Codex)');
   const unpaired = pairs.filter((p) => p.opencode.length === 0).map((p) => p.claude.join('\n'));
   assert.deepEqual(unpaired, ['@AGENTS.md'], 'only the import has no OpenCode text: OpenCode reads AGENTS.md natively');
 });
@@ -150,19 +152,9 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       'review-territory-h22': 'OpenCode has no H22; the line is still required',
       'store-guard-h15': "the Sterling plugin's evaluate hook denies a shell command with a write shape aimed at the store while letting reads through",
       'platform-mechanics': "OpenCode's plugin hooks, agent files and config move between versions",
-      // GitHub issue #24 (user-ruled 2026-10-05 through the question form): the OpenCode bullet
-      // no longer routes these lanes through a codex MCP server, so the two entries that pinned
-      // that wording ('codex-availability', 'codex-background') are replaced by the native route.
-      'native-review': 'agent `sterling/reviewer` with `model` `openai/gpt-6.1-sol#high` to review',
-      'native-sparring': '`openai/gpt-6-astra#high` to spar',
-      'native-implement': 'agent `sterling/implementor` with `model` `openai/gpt-5.6-terra` to implement',
-      'native-no-sandbox': 'do not modify the worktree',
-      'native-model-pinned': 'The user pins which model runs these lanes (user-asked 2026-10-03',
-      'claude-code-route-5.6-sol-frozen-mcp': 'Claude Code\'s `codex` MCP route stays on `gpt-5.6-sol`, because the Codex MCP route is frozen at client 0.153.4, which cannot reach `gpt-6.1-sol`; a refusal there is reported and the review runs on Opus',
-      'codex-claude-code-only': 'The `codex` MCP tool is the Claude Code route only',
-      'codex-ruling-2026-09-20': '*"Add that to all instruction files, that we use the codex mcp over whatever you were doing"*',
-      'codex-ruling-2026-10-05': 'narrowed to Claude Code on 2026-10-05',
-      'openai-not-logged-in': 'If the openai provider is not logged in, say so and use the fallbacks',
+      // Codex is removed (decision decommission-the-codex-model-setting-codex-is-no-longer-used): the
+      // entries that pinned the native Sol/Astra/Terra route and the codex route sentences went with the
+      // two template bullets, and the one remaining lane bullet lives in AGENTS.md (checked below).
       'ready-for-new-session': '- **Say `READY FOR NEW SESSION` plainly when it is time.**',
       'version-banner': `read it from \`${root}/.claude-plugin/plugin.json\``,
       'agent-currency': 'on OpenCode say that no agent-currency check ran',
@@ -170,47 +162,32 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
     };
     for (const [id, text] of Object.entries(expected)) assert.ok(out.includes(text), `${id}: OpenCode text missing: ${text}`);
     assert.match(out, /`node "[^"]+\/bin\/rotation-note\.mjs"`.*\/new/s, 'the new-session line names rotation-note by root and /new');
-    for (const codexRoute of ['uses the `codex` MCP tool', 'only when a `codex` MCP server is configured', '`sandbox` (`read-only`', 'How OpenCode handles a long Codex call']) {
+    for (const codexRoute of ['uses the `codex` MCP tool', 'only when a `codex` MCP server is configured', '`sandbox` (`read-only`', 'How OpenCode handles a long Codex call', 'openai/gpt-']) {
       assert.ok(!out.includes(codexRoute), `the OpenCode render still routes a lane through the codex MCP tool: ${codexRoute}`);
     }
+    // Codex is removed (decision decommission-the-codex-model-setting-codex-is-no-longer-used): the Claude
+    // render no longer carries the codex route or the Sol/Astra/Terra dispatch bullet either.
     const claude = renderClaudeText(template(), 'target-claude-md.md');
-    assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
-    assert.ok(!claude.includes('openai/') && !claude.includes('sterling/reviewer'), 'the native OpenCode route does not reach the Claude render');
-    // GitHub issue #169 (decision claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4):
-    // the Claude route reviews on gpt-5.6-sol; a refusal is reported and the review runs on Opus,
-    // with no retry on another Sol id, in the Claude render only.
-    assert.ok(claude.includes('`gpt-5.6-sol` to review'), 'the Claude render of the template names gpt-5.6-sol for review');
-    assert.ok(claude.includes('say so, run the review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently'), 'the Claude render of the template carries the loud Opus fallback');
-    assert.ok(!claude.includes('`gpt-6.1-sol` to review'), 'the Claude render of the template does not default to gpt-6.1-sol');
-    assert.ok(!claude.includes('retry once'), 'the Claude render of the template no longer retries on another Sol id');
-    assert.ok(!claude.includes('refuses the 6.x Sol models'), 'the Claude render no longer carries the stale refusal rationale');
+    for (const gone of ['`codex` MCP tool', 'Codex runs through the MCP tool', 'openai/', 'sterling/reviewer', 'gpt-5.6-sol']) {
+      assert.ok(!claude.includes(gone), `the Claude render still carries ${gone}`);
+    }
   } finally {
     p.cleanup();
   }
 });
 
-// This repo's Sol, Astra and Terra lane route was a host-fenced pair in its CLAUDE.md. It is now ONE
-// host-neutral bullet in AGENTS.md "Project rules": every rule a project adds goes into AGENTS.md, and
-// CLAUDE.md holds only Sterling's layer (user-ruled 2026-11-19, decision
-// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer; GitHub issue #319).
-// AGENTS.md has no host fences, so the one bullet states both routes and these checks read it directly.
-// stamp-contract skips the Sterling repo itself (selfPath), so it never re-inserts the template bullet.
-test("this repo's AGENTS.md: one host-neutral bullet states the OpenCode native route and the Claude Code codex MCP route, and CLAUDE.md carries neither", () => {
+// This repo's reviewer and sparring lane rule is ONE host-neutral bullet in AGENTS.md "Project rules"
+// (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer). Codex is
+// not used (decision decommission-the-codex-model-setting-codex-is-no-longer-used), so no instruction
+// file carries a codex route or a pinned openai model.
+test("this repo's AGENTS.md: one host-neutral lane bullet names the sterling/reviewer and sterling/sparring dispatches, and no instruction file carries a codex route", () => {
   const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
   const claudeMd = readFileSync(join(repo, 'CLAUDE.md'), 'utf8');
-  const bullets = agents.split('\n').filter((l) => l.startsWith('- **Sol, Astra and Terra lanes run through the `codex` MCP tool'));
-  assert.equal(bullets.length, 1, 'exactly one lane-route bullet in AGENTS.md');
-  const bullet = bullets[0];
-  assert.ok(!bullet.includes('<!--'), 'no fence marker: AGENTS.md is read raw by every host');
-  for (const text of ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'The `codex` MCP tool is the Claude Code route only', 'narrowed to Claude Code on 2026-10-05', 'do not modify the worktree', 'Claude Code\'s `codex` MCP route stays on `gpt-5.6-sol`, because the Codex MCP route is frozen at client 0.153.4']) {
-    assert.ok(bullet.includes(text), `the bullet lacks ${JSON.stringify(text)}`);
-  }
-  for (const text of ['uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route', '`gpt-5.6-sol` to review', '`sandbox` (`read-only`', 'say so, run the review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently', 'never read or write anything under `.sterling/`']) {
-    assert.ok(bullet.includes(text), `the bullet lacks ${JSON.stringify(text)}`);
-  }
-  assert.ok(!bullet.includes('`gpt-6.1-sol` to review'), 'the Claude Code route does not default to gpt-6.1-sol');
-  assert.ok(!bullet.includes('refuses the 6.x Sol models'), 'the stale refusal rationale is gone');
-  assert.ok(!bullet.includes('retry once'), 'no second Sol retry');
+  const bullets = agents.split('\n').filter((l) => l.startsWith('- **Reviewer and sparring lanes are `sterling/reviewer`'));
+  assert.equal(bullets.length, 1, 'exactly one lane bullet in AGENTS.md');
+  assert.ok(!bullets[0].includes('<!--'), 'no fence marker: AGENTS.md is read raw by every host');
+  assert.ok(bullets[0].includes('Codex is not used'), 'the bullet says Codex is not used');
+  assert.ok(!agents.includes('`codex` MCP tool') && !agents.includes('openai/gpt-'), 'AGENTS.md carries no codex route or pinned openai model');
   assert.ok(!claudeMd.includes('openai/gpt-') && !claudeMd.includes('Codex runs through the MCP tool'), 'CLAUDE.md carries neither route');
 });
 

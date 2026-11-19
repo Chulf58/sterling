@@ -1,8 +1,9 @@
 // The OpenCode dispatch model resolver (packages/opencode-plugin/src/dispatch-model.mjs;
-// decision subagent-model-choice-on-opencode-conductor-states-dispatch): the MODEL-INTENT
-// brief line, the pure resolver over config.models, and the dispatch seam in axis.mjs
-// with Overpass off and on. Every fixture is a fresh temp project; nothing reads this
-// repo's .sterling/.
+// decisions one-model-per-agent-an-agent-has-a-single-model-not-a-claude and
+// settings-redesign-build-shape-one-legacy-to-canonical-config): the routing read from
+// config.models, the pure resolver, and the dispatch seam in axis.mjs. Every agent has ONE
+// canonical model; there is no MODEL-INTENT line. Every fixture is a fresh temp project;
+// nothing reads this repo's .sterling/.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -22,169 +23,122 @@ before(async () => {
 });
 
 const SONNET = 'anthropic/claude-sonnet-5-5#high';
-// Changed 2026-10-25: the plain implementor's default effort is medium (decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2).
+// The plain implementor's default effort is medium (decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2).
 const IMPL_SONNET = 'anthropic/claude-sonnet-5-5#medium';
 const OPUS = 'anthropic/claude-opus-5-5#high';
 const SOL = 'openai/gpt-6.1-sol#high';
-const ASTRA = 'openai/gpt-6-astra#high';
-const brief = (intent) => `Do the work.\n${intent ? `MODEL-INTENT: ${intent}\n` : ''}Do not modify the worktree.`;
-
-// ── the intent line ───────────────────────────────────────────────────────────
-
-test('intent: none, hard, review-of and fallback are read from an unfenced line-start marker', () => {
-  assert.deepEqual(dm.parseIntent('Just work.'), { kind: 'normal' });
-  assert.deepEqual(dm.parseIntent(undefined), { kind: 'normal' });
-  assert.deepEqual(dm.parseIntent(brief('hard')), { kind: 'hard' });
-  assert.deepEqual(dm.parseIntent(brief(' review-of=openai ')), { kind: 'review-of', author: 'openai' });
-  assert.deepEqual(dm.parseIntent(brief('fallback=openai provider not logged in')), { kind: 'fallback', reason: 'openai provider not logged in' });
-  assert.deepEqual(dm.parseIntent('Quote: the line MODEL-INTENT: hard is mid-sentence.'), { kind: 'normal' }, 'not a line start');
-  assert.deepEqual(dm.parseIntent('Example:\n```\nMODEL-INTENT: hard\n```\n'), { kind: 'normal' }, 'fenced text is quoted, not a marker');
-});
-
-test('intent: a repeated line, an unknown value, an empty fallback reason or a bad provider refuses', () => {
-  for (const [prompt, why] of [
-    [`${brief('hard')}\nMODEL-INTENT: hard`, /it has 2 of them/],
-    [brief('hrad'), /its value "hrad" is not one of/],
-    [brief('fallback=  '), /the fallback gives no reason/],
-    [brief('review-of=Terra Model'), /review-of names "Terra Model", which is not a provider id/],
-  ]) {
-    assert.throws(() => dm.parseIntent(prompt), (e) => {
-      assert.match(e.message, /^Sterling refused this subagent dispatch: its brief carries a MODEL-INTENT line but /);
-      assert.match(e.message, why);
-      return true;
-    }, prompt);
-  }
-});
+const TERRA = 'openai/gpt-5.6-terra';
 
 // ── the pure resolver ─────────────────────────────────────────────────────────
 
-const ref = (role, intent, config = {}, mode = null) => {
-  const r = dm.resolveDispatchModel(role, dm.parseIntent(brief(intent)), config, mode);
+const ref = (role, config = {}) => {
+  const r = dm.resolveDispatchModel(role, dm.projectRouting(config));
   return r?.ref ?? r;
 };
 
-test('resolver: the shipped defaults reproduce the models the conductor named before (hobby)', () => {
-  assert.equal(ref('implementor', null), IMPL_SONNET);
-  // decision hard-implementor-is-its-own-agent-sterling-implementor-hard: the hard lane is models.implementor-hard
-  assert.equal(ref('implementor', 'hard'), OPUS, 'hard on implementor -> models.implementor-hard (Opus 5.5)');
-  assert.equal(ref('implementor-hard', null), OPUS, 'sterling/implementor-hard runs on models.implementor-hard (Opus 5.5)');
-  assert.equal(ref('reviewer', null), SOL);
-  assert.equal(ref('sparring', null), ASTRA);
-  assert.equal(ref('researcher', null), 'anthropic/claude-sonnet-5-5#medium');
-  assert.equal(ref('scout', null), 'anthropic/claude-sonnet-5-5#low');
-  assert.equal(ref('librarian', null), 'anthropic/claude-haiku-5-5#low');
-  assert.equal(ref('reviewer', 'hard'), SOL, 'a role with no hard_task keeps its normal model');
+test('resolver: the shipped defaults give each role its one canonical model, effort as the variant', () => {
+  assert.equal(ref('implementor'), IMPL_SONNET);
+  assert.equal(ref('implementor-hard'), OPUS, 'sterling/implementor-hard is its own role');
+  assert.equal(ref('reviewer'), OPUS);
+  assert.equal(ref('sparring'), OPUS);
+  assert.equal(ref('researcher'), 'anthropic/claude-sonnet-5-5#medium');
+  assert.equal(ref('scout'), 'anthropic/claude-sonnet-5-5#low');
+  assert.equal(ref('librarian'), 'anthropic/claude-haiku-5-5#low');
+  assert.equal(ref('preflight'), 'anthropic/claude-sonnet-5-5#low');
 });
 
-test('resolver: review-of pairs the reviewer off the author family in hobby mode; work mode keeps Sol for every pre-PR review', () => {
-  assert.equal(ref('reviewer', 'review-of=openai', {}, 'hobby'), OPUS, 'Terra-written work gets the Opus reviewer');
-  assert.equal(ref('reviewer', 'review-of=anthropic', {}, 'hobby'), SOL, 'Claude-written work gets Sol');
-  assert.equal(ref('reviewer', 'review-of=openai', {}, 'work'), SOL, 'work mode: Sol-before-PR wins over the pairing');
-  assert.equal(ref('reviewer', 'review-of=openai', { mode: 'hobby' }), OPUS, 'mode read from the config when not given');
-  assert.equal(ref('reviewer', 'review-of=openai', { mode: 'work' }), SOL);
-  const none = dm.resolveDispatchModel('reviewer', { kind: 'review-of', author: 'anthropic' }, { models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'anthropic/claude-opus-5-5' } } }, 'hobby');
-  assert.equal(none.ref, OPUS);
-  assert.match(none.note, /CROSS-FAMILY NOT POSSIBLE/, 'a pairing that cannot be met says so');
-  assert.match(dm.resolveDispatchModel('reviewer', { kind: 'review-of', author: 'openai' }, { mode: 'later' }).problem, /config\.mode is "later"/);
-});
-
-// Decision hard-implementor-is-its-own-agent-sterling-implementor-hard: with Overpass off a
-// sterling/implementor-hard dispatch resolves through config.models like any role, and
-// MODEL-INTENT: hard on sterling/implementor resolves to the same entry, for older briefs.
-test('resolver: implementor-hard is its own config.models role, and MODEL-INTENT hard on implementor resolves to it', () => {
+test('resolver: config wins over defaults; model and effort stay separate until composed; an unset effort sends no variant', () => {
   const cfg = { models: {
-    implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-4-8' } },
-    'implementor-hard': { model: 'claude-opus-5-5', effort: 'xhigh', opencode_model: 'openai/gpt-6.1-sol' },
+    implementor: { model: 'openai/gpt-5.6-terra', effort: 'medium' },
+    reviewer: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' },
+    scout: { model: 'anthropic/claude-sonnet-5-5' },
   } };
-  assert.equal(ref('implementor-hard', null, cfg), 'openai/gpt-6.1-sol#xhigh');
-  const hard = dm.resolveDispatchModel('implementor', { kind: 'hard' }, cfg);
-  assert.equal(hard.ref, 'openai/gpt-6.1-sol#xhigh', 'the implementor-hard entry, never the stale implementor.hard_task');
-  assert.match(hard.note, /^config\.models\.implementor-hard \(MODEL-INTENT hard on implementor; dispatch sterling\/implementor-hard instead; models\.implementor\.hard_task is no longer read/);
-  assert.doesNotMatch(dm.resolveDispatchModel('implementor', { kind: 'hard' }, {}).note, /no longer read/, 'no stale hard_task, no warning');
-  const viaAgent = dm.dispatchModel(cfg, { agent: 'sterling/implementor-hard', prompt: 'do it' });
-  assert.equal(viaAgent.model, 'openai/gpt-6.1-sol#xhigh');
-  assert.match(viaAgent.line, /from config\.models\.implementor-hard\.$/);
-  assert.equal(dm.dispatchModel(cfg, { agent: 'sterling/implementor', prompt: brief('hard') }).model, 'openai/gpt-6.1-sol#xhigh');
+  assert.equal(ref('implementor', cfg), 'openai/gpt-5.6-terra#medium', 'Terra as the implementor choice via config');
+  assert.equal(ref('reviewer', cfg), 'openai/gpt-6.1-sol#xhigh');
+  assert.equal(ref('scout', cfg), 'anthropic/claude-sonnet-5-5');
+  const r = dm.resolveDispatchModel('implementor', dm.projectRouting(cfg));
+  assert.deepEqual({ model: r.model, variant: r.variant, overpass: r.overpass }, { model: 'openai/gpt-5.6-terra', variant: 'medium', overpass: false });
+  assert.equal(ref('researcher', cfg), 'anthropic/claude-sonnet-5-5#medium', 'a role the config leaves out keeps its default');
 });
 
-test('resolver: fallback runs on the role\'s Claude model with its effort', () => {
-  assert.equal(ref('reviewer', 'fallback=openai not logged in'), OPUS);
-  assert.equal(ref('sparring', 'fallback=Astra capped'), OPUS);
-  assert.equal(ref('implementor', 'fallback=x'), IMPL_SONNET);
-});
-
-test('resolver: config wins over defaults; effort becomes the variant; hard_task takes a Claude id or a provider ref', () => {
-  const cfg = { models: {
-    implementor: { model: 'claude-sonnet-5-5', effort: 'medium', opencode_model: 'openai/gpt-5.6-terra' },
-    reviewer: { model: 'claude-opus-5-5', effort: 'low' },
-    researcher: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } },
-    // the provider-ref hard_task case moved here from implementor, whose hard lane is now
-    // models.implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-    scout: { model: 'claude-sonnet-5-5', effort: 'low', hard_task: { model: 'openai/gpt-6.1-sol', effort: 'xhigh' } },
-  } };
-  assert.equal(ref('implementor', null, cfg), 'openai/gpt-5.6-terra#medium', 'Terra as the implementor choice via config');
-  assert.equal(ref('scout', 'hard', cfg), 'openai/gpt-6.1-sol#xhigh', 'hard_task effort wins over the role effort');
-  assert.equal(ref('reviewer', null, cfg), 'anthropic/claude-opus-5-5#low', 'an entry without opencode_model runs on its Claude model (the add step writes Sol into live configs once)');
-  assert.equal(ref('researcher', 'hard', cfg), 'anthropic/claude-opus-5-5#high', 'hard_task without effort takes the role effort');
-  const r = dm.resolveDispatchModel('implementor', { kind: 'normal' }, cfg);
-  assert.deepEqual({ model: r.model, variant: r.variant }, { model: 'openai/gpt-5.6-terra', variant: 'medium' }, 'model and effort stay separate until composed');
+test('resolver: a legacy file and its canonical form give the same answer (the transform, not a second reader)', () => {
+  const legacy = { models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'anthropic/claude-opus-5-5' }, scout: { model: 'claude-sonnet-5-5', effort: 'low' } } };
+  const canonical = { models: { reviewer: { model: 'anthropic/claude-opus-5-5', effort: 'high' }, scout: { model: 'anthropic/claude-sonnet-5-5', effort: 'low' } } };
+  for (const role of ['reviewer', 'scout', 'implementor']) assert.equal(ref(role, legacy), ref(role, canonical), role);
+  assert.equal(ref('reviewer', legacy), OPUS);
 });
 
 test('resolver: an unconfigured agent is left alone; an invalid entry is a problem, never a guess', () => {
-  assert.equal(dm.resolveDispatchModel('general', { kind: 'normal' }, {}), null);
-  assert.equal(dm.resolveDispatchModel(undefined, { kind: 'normal' }, {}), null);
-  for (const [config, why] of [
-    [{ models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol#high' } } }, /config\.models\.reviewer\.opencode_model: opencode_model must be <provider>\/<model>/],
-    [{ models: { implementor: { model: 'claude-sonnet-5-5' } } }, /config\.models\.implementor\.effort/],
-    [{ models: 'none' }, /config\.models is "none", not an object/],
-  ]) {
-    const role = Object.keys(config.models ?? {})[0] ?? 'reviewer';
-    assert.match(dm.resolveDispatchModel(typeof config.models === 'string' ? 'reviewer' : role, { kind: 'normal' }, config).problem, why, JSON.stringify(config));
-  }
-  // researcher, not implementor, since the implementor's hard lane moved to models.implementor-hard
-  // (decision hard-implementor-is-its-own-agent-sterling-implementor-hard); the hard_task path is the same.
-  const badHard = dm.resolveDispatchModel('researcher', { kind: 'hard' }, { models: { researcher: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } });
-  assert.match(badHard.problem, /hard_task\.model is "not a model", neither a Claude model id nor <provider>\/<model>/);
-  assert.equal(dm.resolveDispatchModel('researcher', { kind: 'normal' }, { models: { researcher: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'not a model' } } } }).ref, SONNET, 'a bad hard_task only matters on a hard dispatch');
-  const badEntry = dm.resolveDispatchModel('implementor', { kind: 'hard' }, { models: { 'implementor-hard': { model: 'claude-opus-5-5' } } });
-  assert.match(badEntry.problem, /config\.models\.implementor-hard\.effort/, 'hard on implementor judges the implementor-hard entry');
+  assert.equal(dm.resolveDispatchModel('general', dm.projectRouting({})), null);
+  assert.equal(dm.resolveDispatchModel(undefined, dm.projectRouting({})), null);
+  const bad = dm.resolveDispatchModel('scout', dm.projectRouting({ models: { scout: { model: 'no slash or catalog' } } }));
+  assert.match(bad.problem, /config\.models\.scout\.model/);
+  assert.match(dm.resolveDispatchModel('reviewer', dm.projectRouting({ models: 'none' })).problem, /config\.models is "none", not an object/);
+  assert.equal(dm.resolveDispatchModel('reviewer', dm.projectRouting({ models: { scout: { model: 'no slash or catalog' } } })).ref, OPUS, 'one bad entry does not take another role down');
+});
+
+test('resolver: an overpass/<tier> model maps through config.overpass.provider and sends no variant; a bad provider or block throws', () => {
+  const tier = dm.resolveDispatchModel('reviewer', dm.projectRouting({ overpass: { provider: 'gw' }, models: { reviewer: { model: 'overpass/agentic-high', effort: 'xhigh' } } }));
+  assert.deepEqual({ model: tier.model, variant: tier.variant, ref: tier.ref, overpass: tier.overpass }, { model: 'gw/agentic-high', variant: undefined, ref: 'gw/agentic-high', overpass: true });
+  assert.match(tier.note, /Overpass tier overpass\/agentic-high on provider 'gw' with effort xhigh sent as the request's reasoning effort/);
+  assert.equal(dm.resolveDispatchModel('scout', dm.projectRouting({ models: { scout: { model: 'overpass/agentic-auto' } } })).ref, 'overpass/agentic-auto', 'the default provider is overpass');
+  assert.throws(() => dm.projectRouting({ overpass: { provider: 'a/b' } }), /config\.overpass\.provider is "a\/b"/);
+  assert.throws(() => dm.projectRouting({ overpass: 'on' }), /config\.overpass is "on"/);
+});
+
+test('resolver: a role with two unresolved legacy models is a conflict; a resume or an unrelated role is not', () => {
+  const routing = dm.projectRouting({ models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } });
+  assert.deepEqual(dm.resolveDispatchModel('reviewer', routing), { conflict: true });
+  assert.equal(dm.resolveDispatchModel('scout', routing).ref, 'anthropic/claude-sonnet-5-5#low');
+  assert.equal(dm.conflictRefusal('reviewer'), 'Sterling refused this subagent dispatch: role reviewer has two models; run /sterling:update to choose. Nothing was sent, on either model.');
 });
 
 // ── the dispatch step (precedence) ────────────────────────────────────────────
 
 test('dispatchModel: an unnamed call gets the resolved model; a named call keeps its pin and is told what config gives', () => {
-  const unnamed = dm.dispatchModel({}, { agent: 'sterling/reviewer', prompt: brief('') });
+  const routing = dm.projectRouting({ models: { reviewer: { model: 'openai/gpt-6.1-sol', effort: 'high' } } });
+  const unnamed = dm.dispatchModel(routing, { agent: 'sterling/reviewer', prompt: 'Review.' });
   assert.equal(unnamed.model, SOL);
+  assert.equal(unnamed.resolved, true);
+  assert.equal(unnamed.overpass, false);
   assert.match(unnamed.line, /^MODEL: this dispatch runs on openai\/gpt-6\.1-sol#high, from config\.models\.reviewer\.$/);
-  const named = dm.dispatchModel({}, { agent: 'sterling/reviewer', prompt: brief('review-of=openai'), model: 'anthropic/claude-fable-5-1' });
-  assert.equal(named.model, null, 'a model the call names is never replaced off Overpass');
-  assert.match(named.line, /kept anthropic\/claude-fable-5-1 as the call named; .* gives anthropic\/claude-opus-5-5#high/);
-  assert.equal(dm.dispatchModel({}, { agent: 'sterling/reviewer', prompt: 'x', model: SOL }).line, null, 'no line when the named model is what config gives');
+  const named = dm.dispatchModel(routing, { agent: 'sterling/reviewer', prompt: 'Review.', model: 'anthropic/claude-fable-5-1' });
+  assert.equal(named.model, null, 'a model the call names is kept, never replaced');
+  assert.match(named.line, /kept anthropic\/claude-fable-5-1 as the call named; .* gives openai\/gpt-6\.1-sol#high/);
+  assert.equal(dm.dispatchModel(routing, { agent: 'sterling/reviewer', prompt: 'x', model: SOL }).line, null, 'no line when the named model is what config gives');
 });
 
-test('dispatchModel: a fallback is announced as a notice, named or not', () => {
-  const resolved = dm.dispatchModel({}, { agent: 'sterling/reviewer', prompt: brief('fallback=openai not logged in') });
-  assert.equal(resolved.model, OPUS);
-  assert.equal(resolved.notice, `Sterling models: fallback dispatch on ${OPUS} (reason: openai not logged in).`);
-  const named = dm.dispatchModel({}, { agent: 'sterling/sparring', prompt: brief('fallback=Astra capped'), model: 'anthropic/claude-fable-5-1' });
-  assert.equal(named.model, null);
-  assert.match(named.notice, /fallback dispatch on anthropic\/claude-fable-5-1 \(reason: Astra capped\)/);
+test('dispatchModel: MODEL-INTENT and OVERPASS-BYPASS lines are plain text now, never parsed or refused', () => {
+  const routing = dm.projectRouting({});
+  for (const line of ['MODEL-INTENT: hard', 'MODEL-INTENT: nonsense', 'MODEL-INTENT: fallback=x', 'OVERPASS-BYPASS:']) {
+    const pin = dm.dispatchModel(routing, { agent: 'sterling/implementor', prompt: `Do it.\n${line}\n` });
+    assert.equal(pin.model, IMPL_SONNET, line);
+    assert.equal(pin.notice, undefined, line);
+  }
+  assert.equal(dm.parseIntent, undefined, 'the intent parser is gone');
 });
 
-test('dispatchModel: invalid config keeps the call\'s model with a loud line and notice; an unconfigured agent with an intent says so', () => {
-  const bad = { models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'x#y' } } };
+test('dispatchModel: invalid config keeps the call\'s model with a loud line and notice; an unconfigured agent is left alone', () => {
+  const bad = dm.projectRouting({ models: { reviewer: { model: 'no slash or catalog', effort: 'high' } } });
   const named = dm.dispatchModel(bad, { agent: 'sterling/reviewer', prompt: 'x', model: 'anthropic/claude-opus-5-5' });
   assert.equal(named.model, null);
-  assert.match(named.line, /^MODEL: config\.models is invalid \(config\.models\.reviewer\.opencode_model: .*\), so this dispatch was not given a model from it and kept anthropic\/claude-opus-5-5 as the call named/);
+  assert.match(named.line, /^MODEL: config\.models is invalid \(config\.models\.reviewer\.model: .*\), so this dispatch was not given a model from it and kept anthropic\/claude-opus-5-5 as the call named/);
   assert.match(named.notice, /^Sterling models: config\.models is invalid/);
   const unnamed = dm.dispatchModel(bad, { agent: 'sterling/reviewer', prompt: 'x' });
   assert.equal(unnamed.model, null);
   assert.match(unnamed.line, /runs on the agent's own model/);
-  assert.deepEqual(dm.dispatchModel({}, { agent: 'general', prompt: 'x' }), { model: null, line: null });
-  assert.match(dm.dispatchModel({}, { agent: 'general', prompt: brief('hard') }).line, /MODEL-INTENT line was not applied: the agent "general" has no config\.models entry/);
+  assert.deepEqual(dm.dispatchModel(dm.projectRouting({}), { agent: 'general', prompt: 'x' }), { model: null, line: null });
 });
 
-// ── the seam: axis.mjs through the plugin, Overpass off and on ───────────────
+test('dispatchModel: a two-model role refuses on either model, a named one included; a resume and other roles are not refused', () => {
+  const routing = dm.projectRouting({ models: { reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } });
+  assert.throws(() => dm.dispatchModel(routing, { agent: 'sterling/reviewer', prompt: 'x' }), /^Error: Sterling refused this subagent dispatch: role reviewer has two models; run \/sterling:update to choose\. Nothing was sent, on either model\.$/);
+  assert.throws(() => dm.dispatchModel(routing, { agent: 'sterling/reviewer', prompt: 'x', model: SOL }), /two models/);
+  assert.equal(dm.dispatchModel(routing, { agent: 'sterling/reviewer', sessionID: 'ses_1', prompt: 'x' }).model, null);
+  assert.equal(dm.dispatchModel(routing, { agent: 'sterling/scout', prompt: 'x' }).model, 'anthropic/claude-sonnet-5-5#low');
+});
+
+// ── the seam: axis.mjs through the plugin ─────────────────────────────────────
 
 function makeProject(config) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-oc-dispatch-model-'));
@@ -236,56 +190,68 @@ async function withPlugin(config, fn) {
   }
 }
 
-test('seam: Overpass off (hobby and work) sets each role\'s model from config.models and reports it on the result', async () => {
-  for (const config of [{}, { mode: 'hobby', overpass: { enabled: true } }, { mode: 'work' }]) {
+test('seam: each role\'s model comes from config.models whatever the mode, and is reported on the result', async () => {
+  for (const config of [{}, { mode: 'hobby' }, { mode: 'work' }]) {
     await withPlugin(config, async ({ dispatch }) => {
       const impl = await dispatch({});
       assert.equal(impl.args.model, IMPL_SONNET, JSON.stringify(config));
       assert.match(impl.result, /MODEL: this dispatch runs on anthropic\/claude-sonnet-5-5#medium/);
-      assert.equal((await dispatch({ prompt: brief('hard') })).args.model, OPUS);
-      assert.equal((await dispatch({ agent: 'sterling/reviewer', prompt: brief('') })).args.model, SOL);
-      assert.equal((await dispatch({ agent: 'sterling/sparring', prompt: brief('') })).args.model, ASTRA);
-      const pairing = (await dispatch({ agent: 'sterling/reviewer', prompt: brief('review-of=openai') })).args.model;
-      assert.equal(pairing, config.mode === 'work' ? SOL : OPUS, `pairing by mode: ${JSON.stringify(config)}`);
-      const kept = await dispatch({ model: 'anthropic/claude-opus-5-5' });
-      assert.equal(kept.args.model, 'anthropic/claude-opus-5-5', 'the named model is kept');
-      assert.match(kept.result, /MODEL: kept anthropic\/claude-opus-5-5 as the call named/);
+      assert.equal((await dispatch({ agent: 'sterling/implementor-hard' })).args.model, OPUS);
+      assert.equal((await dispatch({ agent: 'sterling/reviewer' })).args.model, OPUS);
+      assert.equal((await dispatch({ agent: 'sterling/sparring' })).args.model, OPUS);
+      const kept = await dispatch({ model: 'anthropic/claude-fable-5-1' });
+      assert.equal(kept.args.model, 'anthropic/claude-fable-5-1', 'the named model is kept');
+      assert.match(kept.result, /MODEL: kept anthropic\/claude-fable-5-1 as the call named/);
     });
   }
-});
-
-test('seam: Overpass on keeps the tier and OVERPASS-BYPASS exactly; an intent line is ignored, even a malformed one', async () => {
-  await withPlugin({ mode: 'work', overpass: { enabled: true } }, async ({ dispatch }) => {
-    const plain = await dispatch({ prompt: brief('hard') });
-    assert.equal(plain.args.model, 'overpass/agentic-auto');
-    assert.doesNotMatch(plain.result, /MODEL:/);
-    assert.equal((await dispatch({ agent: 'sterling/reviewer', prompt: brief('review-of=openai'), model: SOL })).args.model, 'overpass/agentic-high');
-    assert.equal((await dispatch({ prompt: brief('hrad') })).args.model, 'overpass/agentic-auto', 'no refusal while Overpass decides');
-    const bypass = await dispatch({ model: OPUS, prompt: `${brief('hard')}\nOVERPASS-BYPASS: needs Opus` });
-    assert.equal(bypass.args.model, OPUS);
-    assert.match(bypass.result, /OVERPASS-BYPASS: Overpass bypassed for this dispatch/);
+  await withPlugin({ models: { reviewer: { model: 'openai/gpt-6.1-sol', effort: 'high' }, implementor: { model: TERRA, effort: 'medium' } } }, async ({ dispatch }) => {
+    assert.equal((await dispatch({ agent: 'sterling/reviewer' })).args.model, SOL);
+    assert.equal((await dispatch({})).args.model, `${TERRA}#medium`);
   });
 });
 
-test('seam: a malformed intent line refuses the dispatch off Overpass; invalid config.models keeps the call and notices loud', async () => {
-  await withPlugin({}, async ({ ctx }) => {
-    const input = { tool: 'subagent', id: 'call_bad', sessionID: 'ses_root', input: { agent: 'sterling/implementor', description: 'd', prompt: brief('hrad') } };
-    await assert.rejects(ctx.hooks.tool['execute.before'](input), /^Error: Sterling refused this subagent dispatch: its brief carries a MODEL-INTENT line but its value "hrad"/);
+test('seam: a brief\'s MODEL-INTENT or OVERPASS-BYPASS line is plain text; it neither refuses nor changes the model', async () => {
+  await withPlugin({}, async ({ dispatch }) => {
+    for (const [i, line] of ['MODEL-INTENT: hard', 'MODEL-INTENT: hrad', 'MODEL-INTENT: review-of=openai', 'OVERPASS-BYPASS:'].entries()) {
+      const out = await dispatch({ prompt: `Do the work.\n${line}\n` }, `call_${i}`);
+      assert.equal(out.args.model, IMPL_SONNET, line);
+      assert.doesNotMatch(out.result, /OVERPASS-BYPASS|MODEL-INTENT/, line);
+    }
+    const named = await dispatch({ model: OPUS, prompt: 'Do it.\nOVERPASS-BYPASS: needs Opus\n' }, 'call_n');
+    assert.equal(named.args.model, OPUS, 'a model the call names is the pin, marker or not');
+  });
+});
+
+test('seam: an Overpass tier is sent mapped through the provider and unchecked-for-variant; a named call keeps its own model', async () => {
+  await withPlugin({ overpass: { provider: 'overpass' }, models: { implementor: { model: 'overpass/agentic-auto', effort: 'high' } } }, async ({ dispatch }) => {
+    const plain = await dispatch({});
+    assert.equal(plain.args.model, 'overpass/agentic-auto', 'no variant on a tier');
+    assert.match(plain.result, /MODEL: this dispatch runs on overpass\/agentic-auto, from config\.models\.implementor, the Overpass tier overpass\/agentic-auto on provider 'overpass' with effort high/);
+    const named = await dispatch({ model: 'anthropic/claude-opus-5-5' }, 'call_2');
+    assert.equal(named.args.model, 'anthropic/claude-opus-5-5');
+    assert.match(named.result, /MODEL: kept anthropic\/claude-opus-5-5 as the call named/);
+  });
+});
+
+test('seam: a two-model role refuses the dispatch and leaves the call untouched; invalid config.models keeps the call and notices loud', async () => {
+  await withPlugin({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } }, async ({ ctx }) => {
+    const input = { tool: 'subagent', id: 'call_bad', sessionID: 'ses_root', input: { agent: 'sterling/implementor', description: 'd', prompt: 'x' } };
+    await assert.rejects(ctx.hooks.tool['execute.before'](input), /^Error: Sterling refused this subagent dispatch: role implementor has two models; run \/sterling:update to choose\./);
     assert.equal(Object.hasOwn(input.input, 'model'), false, 'a refused call is not touched');
   });
-  await withPlugin({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra#high' } } }, async ({ dispatch, notices }) => {
+  await withPlugin({ models: { implementor: { model: 'no slash or catalog', effort: 'high' } } }, async ({ dispatch, notices }) => {
     const named = await dispatch({ model: 'anthropic/claude-sonnet-5-5' });
     assert.equal(named.args.model, 'anthropic/claude-sonnet-5-5', 'the dispatch still runs, on its own model');
-    assert.match(named.result, /MODEL: config\.models is invalid \(config\.models\.implementor\.opencode_model/);
+    assert.match(named.result, /MODEL: config\.models is invalid \(config\.models\.implementor\.model/);
     assert.match(notices(), /Sterling models: config\.models is invalid/);
   });
 });
 
-test('seam: an unreadable config leaves the call alone with the existing UNKNOWN line, as before', async () => {
+test('seam: an unreadable config leaves the call alone with the UNKNOWN line', async () => {
   await withPlugin('{ "mode": ', async ({ dispatch }) => {
-    const unnamed = await dispatch({ prompt: brief('hard') });
+    const unnamed = await dispatch({});
     assert.equal(Object.hasOwn(unnamed.args, 'model'), false);
-    assert.match(unnamed.result, /Overpass routing UNKNOWN/);
+    assert.match(unnamed.result, /Model routing UNKNOWN: \.sterling\/config\.json could not be read/);
   });
 });
 
@@ -293,6 +259,7 @@ test('seam: an unreadable config leaves the call alone with the existing UNKNOWN
 
 const LIST = [
   { providerID: 'openai', id: 'gpt-6.1-sol', variants: [{ id: 'low' }, { id: 'medium' }, { id: 'high' }, { id: 'xhigh' }] },
+  { providerID: 'anthropic', id: 'claude-opus-5-5', variants: [{ id: 'low' }, { id: 'medium' }, { id: 'high' }] },
   { providerID: 'anthropic', id: 'claude-haiku-5-5', variants: [] },
   { providerID: 'anthropic', modelID: 'claude-sonnet-5-5', id: 'claude-sonnet-5-5', variants: ['low', 'high'] },
 ];
@@ -328,7 +295,7 @@ test('seam: the plugin checks a resolved variant against ctx.model.list and drop
     assert.equal(lib.model, 'anthropic/claude-haiku-5-5', 'the variant is dropped, the dispatch still runs');
     assert.match(lib.text, /variant low dropped/);
     const rev = await run({ agent: 'sterling/reviewer' }, 'c2');
-    assert.equal(rev.model, SOL);
+    assert.equal(rev.model, OPUS);
     assert.doesNotMatch(rev.text, /variant/);
     const named = await run({ agent: 'sterling/librarian', model: 'anthropic/claude-haiku-5-5#low' }, 'c3');
     assert.equal(named.model, 'anthropic/claude-haiku-5-5#low', 'a model the call names is not touched by the guard');
@@ -350,13 +317,10 @@ test('seam: a model list that never settles cannot stall the dispatch; the varia
     await ctx.hooks.tool['execute.before'](input);
     const waited = Date.now() - started;
     assert.ok(waited < 5000, `the dispatch went ahead after ${waited} ms`);
-    assert.equal(input.input.model, SOL);
+    assert.equal(input.input.model, OPUS);
     const after = { ...input, status: 'completed', result: { content: [{ type: 'text', text: 'done' }], metadata: {} } };
     await ctx.hooks.tool['execute.after'](after);
     assert.match(after.result.content.map((x) => x.text).join('\n'), /variant high not checked: OpenCode's model list could not be read: the model list timed out after 2000 ms/);
-    // A refusal still refuses at once, whatever the model list does.
-    const bad = { tool: 'subagent', id: 'c_bad', sessionID: 'ses_root', input: { agent: 'sterling/reviewer', description: 'd', prompt: brief('hrad') } };
-    await assert.rejects(ctx.hooks.tool['execute.before'](bad), /MODEL-INTENT line but its value "hrad"/);
   } finally {
     await cleanup?.();
     p.cleanup();
@@ -390,47 +354,33 @@ test('seam: a bare-array ctx.model.list still works', async () => {
 
 // ── resuming a subagent session (board 25acfbe4) ─────────────────────────────
 
-test('resume: a call with a sessionID and no intent line keeps the session\'s own model; a named model or an intent line still applies', () => {
-  const plain = dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.' });
-  assert.deepEqual(plain, { model: null, line: 'MODEL: resumed session keeps its own model (no MODEL-INTENT line, so config.models is not applied).' });
-  assert.deepEqual(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.', model: OPUS }), { model: null, line: null }, 'a model the call names is the caller\'s pin');
-  assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: brief('hard') }).model, OPUS, 'an intent line resolves as usual');
-  assert.equal(dm.dispatchModel({}, { agent: 'sterling/reviewer', sessionID: 'ses_warm', prompt: brief('fallback=x') }).model, OPUS);
-  assert.equal(dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: '', prompt: 'x' }).model, IMPL_SONNET, 'an empty sessionID is a new dispatch');
-  assert.throws(() => dm.dispatchModel({}, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: brief('hrad') }), /MODEL-INTENT/, 'a malformed line still refuses on a resume');
+test('resume: a call with a sessionID keeps the session\'s own model; a named model is the caller\'s pin', () => {
+  const routing = dm.projectRouting({});
+  const plain = dm.dispatchModel(routing, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.' });
+  assert.deepEqual(plain, { model: null, line: 'MODEL: resumed session keeps its own model (config.models is not applied).' });
+  assert.deepEqual(dm.dispatchModel(routing, { agent: 'sterling/implementor', sessionID: 'ses_warm', prompt: 'Continue.', model: OPUS }), { model: null, line: null });
+  assert.equal(dm.dispatchModel(routing, { agent: 'sterling/implementor', sessionID: '', prompt: 'x' }).model, IMPL_SONNET, 'an empty sessionID is a new dispatch');
 });
 
-test('seam: resuming leaves the model unset (hobby and work); an intent line sets it; Overpass on is unchanged', async () => {
-  for (const config of [{}, { mode: 'work' }]) {
+test('seam: resuming leaves the model unset, in every mode and on a tier too', async () => {
+  for (const config of [{}, { mode: 'work' }, { models: { implementor: { model: 'overpass/agentic-auto' } } }]) {
     await withPlugin(config, async ({ dispatch }) => {
       const resumed = await dispatch({ sessionID: 'ses_warm' });
       assert.equal(Object.hasOwn(resumed.args, 'model'), false, JSON.stringify(config));
       assert.match(resumed.result, /MODEL: resumed session keeps its own model/);
-      assert.equal((await dispatch({ sessionID: 'ses_warm', prompt: brief('hard') })).args.model, OPUS);
     });
   }
-  await withPlugin({ mode: 'work', overpass: { enabled: true } }, async ({ dispatch }) => {
-    const resumed = await dispatch({ sessionID: 'ses_warm' });
-    assert.equal(resumed.args.model, 'overpass/agentic-auto', 'Overpass still sets the tier on a resume');
-    assert.doesNotMatch(resumed.result, /resumed session/);
-  });
 });
 
-// GitHub #310 review round: a config written by v0.19.155 may carry an exact agy_model id. The dispatch resolver
-// judges config.models entries with the schema, so it must apply the shared legacy strip first; otherwise a
-// stale value reads as an invalid config and the dispatch loses its model.
-test('legacy agy_model ids in config.models resolve exactly as a clean config: normal, review-of and fallback', () => {
+// GitHub #310 review round: a config written by v0.19.155 may carry an exact agy_model id. The routing is
+// read through the legacy-to-canonical transform, so the stale value must not read as an invalid config.
+test('legacy agy_model ids in config.models resolve exactly as a clean config', () => {
   const entry = (opencode, agy) => ({ model: 'claude-opus-5-5', effort: 'high', opencode_model: opencode, agy_model: agy });
-  const legacy = { models: { reviewer: entry('openai/gpt-6.1-sol', 'gemini-4-hydrogen-high'), sparring: entry('openai/gpt-6-astra', 'claude-opus-5-5-high') } };
-  const clean = { models: { reviewer: entry('openai/gpt-6.1-sol', undefined), sparring: entry('openai/gpt-6-astra', undefined) } };
-  assert.equal(ref('reviewer', null, legacy), SOL);
-  assert.equal(ref('sparring', null, legacy), ASTRA);
-  assert.equal(ref('reviewer', 'review-of=openai', legacy, 'hobby'), OPUS, 'MODEL-INTENT review-of=openai pairs the Opus reviewer in hobby');
-  assert.equal(ref('reviewer', 'fallback=openai not logged in', legacy), OPUS);
-  for (const [role, intent, mode] of [['reviewer', null, null], ['sparring', null, null], ['reviewer', 'review-of=openai', 'hobby'], ['reviewer', 'fallback=x', null]]) {
-    assert.equal(ref(role, intent, legacy, mode), ref(role, intent, clean, mode), `${role} ${intent}`);
-  }
-  const call = dm.dispatchModel(legacy, { agent: 'sterling/reviewer', prompt: brief('') });
-  assert.equal(call.model, SOL, 'the dispatch gets its model, with no invalid-config notice');
+  const legacy = { models: { reviewer: entry('anthropic/claude-opus-5-5', 'gemini-4-hydrogen-high'), sparring: entry('anthropic/claude-opus-5-5', 'claude-opus-5-5-high') } };
+  const clean = { models: { reviewer: entry('anthropic/claude-opus-5-5', undefined), sparring: entry('anthropic/claude-opus-5-5', undefined) } };
+  for (const role of ['reviewer', 'sparring']) assert.equal(ref(role, legacy), ref(role, clean), role);
+  assert.equal(ref('reviewer', legacy), OPUS);
+  const call = dm.dispatchModel(dm.projectRouting(legacy), { agent: 'sterling/reviewer', prompt: 'x' });
+  assert.equal(call.model, OPUS, 'the dispatch gets its model, with no invalid-config notice');
   assert.equal(call.notice ?? null, null);
 });

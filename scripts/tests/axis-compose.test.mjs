@@ -19,15 +19,25 @@ test('the H20 and H23 composition lives only in scripts/hooks/lib/axis-compose.m
   const shared = read(LIB);
   const literals = [
     'you have just put a CHOICE TO THE USER',
-    'you are about to CONSULT the sparring partner',
     'PRIOR ANSWERS in the store',
     'STERLING OUTPUT-AXIS DELIVERY (H23)',
-    'STERLING CODEX MODEL PIN (H20)',
-    'this tool takes no model argument',
   ];
   for (const literal of literals) {
     assert.ok(shared.includes(literal), `${LIB} holds '${literal}'`);
     for (const caller of CALLERS) assert.ok(!read(caller).includes(literal), `${caller} keeps no copy of '${literal}'`);
   }
   for (const caller of CALLERS) assert.match(read(caller), /from '[^']*axis-compose\.mjs'/, `${caller} imports the shared composition`);
+});
+
+test('no axis caller touches a codex tool call: the model pin, the MCP-server disabling and the codex matcher are gone', async () => {
+  const lib = await import('../hooks/lib/axis-compose.mjs');
+  for (const name of ['codexModelPin', 'codexMcpDisable', 'codexUserMcpServers']) assert.equal(lib[name], undefined, `${name} is no longer exported`);
+  const { axisSurface } = await import('../../packages/opencode-plugin/src/axis.mjs');
+  assert.equal(axisSurface('codex_codex'), null);
+  assert.equal(axisSurface('codex.codex-reply'), null);
+  assert.equal(axisSurface('subagent'), 'dispatch');
+  const hooks = JSON.parse(read('hooks/hooks.json'));
+  const matchers = (hooks.hooks.PreToolUse ?? []).map((e) => e.matcher);
+  assert.ok(!matchers.some((m) => /codex/.test(m)), 'hooks.json registers no codex matcher');
+  for (const caller of CALLERS) assert.ok(!/mcp__codex__|sparring_partner/.test(read(caller)), `${caller} reads no codex tool call or sparring_partner`);
 });

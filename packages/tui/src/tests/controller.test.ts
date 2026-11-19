@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { openDashboard, type DashboardController } from '../controller.js';
-import { SYSTEM_TAB } from '../state.js';
+import { SYSTEM_TAB, modelChoices, pickerSpecs, systemCursorOf } from '../state.js';
+import { applyHandoffToggle } from '../config-writeback.js';
 
 // The dashboard controller is the host-neutral half of main.ts: the store and
 // config code paths both the terminal TUI and the OpenCode plugin drive. These
@@ -38,11 +39,10 @@ test('controller: the TDD toggle on the System tab writes config.tdd.enabled thr
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     assert.equal(ctl.roster()?.tdd?.enabled, true, 'the roster loads on System-tab activation');
-    // config.models defaults fill the top rows; the PR auto-merge row is last
-    // (DOWN clamps on it), the handoff files row sits above it, the mode row
-    // above that and the tdd row above that.
+    // config.models defaults fill the top rows. This fixture is in hobby mode, where the PR auto-merge row is
+    // disabled (2026-11-18, System tab redesign item 2), so the handoff files row is the last stop (DOWN clamps
+    // on it), the mode row sits above it and the tdd row above that.
     for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
-    await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
@@ -56,105 +56,27 @@ test('controller: the TDD toggle on the System tab writes config.tdd.enabled thr
   }
 });
 
-// The handoff files row and the project mode row are separate switches (decision
-// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-// each writes only its own key, and each notice says only what that key decides.
-for (const mode of ['hobby', 'work']) {
-  test(`controller (${mode}): the handoff toggle writes config.handoff.enabled and leaves the mode alone; the mode toggle leaves handoff alone`, async () => {
-    const f = fixture({ mode, tdd: { enabled: true } });
-    const ctl = openDashboard(f.storePath);
-    try {
-      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
-      assert.equal(ctl.roster()?.handoff, false, 'no handoff key and nothing tracked reads off, in work mode too');
-      // the PR auto-merge row is last; the handoff files row sits above it
-      for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
-      await ctl.handle({ kind: 'key', name: 'UP' }, VP);
-      await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
-      let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
-      assert.deepEqual(written.handoff, { enabled: true }, 'config.handoff.enabled written');
-      assert.equal(written.mode, mode, 'the mode is untouched');
-      assert.equal(ctl.roster()?.handoff, true, 'the roster reloads after the write');
-      assert.match(ctl.ui().notice ?? '', /^handoff files turned on — run \/sterling:update \(or init\)/);
-
-      await ctl.handle({ kind: 'key', name: 'UP' }, VP);
-      await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
-      written = JSON.parse(readFileSync(f.configPath, 'utf8'));
-      assert.equal(written.mode, mode === 'hobby' ? 'work' : 'hobby', 'the mode row flips the mode');
-      assert.deepEqual(written.handoff, { enabled: true }, 'the handoff setting is untouched by a mode switch');
-      assert.match(ctl.ui().notice ?? '', /^project mode set to /);
-      assert.doesNotMatch(ctl.ui().notice ?? '', /OpenCode|handoff/i, 'the mode notice makes no claim about the handoff files');
-
-      await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
-      await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
-      assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).handoff, { enabled: false });
-      assert.match(ctl.ui().notice ?? '', /^handoff files turned off — .*NOT deleted/);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-}
-
-// The PR auto-merge row (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean)
-// is the System tab's last row: it writes pr_review.auto_merge_on_clean, keeps
-// the pinned Copilot login, and reads back through the loop's own judge.
-test('controller: the auto-merge toggle writes pr_review.auto_merge_on_clean through handle(), keeps copilot_logins, and reloads the roster', async () => {
-  const f = fixture({ mode: 'work', pr_review: { copilot_logins: ['copilot-pull-request-reviewer[bot]'] } });
+// The handoff files row writes only config.handoff.enabled (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting); the Project mode
+// row is gone (decision system-tab-layout-one-screen-with-three-sections-agents-one).
+test('controller: the handoff toggle writes config.handoff.enabled and leaves the workflow alone', async () => {
+  const f = fixture({ workflow: { merge: 'pr', reviewers: 2, copilot_loop: true, auto_merge_on_clean: true }, tdd: { enabled: true } });
   const ctl = openDashboard(f.storePath);
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
-    assert.equal(ctl.roster()?.autoMergeOnClean, true, 'an absent switch reads on');
-    for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    assert.equal(ctl.roster()?.handoff, false, 'no handoff key and nothing tracked reads off');
+    // the handoff files row is the last cursor stop of the tab (storage below it is read-only)
+    for (let i = 0; i < 40; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
-    assert.deepEqual(written.pr_review, { copilot_logins: ['copilot-pull-request-reviewer[bot]'], auto_merge_on_clean: false });
-    assert.equal(written.mode, 'work', 'the mode is untouched');
-    assert.equal(ctl.roster()?.autoMergeOnClean, false, 'the roster reloads after the write');
-    assert.match(ctl.ui().notice ?? '', /^auto-merge turned off — .*human merges/);
+    assert.deepEqual(written.handoff, { enabled: true }, 'config.handoff.enabled written');
+    assert.deepEqual(written.workflow, { merge: 'pr', reviewers: 2, copilot_loop: true, auto_merge_on_clean: true }, 'the workflow is untouched');
+    assert.equal(ctl.roster()?.handoff, true, 'the roster reloads after the write');
+    assert.match(ctl.ui().notice ?? '', /^handoff files turned on — run \/sterling:update \(or init\)/);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     written = JSON.parse(readFileSync(f.configPath, 'utf8'));
-    assert.equal(written.pr_review.auto_merge_on_clean, true);
-    assert.match(ctl.ui().notice ?? '', /^auto-merge turned on — /);
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: a malformed auto-merge switch reaches the roster as its JSON text (INVALID); an unreadable config is UNKNOWN', async () => {
-  for (const [config, expected] of [
-    [{ pr_review: { auto_merge_on_clean: 'yes' } }, '"yes"'],
-    [{ pr_review: 'on' }, '"on"'],
-  ] as const) {
-    const f = fixture(config as unknown as Record<string, unknown>);
-    const ctl = openDashboard(f.storePath);
-    try {
-      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
-      assert.equal(ctl.roster()?.autoMergeOnClean, expected);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  }
-  // the store may refuse to open on a malformed config, so it breaks after opening
-  for (const [text, expected] of [['null', 'null'], ['7', '7'], ['"x"', '"x"'], ['[]', '[]']] as const) {
-    const f = fixture();
-    const ctl = openDashboard(f.storePath);
-    try {
-      writeFileSync(f.configPath, text);
-      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
-      assert.equal(ctl.roster()?.autoMergeOnClean, expected, `a ${text} root is INVALID, never on`);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  }
-  const f = fixture();
-  const ctl = openDashboard(f.storePath);
-  try {
-    writeFileSync(f.configPath, '{not json');
-    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
-    assert.equal(ctl.roster()?.autoMergeOnClean, null);
+    assert.deepEqual(written.handoff, { enabled: false });
+    assert.match(ctl.ui().notice ?? '', /^handoff files turned off — .*NOT deleted/);
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });
@@ -194,99 +116,6 @@ test('controller: a disabled select effect is dropped and nothing reaches the se
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     assert.equal(ctl.store.takeSelection(), undefined);
     assert.equal(ctl.ui().expanded.length, 1, 'the card still expands; only the handoff is off');
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: a disabled model_swap surfaces its notice and leaves config.models untouched', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
-  const ctl = openDashboard(f.storePath, { disabledEffects: { model_swap: 'model swap is off here' } });
-  try {
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: [], decisionTitle: 't' },
-    ]);
-    assert.equal(ctl.ui().notice, 'model swap is off here');
-    assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor.model, 'claude-a');
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: a model swap also re-renders the Sterling-full OpenCode agents with the matching OpenCode model', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
-  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
-  mkdirSync(ocDir, { recursive: true });
-  const ctl = openDashboard(f.storePath);
-  try {
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
-    ]);
-    assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor.model, 'claude-b');
-    assert.match(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), /^model: anthropic\/claude-b$/m);
-    assert.doesNotMatch(readFileSync(join(ocDir, 'conductor.md'), 'utf8'), /^model:/m);
-    assert.equal(ctl.ui().notice, undefined, ctl.ui().notice);
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: an OpenCode re-render failure is folded into the notice; the swap decision is still recorded', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
-  // a directory where the implementor file belongs makes the re-render throw (EISDIR)
-  mkdirSync(join(f.dir, '.opencode', 'agents', 'sterling', 'implementor.md'), { recursive: true });
-  const ctl = openDashboard(f.storePath);
-  try {
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 'swap-decision-title' },
-    ]);
-    assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor.model, 'claude-b');
-    assert.match(ctl.ui().notice ?? '', /OpenCode agent re-render failed/);
-    const decisions = ctl.store.query({ types: ['decision'], cap: 10 }) as Array<{ title: string }>;
-    assert.ok(decisions.some((d) => d.title === 'swap-decision-title'), 'the swap decision was written');
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: a model swap refused because config.json changed on disk writes no agent file and records no decision', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
-  const claudeAgent = join(f.dir, '.claude', 'agents', 'implementor.md');
-  mkdirSync(join(f.dir, '.claude', 'agents'), { recursive: true });
-  writeFileSync(claudeAgent, '---\nname: implementor\nmodel: claude-a\neffort: high\n---\nbody\n');
-  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
-  mkdirSync(ocDir, { recursive: true });
-  writeFileSync(join(ocDir, 'implementor.md'), 'portable\n');
-  const concurrent = JSON.stringify({ models: { implementor: { model: 'claude-a', effort: 'high' } }, overpass: { enabled: false } }, null, 2) + '\n';
-  const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => writeFileSync(f.configPath, concurrent) } });
-  try {
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
-    ]);
-    assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change is not lost");
-    assert.match(readFileSync(claudeAgent, 'utf8'), /^model: claude-a$/m, 'the Claude agent file was not re-stamped');
-    assert.equal(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), 'portable\n', 'the OpenCode agent file was not re-rendered');
-    assert.equal(ctl.store.query({ types: ['decision'], cap: 10 }).length, 0, 'no swap decision was recorded');
-    assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), []);
-    assert.match(ctl.ui().notice ?? '', /^model swap for 'implementor' not changed — config\.json changed on disk while this write was in flight/);
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: a model swap in a project without OpenCode agents writes no .opencode files', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
-  const ctl = openDashboard(f.storePath);
-  try {
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
-    ]);
-    assert.equal(existsSync(join(f.dir, '.opencode')), false);
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });
@@ -352,320 +181,191 @@ test('controller: the handoff row says why — not set for an absent key, the tr
 });
 
 // decision opencode-only-model-override-per-role-for-openai-picks
-test('controller: an OpenCode override writes config.models.<key>.opencode_model and the OpenCode agent only; the Claude agent file is unchanged', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high', hard_task: { model: 'claude-h' } } } });
-  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
-  mkdirSync(ocDir, { recursive: true });
+
+test('controller: a fresh dashboard seeds the models catalog with vendor and id split, so the picker never shows anthropic/anthropic/... or a logical overpass/ or agy/ id as a catalog model (item-G review finding 6)', async () => {
+  const f = fixture({ tdd: { enabled: true }, models: { implementor: { model: 'openai/gpt-5.6-terra', effort: 'high' }, scout: { model: 'overpass/agentic-auto' }, librarian: { model: 'agy/flash' } } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    const snap = ctl.roster();
+    assert.ok(snap?.catalog.present, 'the catalog was seeded');
+    const ids = snap!.catalog.entries.map((e) => `${e.vendor ?? 'anthropic'}/${e.id}`);
+    assert.ok(ids.includes('anthropic/claude-opus-5-5'), ids.join(', '));
+    assert.ok(ids.includes('openai/gpt-5.6-terra'), ids.join(', '));
+    assert.deepEqual(snap!.catalog.entries.filter((e) => e.id.includes('/')), [], 'no catalog id carries a provider prefix');
+    const refs = modelChoices(snap!, 'implementor').flatMap((o) => ('ref' in o.choice ? [o.choice.ref] : []));
+    assert.deepEqual(refs.filter((r) => /^anthropic\/anthropic\/|^[^/]+\/(overpass|agy|openai|anthropic)\//.test(r)), [], refs.join(', '));
+    assert.equal(refs.filter((r) => r === 'overpass/agentic-auto').length, 1, 'a tier is offered once, as itself');
+    assert.equal(refs.filter((r) => r === 'agy/flash').length, 1);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// decision gemini-4-neon-in-the-system-tab-agy-inherit-is-shown-as-the
+test('controller: the picker shows agy/inherit as the agy session model, and the choice carries the ref agy/inherit', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    const choices = modelChoices(ctl.roster()!, 'implementor');
+    const idx = choices.findIndex((o) => 'ref' in o.choice && o.choice.ref === 'agy/inherit');
+    assert.ok(idx >= 0, 'agy/inherit is offered');
+    assert.equal(choices[idx]!.label, 'agy session model (your agy default, e.g. Neon)');
+    assert.deepEqual(choices[idx]!.choice, { ref: 'agy/inherit' });
+    const specs = pickerSpecs(ctl.roster()!, { key: 'implementor', stage: 'model', highlight: 0 } as never);
+    assert.ok(specs.some((s) => s.text === 'agy/inherit  agy session model (your agy default, e.g. Neon)'));
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// Restored from the pre-cutover suite (model_swap), ported to the agent_model effect that replaced it.
+test('controller: a disabled agent_model effect surfaces its notice and leaves config.models untouched', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
+  const before = readFileSync(f.configPath, 'utf8');
+  const ctl = openDashboard(f.storePath, { disabledEffects: { agent_model: 'model change is off here' } });
+  try {
+    await ctl.applyEffects([{ type: 'agent_model', key: 'implementor', model: 'anthropic/claude-opus-5-5', effort: 'low' }]);
+    assert.equal(ctl.ui().notice, 'model change is off here');
+    assert.equal(readFileSync(f.configPath, 'utf8'), before);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: an agent_model write refused because config.json changed on disk keeps the other writer\'s change, renders no agent file and leaves no temp file', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
   const claudeAgent = join(f.dir, '.claude', 'agents', 'implementor.md');
   mkdirSync(join(f.dir, '.claude', 'agents'), { recursive: true });
-  writeFileSync(claudeAgent, '---\nname: implementor\nmodel: claude-a\neffort: high\n---\nbody\n');
-  const claudeBefore = readFileSync(claudeAgent, 'utf8');
-  const ctl = openDashboard(f.storePath);
-  try {
-    await ctl.applyEffects([
-      { type: 'opencode_model', key: 'implementor', to: 'openai/gpt-5.6-terra', model: 'claude-a', effort: 'high', agents: ['implementor'] },
-    ]);
-    assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor, { model: 'claude-a', effort: 'high', hard_task: { model: 'claude-h' }, opencode_model: 'openai/gpt-5.6-terra' });
-    assert.match(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), /^model: openai\/gpt-5\.6-terra$/m);
-    assert.equal(readFileSync(claudeAgent, 'utf8'), claudeBefore, 'the Claude Code agent file is byte-identical');
-    assert.match(ctl.ui().notice ?? '', /set to openai\/gpt-5\.6-terra; Claude Code keeps claude-a/);
-    const decisions = ctl.store.query({ types: ['decision'], cap: 10 }) as Array<{ title: string }>;
-    assert.ok(decisions.some((d) => d.title === 'OpenCode model: implementor anthropic/claude-a→openai/gpt-5.6-terra (System tab)'), JSON.stringify(decisions.map((d) => d.title)));
-
-    // a later Claude swap on the same key keeps the override, on disk and on OpenCode
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
-    ]);
-    assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor, { model: 'claude-b', effort: 'low', hard_task: { model: 'claude-h' }, opencode_model: 'openai/gpt-5.6-terra' });
-    assert.deepEqual(readFileSync(join(ocDir, 'implementor.md'), 'utf8').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
-
-    // clearing the override returns the OpenCode agent to the role's Claude model
-    await ctl.applyEffects([
-      { type: 'opencode_model', key: 'implementor', from: 'openai/gpt-5.6-terra', model: 'claude-b', effort: 'low', agents: ['implementor'] },
-    ]);
-    assert.equal('opencode_model' in JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor, false);
-    assert.deepEqual(readFileSync(join(ocDir, 'implementor.md'), 'utf8').match(/^model: .*$/gm), ['model: anthropic/claude-b']);
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: an override for a key the config file does not carry writes the key with its current Claude values', async () => {
-  const f = fixture();
-  const ctl = openDashboard(f.storePath);
-  try {
-    await ctl.applyEffects([
-      { type: 'opencode_model', key: 'reviewer', to: 'openai/gpt-6.1-sol', model: 'claude-opus-5-5', effort: 'high', agents: ['reviewer'] },
-    ]);
-    assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).models.reviewer, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' });
-    assert.equal(existsSync(join(f.dir, '.opencode')), false, 'no OpenCode agents installed, none created');
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-test('controller: a malformed override is refused before config.json is written', async () => {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
-  const before = readFileSync(f.configPath, 'utf8');
-  const ctl = openDashboard(f.storePath);
-  try {
-    await ctl.applyEffects([
-      { type: 'opencode_model', key: 'implementor', to: 'gpt-5.6-terra', model: 'claude-a', effort: 'high', agents: ['implementor'] },
-    ]);
-    assert.equal(readFileSync(f.configPath, 'utf8'), before);
-    assert.match(ctl.ui().notice ?? '', /OpenCode model for 'implementor' not changed/);
-  } finally {
-    ctl.close();
-    rmSync(f.dir, { recursive: true, force: true });
-  }
-});
-
-// Sol review of 42c626ce: an override is all or nothing. A refused or failed
-// OpenCode projection leaves config.json and every agent file byte-identical and
-// records no decision, on the set path and on the clear path.
-function overrideFixture(opencodeModel?: string) {
-  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high', ...(opencodeModel ? { opencode_model: opencodeModel } : {}) }, reviewer: { model: 'claude-r', effort: 'high' } } });
+  writeFileSync(claudeAgent, '---\nname: implementor\nmodel: claude-sonnet-5-5\neffort: high\n---\nbody\n');
   const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
   mkdirSync(ocDir, { recursive: true });
-  return { ...f, ocDir };
-}
-function snapshotFiles(f: { configPath: string; ocDir: string }): Record<string, string> {
-  const out: Record<string, string> = { config: readFileSync(f.configPath, 'utf8') };
-  for (const n of readdirSync(f.ocDir)) out[n] = readFileSync(join(f.ocDir, n), 'utf8');
-  return out;
-}
-function decisionCount(ctl: DashboardController): number {
-  return ctl.store.query({ types: ['decision'], cap: 50 }).length;
-}
-for (const path of ['set', 'clear'] as const) {
-  const effect = (agents: string[]) => path === 'set'
-    ? { type: 'opencode_model' as const, key: 'implementor', to: 'openai/gpt-5.6-terra', model: 'claude-a', effort: 'high', agents }
-    : { type: 'opencode_model' as const, key: 'implementor', from: 'openai/gpt-6-astra', model: 'claude-a', effort: 'high', agents };
-
-  test(`controller: an override ${path} with a hand-edited OpenCode agent changes nothing and records no decision`, async () => {
-    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    const ctl = openDashboard(f.storePath);
-    try {
-      // install the Sterling-full set at the starting pin, then hand-edit the target
-      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      writeFileSync(join(f.ocDir, 'implementor.md'), readFileSync(join(f.ocDir, 'implementor.md'), 'utf8') + '\nmine\n');
-      const before = snapshotFiles(f);
-      const decisions = decisionCount(ctl);
-      await ctl.applyEffects([effect(['implementor'])]);
-      assert.deepEqual(snapshotFiles(f), before, 'config.json and every agent file are byte-identical');
-      assert.equal(decisionCount(ctl), decisions, 'no decision recorded');
-      assert.match(ctl.ui().notice ?? '', /not changed — OpenCode agent file\(s\) refused/);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  test(`controller: an override ${path} whose render throws changes nothing and records no decision`, async () => {
-    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    // a directory where the implementor file belongs makes the render throw (EISDIR)
-    mkdirSync(join(f.ocDir, 'implementor.md'));
-    const ctl = openDashboard(f.storePath);
-    try {
-      const config = readFileSync(f.configPath, 'utf8');
-      await ctl.applyEffects([effect(['implementor'])]);
-      assert.equal(readFileSync(f.configPath, 'utf8'), config);
-      assert.deepEqual(readdirSync(f.ocDir), ['implementor.md'], 'no agent file was written');
-      assert.equal(decisionCount(ctl), 0);
-      assert.match(ctl.ui().notice ?? '', /not changed — the OpenCode agent render failed/);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  test(`controller: an override ${path} whose agent write fails changes nothing and records no decision`, async () => {
-    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    const ctl = openDashboard(f.storePath);
-    try {
-      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      // a read-only agents directory refuses the temp file every atomic write needs
-      chmodSync(f.ocDir, 0o555);
-      const before = snapshotFiles(f);
-      const decisions = decisionCount(ctl);
-      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.deepEqual(snapshotFiles(f), before, 'config.json and every agent file are byte-identical');
-      assert.equal(decisionCount(ctl), decisions);
-      assert.match(ctl.ui().notice ?? '', /not changed — writing the OpenCode agents failed/);
-    } finally {
-      ctl.close();
-      chmodSync(f.ocDir, 0o755);
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  // The config.json write comes first and the agent files only after it succeeded, so a
-  // config write that stops part-way (a full disk) leaves config.json AND every agent file
-  // as they were: the agents were never touched.
-  test(`controller: an override ${path} whose config.json write stops part-way keeps the original config bytes and never writes the agent files`, async () => {
-    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    let failing = false;
-    const configWriteFs = { writeFile: (p: string, c: string) => { if (!failing) return writeFileSync(p, c); writeFileSync(p, c.slice(0, 7)); throw new Error('ENOSPC: no space left'); } };
-    const ctl = openDashboard(f.storePath, { configWriteFs });
-    try {
-      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      failing = true;
-      const before = snapshotFiles(f);
-      const decisions = decisionCount(ctl);
-      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.deepEqual(snapshotFiles(f), before, 'config.json keeps its original bytes and no agent file was written');
-      assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), [], 'no config temp file is left behind');
-      assert.deepEqual(readdirSync(f.ocDir).filter((n) => !n.endsWith('.md')), [], 'no agent temp file is left behind');
-      assert.equal(decisionCount(ctl), decisions);
-      assert.match(ctl.ui().notice ?? '', /not changed — writing config\.json failed: ENOSPC/);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  test(`controller: an override ${path} refused because config.json changed on disk keeps the other writer's file, re-renders no agent and records no decision`, async () => {
-    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    let concurrent: string | undefined;
-    const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => { if (concurrent !== undefined) writeFileSync(f.configPath, concurrent); } } });
-    try {
-      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      const agentsBefore = snapshotFiles(f);
-      delete (agentsBefore as Record<string, string>).config;
-      const decisions = decisionCount(ctl);
-      // another session changes config.json between this change's read and its rename
-      concurrent = JSON.stringify({ ...JSON.parse(readFileSync(f.configPath, 'utf8')), overpass: { enabled: false } }, null, 2) + '\n';
-      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change is not lost");
-      const agentsAfter = snapshotFiles(f);
-      delete (agentsAfter as Record<string, string>).config;
-      assert.deepEqual(agentsAfter, agentsBefore, 'no OpenCode agent file was re-rendered');
-      assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), [], 'no config temp file is left behind');
-      assert.equal(decisionCount(ctl), decisions);
-      assert.match(ctl.ui().notice ?? '', /not changed — config\.json changed on disk while this write was in flight/);
-    } finally {
-      ctl.close();
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-
-  test(`controller: an override ${path} whose agent write fails after the config write puts config.json back, and says so when it cannot because the file changed`, async () => {
-    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    let writes = 0;
-    let concurrent: string | undefined;
-    const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => { writes++; if (concurrent !== undefined && writes === 2) writeFileSync(f.configPath, concurrent); } } });
-    try {
-      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      chmodSync(f.ocDir, 0o555);
-      const before = snapshotFiles(f);
-      // the agent write fails after config.json was replaced: the config write is undone
-      writes = 0;
-      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.equal(writes, 2, 'one config write, one restore');
-      assert.deepEqual(snapshotFiles(f), before, 'config.json is back to its original bytes');
-      assert.match(ctl.ui().notice ?? '', /not changed — writing the OpenCode agents failed/);
-      // the same failure while another session changed config.json: the restore is refused
-      writes = 0;
-      concurrent = JSON.stringify({ ...JSON.parse(before.config), overpass: { enabled: false } }, null, 2) + '\n';
-      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change stands");
-      assert.match(ctl.ui().notice ?? '', /writing the OpenCode agents failed \(.*\) and config\.json was not restored: config\.json changed on disk/);
-    } finally {
-      ctl.close();
-      chmodSync(f.ocDir, 0o755);
-      rmSync(f.dir, { recursive: true, force: true });
-    }
-  });
-}
-
-// ---- agy_model (issue #306) --------------------------------------------------
-// Hermetic agy setup: the real setupAgy with agy reported installed, a scratch home and the repo's own
-// plugin root, so nothing is written outside the fixture directory.
-async function agyFixture() {
-  const { setupAgy } = await import('../../../../scripts/lib/agy-setup.mjs');
-  const f = fixture({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } });
-  spawnSync('git', ['init', '-q'], { cwd: f.dir });
-  const home = mkdtempSync(join(tmpdir(), 'sterling-agy-home-'));
-  const agySetup = (args: { projectDir: string; pluginRoot: string }) =>
-    setupAgy({ ...args, env: { STERLING_AGY_PROBE: 'ok' }, home, installed: false, nodePath: process.execPath });
-  const agent = (name: string) => join(f.dir, '.agents', 'agents', name, 'agent.md');
-  return { f, home, agySetup, agent, cleanup: () => { rmSync(f.dir, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); } };
-}
-
-test('controller: an agy_model set writes config.models.<key>.agy_model and the agy agent file pins it', async () => {
-  const a = await agyFixture();
-  const ctl = openDashboard(a.f.storePath, { agySetup: a.agySetup });
+  writeFileSync(join(ocDir, 'implementor.md'), 'portable\n');
+  const concurrent = JSON.stringify({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } }, tdd: { enabled: false } }, null, 2) + '\n';
+  const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => writeFileSync(f.configPath, concurrent) } });
   try {
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    assert.equal(JSON.parse(readFileSync(a.f.configPath, 'utf8')).models.implementor.agy_model, 'pro');
-    assert.match(readFileSync(a.agent('implementor'), 'utf8'), /^model: pro$/m);
-    assert.match(ctl.ui().notice ?? '', /Antigravity model for 'implementor' set to pro/);
+    await ctl.applyEffects([{ type: 'agent_model', key: 'implementor', model: 'anthropic/claude-opus-5-5', effort: 'low' }]);
+    assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change is not lost");
+    assert.match(readFileSync(claudeAgent, 'utf8'), /^model: claude-sonnet-5-5$/m, 'the Claude agent file was not re-rendered');
+    assert.equal(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), 'portable\n', 'the OpenCode agent file was not re-rendered');
+    assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), []);
+    assert.match(ctl.ui().notice ?? '', /^model change for 'implementor' failed — config\.json changed on disk while this write was in flight/);
   } finally {
     ctl.close();
-    a.cleanup();
+    rmSync(f.dir, { recursive: true, force: true });
   }
 });
 
-test('controller: an agy render that refuses a sibling agent puts the already rewritten agent files and config.json back', async () => {
-  const a = await agyFixture();
-  const ctl = openDashboard(a.f.storePath, { agySetup: a.agySetup });
+// Restored from the pre-cutover auto-merge test: the keyboard path, now writing workflow.auto_merge_on_clean.
+test('controller: the PR auto-merge row toggles workflow.auto_merge_on_clean from the keyboard, keeps pr_review.copilot_logins, and reloads the roster', async () => {
+  const f = fixture({ workflow: { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true }, pr_review: { copilot_logins: ['copilot-pull-request-reviewer[bot]'] }, tdd: { enabled: true } });
+  const ctl = openDashboard(f.storePath);
   try {
-    // baseline render: every agy agent file exists, written with model: inherit
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'flash_lite', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', from: 'flash_lite', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    const implementorBefore = readFileSync(a.agent('implementor'));
-    assert.match(implementorBefore.toString('utf8'), /^model: inherit$/m);
-    // a locally edited sibling that comes after the implementor in the roster: setupAgy refuses it
-    writeFileSync(a.agent('researcher'), readFileSync(a.agent('researcher'), 'utf8') + '\nmy own edit\n');
-    const configBefore = readFileSync(a.f.configPath);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    assert.ok(readFileSync(a.agent('implementor')).equals(implementorBefore), 'the implementor agent file is back to its old bytes');
-    assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is back to its old bytes');
-    assert.match(ctl.ui().notice ?? '', /not changed — .*edited after Sterling wrote it.*config\.json and the agy agent files are as they were/);
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    assert.equal(ctl.roster()?.workflow?.auto_merge_on_clean, true);
+    // the row is found by its id in the entry list the tab draws, then reached with DOWN like a user would
+    const target = systemCursorOf(ctl.roster()!, ctl.ui(), 'sys:pr_auto_merge');
+    assert.ok(target > 0, 'the auto-merge row is drawn and cursorable in a pr project');
+    for (let i = 0; i < 60 && ctl.ui().cursor !== target; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    assert.equal(ctl.ui().cursor, target, 'DOWN reaches the auto-merge row');
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+    assert.deepEqual(written.workflow, { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: false });
+    assert.deepEqual(written.pr_review, { copilot_logins: ['copilot-pull-request-reviewer[bot]'] });
+    assert.equal(ctl.roster()?.workflow?.auto_merge_on_clean, false, 'the roster reloads after the write');
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+    assert.equal(written.workflow.auto_merge_on_clean, true);
   } finally {
     ctl.close();
-    a.cleanup();
+    rmSync(f.dir, { recursive: true, force: true });
   }
 });
 
-// Review re-check (issue #306): the agy agent-file snapshot is taken and validated before anything is written.
-test('controller: an agy agent path that is a directory refuses the change before config.json is written; setup never runs', async () => {
-  const a = await agyFixture();
-  let setupCalls = 0;
-  const ctl = openDashboard(a.f.storePath, { agySetup: (args) => { setupCalls += 1; return a.agySetup(args); } });
+// Restored from storage-row.test.ts (removed with the cutover): the controller's raw read and the startup refusal.
+async function rosterStorage(rawConfig: string): Promise<unknown> {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tui-storage-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const configPath = join(dir, '.sterling', 'config.json');
+  writeFileSync(configPath, JSON.stringify({ tdd: { enabled: true } }));
+  const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'));
   try {
-    mkdirSync(a.agent('implementor'), { recursive: true }); // agent.md is a directory
-    const configBefore = readFileSync(a.f.configPath);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is unchanged');
-    assert.equal(setupCalls, 0, 'setup did not run');
-    assert.match(ctl.ui().notice ?? '', /not changed — cannot snapshot the agy agent files: .*implementor.*not a regular file/);
+    writeFileSync(configPath, rawConfig);
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    return ctl.roster()?.storage;
   } finally {
     ctl.close();
-    a.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the controller reads config.storage RAW for the row, keeping the four states separate', async () => {
+  assert.equal(await rosterStorage('{"storage":"postgres"}'), 'postgres');
+  assert.equal(await rosterStorage('{"storage":"sqlite"}'), 'sqlite');
+  assert.equal(await rosterStorage('{"tdd":{"enabled":true}}'), undefined, 'absent stays undefined (SQLite default)');
+  assert.equal(await rosterStorage('{"storage":"mysql"}'), 'mysql');
+  assert.equal(await rosterStorage('{"storage":5}'), '5', 'a non-string value comes back as its JSON text');
+  assert.equal(await rosterStorage('{ not json'), null, 'an unreadable config is null (UNKNOWN)');
+  for (const junk of ['null', '[]', 'false', '0', '""', '5']) {
+    assert.equal(await rosterStorage(junk), null, `a config of ${junk} parses but is not an object: UNKNOWN, never the SQLite default`);
   }
 });
 
-test('controller: a symlinked agy agent path is refused before any write, and the link is left a link', async () => {
-  const a = await agyFixture();
-  let setupCalls = 0;
-  const ctl = openDashboard(a.f.storePath, { agySetup: (args) => { setupCalls += 1; return a.agySetup(args); } });
+test('openDashboard refuses an unrecognized config.storage at startup, naming the key, the raw value and the valid values', () => {
+  for (const [raw, shown] of [['"mysql"', '"mysql"'], ['5', '5'], ['"Postgres"', '"Postgres"']] as const) {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-tui-refuse-'));
+    try {
+      mkdirSync(join(dir, '.sterling'), { recursive: true });
+      writeFileSync(join(dir, '.sterling', 'config.json'), `{"storage":${raw}}`);
+      assert.throws(
+        () => openDashboard(join(dir, '.sterling', 'sterling.db')),
+        (e: unknown) => {
+          const err = e as Error;
+          assert.equal(err.name, 'StoreSettingsError');
+          assert.ok(err.message.includes(`config.storage is ${shown}`), err.message);
+          assert.ok(err.message.includes("must be 'sqlite' or 'postgres'"), err.message);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// Restored from handoff-toggle.test.ts (removed with the cutover): the write-back round trip and its failure path.
+test('applyHandoffToggle: writes config.handoff.enabled at the explicit path, keeps every other key, replaces a malformed block, and round-trips', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-wb-'));
   try {
-    mkdirSync(join(a.f.dir, '.agents', 'agents', 'scout'), { recursive: true });
-    const target = join(a.f.dir, 'elsewhere.md');
-    writeFileSync(target, 'target bytes\n');
-    symlinkSync(target, a.agent('scout'));
-    const configBefore = readFileSync(a.f.configPath);
-    await ctl.applyEffects([{ type: 'agy_model', key: 'implementor', to: 'pro', model: 'claude-sonnet-5-5', effort: 'high' }]);
-    assert.ok(readFileSync(a.f.configPath).equals(configBefore), 'config.json is unchanged');
-    assert.equal(setupCalls, 0, 'setup did not run');
-    assert.equal(lstatSync(a.agent('scout')).isSymbolicLink(), true, 'the link is still a link');
-    assert.equal(readFileSync(target, 'utf8'), 'target bytes\n');
-    assert.match(ctl.ui().notice ?? '', /not changed — cannot snapshot the agy agent files: .*scout.*is a symlink/);
+    mkdirSync(join(dir, '.sterling'));
+    const cfgPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(cfgPath, JSON.stringify({ project_name: 'x', workflow: { merge: 'direct' }, tdd: { enabled: false } }, null, 2));
+    assert.equal(applyHandoffToggle({ type: 'handoff_toggle', enabled: true }, undefined, cfgPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')), { project_name: 'x', workflow: { merge: 'direct' }, tdd: { enabled: false }, handoff: { enabled: true } });
+    assert.equal(applyHandoffToggle({ type: 'handoff_toggle', enabled: false }, undefined, cfgPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')).handoff, { enabled: false });
+    // a value that is not an object is replaced, never spread
+    writeFileSync(cfgPath, JSON.stringify({ workflow: { merge: 'pr' }, handoff: 'yes' }));
+    assert.equal(applyHandoffToggle({ type: 'handoff_toggle', enabled: false }, undefined, cfgPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')), { workflow: { merge: 'pr' }, handoff: { enabled: false } });
   } finally {
-    ctl.close();
-    a.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('applyHandoffToggle: an unreadable config reports the failure through onError and returns false', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-wb-'));
+  try {
+    const errors: string[] = [];
+    const ok = applyHandoffToggle({ type: 'handoff_toggle', enabled: true }, (m) => errors.push(m), join(dir, 'missing', 'config.json'));
+    assert.equal(ok, false);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /handoff toggle failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

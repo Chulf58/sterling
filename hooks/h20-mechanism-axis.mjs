@@ -5,10 +5,6 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync13 } from "node:fs";
-import { join as join17 } from "node:path";
-
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync7, existsSync as existsSync6, writeSync, writeFileSync as writeFileSync4, renameSync as renameSync3, mkdirSync as mkdirSync5 } from "node:fs";
 import { dirname as dirname7, join as join10 } from "node:path";
@@ -5200,6 +5196,13 @@ var workerPolicySchema = external_exports.object({
 // packages/schemas/dist/project.js
 import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+var PROJECT_MODES = ["hobby", "work"];
+var ProjectModeError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectModeError";
+  }
+};
 var ProjectIdentityError = class extends Error {
   constructor(message) {
     super(message);
@@ -5249,6 +5252,14 @@ function readJsonObject(root, rel, ErrorClass, subject) {
   }
   return { where, parsed };
 }
+function judgeProjectMode(mode, where) {
+  if (mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return mode;
+}
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
   if (parsed === void 0)
@@ -5275,6 +5286,11 @@ var agentModelEntry = external_exports.object({
   opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
   agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
+var CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+function isCustomAgentKey(key) {
+  return CUSTOM_AGENT_KEY_RE.test(key);
+}
+var customAgentEntry = agentModelEntry.partial();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
   anthropic: modelPin.optional()
@@ -5484,7 +5500,17 @@ var configSchema = external_exports.object({
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
     preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
-  }).catchall(agentModelEntry).default({}),
+  }).catchall(customAgentEntry).superRefine((models, ctx) => {
+    for (const [key, entry] of Object.entries(models)) {
+      if (isCustomAgentKey(key))
+        continue;
+      const e = entry;
+      for (const field of ["model", "effort"]) {
+        if (e[field] === void 0)
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, field], message: "Required" });
+      }
+    }
+  }).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -5687,31 +5713,12 @@ var configSchema = external_exports.object({
     // three-state guard used for other config-derived delivery values.
     total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
-  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-  // whether the automatic consult moments (design/review/gate second opinions via
-  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern (every field has a default; an absent
-  // block still parses) — a project without the
-  // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-  // — this field never stands in for that absence, only for a deliberate OFF.
-  sparring_partner: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    // Which vendor's model the consult runs on (decision
-    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-    // 'openai' is the behaviour before the setting existed.
-    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-    // The model pinned per vendor. Absent = no pin (the host's default). The
-    // old sparring_partner.model is converted to models.openai by
-    // normalizeRawConfig, before this schema strips unknown keys. The default
-    // ships no pin: the decision names no model per vendor.
-    models: vendorPins
-  }).default({}),
+  // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+  // Sterling's Codex integration is gone and the legacy transform drops the key.
   // Reviews (same decision): the vendor policy and the model pinned per vendor.
   // cross_vendor = the other family than the model that wrote the diff; openai
   // and anthropic force one vendor even when that makes reviewer and author the
-  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  // same family (user-ruled 2026-10-03). Ships no pin.
   review: external_exports.object({
     policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
     models: vendorPins
@@ -5719,7 +5726,7 @@ var configSchema = external_exports.object({
   // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-  // Mirrors sparring_partner's additive-optional shape exactly — an absent
+  // An additive-optional shape — an absent
   // block still parses with {enabled: true}, and an unknown field inside the
   // block strips silently rather than refusing (forward-compat, non-strict).
   // OFF silences only the automatic default posture: an explicit user ask
@@ -5746,6 +5753,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5812,7 +5824,106 @@ var configSchema = external_exports.object({
   // Written by sync and init only.
   applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
+var DEFAULT_OVERPASS_PROVIDER = "overpass";
+var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+var MAINTENANCE_WORKER_ROLE = "maintenance-worker";
 var MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
+var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
+var DEFAULT_OVERPASS_TIER = "agentic-high";
+var DEFAULT_OVERPASS_ROLE_TIERS = {
+  implementor: "agentic-auto",
+  "implementor-hard": "agentic-premium",
+  researcher: DEFAULT_OVERPASS_TIER,
+  scout: "agentic-auto",
+  reviewer: DEFAULT_OVERPASS_TIER,
+  librarian: "agentic-auto",
+  sparring: "agentic-premium-max",
+  preflight: "agentic-auto",
+  "maintenance-worker": "agentic-auto"
+};
+var DEFAULT_OVERPASS_ROLE_EFFORTS = {
+  implementor: "medium",
+  "implementor-hard": "xhigh",
+  scout: "high",
+  librarian: "high",
+  sparring: "xhigh",
+  preflight: "high",
+  "maintenance-worker": "high"
+};
+var OverpassUnknownRoleError = class extends Error {
+  role;
+  constructor(role) {
+    super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+    this.name = "OverpassUnknownRoleError";
+    this.role = role;
+  }
+};
+function resolveOverpassRoles(raw, provider) {
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
+  }
+  const block = raw ?? {};
+  for (const key of Object.keys(block)) {
+    if (!OVERPASS_ROLES.includes(key)) {
+      throw new OverpassUnknownRoleError(key);
+    }
+  }
+  const out = {};
+  for (const role of OVERPASS_ROLES) {
+    const entry = block[role];
+    if (entry !== void 0 && !isPlainObject(entry)) {
+      throw new Error(`config.overpass.roles.${role} is ${JSON.stringify(entry)} \u2014 it must be an object with an optional "tier" and "effort"`);
+    }
+    const fields = entry ?? {};
+    for (const key of Object.keys(fields)) {
+      if (key !== "tier" && key !== "effort")
+        throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} \u2014 only "tier" and "effort" are allowed`);
+    }
+    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
+    if (typeof tier !== "string" || !OVERPASS_TIER_RE.test(tier)) {
+      throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} \u2014 it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
+    }
+    const effort = fields.effort;
+    if (effort !== void 0 && (typeof effort !== "string" || !OVERPASS_EFFORTS.includes(effort))) {
+      throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} \u2014 it must be one of ${OVERPASS_EFFORTS.join(", ")}`);
+    }
+    const chosen = effort ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
+  }
+  return out;
+}
+function resolveOverpass(config, opts) {
+  const cfg = isPlainObject(config) ? config : {};
+  const raw = cfg.overpass;
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} \u2014 it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === void 0 ? false : block.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === void 0 ? true : block.conductor_bypass;
+  if (typeof bypass !== "boolean") {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
+  }
+  const provider = block.provider === void 0 ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const roles = resolveOverpassRoles(block.roles, provider);
+  const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
+  if (!enabled)
+    return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts.host !== "opencode")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
+  return { ...base2, effective: true, conductorRouted: !bypass };
+}
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -5828,20 +5939,6 @@ function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
   let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -5866,8 +5963,252 @@ function migrateStaleAgyModels(raw) {
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
+  return parseCanonicalConfig(raw);
 }
+var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
+var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
+var CONDUCTOR_MODEL_KEY = "conductor";
+var PLAN_MODEL_KEY = "plan";
+var MERGE_PATHS = ["direct", "pr"];
+var MIN_REVIEWERS = 1;
+var MAX_REVIEWERS = 5;
+var canonicalModelEntry = external_exports.object({
+  model: external_exports.string().regex(MODEL_REF_RE, "model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto"),
+  effort: external_exports.enum(OVERPASS_EFFORTS).optional()
+}).strict();
+var canonicalModelsSchema = external_exports.object({
+  implementor: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  "implementor-hard": canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  researcher: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  scout: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" }),
+  librarian: canonicalModelEntry.default({ model: "anthropic/claude-haiku-5-5", effort: "low" }),
+  reviewer: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  sparring: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  preflight: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" })
+}).catchall(canonicalModelEntry.partial()).superRefine((models, ctx) => {
+  for (const [key, entry] of Object.entries(models)) {
+    const e = entry;
+    if (e.model === void 0) {
+      if (e.effort === "max")
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+      if (!isCustomAgentKey(key))
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: "Required" });
+      continue;
+    }
+    const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+    if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
+    }
+    if (e.effort === "max" && overpassTier === null) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+    }
+  }
+}).default({});
+var workflowSchema = external_exports.object({
+  merge: external_exports.enum(MERGE_PATHS).default("direct"),
+  reviewers: external_exports.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+  copilot_loop: external_exports.boolean().default(false),
+  auto_merge_on_clean: external_exports.boolean().default(true)
+}).strict().default({});
+var canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
+var canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
+  models: canonicalModelsSchema,
+  workflow: workflowSchema,
+  overpass: canonicalOverpassSchema,
+  // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+});
+var CANONICAL_RETIRED_KEYS = ["mode", "sparring_partner"];
+var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) => {
+  if (!isPlainObject(raw))
+    return;
+  for (const key of CANONICAL_RETIRED_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(raw, key))
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key], message: `${key} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+  }
+  if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, "auto_merge_on_clean")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
+  }
+}).pipe(canonicalConfigObject);
+var LegacyConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LegacyConfigError";
+  }
+};
+var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+var LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
+function toCanonicalConfig(legacy, opts = {}) {
+  if (!isPlainObject(legacy))
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
+  const raw = normalizeRawConfig(legacy);
+  const out = { ...raw };
+  const changes = [];
+  const conflicts = [];
+  const origins = {};
+  const resolutions = opts.resolutions ?? {};
+  const mode = judgeProjectMode(raw.mode, "the config");
+  let autoMerge;
+  if (raw.pr_review !== void 0) {
+    if (!isPlainObject(raw.pr_review))
+      throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} \u2014 it must be an object`);
+    if (has(raw.pr_review, "auto_merge_on_clean")) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== "boolean")
+        throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} \u2014 it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === void 0) {
+    const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  }
+  if (autoMerge !== void 0)
+    changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
+  if (has(raw, "mode")) {
+    delete out.mode;
+    changes.push({ path: "mode", was: raw.mode });
+  }
+  let overpass = null;
+  if (raw.overpass !== void 0) {
+    if (!isPlainObject(raw.overpass))
+      throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} \u2014 it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: "opencode" });
+      const kept = {};
+      for (const [k, v] of Object.entries(block)) {
+        if (LEGACY_OVERPASS_KEYS.includes(k))
+          changes.push({ path: `overpass.${k}`, was: v });
+        else
+          kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+  const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return { config: out, conflicts, changes, origins };
+  const models = { ...raw.models ?? {} };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry))
+      continue;
+    const next = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === "model" || k === "effort" || k === "opencode_model")
+        continue;
+      if (k === "agy_model" || k === "hard_task") {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v;
+    }
+    const claude = typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model)
+      changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== void 0) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === void 0 || opencode === claude) {
+        model = opencode;
+      } else if (resolutions[role] !== void 0) {
+        model = resolutions[role] === "claude" ? claude : opencode;
+      } else if (!(effective && OVERPASS_ROLES.includes(role))) {
+        const effort = typeof entry.effort === "string" ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: "opencode" });
+        model = opencode;
+      }
+    }
+    if (model !== void 0)
+      next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
+    if (entry.effort !== void 0)
+      next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : void 0;
+    const claude = isPlainObject(entry) && typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : void 0;
+    const answered = isPlainObject(entry) && entry.opencode_model !== void 0 && claude !== void 0 && entry.opencode_model !== claude;
+    if (!answered)
+      throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+      origins[`models.${role}`] = "overpass";
+    }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: void 0, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, "opencode_model")) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === "string" && old.trim() !== "") {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== "string") {
+        const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: "maintenance_worker.opencode_model", was: old });
+    }
+  }
+  if (modelsChanged)
+    out.models = models;
+  if (has(raw, "sparring_partner")) {
+    delete out.sparring_partner;
+    changes.push({ path: "sparring_partner", was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes, origins };
+}
+function parseCanonicalConfig(raw) {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
+
+// packages/schemas/dist/custom-agents.js
+var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
+var AGENT_HOST_CAPABILITIES = Object.freeze({
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
+});
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -12265,9 +12606,9 @@ var SterlingStore = class _SterlingStore {
    * Keep the models catalog covering every model the System tab pickers must offer
    * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
    * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
-   * models (each role's `model`, and its `opencode_model` and the maintenance worker's
-   * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
-   * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+   * models (each agent's one canonical `model`, <provider>/<id>; overpass/ and agy/ models are
+   * not catalog models, and the maintenance worker's legacy `opencode_model` when a
+   * <provider>/<model> string) and the maintenance worker's Claude model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
    * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
    * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
    * edited or removed, and nothing is written when nothing is missing. The read-modify-write
@@ -12280,8 +12621,14 @@ var SterlingStore = class _SterlingStore {
     const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
     const refs = /* @__PURE__ */ new Set();
     const addPins = (v) => {
-      if (v?.model)
-        claude.add(v.model);
+      if (typeof v?.model === "string") {
+        if (!v.model.includes("/"))
+          claude.add(v.model);
+        else if (v.model.startsWith("anthropic/"))
+          claude.add(v.model.slice("anthropic/".length));
+        else if (!v.model.startsWith("overpass/") && !v.model.startsWith("agy/") && OPENCODE_MODEL_REF_RE.test(v.model))
+          refs.add(v.model);
+      }
       if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
         refs.add(v.opencode_model);
     };
@@ -15786,11 +16133,6 @@ function dispatchOverlapNotice(input2, { now = Date.now() } = {}) {
   }
 }
 
-// scripts/hooks/lib/axis-compose.mjs
-import { existsSync as existsSync12, readFileSync as readFileSync13 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join16 } from "node:path";
-
 // scripts/hooks/lib/retired-terms.mjs
 function retiredTermNotice(store, text) {
   if (!text) return "";
@@ -15829,270 +16171,6 @@ function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
   return t.includes("?") && QUESTION_WORDS_RE.test(t);
 }
-function codexModelPin(root, { opener, toolInput }) {
-  const PIN = "STERLING CODEX MODEL PIN (H20)";
-  const show = (v) => {
-    const s2 = JSON.stringify(String(v ?? ""));
-    return s2.length <= 120 ? s2 : `${s2.slice(0, 120)}\u2026`;
-  };
-  if (!opener) {
-    return {
-      line: `STERLING CODEX MODEL (H20) \u2014 this tool takes no model argument, so the thread keeps the model its opener started with. Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`
-    };
-  }
-  let config = null;
-  let unreadable = null;
-  try {
-    config = loadConfig(root);
-  } catch (e) {
-    unreadable = e && e.message || String(e);
-  }
-  const sp = config && typeof config.sparring_partner === "object" && config.sparring_partner ? config.sparring_partner : null;
-  const lines = [];
-  if (sp && sp.enabled === false) {
-    lines.push(
-      `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
-    );
-  }
-  const callModel = typeof toolInput?.model === "string" && toolInput.model !== "" ? toolInput.model : null;
-  const pinned = sp && sp.models && typeof sp.models === "object" ? sp.models.openai?.model : void 0;
-  const chosen = typeof pinned === "string" ? pinned : sp ? sp.model : void 0;
-  const configured = typeof chosen === "string" && chosen !== "" ? chosen : null;
-  if (callModel !== null) {
-    lines.push(
-      `${PIN} \u2014 this call names model ${show(callModel)} EXPLICITLY, so the call-site value wins and Sterling leaves the input untouched${configured ? ` (config.sparring_partner.model is ${show(configured)} and was not applied)` : ""}.`
-    );
-    return { line: lines.join("\n") };
-  }
-  if (unreadable) {
-    lines.push(
-      `${PIN} \u2014 .sterling/config.json could not be parsed (${show(unreadable)}), so NO model was applied and the Codex CLI default is in force. Fix the config file; a consult is never denied over this.`
-    );
-    return { line: lines.join("\n") };
-  }
-  if (!configured) {
-    lines.push(
-      `${PIN} \u2014 no model is set in config.sparring_partner.model${config ? "" : " (no .sterling/config.json to read)"}, so this consult takes the Codex CLI default. Set one on the TUI System tab row 'Default Codex model'.`
-    );
-    return { line: lines.join("\n") };
-  }
-  lines.push(
-    `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
-  );
-  return { line: lines.join("\n"), model: configured };
-}
-var TomlSyntaxError = class extends Error {
-};
-var TOML_BARE_KEY = /[A-Za-z0-9_-]/;
-var TOML_SCALAR = /[A-Za-z0-9_+\-.:]/;
-var TOML_ESCAPES = { b: "\b", t: "	", n: "\n", f: "\f", r: "\r", e: "\x1B", '"': '"', "\\": "\\" };
-function tomlMcpServerNames(src) {
-  const n = src.length;
-  let i = src.charCodeAt(0) === 65279 ? 1 : 0;
-  const names = /* @__PURE__ */ new Set();
-  const fail = (what) => {
-    throw new TomlSyntaxError(`not valid TOML at line ${src.slice(0, i).split("\n").length}: ${what}`);
-  };
-  const ws = () => {
-    while (src[i] === " " || src[i] === "	") i++;
-  };
-  const newline = () => {
-    if (src[i] === "\n") i += 1;
-    else if (src[i] === "\r" && src[i + 1] === "\n") i += 2;
-    else return false;
-    return true;
-  };
-  const comment = () => {
-    if (src[i] === "#") while (i < n && src[i] !== "\n" && !(src[i] === "\r" && src[i + 1] === "\n")) i++;
-  };
-  const gap = () => {
-    for (; ; ) {
-      ws();
-      comment();
-      if (!newline()) return;
-    }
-  };
-  const endOfLine = () => {
-    ws();
-    comment();
-    if (i < n && !newline()) fail("expected the end of the line");
-  };
-  const escape = () => {
-    const c = src[i + 1];
-    if (c !== void 0 && Object.hasOwn(TOML_ESCAPES, c)) {
-      i += 2;
-      return TOML_ESCAPES[c];
-    }
-    const len = c === "u" ? 4 : c === "U" ? 8 : c === "x" ? 2 : 0;
-    const hex = src.slice(i + 2, i + 2 + len);
-    const code = len && hex.length === len && /^[0-9A-Fa-f]+$/.test(hex) ? parseInt(hex, 16) : -1;
-    if (code < 0 || code > 1114111 || code >= 55296 && code <= 57343) fail("an invalid escape in a string");
-    i += 2 + len;
-    return String.fromCodePoint(code);
-  };
-  const basic = () => {
-    let s2 = "";
-    for (i++; ; ) {
-      const c = src[i];
-      if (c === void 0 || c === "\n" || c === "\r") fail("an unterminated string");
-      if (c === '"') {
-        i++;
-        return s2;
-      }
-      if (c === "\\") s2 += escape();
-      else {
-        s2 += c;
-        i++;
-      }
-    }
-  };
-  const literal = () => {
-    const start = ++i;
-    while (i < n && src[i] !== "'" && src[i] !== "\n") i++;
-    if (src[i] !== "'") fail("an unterminated string");
-    return src.slice(start, i++);
-  };
-  const multiline = (q) => {
-    for (i += 3; ; ) {
-      if (i >= n) fail("an unterminated multiline string");
-      if (q === '"' && src[i] === "\\") i += 2;
-      else if (src[i] === q && src[i + 1] === q && src[i + 2] === q) {
-        let run = 3;
-        while (src[i + run] === q) run++;
-        if (run > 5) fail("too many quotes closing a multiline string");
-        i += run;
-        return;
-      } else i++;
-    }
-  };
-  const key = () => {
-    const parts = [];
-    for (; ; ) {
-      ws();
-      const c = src[i];
-      if (c === '"' || c === "'") {
-        if (src[i + 1] === c && src[i + 2] === c) fail("a multiline string used as a key");
-        parts.push(c === '"' ? basic() : literal());
-      } else {
-        const start = i;
-        while (i < n && TOML_BARE_KEY.test(src[i])) i++;
-        if (i === start) fail("expected a key");
-        parts.push(src.slice(start, i));
-      }
-      ws();
-      if (src[i] !== ".") return parts;
-      i++;
-    }
-  };
-  const value = () => {
-    const c = src[i];
-    if (c === '"' || c === "'") {
-      if (src[i + 1] === c && src[i + 2] === c) multiline(c);
-      else if (c === '"') basic();
-      else literal();
-      return null;
-    }
-    if (c === "[") {
-      for (i++; ; ) {
-        gap();
-        if (src[i] === "]") break;
-        value();
-        gap();
-        if (src[i] === ",") i++;
-        else if (src[i] !== "]") fail("expected , or ] in an array");
-      }
-      i++;
-      return null;
-    }
-    if (c === "{") {
-      const keys = [];
-      for (i++; ; ) {
-        gap();
-        if (src[i] === "}") break;
-        keys.push(key()[0]);
-        if (src[i] !== "=") fail("expected = in an inline table");
-        i++;
-        ws();
-        value();
-        gap();
-        if (src[i] === ",") i++;
-        else if (src[i] !== "}") fail("expected , or } in an inline table");
-      }
-      i++;
-      return keys;
-    }
-    const start = i;
-    while (i < n && TOML_SCALAR.test(src[i])) i++;
-    if (i === start) fail("expected a value");
-    if (/^\d{4}-\d{2}-\d{2}$/.test(src.slice(start, i)) && src[i] === " " && /\d/.test(src[i + 1] ?? "")) {
-      for (i++; i < n && TOML_SCALAR.test(src[i]); ) i++;
-    }
-    return null;
-  };
-  let table = [];
-  let inServerArray = false;
-  while (i < n) {
-    ws();
-    if (newline()) continue;
-    if (i >= n || src[i] === "#") {
-      endOfLine();
-      continue;
-    }
-    if (src[i] === "[") {
-      const array = src[i + 1] === "[";
-      i += array ? 2 : 1;
-      table = key();
-      if (src[i] !== "]" || array && src[i + 1] !== "]") fail("expected ] closing a table header");
-      i += array ? 2 : 1;
-      inServerArray = array && table.length === 1 && table[0] === "mcp_servers";
-      if (table[0] === "mcp_servers" && table.length >= 2) names.add(table[1]);
-      endOfLine();
-      continue;
-    }
-    const path = [...table, ...key()];
-    if (src[i] !== "=") fail("expected = after a key");
-    i++;
-    ws();
-    const inline = value();
-    if (path[0] === "mcp_servers" && !inServerArray) {
-      if (path.length >= 2) names.add(path[1]);
-      else if (inline) for (const k of inline) names.add(k);
-    }
-    endOfLine();
-  }
-  return [...names];
-}
-function codexUserMcpServers(env = process.env) {
-  const file = join16(env.CODEX_HOME || join16(homedir4(), ".codex"), "config.toml");
-  let text;
-  try {
-    text = readFileSync13(file, "utf8");
-  } catch (e) {
-    return e && e.code === "ENOENT" ? { names: [] } : { names: [], error: `${file}: ${e && e.message || e}` };
-  }
-  try {
-    return { names: tomlMcpServerNames(text) };
-  } catch (e) {
-    if (e instanceof TomlSyntaxError) return { names: [], error: `${file}: ${e.message}` };
-    throw e;
-  }
-}
-function codexMcpDisable(toolInput, env = process.env) {
-  const { names, error } = codexUserMcpServers(env);
-  if (error) {
-    return { line: `STERLING CODEX MCP SERVERS (H20) \u2014 the Codex config could not be read (${JSON.stringify(error).slice(0, 200)}), so no user MCP server was disabled on this call.` };
-  }
-  const base2 = toolInput && typeof toolInput.config === "object" && toolInput.config !== null && !Array.isArray(toolInput.config) ? toolInput.config : {};
-  const callerServers = base2.mcp_servers && typeof base2.mcp_servers === "object" && !Array.isArray(base2.mcp_servers) ? base2.mcp_servers : {};
-  const added = names.filter((n) => !Object.hasOwn(callerServers, n));
-  if (added.length === 0) return {};
-  const mcp_servers = { ...callerServers };
-  for (const n of added) mcp_servers[n] = { enabled: false };
-  return {
-    config: { ...base2, mcp_servers },
-    line: `STERLING CODEX MCP SERVERS (H20) \u2014 disabled ${added.length} user MCP server(s) from the Codex config on this call (${added.map((n) => JSON.stringify(n)).join(", ").slice(0, 200)}); a review or consult uses none of them.`
-  };
-}
 function citedInBrief(record, text) {
   const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const id8 = String(record.id ?? "").slice(0, 8);
@@ -16113,7 +16191,6 @@ function composeMechanismAxis(store, opts) {
 }
 function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion2 = surface === "question";
-  const isConsult2 = surface === "consult";
   const isDispatch = surface === "dispatch";
   const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) return null;
@@ -16162,7 +16239,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const fresh = scored.filter((x) => {
     if (x.record.type !== "anti_pattern") return !isKnownDelivered(guard, x.record);
     if (isDispatch && citedInBrief(x.record, briefText)) return false;
-    return isConsult2 ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    return !isKnownDelivered(guard, x.record);
   });
   if (!fresh.length) return null;
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
@@ -16178,7 +16255,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-  const header = isQuestion2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
+  const header = isQuestion2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : (
     // PreToolUse context arrives WITH the dispatch (timing note at the top
     // of this file), so the brief has already gone out: the act this
     // prompts is a correction (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 5).
@@ -16318,31 +16395,9 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
 
 // scripts/hooks/h20-mechanism-axis.mjs
 var input = readStdin();
-function buildModelPin(inp) {
-  if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
-  const root = inp.storeRoot ? String(inp.storeRoot) : "";
-  const sterling = join17(root, ".sterling");
-  if (!existsSync13(join17(sterling, "sterling.db")) && !existsSync13(join17(sterling, "config.json"))) return null;
-  const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
-  const base2 = inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {};
-  const mcp = inp.tool_name === "mcp__codex__codex" ? codexMcpDisable(base2) : {};
-  const line = [pin.line, mcp.line].filter(Boolean).join("\n");
-  if (!pin.model && !mcp.config) return { line };
-  return { line, updatedInput: { ...base2, ...pin.model ? { model: pin.model } : {}, ...mcp.config ? { config: mcp.config } : {} } };
-}
-var pinMemo;
-function modelPin2() {
-  if (pinMemo === void 0) pinMemo = buildModelPin(input);
-  return pinMemo;
-}
 function envelopeFor(extraContext) {
-  const pin = modelPin2();
-  const parts = [];
-  if (pin?.line) parts.push(pin.line);
-  if (extraContext) parts.push(extraContext);
   const hookSpecificOutput = { hookEventName: input.hook_event_name };
-  if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
-  if (parts.length) hookSpecificOutput.additionalContext = parts.join("\n\n");
+  if (extraContext) hookSpecificOutput.additionalContext = extraContext;
   return { hookSpecificOutput };
 }
 function emitEnvelope(extraContext, opts = {}) {
@@ -16358,7 +16413,7 @@ var boardMemo;
 function boardReady() {
   if (boardMemo !== void 0) return boardMemo;
   boardMemo = null;
-  const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
+  const onDispatch = !Array.isArray(input.tool_input?.questions);
   if (!onDispatch || input.agent_id) return boardMemo;
   try {
     const store = openStore(input.cwd);
@@ -16388,19 +16443,17 @@ function markBoardReadyShown() {
 var overlapMemo;
 function overlapNotice() {
   if (overlapMemo === void 0) {
-    const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
+    const onDispatch = !Array.isArray(input.tool_input?.questions);
     overlapMemo = [onDispatch ? dispatchOverlapNotice(input) : null, boardReady()?.line].filter(Boolean).join("\n\n") || null;
   }
   return overlapMemo;
 }
 function finish(extraContext) {
-  const pin = modelPin2();
   const context = [extraContext, overlapNotice()].filter(Boolean).join("\n\n");
-  if (!pin?.line && !pin?.updatedInput && !context) return allow();
+  if (!context) return allow();
   return emitEnvelope(context);
 }
 var isQuestion = Array.isArray(input.tool_input?.questions);
-var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
 function main(input2) {
   try {
     const outgoing = outgoingProposalText(input2.tool_input);
@@ -16412,20 +16465,17 @@ function main(input2) {
       root: input2.cwd,
       outgoing,
       toolInput: input2.tool_input,
-      surface: isQuestion ? "question" : isConsult ? "consult" : "dispatch",
+      surface: isQuestion ? "question" : "dispatch",
       subagentType: input2.tool_input?.subagent_type,
       guardFor: () => readGuard(gPath),
-      pinLine: modelPin2()?.line,
       overlap: overlapNotice(),
       host: "claude"
     });
     warnFanDegraded(store, "H20");
     if (!composed) return finish();
     const { assembled, guard } = composed;
-    const pin = modelPin2();
     const carriage = assembled.text;
     const hookSpecificOutput = { hookEventName: input2.hook_event_name };
-    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
     if (carriage) hookSpecificOutput.additionalContext = carriage;
     return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
@@ -16437,24 +16487,19 @@ function main(input2) {
           writeGuard(gPath, guard);
         } catch (e) {
           process.stderr.write(
-            `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+            `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS; these records stay eligible for delivery again this session.`
           );
         }
       }
     });
   } catch (e) {
     const failure = `H20: mechanism-axis delivery failed: ${e && e.message || e}`;
-    const pin = modelPin2();
     const overlap = overlapNotice();
-    if (overlap && !pin?.line && !pin?.updatedInput) {
+    if (overlap) {
       process.stderr.write(failure);
       return emitEnvelope(`${overlap}
 
 \u26A0 ${failure} \u2014 relevance carriage was SKIPPED for this dispatch.`);
-    }
-    if (pin?.line || pin?.updatedInput) {
-      process.stderr.write(failure);
-      return emitEnvelope(`\u26A0 ${failure} \u2014 the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
     }
     return warnNonBlocking(failure);
   }

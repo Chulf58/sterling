@@ -78,6 +78,27 @@ import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, op
  *  MAINTENANCE_WORKER_CLAUDE_MODEL and _EFFORT in packages/schemas; a test pins them equal. */
 export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
+/** The worker's config.models key: its ONE model, `<provider>/<id>` with an optional effort
+ *  (decisions one-model-per-agent-an-agent-has-a-single-model-not-a-claude and
+ *  settings-redesign-build-shape-one-legacy-to-canonical-config: "the maintenance worker joins
+ *  the one-model rule"). Unset, the Claude runner keeps WORKER_MODEL and WORKER_EFFORT and the
+ *  OpenCode runner keeps maintenance_worker.opencode_model, until the cutover writes the key. */
+export const WORKER_MODEL_KEY = 'maintenance-worker';
+
+/**
+ * The worker's one model from config.models: null when unset, { error } for a value that is not
+ * { model: string, effort? }, else { model, effort? } with a bare Claude id read as anthropic/<id>.
+ * Dependency-free, so an Overpass tier stays overpass/<tier>: the caller maps it (the OpenCode
+ * plugin passes the mapped model as workerModel).
+ */
+export function workerModelOf(config) {
+  const e = config?.models?.[WORKER_MODEL_KEY];
+  if (e === undefined) return null;
+  if (e === null || typeof e !== 'object' || typeof e.model !== 'string' || !e.model.trim() || (e.effort !== undefined && typeof e.effort !== 'string')) {
+    return { error: `config.models.${WORKER_MODEL_KEY} must be {"model": "<provider>/<id>", "effort"?: "<level>"}, got ${JSON.stringify(e)}` };
+  }
+  return { model: e.model.includes('/') ? e.model : `anthropic/${e.model}`, ...(e.effort === undefined ? {} : { effort: e.effort }) };
+}
 /** The child's agent, defined at launch through --agents (GitHub #70). MEASURED
  *  on Claude Code 2.1.296: an agent's `tools` list caps the session's tools,
  *  and neither --allowedTools nor --tools adds a tool the list leaves out. Run
@@ -1000,14 +1021,16 @@ export function workerPrompt(pluginRoot, root, eligible = null, diffs = '') {
  *  Sterling hook runs in the child and it cannot recurse). --agents defines
  *  WORKER_AGENT (workerAgentDefinition); its tools list is what makes the web
  *  tools reachable. */
-export function buildWorkerArgs({ mcpConfig, agentDefinition, budgetUsd = WORKER_RUN_BUDGET_USD }) {
+export function buildWorkerArgs({ mcpConfig, agentDefinition, budgetUsd = WORKER_RUN_BUDGET_USD, model, effort }) {
   if (typeof agentDefinition !== 'string' || !agentDefinition) throw new Error('buildWorkerArgs needs the worker agent definition (workerAgentDefinition)');
+  // `model` is config.models.maintenance-worker's Claude id; unset, the shipped pair. Its effort
+  // is sent only when set (an unset effort stays unset).
+  const pair = model === undefined ? { model: WORKER_MODEL, effort: WORKER_EFFORT } : { model, effort };
   return [
     '-p',
     '--model',
-    WORKER_MODEL,
-    '--effort',
-    WORKER_EFFORT,
+    pair.model,
+    ...(pair.effort === undefined ? [] : ['--effort', pair.effort]),
     '--agents',
     agentDefinition,
     '--agent',
@@ -1294,11 +1317,17 @@ function launchWorker(opts) {
 
     const host = opts.host ?? 'claude';
     if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: 'error', detail: failDetail(`unknown runner host '${host}'`) };
-    // `opts.workerModel` is a model the CALLER pinned (the OpenCode plugin passes
-    // the Overpass tier model while Overpass is effective): it wins over
-    // maintenance_worker.opencode_model, which stays in the config untouched.
-    // The lib stays dependency-free, so the caller resolves it.
-    const model = opts.workerModel ?? opencodeModelOf(opts.config);
+    // `opts.workerModel` is a model the CALLER pinned (the OpenCode plugin passes the
+    // worker's one model, an Overpass tier mapped through its provider): it wins. Else
+    // config.models.maintenance-worker, else maintenance_worker.opencode_model. A Claude
+    // runner can run only an anthropic model: any other one refuses the launch loudly,
+    // never falling back to the shipped Claude model.
+    const own = workerModelOf(opts.config);
+    if (own?.error) return { launched: false, reason: 'error', detail: failDetail(own.error) };
+    if (host === 'claude' && own && !own.model.startsWith('anthropic/')) {
+      return { launched: false, reason: 'error', detail: failDetail(`config.models.${WORKER_MODEL_KEY} is ${own.model}, which the Claude Code runner cannot run; it runs only through OpenCode`) };
+    }
+    const model = opts.workerModel ?? (own && !own.model.startsWith('overpass/') ? own.model : opencodeModelOf(opts.config));
     if (host === 'opencode') {
       if (typeof opts.opencodeBin !== 'string' || !opts.opencodeBin) return { launched: false, reason: 'error', detail: failDetail('the opencode host needs the path of the opencode binary') };
       if (model === null) return { launched: false, reason: 'error', detail: failDetail(OPENCODE_MODEL_UNSET) };
@@ -1332,7 +1361,11 @@ function launchWorker(opts) {
       // The runner host travels with the eligible list, bound to this launch by the token.
       // `opts.workerEffort` rides with the pinned model (the Overpass role's effort, sent as
       // the OpenCode run's --variant); the config model has no effort.
-      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...(opts.workerModel !== undefined ? { opencode_model_pinned: true, ...(opts.workerEffort ? { opencode_variant: opts.workerEffort } : {}) } : {}) } : { host };
+      const ownEffort = opts.workerModel === undefined && own?.effort ? { opencode_variant: own.effort } : {};
+      const runnerHost =
+        host === 'opencode'
+          ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...(opts.workerModel !== undefined ? { opencode_model_pinned: true, ...(opts.workerEffort ? { opencode_variant: opts.workerEffort } : {}) } : ownEffort) }
+          : { host, ...(own ? { claude_model: own.model.slice('anthropic/'.length), ...(own.effort ? { claude_effort: own.effort } : {}) } : {}) };
       // THE BATCH POLICY (change (ii)): eligible.json is token-bound, and the
       // worker's own Sterling server reads it through --worker-policy. `items`
       // keeps its shape for the runner and the prompt; `policy_items` is the
@@ -1780,7 +1813,7 @@ export async function runWorker(opts) {
       return { host, bin: ocBin, args: buildOpencodeArgs({ model }), input: opencodePrompt(prompt), env: opencodeEnv({ root: opts.root, config, effort }) };
     }
     if (host !== 'claude') throw new Error(`unknown runner host '${host}'`);
-    return { host, bin, input: prompt, args: buildWorkerArgs({ mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
+    return { host, bin, input: prompt, args: buildWorkerArgs({ mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd : rawBudget, model: eligible?.claude_model, effort: eligible?.claude_effort }), env: {} };
   };
   if (opts.dryRun) {
     let run;

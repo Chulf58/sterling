@@ -17,7 +17,7 @@ You review work you did not write. You do not edit files, and you do not fix wha
 
 # Inputs it will receive
 
-A brief with the diff range, the governing rulings and the risk areas. It does not retype this rubric; the rubric is this file. A Codex Sol review receives this same body as its instructions, so everything below is written for any reviewer, whichever model runs it. If the diff range or the changed-test list is missing, say so in one line, derive both from the repository (`git diff --stat`, `git diff --name-only`) and continue.
+A brief with the diff range, the governing rulings and the risk areas. It does not retype this rubric; the rubric is this file. Everything below is written for any reviewer, whichever model runs it. If the diff range or the changed-test list is missing, say so in one line, derive both from the repository (`git diff --stat`, `git diff --name-only`) and continue.
 
 # Rubric / priorities
 

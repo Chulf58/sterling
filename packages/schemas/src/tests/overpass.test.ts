@@ -11,8 +11,8 @@ const shippedRaw = (): Record<string, unknown> => JSON.parse(readFileSync(join(r
 const on = (extra: Record<string, unknown> = {}) => ({ mode: 'work', overpass: { enabled: true, ...extra } });
 
 // Deliberate default change (user-ruled 2026-10-23, 'Defaults + reset + bypass ON'): conductor_bypass is true by default.
-test('overpass: the schema default and templates/default-config.json agree, and both are off with the conductor bypassed', () => {
-  const expected = { enabled: false, provider: 'overpass', conductor_bypass: true };
+test('overpass: the canonical default and templates/default-config.json agree: only the provider is configured (no enabled, roles or bypass)', () => {
+  const expected = { provider: 'overpass' };
   assert.deepEqual((parseConfig({}) as unknown as { overpass: unknown }).overpass, expected);
   assert.deepEqual(shippedRaw().overpass, expected);
 });
@@ -298,9 +298,9 @@ test('overpass roles: an unknown role, an unknown field or a bad value throws, e
   }
 });
 
-test('overpass roles: parseConfig keeps an invalid roles value raw instead of throwing', () => {
+test('overpass roles: an invalid roles value is refused loud by the transform, never carried', () => {
   const raw = { overpass: { enabled: true, roles: { conductor: { effort: 'nope' } } } };
-  assert.deepEqual((parseConfig(raw) as unknown as { overpass: unknown }).overpass, raw.overpass);
+  assert.throws(() => parseConfig(raw), /roles/);
 });
 
 // The tiers the user listed (user-stated 2026-10-23), in that order; the System tab tier picker offers them.

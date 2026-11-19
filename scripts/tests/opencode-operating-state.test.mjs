@@ -128,10 +128,14 @@ const input = (sessionID, messages = []) => ({ sessionID, agent: 'build', system
 // ---- the shared lines (scripts/hooks/lib/operating-state.mjs) --------------
 
 test('shared lib: project-mode line has the three H1 states', () => {
-  assert.match(lib.projectModeLine({ config: {}, configUnreadable: false }), /^Project mode: HOBBY \(config\.mode/);
-  assert.match(lib.projectModeLine({ config: { mode: 'work' }, configUnreadable: false }), /^Project mode: WORK/);
-  assert.match(lib.projectModeLine({ config: { mode: 'bogus' }, configUnreadable: false }), /^Project mode: INVALID \('bogus'\)/);
-  assert.match(lib.projectModeLine({ config: null, configUnreadable: true }), /^Project mode: UNKNOWN/);
+  // CHANGED with the settings redesign (item C): the mode line became the Workflow line.
+  assert.match(lib.projectModeLine({ config: {}, configUnreadable: false }), /^Workflow: merge path DIRECT · Reviewers: 1 · Copilot loop: OFF \(config\.workflow/);
+  assert.match(lib.projectModeLine({ config: { mode: 'work' }, configUnreadable: false }), /^Workflow: merge path PULL REQUEST · Reviewers: 3 · Copilot loop: ON/);
+  assert.match(lib.projectModeLine({ config: { workflow: { merge: 'pr' } }, configUnreadable: false, noOrigin: true }), /^Workflow: merge path PULL REQUEST .*no 'origin' remote/);
+  assert.match(lib.projectModeLine({ config: { workflow: { merge: 'direct', copilot_loop: true } }, configUnreadable: false }), /Copilot loop: ON but inactive \(needs the pull-request merge path\)/);
+  assert.match(lib.projectModeLine({ config: { workflow: { reviewers: 9 } }, configUnreadable: false }), /^Workflow: INVALID — config\.workflow is invalid/);
+  assert.match(lib.projectModeLine({ config: { mode: 'bogus' }, configUnreadable: false }), /^Workflow: INVALID — config\.mode is "bogus"/);
+  assert.match(lib.projectModeLine({ config: null, configUnreadable: true }), /^Workflow: UNKNOWN/);
 });
 
 test('shared lib: TDD posture reads ON by default, OFF only on an explicit false, UNKNOWN when unreadable', () => {
@@ -172,12 +176,12 @@ test('the root session context carries project mode and TDD posture, read live f
     const h = handler(dir, { sessions: { ses_root: {} } });
     const i = input('ses_root');
     await h.onContext(i);
-    assert.match(textOf(i), /Project mode: WORK/);
+    assert.match(textOf(i), /Workflow: merge path PULL REQUEST/);
     assert.match(textOf(i), /TDD posture: tests-first OFF/);
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture-proj', tdd: { enabled: true } }));
     const j = input('ses_root');
     await h.onContext(j);
-    assert.match(textOf(j), /Project mode: HOBBY/);
+    assert.match(textOf(j), /Workflow: merge path DIRECT/);
     assert.match(textOf(j), /TDD posture: tests-first ON/, 'a toggle flipped mid-session shows on the next request');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -192,11 +196,11 @@ test('the root session context says the merge is local for a work project with n
     const h = handler(dir, { sessions: { ses_root: {} } });
     const i = input('ses_root');
     await h.onContext(i);
-    assert.match(textOf(i), /Project mode: WORK \(config\.mode — TUI System tab\) — this repository has no 'origin' remote, so \/sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen\./);
+    assert.match(textOf(i), /Workflow: merge path PULL REQUEST .* \(config\.workflow — TUI System tab\) — this repository has no 'origin' remote, so \/sterling:merge merges locally like the direct merge path: no pull request and no Copilot review will happen\./);
     assert.equal(spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/widget.git'], { cwd: dir, encoding: 'utf8' }).status, 0);
     const j = input('ses_root');
     await h.onContext(j);
-    assert.match(textOf(j), /Project mode: WORK \(config\.mode — TUI System tab\) — work ships as a pull request through \/sterling:merge/);
+    assert.match(textOf(j), /Workflow: merge path PULL REQUEST .* \(config\.workflow — TUI System tab\) — work ships as a pull request through \/sterling:merge/);
     assert.doesNotMatch(textOf(j), /no 'origin' remote/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -209,7 +213,7 @@ test('an unreadable config reads UNKNOWN on both lines, never the default', asyn
     const h = handler(dir, { sessions: { ses_root: {} } });
     const i = input('ses_root');
     await h.onContext(i);
-    assert.match(textOf(i), /Project mode: UNKNOWN/);
+    assert.match(textOf(i), /Workflow: UNKNOWN/);
     assert.match(textOf(i), /TDD posture: UNKNOWN/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

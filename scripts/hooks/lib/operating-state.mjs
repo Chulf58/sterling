@@ -1,5 +1,5 @@
 // The host-neutral operating-state lines H1 states at SessionStart: the project
-// config read with its three states, MACHINE ROLE, TDD posture, Project mode,
+// config read with its three states, MACHINE ROLE, TDD posture, Workflow,
 // Handoff files and the pending Sterling issue-report count, and the mounted domain lines.
 // Extracted from h1-session-start.mjs so the OpenCode context hook
 // (packages/opencode-plugin/src/context.mjs) renders the SAME text from the SAME
@@ -9,10 +9,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { storeRootFor } from '../../lib/worktree-root.mjs';
-import { MAINTENANCE_WORKER_ROLE, resolveOverpass } from '@sterling/schemas';
+import { ProjectWorkflowError, opencodeModelRef, parseConfig, unsupportedAgents, workflowOfConfig } from '@sterling/schemas';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../lib/handoff-projection.mjs';
+import { noOriginRemote } from '../../lib/work-pr.mjs';
 import { describeMountedDomains } from './subject-fan.mjs';
 
 /**
@@ -109,95 +110,146 @@ export function tddPostureLine({ config, configUnreadable }) {
 }
 
 /**
- * PROJECT MODE (decision project-mode-hobby-work-toggle-decides-flow, slice S1):
- * informational only. Same three states as the TDD line: an absent key IS the
- * schema default (hobby); an unreadable config is UNKNOWN, never the default; a
- * value outside hobby/work reads INVALID, never as either flow.
- * `noOrigin` (work mode in a git repo with no 'origin' remote, GitHub issue #39) says the
- * merge is local, because there is no PR path.
- * The line says only how work ships. Whether the handoff files are written is a
- * separate setting with its own line, handoffFilesLine below (decision
- * project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting).
+ * WORKFLOW (decisions settings-that-replace-project-mode-merge-path-reviewer-count and
+ * settings-redesign-build-shape-one-legacy-to-canonical-config; the line that replaced
+ * "Project mode"): the merge path, the Reviewers count and the Copilot review loop,
+ * read through workflowOfConfig (a legacy mode is carried by the one transform). Three
+ * states, as the TDD line: an absent config IS the schema default (direct, 1, loop
+ * off); an unreadable config is UNKNOWN, never the default (anti-pattern
+ * config-derived-posture-line-collapses-absent-into-unusable); a value the reader
+ * refuses is INVALID, never either path. On the pull-request path with no 'origin'
+ * remote (GitHub issue #39) the line says the merge is local. `root` makes the line
+ * probe the remote itself, only on the pull-request path; a caller that passes no
+ * root passes `noOrigin` instead. The line is informational: whether the handoff files
+ * are written is its own setting (handoffFilesLine below).
  */
-export function projectModeLine({ config, configUnreadable, noOrigin = false }) {
+export function projectModeLine({ config, configUnreadable, noOrigin = false, root = null }) {
   if (configUnreadable) {
     return (
-      'Project mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. ' +
-      'This is NOT the hobby default: repair the config.'
+      'Workflow: UNKNOWN — the project config could not be read, so config.workflow (merge path, Reviewers, Copilot loop) could not be determined. ' +
+      'This is NOT the default (direct merge, 1 reviewer, loop off): repair the config.'
     );
   }
-  const mode = config?.mode;
-  if (mode === undefined || mode === 'hobby' || mode === 'work') {
-    return (
-      `Project mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
-      (mode === 'work' && noOrigin
-        ? "this repository has no 'origin' remote, so /sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen."
-        : mode === 'work'
-        ? 'work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.'
-        : 'work ships by direct merge through /sterling:merge.')
-    );
+  let wf;
+  try {
+    wf = workflowOfConfig(config ?? undefined, '.sterling/config.json');
+  } catch (e) {
+    if (!(e instanceof ProjectWorkflowError)) throw e;
+    return `Workflow: INVALID — ${e.message}. /sterling:merge refuses to act on it until it is fixed (TUI System tab).`;
   }
-  return (
-    `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
-    '/sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).'
-  );
+  const pr = wf.merge === 'pr';
+  const localPr = pr && (root ? noOriginRemote(root) : noOrigin);
+  const loop = !wf.copilot_loop ? 'OFF' : pr ? 'ON' : 'ON but inactive (needs the pull-request merge path)';
+  const head =
+    `Workflow: merge path ${pr ? 'PULL REQUEST' : 'DIRECT'} · Reviewers: ${wf.reviewers} · Copilot loop: ${loop}` +
+    (pr ? ` · auto-merge on clean: ${wf.auto_merge_on_clean ? 'ON' : 'OFF'}` : '') +
+    ' (config.workflow — TUI System tab) — ';
+  const ships = localPr
+    ? "this repository has no 'origin' remote, so /sterling:merge merges locally like the direct merge path: no pull request and no Copilot review will happen."
+    : pr
+    ? `work ships as a pull request through /sterling:merge; nothing is merged directly${wf.copilot_loop ? ', and the Copilot review loop follows' : ''}.`
+    : 'work ships by direct merge through /sterling:merge.';
+  return `${head}${ships} Run ${wf.reviewers} task-end ${wf.reviewers === 1 ? 'reviewer' : 'reviewers in parallel'}, then one fix round and one re-check.`;
 }
 
-// The resolved per-role routes (resolveOverpass().roles, ruled defaults plus any
-// config.overpass.roles override) grouped by model and effort, in role order:
-// "model (role, role), model at effort high (role)".
+// The agents whose one model is an Overpass tier, grouped by model and effort in key order:
+// "overpass/agentic-auto at effort high (implementor, scout), overpass/agentic-high (reviewer)".
 const routeLabel = ({ model, effort }) => (effort ? `${model} at effort ${effort}` : model);
 
-function overpassRoleRoutes(roles) {
+function overpassAgentRoutes(entries) {
   const groups = new Map();
-  for (const [role, route] of Object.entries(roles)) {
+  for (const [agent, route] of entries) {
     const label = routeLabel(route);
-    groups.set(label, [...(groups.get(label) ?? []), role]);
+    groups.set(label, [...(groups.get(label) ?? []), agent]);
   }
   return [...groups].map(([label, names]) => `${label} (${names.join(', ')})`).join(', ');
 }
 
 /**
- * OVERPASS (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers and
- * overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
- * point 6): whether every lane is routed through the Overpass tiers, through the one
- * resolver the plugin's routing uses (resolveOverpass). States: ON (provider, the
- * conductor's model or that it is bypassed, each role's model, the lane model); CONFIGURED BUT NOT IN EFFECT
- * with the resolver's reason; OFF, stated only where the toggle is offered (work mode on
- * OpenCode) and silent elsewhere, since hobby mode and Claude Code never route through
- * it; INVALID with the resolver's error; and UNKNOWN for an unreadable config, never
- * the off default (anti-pattern config-derived-posture-line-collapses-absent-into-unusable).
+ * OVERPASS (decisions overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi and
+ * settings-that-replace-project-mode-merge-path-reviewer-count): Overpass is no setting of its
+ * own; an agent is routed through it when its one model is an overpass/<tier> (read through the
+ * canonical transform, so a legacy config reads as it migrates). States: ON (OpenCode, provider
+ * and each routed agent's model); NOT IN EFFECT (an agent holds an Overpass tier but the host is
+ * not OpenCode, which Claude Code and agy cannot run); INVALID with the reader's error; UNKNOWN
+ * for an unreadable config, never the off default (anti-pattern
+ * config-derived-posture-line-collapses-absent-into-unusable); and silent when no agent is routed.
  */
 export function overpassLine({ config, configUnreadable, host }) {
   if (configUnreadable) {
     return (
-      'Overpass: UNKNOWN — the project config could not be read, so config.overpass could not be determined. ' +
+      'Overpass: UNKNOWN — the project config could not be read, so which agents run on Overpass tiers could not be determined. ' +
       'This is NOT the off default: repair the config.'
     );
   }
-  let res;
+  let canon;
   try {
-    res = resolveOverpass(config ?? {}, { host });
+    canon = parseConfig(config ?? {});
   } catch (e) {
-    return `Overpass: INVALID — ${(e && e.message) || e}. Subagent dispatches are not routed through Overpass and say so on each result; fix .sterling/config.json (TUI System tab).`;
+    return `Overpass: INVALID — ${(e && e.message) || e}. Fix .sterling/config.json (TUI System tab).`;
   }
-  if (res.effective) {
-    const conductor = res.conductorRouted
-      ? `the conductor runs on ${res.conductorModel}`
-      : 'the conductor is bypassed (config.overpass.conductor_bypass) and keeps its direct model pin';
-    // The maintenance worker is a role of its own but no subagent: it is named apart.
-    const { [MAINTENANCE_WORKER_ROLE]: worker, ...subagentRoles } = res.roles;
-    return (
-      `Overpass: ON (provider '${res.provider}', config.overpass — TUI System tab) — ${conductor}; ` +
-      `subagent roles run on ${overpassRoleRoutes(subagentRoles)}; ` +
-      `the maintenance worker runs on ${routeLabel(worker)}; ` +
-      `other agents and the Plan agent run on ${res.laneModel}. ` +
-      'The direct model pins in agent files, briefs and models.<role>.opencode_model do not apply while it is on.'
-    );
+  const routed = Object.entries(canon.models).filter(([, entry]) => typeof entry?.model === 'string' && entry.model.startsWith('overpass/'));
+  if (routed.length === 0) return '';
+  const routes = overpassAgentRoutes(routed.map(([agent, entry]) => [agent, { model: opencodeModelRef(entry.model, canon.overpass.provider), effort: entry.effort }]));
+  if (host === 'opencode') return `Overpass: ON (provider '${canon.overpass.provider}', config.models — TUI System tab) — ${routes}.`;
+  return `Overpass: NOT IN EFFECT — ${routes} are set to Overpass tiers, which only OpenCode can run; this host gets no copy of them.`;
+}
+
+/**
+ * HOST FIT (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude): the agents
+ * this session's host gets no copy of because it cannot run their one model, and the roles whose two
+ * legacy models are not chosen yet. Read through unsupportedAgents (the canonical transform), so a
+ * legacy config reads as it migrates. Silent when every agent runs here; an unreadable config is
+ * UNKNOWN, never silence; a config unsupportedAgents cannot read says so (INVALID).
+ */
+export function unsupportedAgentsLine({ config, configUnreadable, host, root }) {
+  if (configUnreadable) return 'Agents on this host: UNKNOWN — the project config could not be read, so which agents have no copy here could not be determined. Repair the config.';
+  let rows;
+  try {
+    rows = unsupportedAgents(config ?? {}, [host]);
+  } catch (e) {
+    return `Agents on this host: INVALID — ${(e && e.message) || e}. Fix .sterling/config.json (TUI System tab).`;
   }
-  if (res.configured) return `Overpass: CONFIGURED BUT NOT IN EFFECT — ${res.reason}; every lane uses its direct model pin.`;
-  if (host === 'opencode' && config?.mode === 'work') return 'Overpass: OFF (config.overpass.enabled — TUI System tab) — every lane uses its direct model pin.';
-  return '';
+  if (rows.length === 0) return '';
+  const named = (r) => (r.host === '*' ? `${r.agent} (two models; run /sterling:update to choose)` : `${r.agent} (${r.model})`);
+  const conflicts = rows.filter((r) => r.host === '*');
+  let noCopy = rows.filter((r) => r.host !== '*');
+  const parts = [];
+  // The conductor gets its own line. It states two observed facts, the unsupported selection and the
+  // file at the conductor's path, and never which agent the reading session is: child sessions (a
+  // reviewer, a lane) receive this line too, and a file being present does not prove whose it is or
+  // whether it was edited. `root` is the checkout the agent files live in; without it the file state is
+  // not claimed.
+  const conductor = noCopy.find((r) => r.agent === 'conductor');
+  if (conductor && (host === 'claude' || host === 'opencode')) {
+    noCopy = noCopy.filter((r) => r !== conductor);
+    const rel = host === 'claude' ? '.claude/agents/conductor.md' : '.opencode/agents/sterling/conductor.md';
+    const hostName = host === 'claude' ? 'Claude Code' : 'OpenCode';
+    const head = `the conductor's model ${conductor.model} cannot run on ${hostName}`;
+    const fix = `pick a model ${hostName} can run for the conductor in the TUI System tab`;
+    const present = root ? existsSync(join(root, rel)) : null;
+    if (present === true) {
+      parts.push(`${head}; a conductor file Sterling did not remove is present at ${rel}, and it may not run ${conductor.model}; ${fix}`);
+    } else if (present === null) {
+      parts.push(`${head}, so Sterling writes no conductor copy for it; ${fix}`);
+    } else if (host === 'claude') {
+      parts.push(`${head}; Sterling wrote no conductor copy (${rel} is absent), so a .claude/settings.json "agent": "conductor" has no conductor file to start; ${fix}`);
+    } else {
+      // Only what was read is stated. A missing conductor file does not say which agent OpenCode runs: an
+      // inline agent["sterling/conductor"] definition in opencode.json still defines it, so no fallback is claimed.
+      let defaultAgent;
+      try {
+        const doc = JSON.parse(readFileSync(join(root, '.opencode', 'opencode.json'), 'utf8'));
+        defaultAgent = doc !== null && typeof doc === 'object' && !Array.isArray(doc) && doc.default_agent !== undefined ? `default_agent is ${JSON.stringify(doc.default_agent)}` : 'default_agent is not set';
+      } catch (e) {
+        defaultAgent = e?.code === 'ENOENT' ? 'there is no .opencode/opencode.json' : `default_agent could not be read (${(e && e.message) || e})`;
+      }
+      parts.push(`${head}; there is no conductor file at ${rel}; ${defaultAgent}; ${fix}`);
+    }
+  }
+  if (noCopy.length) parts.push(`no ${host === 'claude' ? 'Claude Code' : host === 'opencode' ? 'OpenCode' : 'agy'} copy of ${noCopy.map(named).join(', ')}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
+  if (conflicts.length) parts.push(`${conflicts.map(named).join(', ')}: dispatch refuses until you choose`);
+  return `Agents on this host: ${parts.join('; ')}.`;
 }
 
 const STORAGE_TAIL = 'TUI System tab; switch with the move-store skill';

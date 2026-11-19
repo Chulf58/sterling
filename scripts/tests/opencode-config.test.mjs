@@ -153,8 +153,10 @@ test('AskUserQuestion maps to the question tool, readably, in bodies and descrip
   const ctx = stubCtx(project);
   await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW })(ctx);
   const { commands, skills } = ctx.run();
-  await commands.get('sterling:init').execute({ sessionID: 's', prompt: { text: '' }, delivery: 'steer' });
-  assert.match(ctx.prompts[0].text, /ask ONE `question` tool form, header "Mode"/);
+  // Changed with item C: /sterling:init no longer asks the hobby/work Mode question (the mode is retired), so the command body
+  // that pins the AskUserQuestion mapping is /sterling:domains, which still puts its additions through one form.
+  await commands.get('sterling:domains').execute({ sessionID: 's', prompt: { text: '' }, delivery: 'steer' });
+  assert.match(ctx.prompts[0].text, /Put the additions to the user through ONE `question` tool form before any `--apply`/);
   assert.match(skills.get('sterling:grill').description, /one `question` tool form at a time/);
   assert.match(skills.get('sterling:decision-records').content, /through a `question` tool form/);
   assert.match(skills.get('sterling:pr-review-loop').content, /through the \*\*`question`\*\* tool/);
@@ -266,36 +268,22 @@ test('every opencode-only block in a raw-read command or skill opens with "On Op
 // GitHub issue #24: on OpenCode the Sol, Astra and Terra lanes are native subagent dispatches on
 // openai models, and the `codex` MCP tool is the Claude Code route only. The three skills that
 // name the route carry a host block each, and their Claude text is the text before the blocks.
-test('review-brief, grill and delegating-to-subagents: the OpenCode render names the native route and no codex MCP call; the Claude render keeps the codex MCP wording', async () => {
+// Changed with the Codex removal (settings redesign D): review and sparring are plain sterling/reviewer and sterling/sparring dispatches
+// on each agent's one model, so no skill carries a codex MCP route, a Sol or Astra route or a Terra pin on either host. What stays pinned:
+// the Claude render is the source without the opencode-only fences, and neither render routes a lane through the codex MCP tool.
+test('review-brief, grill and delegating-to-subagents: neither render routes a lane through the codex MCP tool or names a per-host model route; the Claude render is the source without the fences', async () => {
   const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
-  const expected = {
-    'review-brief': { opencode: ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'do not modify the worktree'], claude: 'call the `codex` MCP tool at `sandbox: read-only`' },
-    grill: { opencode: ['sterling/sparring', 'openai/gpt-6-astra#high'], claude: 'through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`' },
-    'delegating-to-subagents': { opencode: ['sterling/implementor', 'openai/gpt-5.6-terra'], claude: '(`gpt-5.6-terra`, through the `codex` MCP tool)' },
-  };
-  for (const [dir, want] of Object.entries(expected)) {
+  for (const dir of ['review-brief', 'grill', 'delegating-to-subagents']) {
     const rel = `skills/${dir}/SKILL.md`;
     const source = readFileSync(join(repo, rel), 'utf8').replace(/\r\n/g, '\n');
     const opencode = cfg.hostMapText(source, '/r', rel);
-    for (const text of want.opencode) assert.ok(opencode.includes(text), `${rel}: the OpenCode render lacks ${JSON.stringify(text)}`);
-    assert.ok(!opencode.includes(want.claude), `${rel}: the OpenCode render still carries the codex MCP call`);
     assert.doesNotMatch(opencode, /(call|through) the `codex` MCP tool/, `${rel}: the OpenCode render routes a lane through the codex MCP tool`);
+    assert.doesNotMatch(opencode, /openai\/gpt-/, `${rel}: the OpenCode render names a per-host model route`);
     const claude = renderClaudeText(source, rel);
-    assert.ok(claude.includes(want.claude), `${rel}: the Claude render keeps the codex MCP wording`);
-    assert.doesNotMatch(claude, /<!--|openai\//, `${rel}: no marker or OpenCode route reaches the Claude render`);
+    assert.doesNotMatch(claude, /(call|through) the `codex` MCP tool|<!--|openai\//, `${rel}: the Claude render carries a codex route, a marker or an OpenCode route`);
     const unfenced = source.replace(/<!-- opencode-only -->\n[\s\S]*?<!-- \/opencode-only -->\n/g, '').replace(/^<!-- \/?claude-only -->\n/gm, '');
     assert.equal(claude, unfenced, `${rel}: the Claude render is the source without the fences`);
   }
-  // Board 52a82da8 and GitHub issue #169: Sol is gpt-6.1-sol on OpenCode and gpt-5.6-sol on Claude
-  // Code; the Claude render carries the loud Opus fallback with no second Sol retry, the OpenCode render does not.
-  const briefSource = readFileSync(join(repo, 'skills/review-brief/SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
-  const briefOpenCode = cfg.hostMapText(briefSource, '/r', 'skills/review-brief/SKILL.md');
-  assert.ok(briefOpenCode.includes('**Sol** (`gpt-6.1-sol`) for Claude-executed work'), 'review-brief: the OpenCode render names the new Sol id in the pairing line');
-  assert.ok(!briefOpenCode.includes('gpt-5.6-sol'), 'review-brief: the OpenCode render no longer names the old Sol id');
-  const briefClaude = renderClaudeText(briefSource, 'skills/review-brief/SKILL.md');
-  assert.ok(briefClaude.includes('Codex **Sol** (`gpt-5.6-sol`) for Claude-executed work'), 'review-brief: the Claude render names gpt-5.6-sol in the pairing line');
-  assert.ok(briefClaude.includes('say so, review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently'), 'review-brief: the Claude render carries the loud Opus fallback');
-  assert.ok(!briefClaude.includes('Codex **Sol** (`gpt-6.1-sol`)') && !briefClaude.includes('retry once'), 'review-brief: the Claude render does not default to gpt-6.1-sol or retry on another Sol id');
 });
 
 test('dashboard.md: sterling:dashboard is not registered on OpenCode; the OpenCode render points at /sterling; the Claude render is the unfenced text', async (t) => {

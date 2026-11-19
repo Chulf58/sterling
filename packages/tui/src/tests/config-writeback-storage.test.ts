@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { StorageTransitionRequiredError, applyModeToggle, applyTddToggle, writeConfigKey } from '../config-writeback.js';
+import { StorageTransitionRequiredError, applyTddToggle, applyWorkflow, writeConfigKey } from '../config-writeback.js';
 import { openDashboard } from '../controller.js';
 
 // config.storage is written only by the store move (decision
@@ -52,22 +52,23 @@ test('every toggle keeps config.storage exactly as written', () => {
   assert.deepEqual(after.tdd, { enabled: false });
 });
 
-test('mode toggle, Postgres storage: both directions write, storage and every other key kept', () => {
-  const path = configFile({ mode: 'work', storage: 'postgres', stack_tags: ['node'] });
+test('workflow write, Postgres storage: writes config.workflow, storage and every other key kept', () => {
+  const path = configFile({ workflow: { merge: 'pr' }, storage: 'postgres', stack_tags: ['node'] });
   const errors: string[] = [];
-  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'hobby' }, (m) => errors.push(m), path), true);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mode: 'hobby', storage: 'postgres', stack_tags: ['node'] });
-  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'work' }, (m) => errors.push(m), path), true);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mode: 'work', storage: 'postgres', stack_tags: ['node'] });
+  assert.equal(applyWorkflow({ type: 'workflow_set', field: 'merge', value: 'direct' }, (m: string) => errors.push(m), path), true);
+  const after = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(after.workflow.merge, 'direct');
+  assert.equal(after.storage, 'postgres');
+  assert.deepEqual(after.stack_tags, ['node']);
   assert.deepEqual(errors, []);
 });
 
-test('mode toggle, SQLite storage: both directions still write, every other key kept', () => {
-  const path = configFile({ mode: 'work', stack_tags: ['node'] });
-  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'hobby' }, undefined, path), true);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mode: 'hobby', stack_tags: ['node'] });
-  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'work' }, undefined, path), true);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mode: 'work', stack_tags: ['node'] });
+test('workflow write, SQLite storage: still writes, every other key kept', () => {
+  const path = configFile({ workflow: { merge: 'direct' }, stack_tags: ['node'] });
+  assert.equal(applyWorkflow({ type: 'workflow_set', field: 'merge', value: 'pr' }, undefined, path), true);
+  const after = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(after.workflow.merge, 'pr');
+  assert.deepEqual(after.stack_tags, ['node']);
 });
 
 test('openDashboard, Postgres storage, database unreachable: throws StoreUnreachableError and creates no SQLite file', () => {

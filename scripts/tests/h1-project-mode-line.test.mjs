@@ -40,15 +40,19 @@ function context(dir) {
   return JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
 }
 
-const modeLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Project mode:'));
+// CHANGED with the settings redesign (item C, decision
+// settings-that-replace-project-mode-merge-path-reviewer-count): the Project mode line
+// became the Workflow line (merge path, Reviewers, Copilot loop); a legacy mode is read
+// through the one transform, so work reads as {pr, 3, loop on} and hobby as {direct, 1, off}.
+const modeLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Workflow:'));
 
 // CHANGED (decision
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
 // the mode line used to say whether the OpenCode agents and handoff files were
 // written. It now says only how work ships; the Handoff files line below it
 // carries the other fact.
-const WORK_LINE = 'Project mode: WORK (config.mode — TUI System tab) — work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.';
-const HOBBY_LINE = 'Project mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.';
+const WORK_LINE = 'Workflow: merge path PULL REQUEST · Reviewers: 3 · Copilot loop: ON · auto-merge on clean: ON (config.workflow — TUI System tab) — work ships as a pull request through /sterling:merge; nothing is merged directly, and the Copilot review loop follows. Run 3 task-end reviewers in parallel, then one fix round and one re-check.';
+const HOBBY_LINE = 'Workflow: merge path DIRECT · Reviewers: 1 · Copilot loop: OFF (config.workflow — TUI System tab) — work ships by direct merge through /sterling:merge. Run 1 task-end reviewer, then one fix round and one re-check.';
 const handoffLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Handoff files:'));
 const HANDOFF_ON_LINE = 'Handoff files: ON (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are written and maintained.';
 const HANDOFF_OFF_LINE = 'Handoff files: OFF (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.';
@@ -63,7 +67,7 @@ for (const [mode, modeLine] of [['hobby', HOBBY_LINE], ['work', WORK_LINE]]) {
         assert.deepEqual(modeLines(ctx), [modeLine]);
         assert.deepEqual(handoffLines(ctx), [handoffLine]);
         assert.doesNotMatch(ctx, /work-only/);
-        assert.equal(ctx.slice(ctx.indexOf('Project mode:'), ctx.indexOf('Handoff files:')).split('\n\n').length, 2, 'nothing sits between the two lines');
+        assert.equal(ctx.slice(ctx.indexOf('Workflow:'), ctx.indexOf('Handoff files:')).split('\n\n').length, 2, 'nothing sits between the two lines');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -107,7 +111,7 @@ for (const [label, cfg, expected] of [
 // 'origin' remote merges locally, so the line must not promise a pull request.
 // A work repo WITH origin keeps the WORK line; a non-git directory is not "no
 // origin" (the WORK tests above run in one).
-const NO_ORIGIN_LINE = "Project mode: WORK (config.mode — TUI System tab) — this repository has no 'origin' remote, so /sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen.";
+const NO_ORIGIN_LINE = "Workflow: merge path PULL REQUEST · Reviewers: 3 · Copilot loop: ON · auto-merge on clean: ON (config.workflow — TUI System tab) — this repository has no 'origin' remote, so /sterling:merge merges locally like the direct merge path: no pull request and no Copilot review will happen. Run 3 task-end reviewers in parallel, then one fix round and one re-check.";
 for (const [label, remote, expected] of [
   ['no origin remote', null, NO_ORIGIN_LINE],
   ['only a non-origin remote', 'upstream', NO_ORIGIN_LINE],
@@ -141,8 +145,8 @@ test('H1 reads an invalid mode as INVALID, never as either flow', () => {
   try {
     const lines = modeLines(context(dir));
     assert.equal(lines.length, 1);
-    assert.equal(lines[0], "Project mode: INVALID ('Work') — config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).");
-    assert.doesNotMatch(lines[0], /HOBBY|WORK/);
+    assert.match(lines[0], /^Workflow: INVALID — config\.mode is "Work" .* \/sterling:merge refuses to act on it until it is fixed \(TUI System tab\)\.$/);
+    assert.doesNotMatch(lines[0], /DIRECT|PULL REQUEST/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -153,8 +157,8 @@ test('H1 reads an unreadable config as UNKNOWN, never the hobby default', () => 
   try {
     const lines = modeLines(context(dir));
     assert.equal(lines.length, 1);
-    assert.equal(lines[0], 'Project mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. This is NOT the hobby default: repair the config.');
-    assert.doesNotMatch(lines[0], /HOBBY/);
+    assert.equal(lines[0], 'Workflow: UNKNOWN — the project config could not be read, so config.workflow (merge path, Reviewers, Copilot loop) could not be determined. This is NOT the default (direct merge, 1 reviewer, loop off): repair the config.');
+    assert.doesNotMatch(lines[0], /DIRECT|PULL REQUEST/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -165,7 +169,7 @@ test('the project-mode line sits right after the TDD posture line', () => {
   try {
     const ctx = context(dir);
     const tdd = ctx.indexOf('TDD posture:');
-    const mode = ctx.indexOf('Project mode:');
+    const mode = ctx.indexOf('Workflow:');
     assert.ok(tdd !== -1 && mode > tdd, 'the mode line follows the TDD posture line');
     assert.equal(ctx.slice(tdd, mode).split('\n\n').length, 2, 'nothing sits between the two lines');
   } finally {
@@ -189,5 +193,33 @@ test('H1: no handoff key and a git failure reads UNKNOWN with the git error, nev
     assert.doesNotMatch(lines[0], /Handoff files: (ON|OFF)\b/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Settings redesign item C: a canonical config's workflow is stated as written, and an
+// invalid workflow reads INVALID, never either path.
+test('H1 states a canonical workflow as written: pull request, 2 reviewers, loop off, auto-merge off', () => {
+  const dir = project({ ...BASE_CONFIG, workflow: { merge: 'pr', reviewers: 2, copilot_loop: false, auto_merge_on_clean: false } });
+  try {
+    assert.deepEqual(modeLines(context(dir)), [
+      'Workflow: merge path PULL REQUEST · Reviewers: 2 · Copilot loop: OFF · auto-merge on clean: OFF (config.workflow — TUI System tab) — work ships as a pull request through /sterling:merge; nothing is merged directly. Run 2 task-end reviewers in parallel, then one fix round and one re-check.',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H1 reads an invalid workflow as INVALID and an unreadable config as UNKNOWN, never the default', () => {
+  const invalid = project({ ...BASE_CONFIG, workflow: { merge: 'squash' } });
+  const broken = project('{ not json');
+  const nonObject = project('[]');
+  try {
+    const [line] = modeLines(context(invalid));
+    assert.match(line, /^Workflow: INVALID — config\.workflow is invalid .*squash/);
+    const unknown = 'Workflow: UNKNOWN — the project config could not be read, so config.workflow (merge path, Reviewers, Copilot loop) could not be determined. This is NOT the default (direct merge, 1 reviewer, loop off): repair the config.';
+    assert.deepEqual(modeLines(context(broken)), [unknown]);
+    assert.deepEqual(modeLines(context(nonObject)), [unknown]);
+  } finally {
+    for (const dir of [invalid, broken, nonObject]) rmSync(dir, { recursive: true, force: true });
   }
 });

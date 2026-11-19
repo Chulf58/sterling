@@ -50,25 +50,25 @@ test('TUI bundle: single file, no workspace resolution, exits politely on non-TT
   }
 });
 
-test('TUI bundle carries the System-tab swap and the codex probe INLINE: no run-time load of scripts/lib, no plugin-MCP codex read', () => {
-  // An installed copy has no node_modules and no packages/*/dist, so the swap's
-  // old run-time import of the scripts/lib/agent-distribution.mjs SOURCE (which
-  // imports @sterling/schemas) could not load there. And codex is registered at
-  // USER scope, so the probe reads <CLAUDE_CONFIG_DIR or home>/.claude.json,
-  // never the plugin's committed .claude-plugin/sterling-mcp.json.
+test('TUI bundle carries the System-tab host-copy render INLINE: no run-time load of scripts/lib, no plugin-MCP read', () => {
+  // An installed copy has no node_modules and no packages/*/dist, so a run-time import of the
+  // scripts/lib/agent-distribution.mjs SOURCE (which imports @sterling/schemas) could not load there.
+  // The model change re-renders the host copies through renderHostCopies (scripts/lib/host-copies.mjs),
+  // which must therefore be inlined. The codex probe (userScopeCodexServer) went with Sterling's Codex
+  // integration (decision decommission-the-codex-model-setting-codex-is-no-longer-used), so the
+  // bundle's function list and the .claude.json read are no longer asserted.
   const outDir = mkdtempSync(join(tmpdir(), 'sterling-tui-build-'));
   const bundle = join(outDir, 'sterling-tui.mjs');
   try {
     const build = spawnSync(process.execPath, [join(root, 'scripts', 'build-tui.mjs'), '--out-file', bundle], { encoding: 'utf8', cwd: root, timeout: 180_000 });
     assert.equal(build.status, 0, build.stderr);
     const content = readFileSync(bundle, 'utf8');
-    for (const fn of ['parseInstalledHeader', 'setInstalledModelEffort', 'userScopeCodexServer']) {
+    for (const fn of ['renderHostCopies', 'installAgents']) {
       assert.match(content, new RegExp(`function ${fn}\\(`), `${fn} is inlined into the bundle`);
     }
     assert.ok(!content.includes('scripts/lib/agent-distribution.mjs"'), 'no run-time import of the agent-distribution source');
     assert.ok(!content.includes("scripts/lib/agent-distribution.mjs'"), 'no run-time import of the agent-distribution source');
-    assert.ok(!content.includes('.claude-plugin/sterling-mcp.json'), 'the codex probe no longer reads the plugin MCP config');
-    assert.match(content, /\.claude\.json/, 'the codex probe reads the user-scope Claude config');
+    assert.ok(!content.includes('.claude-plugin/sterling-mcp.json'), 'the bundle does not read the plugin MCP config');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

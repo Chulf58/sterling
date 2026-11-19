@@ -358,7 +358,7 @@ test('sync-agents: agy absent prints one skip line and writes nothing for agy; a
 test('init: agy absent leaves the project as before (no .agents/, no GEMINI.md, one skipped row); agy present adds them', () => {
   const run = (probe) => {
     const dir = gitProject();
-    const r = spawnSync(process.execPath, [join(repo, 'scripts', 'init.mjs'), '--target', dir, '--project-name', 'agyinit', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'hobby'], {
+    const r = spawnSync(process.execPath, [join(repo, 'scripts', 'init.mjs'), '--target', dir, '--project-name', 'agyinit', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'], { // --mode is retired (settings redesign item C)
       encoding: 'utf8',
       cwd: dir,
       timeout: 180_000,
@@ -611,7 +611,10 @@ test('each of agy\'s four model values renders verbatim, and an unlisted value r
   assert.match(renderAgyAgent(tpl, 't', 'implementor', { root: repo, nodePath: NODE, agyModel: 'claude-opus-5-5-high' }), /^model: inherit$/m);
 });
 
-test('setupAgy with a stale exact agy_model in config writes model: inherit and names the role and the ignored value', () => {
+// Changed 2026-11-19 (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude, rationale point (5),
+// user-ruled "No agy copy, fail loudly"): agy runs only agy/<id> models, so the Opus sparring role gets no agy copy
+// instead of one on model: inherit; the stale agy_model is still named as ignored.
+test('setupAgy with a stale exact agy_model in config names the role and the ignored value, and an Opus role gets no agy copy', () => {
   const dir = gitProject();
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { sparring: { model: 'claude-opus-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' } } }));
@@ -620,7 +623,8 @@ test('setupAgy with a stale exact agy_model in config writes model: inherit and 
   assert.ok(row, JSON.stringify(r.rows));
   assert.equal(row.status, 'ignored');
   assert.match(row.detail, /"claude-opus-5-5-high" is not one of inherit, flash_lite, flash, pro/);
-  assert.match(readFileSync(join(dir, '.agents', 'agents', 'sparring', 'agent.md'), 'utf8'), /^model: inherit$/m);
+  assert.equal(existsSync(join(dir, '.agents', 'agents', 'sparring', 'agent.md')), false);
+  assert.equal(r.rows.find((x) => x.item === '.agents/agents/sparring/agent.md').status, 'unsupported');
 });
 
 // Changed 2026-11-18 (GitHub #310, user ruling "Accept agy's 4 values"): #309 pinned the shipped sparring agy agent to

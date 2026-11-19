@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, opencodeModelFor, writeFullAgentFiles, stageFullAgentModel, sterlingRootFrom, storeWriteTools, materializeTui,
+  refreshFullAgentModels, writeFullAgentFiles, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 import { STERLING_GIT_SPEC } from '../lib/sterling-roots.mjs';
@@ -92,10 +92,10 @@ test('global install writes both shims and the MCP launcher, idempotently, honou
   const shim = readFileSync(join(plugins, 'sterling.js'), 'utf8');
   assert.ok(shim.includes(JSON.stringify(repoRoot.replace(/\\/g, '/'))), 'authoring clone: the clone path is baked');
   const second = setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env, home, installed: false, probe: OC2 });
-  // The codex row skips here (no Codex in the temp HOME); opencode-codex-mcp.test.mjs covers it.
-  const codex = second.rows.filter((r) => r.item.endsWith('mcp.servers.codex'));
-  assert.deepEqual(codex.map((r) => r.status), ['skipped']);
-  assert.deepEqual([...new Set(second.rows.filter((r) => !codex.includes(r)).map((r) => r.status))], ['matches']);
+  // Codex is removed (decision decommission-the-codex-model-setting-codex-is-no-longer-used): install writes
+  // no mcp.servers.codex row, so every row of the second run is a match.
+  assert.deepEqual(second.rows.filter((r) => r.item.endsWith('mcp.servers.codex')), []);
+  assert.deepEqual([...new Set(second.rows.map((r) => r.status))], ['matches']);
 });
 
 test('installed copy: no versioned cache path is written; the shims resolve the newest at run time', () => {
@@ -730,49 +730,70 @@ test('Sterling-full roster: a local edit or a foreign file is refused, never ove
   assert.equal(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md'), 'utf8'), 'my scout\n');
 });
 
-test('model swap: the swapped roster agent is re-rendered with the matching OpenCode model; the rest keep theirs', () => {
+// Changed with the cutover (item G): the System-tab swap functions (swapFullAgentModel, stageFullAgentModel) were removed. A model
+// change now writes config.models and re-renders through refreshFullAgentModels, the render setupOpenCode's agent step runs, so the
+// tests below write the config first and then refresh.
+test('model change: the changed roster agent is re-rendered with the matching OpenCode model; the rest keep theirs', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5'], 'a fresh install pins the config.models default');
-  const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'librarian'], model: 'claude-opus-5-5' });
+  writeConfig(dir, { implementor: { model: 'anthropic/claude-opus-5-5', effort: 'high' }, librarian: { model: 'anthropic/claude-opus-5-5', effort: 'low' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
   assert.equal(statusOf(r, '/implementor.md'), 'refreshed');
   assert.equal(statusOf(r, '/conductor.md'), 'matches');
   assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\nmodel: anthropic\/claude-opus-5-5\n/);
   assert.doesNotMatch(read('conductor'), /^model:/m, 'conductor');
   for (const n of ['researcher', 'scout']) assert.deepEqual(read(n).match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5'], n);
-  // A later sync keeps the pin once config.models says the same, as the System tab writes it before the swap.
-  writeConfig(dir, { implementor: { model: 'claude-opus-5-5', effort: 'high' }, librarian: { model: 'claude-opus-5-5', effort: 'low' } });
-  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
-  assert.match(read('implementor'), /^model: anthropic\/claude-opus-5-5$/m);
-  // Swapping again replaces the pin rather than adding a second line.
-  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
+  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches', 'a later sync keeps the pin');
+  // Changing again replaces the pin rather than adding a second line.
+  writeConfig(dir, { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } });
+  refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
 });
 
-test('model swap: a role with an OpenCode override pins openai/<id>; a role without one pins anthropic/<id>', () => {
-  // decision opencode-only-model-override-per-role-for-openai-picks
+test('model change: an agent whose one model is an OpenAI model pins openai/<id>; Claude and Overpass models map as OpenCode names them; an agy model removes the copy', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
-  const swapped = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
-  // the rows are the public shape only: the staged path/content/previous stay internal
-  for (const row of swapped.rows) assert.deepEqual(Object.keys(row).filter((k) => ['path', 'content', 'previous'].includes(k)), [], row.item);
-  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['reviewer'], model: 'claude-opus-5-5' });
+  writeConfig(dir, { implementor: { model: 'openai/gpt-5.6-terra', effort: 'high' }, reviewer: { model: 'anthropic/claude-opus-5-5', effort: 'high' }, scout: { model: 'overpass/agentic-auto' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  for (const row of r.rows) assert.deepEqual(Object.keys(row).filter((k) => ['path', 'content', 'previous'].includes(k)), [], row.item);
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
   assert.deepEqual(read('reviewer').match(/^model: .*$/gm), ['model: anthropic/claude-opus-5-5']);
-  // A later sync keeps the override pin once config.models carries it, as the System tab writes it.
-  writeConfig(dir, { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } });
-  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
-  // Clearing the override (no opencodeModel) goes back to the role's Claude model.
-  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
-  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
-  // A malformed override is refused before any file is written.
-  const before = read('implementor');
-  assert.throws(() => swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'gpt-5.6-terra\nhooks: x' }), /opencode_model/);
-  assert.equal(read('implementor'), before);
+  assert.deepEqual(read('scout').match(/^model: .*$/gm), ['model: overpass/agentic-auto'], 'overpass/<tier> maps through overpass.provider (default overpass)');
+  // Changed with finding 3 of the item-G review: an agy model is one OpenCode cannot run, so the agent gets no
+  // OpenCode copy and the unedited copy Sterling wrote is removed (it kept its old pin and stayed runnable before).
+  writeConfig(dir, { implementor: { model: 'agy/flash' } });
+  const gone = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(statusOf(gone, '/implementor.md'), 'removed');
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md')), false);
+});
+
+test('an agent on a model OpenCode cannot run gets no copy: a fresh install creates none, an unedited copy is removed, an edited one is kept and reported (item-G review finding 3)', () => {
+  const home = tmp('oc-home-');
+  const fresh = project('hobby');
+  writeConfig(fresh, { scout: { model: 'agy/flash' } });
+  const r = run(fresh, home);
+  assert.equal(statusOf(r, '/scout.md'), 'skipped');
+  assert.match(r.rows.find((x) => x.item.endsWith('/scout.md')).detail, /config\.models\.scout is agy\/flash, which OpenCode cannot run; no OpenCode copy is created/);
+  assert.equal(existsSync(join(fresh, STERLING_AGENTS_SUBDIR, 'scout.md')), false, 'a fresh install creates no copy without a model');
+  assert.equal(statusOf(r, '/implementor.md'), 'created', 'the other roles are installed');
+  const dir = project('hobby');
+  run(dir, home);
+  writeConfig(dir, { scout: { model: 'agy/flash' }, researcher: { model: 'agy/pro' } });
+  const researcher = join(dir, STERLING_AGENTS_SUBDIR, 'researcher.md');
+  const edited = readFileSync(researcher, 'utf8') + '\nmine\n';
+  writeFileSync(researcher, edited);
+  const again = run(dir, home);
+  assert.equal(statusOf(again, '/scout.md'), 'removed');
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false, 'the unedited copy is removed');
+  assert.equal(statusOf(again, '/researcher.md'), 'refused');
+  assert.match(again.rows.find((x) => x.item.endsWith('/researcher.md')).detail, /edited after Sterling wrote it, and config\.models\.researcher is agy\/pro, which OpenCode cannot run, so Sterling would remove it; it is kept/);
+  assert.equal(readFileSync(researcher, 'utf8'), edited, 'the edited copy is kept byte for byte');
+  assert.equal(statusOf(run(dir, home), '/scout.md'), 'skipped', 'a later run creates nothing');
 });
 
 test('writeFullAgentFiles: a write that fails part-way leaves the target intact and restores the files already written', () => {
@@ -802,47 +823,63 @@ test('writeFullAgentFiles: a write that fails part-way leaves the target intact 
   assert.deepEqual(readdirSync(dir).sort().map((n) => readFileSync(join(dir, n), 'utf8')), ['new a\n', 'new b, long enough to be cut short\n', 'new c\n']);
 });
 
-test('stageFullAgentModel keeps the raw bytes as previous: a CRLF agent is restored byte-identical after a failed write', () => {
+test('model change: a CRLF Sterling-full agent is refreshed, not mistaken for a hand edit', () => {
+  // Changed with the cutover: the staged-write rollback is pinned by the writeFullAgentFiles test above; this keeps the CRLF-is-not-an-edit pin.
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const impl = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  writeFileSync(impl, readFileSync(impl, 'utf8').replace(/\n/g, '\r\n'));
+  writeConfig(dir, { implementor: { model: 'openai/gpt-5.6-terra', effort: 'high' } });
+  assert.equal(statusOf(refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot }), '/implementor.md'), 'refreshed');
+});
+
+// Restored (item-G review loop 3, finding 7; main line 805, stageFullAgentModel): end to end through the refresh's
+// staging, the previous bytes stay raw, so a failed write puts a CRLF agent back byte for byte.
+test('model change: a write that fails part-way through the refresh restores a CRLF agent byte for byte', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const impl = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
   const crlf = readFileSync(impl, 'utf8').replace(/\n/g, '\r\n');
   writeFileSync(impl, crlf);
-  const staged = stageFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'reviewer'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
-  assert.equal(statusOf(staged, '/implementor.md'), 'refreshed', 'a CRLF Sterling file is not mistaken for a hand edit');
-  assert.equal(staged.writes.find((w) => w.path === impl).previous, crlf);
+  writeConfig(dir, { implementor: { model: 'openai/gpt-5.6-terra', effort: 'high' }, researcher: { model: 'openai/gpt-5.6-terra', effort: 'high' } });
   let calls = 0;
-  const writeFile = (p, c) => { calls += 1; if (calls === 2) throw new Error('ENOSPC: no space left'); writeFileSync(p, c); };
-  assert.throws(() => writeFullAgentFiles(staged.writes, { writeFile }), /ENOSPC/);
+  const written = [];
+  const writeFile = (p, c) => { calls += 1; if (calls === 2) throw new Error('ENOSPC: no space left'); written.push(p); writeFileSync(p, c); };
+  assert.throws(() => refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot, fs: { writeFile } }), /ENOSPC/);
+  assert.match(written[0] ?? '', /implementor\.md\.tmp|implementor\.md$/, 'the implementor was written before the failure');
   assert.equal(readFileSync(impl, 'utf8'), crlf, 'the CRLF file is back byte for byte');
+  assert.equal(statusOf(refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot }), '/implementor.md'), 'refreshed', 'and is still Sterling\'s unedited copy');
 });
 
-test('opencodeModelFor: the override when set, else anthropic/<Claude model>', () => {
-  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5' }), 'anthropic/claude-sonnet-5-5');
-  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6.1-sol' }), 'openai/gpt-6.1-sol');
-  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6-astra' }), 'openai/gpt-6-astra');
-  for (const bad of ['gpt-6-astra', 'openai/', '', 'openai/gpt 6', 42]) {
-    assert.throws(() => opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: bad }), /opencode_model/, JSON.stringify(bad));
-  }
-  assert.throws(() => opencodeModelFor({}), /model/);
+test('a config that does not validate refuses the model refresh and writes no agent file', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const before = agentFiles(dir);
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.ok(r.refused, 'refused');
+  assert.deepEqual(agentFiles(dir), before);
 });
 
-test('model swap: a hand-edited Sterling-full file is refused and left byte-identical', () => {
+test('model change: a hand-edited Sterling-full file is refused and left byte-identical', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const p = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
   writeFileSync(p, readFileSync(p, 'utf8') + '\nmine\n');
   const before = readFileSync(p, 'utf8');
-  const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-opus-5-5' });
+  writeConfig(dir, { implementor: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
   assert.equal(statusOf(r, '/implementor.md'), 'refused');
   assert.equal(readFileSync(p, 'utf8'), before);
 });
 
-test('model swap: a project without the Sterling-full OpenCode set is skipped and nothing is created', () => {
+test('model change: a project without the Sterling-full OpenCode set is skipped and nothing is created', () => {
   const dir = project('hobby');
-  const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-opus-5-5' });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
   assert.match(r.skipped, /no Sterling-full OpenCode agents/);
   assert.equal(existsSync(join(dir, '.opencode')), false);
 });
@@ -930,10 +967,9 @@ test('a role config.json does not write pins the default the System tab shows; t
     researcher: 'model: anthropic/claude-sonnet-5-5',
     scout: 'model: anthropic/claude-sonnet-5-5',
     reviewer: 'model: anthropic/claude-haiku-4-5',
-    // Changed with the dispatch model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch):
-    // the sparring role's shipped default entry now carries opencode_model openai/gpt-6-astra, the model the
-    // conductor named on sparring dispatches before; this config has no sparring entry, so the default applies.
-    sparring: 'model: openai/gpt-6-astra',
+    // Changed with the cutover (item G, decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude): the sparring
+    // role's shipped default is its one model, Opus; the per-host opencode_model default (openai/gpt-6-astra) is gone.
+    sparring: 'model: anthropic/claude-opus-5-5',
     // the librarian's schema default moved to claude-haiku-5-5 (haiku-5-5-classifiers)
     librarian: 'model: anthropic/claude-haiku-5-5',
   });
@@ -941,12 +977,14 @@ test('a role config.json does not write pins the default the System tab shows; t
   writeConfig(dir, { reviewer: { model: 'claude-haiku-4-5', effort: 'high' }, undefined: { model: 'claude-haiku-4-5', effort: 'low' } });
   assert.equal(configRow(run(dir, home)), undefined, 'the config validates');
   assert.equal(pinsOf(dir).conductor, null, 'models.undefined does not pin the conductor');
-  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['conductor', 'scout'], model: 'claude-opus-5-5' });
+  // Changed with the cutover: the swap that pinned the conductor is gone; a config change on a governed role is realized by the refresh,
+  // and the conductor (no config entry) keeps what is on disk.
+  writeConfig(dir, { scout: { model: 'anthropic/claude-opus-5-5', effort: 'low' } });
   const r = run(dir, home);
   assert.equal(statusOf(r, '/conductor.md'), 'matches', 'no config entry: the pin on disk is kept');
-  assert.equal(pinsOf(dir).conductor, 'model: anthropic/claude-opus-5-5');
+  assert.equal(pinsOf(dir).conductor, null);
   assert.equal(statusOf(r, '/scout.md'), 'refreshed', 'config.models is the authority for a governed role');
-  assert.equal(pinsOf(dir).scout, 'model: anthropic/claude-sonnet-5-5');
+  assert.equal(pinsOf(dir).scout, 'model: anthropic/claude-opus-5-5');
 });
 
 test('a hand-edited agent is refused and left byte-identical when config.models changes; the other roles are still applied', () => {
@@ -978,7 +1016,7 @@ test('a missing, unreadable or invalid config.json is refused loudly and every p
     ['a directory', () => mkdirSync(cfg), /config\.json could not be read/],
     ['fails the schema', () => writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'gpt-5.6-terra' } }), /config\.json does not validate/],
     // a model with a newline would add its own frontmatter line to the agent file
-    ['a model with a newline', () => writeConfig(dir, { ...ALL_ROLES, scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } }), /config\.json does not validate .*Claude model id/],
+    ['a model with a newline', () => writeConfig(dir, { ...ALL_ROLES, scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } }), /config\.json does not validate .*model must be <provider>\/<id>/], // Changed with the cutover: the canonical schema's message replaces the legacy 'Claude model id' wording
   ];
   for (const [label, breakIt, why] of cases) {
     breakIt();
@@ -1021,16 +1059,16 @@ test('install and update write the agents atomically: a write that cannot start 
   assert.deepEqual(agentFiles(dir), before);
 });
 
-test('opencodeModelRef refuses a model with a newline or YAML syntax; the config schema refuses it when written', async () => {
-  for (const bad of ['claude-sonnet-5-5\nhooks: x', 'claude sonnet', 'a: b', '']) assert.throws(() => opencodeModelRef(bad), /Claude model id/, JSON.stringify(bad));
+test('a model with a newline or YAML syntax is refused by the config schema when written; a context suffix is kept', async () => {
+  // Changed with the cutover: opencodeModelRef (a Claude id to anthropic/<id>) was removed with the swap; the frontmatter-injection pin now sits on the canonical schema.
   const { parseConfig } = await import('@sterling/schemas');
-  assert.throws(() => parseConfig({ models: { scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } } }), /Claude model id/);
-  assert.equal(parseConfig({ models: { scout: { model: 'claude-opus-4-6[1m]', effort: 'low' } } }).models.scout.model, 'claude-opus-4-6[1m]');
+  for (const bad of ['anthropic/claude-sonnet-5-5\nhooks: x', 'anthropic/claude sonnet', 'a: b']) {
+    assert.throws(() => parseConfig({ models: { scout: { model: bad, effort: 'low' } } }), /<provider>\/<id>/, JSON.stringify(bad));
+  }
+  assert.equal(parseConfig({ models: { scout: { model: 'claude-opus-4-6[1m]', effort: 'low' } } }).models.scout.model, 'anthropic/claude-opus-4-6[1m]');
 });
 
-test('opencodeModelRef maps a Claude model id to the anthropic provider; sterlingRootFrom finds the plugin root', () => {
-  assert.equal(opencodeModelRef('claude-sonnet-5-5'), 'anthropic/claude-sonnet-5-5');
-  assert.throws(() => opencodeModelRef(''), /model/);
+test('sterlingRootFrom finds the plugin root', () => {
   assert.equal(sterlingRootFrom(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'opencode-install.mjs')).href), repoRoot);
   assert.equal(sterlingRootFrom(pathToFileURL(join(repoRoot, 'tui', 'x.mjs')).href), repoRoot);
 });
@@ -1506,4 +1544,104 @@ test('a clone or Claude-cache copy keeps today\'s shims and materializes nothing
   assert.equal(statusOf(r, 'sterling-tui/tui.tsx'), 'created');
   assert.equal(existsSync(tuiBase(home)), false);
   assert.doesNotMatch(readFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /loadedMaterializedTui/);
+});
+
+test('an agent moved to a model OpenCode cannot run is gone from the agent files AND from opencode.json; a user-written entry is kept and reported (item-G review loop 2, finding 2)', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const ocPath = join(dir, '.opencode', 'opencode.json');
+  const oc = () => JSON.parse(readFileSync(ocPath, 'utf8'));
+  assert.ok(oc().agent?.['sterling/scout'], 'install wrote a guard entry for the scout');
+  // the user's own entry for the researcher: not Sterling's guard-only entry
+  const mine = oc();
+  mine.agent['sterling/researcher'] = { ...mine.agent['sterling/researcher'], description: 'mine' };
+  writeFileSync(ocPath, JSON.stringify(mine, null, 2) + '\n');
+  writeConfig(dir, { scout: { model: 'agy/flash' }, researcher: { model: 'agy/pro' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false);
+  assert.equal(oc().agent['sterling/scout'], undefined, 'the guard-only entry would define the agent on its own');
+  assert.equal(oc().agent['sterling/researcher'].description, 'mine', 'the user entry is kept');
+  const row = r.rows.find((x) => x.item === '.opencode/opencode.json');
+  assert.match(row.detail, /removed the guard-only agent entries of sterling\/scout/);
+  assert.match(row.detail, /KEPT agent entries sterling\/researcher/);
+  assert.ok(oc().agent['sterling/implementor'], 'the other agents keep their guard');
+});
+
+test('the conductor and Plan on a model OpenCode cannot run: no copy created, an unedited copy removed, an edited one kept and reported (item-G review loop 2, finding 4)', () => {
+  const home = tmp('oc-home-');
+  const fresh = project('hobby');
+  writeConfig(fresh, { conductor: { model: 'agy/flash' }, plan: { model: 'agy/pro' } });
+  const r = run(fresh, home);
+  assert.equal(statusOf(r, '/sterling/conductor.md'), 'skipped');
+  assert.match(r.rows.find((x) => x.item.endsWith('/sterling/conductor.md')).detail, /config\.models\.conductor is agy\/flash, which OpenCode cannot run; no OpenCode copy is created/);
+  assert.equal(statusOf(r, '.opencode/agents/plan.md'), 'skipped');
+  assert.equal(existsSync(join(fresh, STERLING_AGENTS_SUBDIR, 'conductor.md')), false);
+  assert.equal(existsSync(join(fresh, '.opencode', 'agents', 'plan.md')), false);
+  const dir = project('hobby');
+  run(dir, home);
+  const plan = join(dir, '.opencode', 'agents', 'plan.md');
+  const edited = readFileSync(plan, 'utf8') + '\nmine\n';
+  writeFileSync(plan, edited);
+  writeConfig(dir, { conductor: { model: 'agy/flash' }, plan: { model: 'agy/pro' } });
+  const again = run(dir, home);
+  assert.equal(statusOf(again, '/sterling/conductor.md'), 'removed');
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'conductor.md')), false);
+  assert.equal(statusOf(again, '.opencode/agents/plan.md'), 'refused');
+  assert.match(again.rows.find((x) => x.item.endsWith('.opencode/agents/plan.md')).detail, /config\.models\.plan is agy\/pro, which OpenCode cannot run, so Sterling would remove it; it is kept/);
+  assert.equal(readFileSync(plan, 'utf8'), edited);
+});
+
+// Item-G review loop 3, findings 1 and 2: the guard cleanup converges from the unsupported roles and the files on
+// disk, never writes a tracked opencode.json, and a failed or refused write is finished by the next refresh.
+test('guard cleanup: a tracked opencode.json is left byte for byte and the stranded entries are reported', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const ocPath = join(dir, '.opencode', 'opencode.json');
+  git(dir, ['add', '-f', '.opencode/opencode.json']);
+  git(dir, ['commit', '-qm', 'track opencode.json']);
+  const before = readFileSync(ocPath, 'utf8');
+  writeConfig(dir, { scout: { model: 'agy/flash' } });
+  const r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false);
+  assert.equal(readFileSync(ocPath, 'utf8'), before, 'a tracked file is never written');
+  const row = r.rows.find((x) => x.item === '.opencode/opencode.json');
+  assert.equal(row.status, 'skipped');
+  assert.match(row.detail, /NOT written: \.opencode\/opencode\.json is tracked by git, so the guard-only agent entries of sterling\/scout stay/);
+  // decision overpass-with-a-tracked-opencode-opencode-json-keep-routing: a tracked file stays tracked; only manual removal of the named entries is offered
+  assert.match(row.detail, /remove those entries from it by hand/);
+  assert.doesNotMatch(row.detail, /untrack|git rm|--cached/i);
+});
+
+test('guard cleanup: after a failed write (EACCES) or a malformed opencode.json, the next refresh removes the entry', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const ocDir = join(dir, '.opencode');
+  const ocPath = join(ocDir, 'opencode.json');
+  const oc = () => JSON.parse(readFileSync(ocPath, 'utf8'));
+  writeConfig(dir, { scout: { model: 'agy/flash' } });
+  chmodSync(ocDir, 0o500);
+  let r;
+  try {
+    r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  } finally {
+    chmodSync(ocDir, 0o700);
+  }
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md')), false, 'the agent file went');
+  assert.match(r.rows.find((x) => x.item === '.opencode/opencode.json').detail, /could not be rewritten \(EACCES\)/);
+  assert.ok(oc().agent['sterling/scout'], 'the entry is still there after the failed write');
+  r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(oc().agent['sterling/scout'], undefined, 'the retry removes it although no file was removed this run');
+  // malformed, then repaired
+  writeConfig(dir, { scout: { model: 'agy/flash' }, researcher: { model: 'agy/pro' } });
+  const good = readFileSync(ocPath, 'utf8');
+  writeFileSync(ocPath, '{ not json');
+  r = refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(existsSync(join(dir, STERLING_AGENTS_SUBDIR, 'researcher.md')), false);
+  assert.match(r.rows.find((x) => x.item === '.opencode/opencode.json').detail, /not valid JSON/);
+  writeFileSync(ocPath, good);
+  refreshFullAgentModels({ projectDir: dir, pluginRoot: repoRoot });
+  assert.equal(oc().agent['sterling/researcher'], undefined, 'after the repair the stranded entry is removed');
 });

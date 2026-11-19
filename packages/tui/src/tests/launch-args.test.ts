@@ -14,7 +14,7 @@ import { SYSTEM_TAB } from '../state.js';
 
 const VP = { width: 100, maxBodyLines: 60, showBanner: false };
 
-test('launch args: --host opencode reaches openDashboard, so the side pane shows the Overpass rows in work mode', async () => {
+test('launch args: --host opencode reaches openDashboard, so the side pane shows the Overpass provider row', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-launch-args-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   // the shape of the reported project's config: work mode, no overpass key
@@ -27,9 +27,7 @@ test('launch args: --host opencode reaches openDashboard, so the side pane shows
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     const text = ctl.state(VP).rows.filter((r) => r.id.startsWith('sys:overpass')).map((r) => r.lines[0].text).join('\n');
-    assert.match(text, /Overpass: OFF/);
     assert.match(text, /Overpass provider: overpass/);
-    assert.match(text, /Conductor bypass: ON/);
   } finally {
     ctl.close();
     rmSync(dir, { recursive: true, force: true });

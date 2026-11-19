@@ -7,10 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
 import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError } from './lib/common.mjs';
-import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
 import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 import { planLockSection } from './lib/plan-lock-section.mjs';
 import { probeDirtyPaths, formatResidueLine, fileEntriesOf } from './lib/dispatch-residue.mjs';
@@ -18,8 +17,7 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
-import { noOriginRemote } from '../lib/work-pr.mjs';
-import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, storageLine, tddPostureLine } from './lib/operating-state.mjs';
+import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, storageLine, tddPostureLine, unsupportedAgentsLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { SUPPORTED_SCHEMA_VERSION, registryPath, resolveSentHandoffs } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
@@ -532,7 +530,7 @@ try {
 
 let modeContext = '';
 try {
-  modeContext = `\n\n${projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(input.cwd) })}`;
+  modeContext = `\n\n${projectModeLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
@@ -549,6 +547,15 @@ try {
 let storageContext = '';
 try {
   storageContext = `\n\n${storageLine({ config, configUnreadable, root: storeRoot })}`;
+} catch {
+  // fail-open — a malformed config costs only this line
+}
+
+// HOST FIT (lib/operating-state.mjs): agents this host gets no copy of, from the one model each has.
+let hostFitContext = '';
+try {
+  const hostFit = unsupportedAgentsLine({ config, configUnreadable, host: 'claude', root: input.cwd });
+  if (hostFit) hostFitContext = `\n\n${hostFit}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
@@ -572,20 +579,6 @@ try {
 }
 const issueReportsLine = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: issueReportsRoot });
 if (issueReportsLine) issueReportsContext = `\n\n${issueReportsLine}`;
-
-// CODEX REGISTRATION (decision codex-route-stays-the-pinned-0-153-4-mcp-server): one line
-// when the user-level Claude config registers no `codex` MCP server. It reads
-// <CLAUDE_CONFIG_DIR or home>/.claude.json and never spawns codex (anti_pattern
-// codex-mcp-probe-by-exit-status). userScopeCodexServer reports an unreadable config as
-// `unreadable`, which the line states. A throw from the check itself still prints one line
-// naming the error code, so the section never costs the rest of H1 and never goes silent.
-let codexContext = '';
-try {
-  const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname(process.execPath) });
-  if (codexLine) codexContext = `\n\n${codexLine}`;
-} catch (err) {
-  codexContext = `\n\nCodex MCP: the Codex registration could not be checked (${err?.code ?? 'unknown error'})`;
-}
 
 // CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
@@ -1492,7 +1485,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + domainsContext + issueReportsContext + codexContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the
