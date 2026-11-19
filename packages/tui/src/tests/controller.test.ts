@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { openDashboard, type DashboardController } from '../controller.js';
-import { SYSTEM_TAB, modelChoices } from '../state.js';
+import { SYSTEM_TAB, modelChoices, systemCursorOf } from '../state.js';
+import { applyHandoffToggle } from '../config-writeback.js';
 
 // The dashboard controller is the host-neutral half of main.ts: the store and
 // config code paths both the terminal TUI and the OpenCode plugin drive. These
@@ -199,5 +200,153 @@ test('controller: a fresh dashboard seeds the models catalog with vendor and id 
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// Restored from the pre-cutover suite (model_swap), ported to the agent_model effect that replaced it.
+test('controller: a disabled agent_model effect surfaces its notice and leaves config.models untouched', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
+  const before = readFileSync(f.configPath, 'utf8');
+  const ctl = openDashboard(f.storePath, { disabledEffects: { agent_model: 'model change is off here' } });
+  try {
+    await ctl.applyEffects([{ type: 'agent_model', key: 'implementor', model: 'anthropic/claude-opus-5-5', effort: 'low' }]);
+    assert.equal(ctl.ui().notice, 'model change is off here');
+    assert.equal(readFileSync(f.configPath, 'utf8'), before);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: an agent_model write refused because config.json changed on disk keeps the other writer\'s change, renders no agent file and leaves no temp file', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
+  const claudeAgent = join(f.dir, '.claude', 'agents', 'implementor.md');
+  mkdirSync(join(f.dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(claudeAgent, '---\nname: implementor\nmodel: claude-sonnet-5-5\neffort: high\n---\nbody\n');
+  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
+  mkdirSync(ocDir, { recursive: true });
+  writeFileSync(join(ocDir, 'implementor.md'), 'portable\n');
+  const concurrent = JSON.stringify({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } }, tdd: { enabled: false } }, null, 2) + '\n';
+  const ctl = openDashboard(f.storePath, { configWriteFs: { beforeRename: () => writeFileSync(f.configPath, concurrent) } });
+  try {
+    await ctl.applyEffects([{ type: 'agent_model', key: 'implementor', model: 'anthropic/claude-opus-5-5', effort: 'low' }]);
+    assert.equal(readFileSync(f.configPath, 'utf8'), concurrent, "the other writer's change is not lost");
+    assert.match(readFileSync(claudeAgent, 'utf8'), /^model: claude-sonnet-5-5$/m, 'the Claude agent file was not re-rendered');
+    assert.equal(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), 'portable\n', 'the OpenCode agent file was not re-rendered');
+    assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), []);
+    assert.match(ctl.ui().notice ?? '', /^model change for 'implementor' failed — config\.json changed on disk while this write was in flight/);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// Restored from the pre-cutover auto-merge test: the keyboard path, now writing workflow.auto_merge_on_clean.
+test('controller: the PR auto-merge row toggles workflow.auto_merge_on_clean from the keyboard, keeps pr_review.copilot_logins, and reloads the roster', async () => {
+  const f = fixture({ workflow: { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true }, pr_review: { copilot_logins: ['copilot-pull-request-reviewer[bot]'] }, tdd: { enabled: true } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    assert.equal(ctl.roster()?.workflow?.auto_merge_on_clean, true);
+    // the row is found by its id in the entry list the tab draws, then reached with DOWN like a user would
+    const target = systemCursorOf(ctl.roster()!, ctl.ui(), 'sys:pr_auto_merge');
+    assert.ok(target > 0, 'the auto-merge row is drawn and cursorable in a pr project');
+    for (let i = 0; i < 60 && ctl.ui().cursor !== target; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    assert.equal(ctl.ui().cursor, target, 'DOWN reaches the auto-merge row');
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+    assert.deepEqual(written.workflow, { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: false });
+    assert.deepEqual(written.pr_review, { copilot_logins: ['copilot-pull-request-reviewer[bot]'] });
+    assert.equal(ctl.roster()?.workflow?.auto_merge_on_clean, false, 'the roster reloads after the write');
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+    assert.equal(written.workflow.auto_merge_on_clean, true);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// Restored from storage-row.test.ts (removed with the cutover): the controller's raw read and the startup refusal.
+async function rosterStorage(rawConfig: string): Promise<unknown> {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tui-storage-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const configPath = join(dir, '.sterling', 'config.json');
+  writeFileSync(configPath, JSON.stringify({ tdd: { enabled: true } }));
+  const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'));
+  try {
+    writeFileSync(configPath, rawConfig);
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    return ctl.roster()?.storage;
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the controller reads config.storage RAW for the row, keeping the four states separate', async () => {
+  assert.equal(await rosterStorage('{"storage":"postgres"}'), 'postgres');
+  assert.equal(await rosterStorage('{"storage":"sqlite"}'), 'sqlite');
+  assert.equal(await rosterStorage('{"tdd":{"enabled":true}}'), undefined, 'absent stays undefined (SQLite default)');
+  assert.equal(await rosterStorage('{"storage":"mysql"}'), 'mysql');
+  assert.equal(await rosterStorage('{"storage":5}'), '5', 'a non-string value comes back as its JSON text');
+  assert.equal(await rosterStorage('{ not json'), null, 'an unreadable config is null (UNKNOWN)');
+  for (const junk of ['null', '[]', 'false', '0', '""', '5']) {
+    assert.equal(await rosterStorage(junk), null, `a config of ${junk} parses but is not an object: UNKNOWN, never the SQLite default`);
+  }
+});
+
+test('openDashboard refuses an unrecognized config.storage at startup, naming the key, the raw value and the valid values', () => {
+  for (const [raw, shown] of [['"mysql"', '"mysql"'], ['5', '5'], ['"Postgres"', '"Postgres"']] as const) {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-tui-refuse-'));
+    try {
+      mkdirSync(join(dir, '.sterling'), { recursive: true });
+      writeFileSync(join(dir, '.sterling', 'config.json'), `{"storage":${raw}}`);
+      assert.throws(
+        () => openDashboard(join(dir, '.sterling', 'sterling.db')),
+        (e: unknown) => {
+          const err = e as Error;
+          assert.equal(err.name, 'StoreSettingsError');
+          assert.ok(err.message.includes(`config.storage is ${shown}`), err.message);
+          assert.ok(err.message.includes("must be 'sqlite' or 'postgres'"), err.message);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// Restored from handoff-toggle.test.ts (removed with the cutover): the write-back round trip and its failure path.
+test('applyHandoffToggle: writes config.handoff.enabled at the explicit path, keeps every other key, replaces a malformed block, and round-trips', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-wb-'));
+  try {
+    mkdirSync(join(dir, '.sterling'));
+    const cfgPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(cfgPath, JSON.stringify({ project_name: 'x', workflow: { merge: 'direct' }, tdd: { enabled: false } }, null, 2));
+    assert.equal(applyHandoffToggle({ type: 'handoff_toggle', enabled: true }, undefined, cfgPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')), { project_name: 'x', workflow: { merge: 'direct' }, tdd: { enabled: false }, handoff: { enabled: true } });
+    assert.equal(applyHandoffToggle({ type: 'handoff_toggle', enabled: false }, undefined, cfgPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')).handoff, { enabled: false });
+    // a value that is not an object is replaced, never spread
+    writeFileSync(cfgPath, JSON.stringify({ workflow: { merge: 'pr' }, handoff: 'yes' }));
+    assert.equal(applyHandoffToggle({ type: 'handoff_toggle', enabled: false }, undefined, cfgPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')), { workflow: { merge: 'pr' }, handoff: { enabled: false } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('applyHandoffToggle: an unreadable config reports the failure through onError and returns false', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-wb-'));
+  try {
+    const errors: string[] = [];
+    const ok = applyHandoffToggle({ type: 'handoff_toggle', enabled: true }, (m) => errors.push(m), join(dir, 'missing', 'config.json'));
+    assert.equal(ok, false);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /handoff toggle failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -167,7 +167,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof
 /** Execute an agent_model effect: config.models.<key> becomes {model, effort?}, replacing the entry whole so
  *  no per-host field survives; a null model leaves an empty entry (a custom agent on its host's default). The
  *  document is validated with canonicalConfigSchema before the write. */
-export function applyAgentModel(e: AgentModelEffect, onError?: (msg: string) => void, path?: string): boolean {
+export function applyAgentModel(e: AgentModelEffect, onError?: (msg: string) => void, path?: string, seams: ConfigWriteSeams = {}): boolean {
   try {
     // the legacy transform reads a bare Claude id as anthropic/<id>, so a bare id would pass the document check
     // below and be written bare: a write names its model as <provider>/<id> itself
@@ -178,7 +178,7 @@ export function applyAgentModel(e: AgentModelEffect, onError?: (msg: string) => 
       const proposed = { ...models, [e.key]: entry };
       assertCanonical({ ...raw, models: proposed });
       return proposed;
-    });
+    }, seams);
     return true;
   } catch (err) {
     onError?.(`model change for '${e.key}' failed — ${(err as Error).message}`);

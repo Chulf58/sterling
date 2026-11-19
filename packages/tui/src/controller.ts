@@ -506,7 +506,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
    *  hidden: the row's hosts cell says so. */
   function applyAgentModelEffect(e: AgentModelEffect): void {
     let failure: string | undefined;
-    if (!applyAgentModel(e, (msg) => { failure = msg; }, configPath)) {
+    if (!applyAgentModel(e, (msg) => { failure = msg; }, configPath, options.configWriteFs)) {
       ui = { ...ui, notice: failure ?? `model change for '${e.key}' failed` };
       return;
     }
