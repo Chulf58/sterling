@@ -78,13 +78,21 @@ for (const path of ['storage', 'storage.backend']) {
   });
 }
 
-test('config_set writes mode: it is the PR-flow toggle, not the storage backend', async () => {
+// Changed with finding 8 of the item-G review: mode is retired (the PR flow is workflow.merge), so a changed mode on a
+// legacy file is refused as a retired value; the PR-flow write that replaces it lands, and neither touches storage.
+test('config_set writes the PR flow as workflow.merge, not the storage backend; a changed retired mode is refused', async () => {
   const root = project({ mode: 'hobby' });
   const { client, close } = await connect(root);
   try {
-    const r = await client.callTool({ name: 'config_set', arguments: { path: 'mode', value: 'work' } });
+    const refused = await client.callTool({ name: 'config_set', arguments: { path: 'mode', value: 'work' } });
+    assert.equal(refused.isError, true, JSON.stringify(refused.content));
+    assert.match(JSON.stringify(refused.content), /mode: a retired field/);
+    const r = await client.callTool({ name: 'config_set', arguments: { path: 'workflow.merge', value: 'pr' } });
     assert.notEqual(r.isError, true, JSON.stringify(r.content));
-    assert.equal(JSON.parse(readFileSync(join(root, '.sterling', 'config.json'), 'utf8')).mode, 'work');
+    const written = JSON.parse(readFileSync(join(root, '.sterling', 'config.json'), 'utf8'));
+    assert.equal(written.workflow.merge, 'pr');
+    assert.equal(written.mode, 'hobby', 'the legacy mode on disk is left as it was');
+    assert.equal(written.storage, undefined);
   } finally {
     await close();
   }

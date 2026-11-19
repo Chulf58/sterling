@@ -1755,6 +1755,63 @@ function unreadKeyWarnings(path: string, keys: readonly UnreadConfigKey[]): stri
     .map((k) => (k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`));
 }
 
+/**
+ * Why a write to a LEGACY config.json (one /sterling:update has not migrated yet) is refused, or
+ * undefined when it may land. The transform tolerates what is already on disk, but a write is judged
+ * by what it newly introduces (anti_pattern config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes):
+ *   - a value the transform would drop (a retired field: mode, a per-host model field, hard_task,
+ *     the Overpass switch keys) that is new or changed by this write;
+ *   - a value at the written path that the transform would rewrite (a legacy form);
+ *   - an issue of the strict canonical check on the transformed document that the file before the
+ *     write did not already have.
+ * Changes and issues the file already had are tolerated unchanged. A file the transform cannot
+ * carry before the write is judged by the transform and strict check alone (parseConfig).
+ */
+function legacyWriteIssues(raw: Record<string, unknown>, mutated: Record<string, unknown>, path: string): string | undefined {
+  const fmt = (i: ZodIssue): string => `${i.path.join('.') || '(root)'}: ${i.message}`;
+  let before: ReturnType<typeof toCanonicalConfig> | null;
+  try {
+    before = toCanonicalConfig(raw);
+  } catch {
+    before = null;
+  }
+  if (before === null) {
+    try {
+      parseConfig(mutated);
+      return undefined;
+    } catch (e) {
+      return e instanceof ZodError ? e.issues.map(fmt).join('; ') : (e as Error).message;
+    }
+  }
+  let after: ReturnType<typeof toCanonicalConfig>;
+  try {
+    after = toCanonicalConfig(mutated);
+  } catch (e) {
+    return (e as Error).message;
+  }
+  const hasNow = (c: { now?: unknown }): boolean => Object.prototype.hasOwnProperty.call(c, 'now');
+  const key = (c: { path: string; was: unknown; now?: unknown }): string => `${c.path}\u0000${JSON.stringify(c.was)}\u0000${hasNow(c) ? JSON.stringify(c.now) : '-'}`;
+  const known = new Set(before.changes.map(key));
+  const touches = (p: string): boolean => p === path || p.startsWith(`${path}.`) || path.startsWith(`${p}.`);
+  const fresh = after.changes.filter((c) => !known.has(key(c)) && (!hasNow(c) || touches(c.path)));
+  if (fresh.length) {
+    return fresh
+      .map((c) =>
+        hasNow(c)
+          ? `${c.path}: ${JSON.stringify(c.was)} is a legacy form the canonical config stores as ${JSON.stringify(c.now)}; write that instead`
+          : `${c.path}: a retired field the canonical config does not carry (value ${JSON.stringify(c.was)}); the migration would drop it, so the write is refused (decision settings-redesign-build-shape-one-legacy-to-canonical-config)`
+      )
+      .join('; ');
+  }
+  const issues = (doc: unknown): string[] => {
+    const v = canonicalConfigSchema.safeParse(normalizeRawConfig(doc));
+    return v.success ? [] : v.error.issues.map(fmt);
+  };
+  const had = new Set(issues(before.config));
+  const added = issues(after.config).filter((i) => !had.has(i));
+  return added.length ? added.join('; ') : undefined;
+}
+
 function configSetImpl(
   repoRoot: string | undefined,
   path: string,
@@ -1941,11 +1998,7 @@ function configSetImpl(
     const validation = canonicalConfigSchema.safeParse(normalizeRawConfig(mutated));
     if (!validation.success) validationIssues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
   } else {
-    try {
-      parseConfig(mutated);
-    } catch (e) {
-      validationIssues = e instanceof ZodError ? e.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : (e as Error).message;
-    }
+    validationIssues = legacyWriteIssues(raw, mutated, path);
   }
   if (validationIssues !== undefined) {
     throw new Error(`config_set: the resulting config.json would fail schema validation — ${validationIssues}. Nothing was written.`);

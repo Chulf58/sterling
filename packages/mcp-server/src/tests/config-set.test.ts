@@ -1341,7 +1341,7 @@ const AGY_SEED_MODELS = {
 };
 const agySeed = (): string => JSON.stringify({ ...seedDoc(), models: AGY_SEED_MODELS }, null, 2);
 
-test('CS-agy: a leaf write of models.<role>.agy_model refuses a bad value and lands a good one', () => {
+test('CS-agy: a leaf write of models.<role>.agy_model refuses a bad value, and a good one as a retired field', () => {
   const h = harness(agySeed());
   try {
     const call = handler(h.tools);
@@ -1350,24 +1350,28 @@ test('CS-agy: a leaf write of models.<role>.agy_model refuses a bad value and la
       assert.match(refusalMessage(call, { path: 'models.implementor.agy_model', value: bad }), /agy_model: must be one of inherit, flash_lite, flash, pro/);
       assert.equal(h.read(), before, 'nothing written');
     }
-    call({ path: 'models.implementor.agy_model', value: 'flash' });
-    assert.equal(JSON.parse(h.read()).models.implementor.agy_model, 'flash');
+    // Changed with finding 8 of the item-G review: agy_model is a retired per-host field (one model per agent), so on a
+    // legacy file even one of agy's four values is a new retired value and is refused, never landed and later dropped.
+    const before = h.read();
+    assert.match(refusalMessage(call, { path: 'models.implementor.agy_model', value: 'flash' }), /models\.implementor\.agy_model: a retired field the canonical config does not carry \(value "flash"\)/);
+    assert.equal(h.read(), before, 'nothing written');
   } finally {
     h.cleanup();
   }
 });
 
-test('CS-agy: a role-object write and a whole models write refuse a bad agy_model and land a good one', () => {
+test('CS-agy: a role-object write and a whole models write refuse a bad agy_model, and a good one as a retired field', () => {
   const h = harness(agySeed());
   try {
     const call = handler(h.tools);
     const entry = (agy: unknown) => ({ model: 'claude-sonnet-5-5', effort: 'medium', agy_model: agy });
     assert.match(refusalMessage(call, { path: 'models.implementor', value: entry('gemini-4-hydrogen-high') }), /models\.implementor\.agy_model: must be one of/);
     assert.match(refusalMessage(call, { path: 'models', value: { ...AGY_SEED_MODELS, implementor: entry('bogus') } }), /models\.implementor\.agy_model: must be one of/);
-    call({ path: 'models.implementor', value: entry('pro') });
-    assert.equal(JSON.parse(h.read()).models.implementor.agy_model, 'pro');
-    call({ path: 'models', value: { ...AGY_SEED_MODELS, implementor: entry('flash_lite') } });
-    assert.equal(JSON.parse(h.read()).models.implementor.agy_model, 'flash_lite');
+    // Changed with finding 8 of the item-G review: a valid agy value is still a retired per-host field on a legacy file.
+    const before = h.read();
+    assert.match(refusalMessage(call, { path: 'models.implementor', value: entry('pro') }), /models\.implementor\.agy_model: a retired field/);
+    assert.match(refusalMessage(call, { path: 'models', value: { ...AGY_SEED_MODELS, implementor: entry('flash_lite') } }), /models\.implementor\.agy_model: a retired field/);
+    assert.equal(h.read(), before, 'nothing written');
   } finally {
     h.cleanup();
   }
@@ -1383,6 +1387,30 @@ test('CS-agy: a stale value already on disk is tolerated when unchanged: an unre
     assert.equal(JSON.parse(h.read()).models.implementor.effort, 'high');
     // changing the stale value to another bad one is a new bad value
     assert.match(refusalMessage(call, { path: 'models.sparring.agy_model', value: 'claude-opus-5-5-low' }), /must be one of/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('CS-legacy (item-G review finding 8): on a legacy file a new or changed retired or invalid value is refused; an unchanged one is tolerated and a canonical write lands', () => {
+  const h = harness(JSON.stringify({ mode: 'hobby', models: { scout: { model: 'claude-sonnet-5-5', effort: 'low', hard_task: { model: 'claude-opus-5-5' } } } }, null, 2) + '\n');
+  try {
+    const call = handler(h.tools);
+    const before = h.read();
+    assert.match(refusalMessage(call, { path: 'models.scout.hard_task', value: 'garbage' }), /models\.scout\.hard_task: a retired field the canonical config does not carry \(value "garbage"\)/);
+    assert.match(refusalMessage(call, { path: 'models.reviewer.opencode_model', value: 'openai/gpt-6.1-sol' }), /models\.reviewer\.opencode_model: a retired field/);
+    assert.match(refusalMessage(call, { path: 'mode', value: 'work' }), /mode: a retired field/);
+    assert.match(refusalMessage(call, { path: 'sparring_partner', value: 'codex' }), /sparring_partner: a retired field/);
+    assert.match(refusalMessage(call, { path: 'models.reviewer.model', value: 'claude-opus-5-5' }), /models\.reviewer\.model: "claude-opus-5-5" is a legacy form the canonical config stores as "anthropic\/claude-opus-5-5"/);
+    assert.match(refusalMessage(call, { path: 'models.reviewer', value: { model: 'not a model' } }), /models\.reviewer\.model/);
+    assert.equal(h.read(), before, 'nothing written');
+    // the legacy fields already on disk (mode, the scout's hard_task, a bare Claude id) are tolerated unchanged
+    call({ path: 'tdd.enabled', value: false });
+    call({ path: 'models.reviewer', value: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
+    const after = JSON.parse(h.read());
+    assert.deepEqual(after.models.reviewer, { model: 'anthropic/claude-opus-5-5', effort: 'high' });
+    assert.deepEqual(after.models.scout.hard_task, { model: 'claude-opus-5-5' });
+    assert.equal(after.mode, 'hobby');
   } finally {
     h.cleanup();
   }
