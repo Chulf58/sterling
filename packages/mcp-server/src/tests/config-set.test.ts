@@ -1415,3 +1415,33 @@ test('CS-legacy (item-G review finding 8): on a legacy file a new or changed ret
     h.cleanup();
   }
 });
+
+test('CS-legacy (loop 2): an invalid value already on disk is tolerated only byte-identical; changing it to another invalid value is refused', () => {
+  const h = harness(JSON.stringify({ mode: 'hobby', models: { scout: { model: 'claude-sonnet-5-5', effort: 42 } } }, null, 2) + '\n');
+  try {
+    const call = handler(h.tools);
+    call({ path: 'tdd.enabled', value: false });
+    assert.equal(JSON.parse(h.read()).models.scout.effort, 42, 'the unchanged invalid value is tolerated');
+    const before = h.read();
+    assert.match(refusalMessage(call, { path: 'models.scout.effort', value: 43 }), /models\.scout\.effort/);
+    assert.match(refusalMessage(call, { path: 'models.scout', value: { model: 'claude-sonnet-5-5', effort: 44 } }), /models\.scout\.effort/);
+    assert.equal(h.read(), before, 'nothing written');
+    call({ path: 'models.scout', value: { model: 'claude-sonnet-5-5', effort: 42 } });
+    assert.equal(JSON.parse(h.read()).models.scout.effort, 42, 'a whole-entry write that keeps it byte-identical lands');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('CS-legacy (loop 2): a file the transform cannot carry still refuses a newly written retired field', () => {
+  const h = harness(JSON.stringify({ mode: 'weekend', models: { scout: { model: 'claude-sonnet-5-5', effort: 'low' } } }, null, 2) + '\n');
+  try {
+    const call = handler(h.tools);
+    const before = h.read();
+    assert.match(refusalMessage(call, { path: 'mode', value: 'hobby' }), /mode: a retired field/);
+    assert.match(refusalMessage(call, { path: 'models.scout.hard_task', value: 'garbage' }), /mode|hard_task/);
+    assert.equal(h.read(), before, 'nothing written');
+  } finally {
+    h.cleanup();
+  }
+});
