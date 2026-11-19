@@ -701,7 +701,9 @@ export type SterlingConfig = CanonicalConfig;
 
 // ── Overpass resolver ────────────────────────────────────────────────────────
 // Pure: takes an already-parsed (or raw) LEGACY config object, reads nothing. Only the
-// legacy-to-canonical transform calls it, to carry an effective Overpass into models.
+// legacy-to-canonical transform calls it, to carry an EFFECTIVE Overpass (enabled, mode work, host
+// OpenCode) into models; a legacy Overpass that was not effective migrates to no tiers.
+// The mode uses the same strict judge as readProjectMode (judgeProjectMode).
 
 export const DEFAULT_OVERPASS_PROVIDER = 'overpass';
 // A provider id: letters, digits, '-', '_', '.'; no '/', no '#', non-empty. It
@@ -792,7 +794,7 @@ export interface OverpassRoleRoute {
 export interface OverpassResolution {
   /** overpass.enabled is true in the config, whatever the mode or host. */
   configured: boolean;
-  /** configured AND host is 'opencode' (the work-mode gate is lifted: decision settings-that-replace-project-mode-merge-path-reviewer-count). */
+  /** configured AND mode is 'work' AND host is 'opencode': the rule the legacy config was judged by. Only the migration asks it now; the runtime gate is gone, tiers are plain models. */
   effective: boolean;
   /** effective AND conductor_bypass is false: the conductor itself is routed. */
   conductorRouted: boolean;
@@ -877,6 +879,8 @@ export function resolveOverpass(config: unknown, opts: { host: string }): Overpa
   const roles = resolveOverpassRoles(block.roles, provider);
   const base = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled) return { ...base, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, 'the config');
+  if (mode !== 'work') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
   if (opts.host !== 'opencode') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
   return { ...base, effective: true, conductorRouted: !bypass };
 }

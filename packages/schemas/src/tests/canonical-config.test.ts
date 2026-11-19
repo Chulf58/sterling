@@ -90,17 +90,12 @@ test('effective Overpass carries each role\'s resolved tier, effort and bypass u
   assert.deepEqual(bypassed.models.plan, { model: 'overpass/agentic-high' });
 });
 
-// Changed with the cutover: the work-mode gate of Overpass is lifted (decision
-// settings-that-replace-project-mode-merge-path-reviewer-count), so an enabled Overpass in a hobby project
-// is effective and carries its resolved tiers; only a disabled Overpass gives no role a tier.
-test('Overpass enabled in a hobby project carries its resolved tiers; disabled gives no role a tier', () => {
+test('Overpass enabled but not effective (hobby project) gives no role a tier', () => {
   const r = toCanonicalConfig({ mode: 'hobby', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-premium' } } }, models: { scout: { model: 'claude-sonnet-5-5', effort: 'low' } } });
   const doc = r.config as Record<string, any>;
   assert.deepEqual(doc.overpass, {});
-  assert.equal(doc.models.reviewer.model, 'overpass/agentic-premium');
-  const off = toCanonicalConfig({ mode: 'hobby', overpass: { enabled: false }, models: { scout: { model: 'claude-sonnet-5-5', effort: 'low' } } }).config as Record<string, any>;
-  assert.deepEqual(off.models, { scout: { model: 'anthropic/claude-sonnet-5-5', effort: 'low' } });
-  assert.ok(!JSON.stringify(off).includes('overpass/'));
+  assert.deepEqual(doc.models, { scout: { model: 'anthropic/claude-sonnet-5-5', effort: 'low' } });
+  assert.ok(!JSON.stringify(doc).includes('overpass/'));
   assert.deepEqual(canonical({ overpass: { enabled: false, provider: 'gw' } }).overpass, { provider: 'gw' });
 });
 

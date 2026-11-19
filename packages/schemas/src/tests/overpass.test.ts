@@ -64,16 +64,12 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
   });
 });
 
-// Changed with the cutover (decision settings-that-replace-project-mode-merge-path-reviewer-count: Overpass
-// no longer needs work mode): the legacy resolver the migration calls has no mode gate any more.
-test('overpass: enabled in any mode (or with no mode) is effective on OpenCode; on another host it is configured but not effective, with a reason', () => {
-  for (const cfg of [{ mode: 'hobby', overpass: { enabled: true } }, { overpass: { enabled: true } }, { mode: 'work', overpass: { enabled: true } }]) {
+test('overpass: enabled in hobby mode (or with no mode) is configured but not effective, with a reason', () => {
+  for (const cfg of [{ mode: 'hobby', overpass: { enabled: true } }, { overpass: { enabled: true } }]) {
     const r = resolveOverpass(cfg, { host: 'opencode' });
     assert.equal(r.configured, true);
-    assert.equal(r.effective, true);
-    const other = resolveOverpass(cfg, { host: 'claude' });
-    assert.equal(other.effective, false);
-    assert.match(other.reason ?? '', /OpenCode only/);
+    assert.equal(r.effective, false);
+    assert.match(r.reason ?? '', /work mode only/);
   }
 });
 
@@ -122,8 +118,11 @@ test('overpass: a present overpass that is not an object throws', () => {
   }
 });
 
-test('overpass: the mode is not judged by the resolver any more (the transform judges it)', () => {
-  assert.equal(resolveOverpass({ mode: 'wrok', overpass: { enabled: true } }, { host: 'opencode' }).effective, true);
+test('overpass: an invalid mode throws when overpass is enabled (the strict mode judge), never reads as hobby', () => {
+  assert.throws(
+    () => resolveOverpass({ mode: 'wrok', overpass: { enabled: true } }, { host: 'opencode' }),
+    ProjectModeError,
+  );
 });
 
 test('judgeProjectMode: the pure judge behind readProjectMode', () => {
@@ -145,6 +144,7 @@ test('overpass: conductor_bypass true keeps effective but turns conductorRouted 
 
 test('overpass: conductorRouted is false whenever overpass is not effective, bypass or not', () => {
   for (const conductor_bypass of [true, false]) {
+    assert.equal(resolveOverpass({ mode: 'hobby', overpass: { enabled: true, conductor_bypass } }, { host: 'opencode' }).conductorRouted, false);
     assert.equal(resolveOverpass(on({ conductor_bypass }), { host: 'claude' }).conductorRouted, false);
     assert.equal(resolveOverpass({ mode: 'work', overpass: { enabled: false, conductor_bypass } }, { host: 'opencode' }).conductorRouted, false);
   }
