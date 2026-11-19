@@ -168,18 +168,21 @@ export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return refuse('is not a JSON object');
   const applied = Array.isArray(raw.applied_config_migrations) ? raw.applied_config_migrations : [];
-  let legacy = raw;
-  const legacyLines = [];
+  // Retired models keys and stale agy values are dropped (and reported) from EVERY file, canonical or not: the transform
+  // ignores them in memory, but only this step removes them from disk. The hard_task move and the Overpass reset are
+  // legacy-only and run once, for a file that has not been through the transform.
+  const m = migrateRetiredModelKeys(raw);
+  const a = migrateStaleAgyModels(m.config);
+  let legacy = a.config;
+  const legacyLines = [...describeMigration(m.dropped), ...describeStaleAgy(a.dropped)];
   if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
-    const m = migrateRetiredModelKeys(legacy);
-    const a = migrateStaleAgyModels(m.config);
     // addModelDefaults is NOT run here: it wrote the per-host opencode_model defaults (reviewer, sparring)
     // that one model per agent removes, and would make every file that never set one a model conflict.
-    const h = moveImplementorHardTask(a.config);
+    const h = moveImplementorHardTask(legacy);
     const o = resetOverpassDefaults(h.config);
     if (o.refusal) return refuse(o.refusal);
     legacy = o.config;
-    legacyLines.push(...describeMigration(m.dropped), ...describeStaleAgy(a.dropped), ...describeHardMove(h.move), ...describeOverpassReset(o));
+    legacyLines.push(...describeHardMove(h.move), ...describeOverpassReset(o));
   }
   let result;
   try {

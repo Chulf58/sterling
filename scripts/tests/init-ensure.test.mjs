@@ -987,6 +987,8 @@ test('a re-run lists the config keys Sterling no longer reads and deletes none, 
     cfg.models.coder = { model: 'claude-opus-5', effort: 'medium' };
     cfg.models.explorer = { model: 'claude-haiku-5-5', effort: 'low' };
     cfg.models.reviewers = { model: 'claude-opus-5', effort: 'high' };
+    // a file from before the cutover has not been through the canonical migration, whose id a fresh init records
+    cfg.applied_config_migrations = cfg.applied_config_migrations.filter((id) => id !== 'canonical-config-2026-11-19');
     writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
@@ -1014,14 +1016,15 @@ test('a re-run that moves models.implementor.hard_task installs implementor-hard
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
     delete cfg.models['implementor-hard'];
     cfg.models.implementor.hard_task = { model: 'claude-opus-4-8', effort: 'xhigh' };
-    cfg.applied_config_migrations = cfg.applied_config_migrations.filter((id) => id !== 'implementor-hard-2026-10-23');
+    cfg.applied_config_migrations = cfg.applied_config_migrations.filter((id) => id !== 'implementor-hard-2026-10-23' && id !== 'canonical-config-2026-11-19');
     writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
     // a project updating from before implementor-hard existed has no agent file for it yet
     rmSync(join(dir, '.claude', 'agents', 'implementor-hard.md'));
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /note: config migration: models\.implementor\.hard_task .* moved to models\.implementor-hard/);
-    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')).models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'xhigh' });
+    // Changed with the cutover: the saved entry names its model as <provider>/<id>.
+    assert.deepEqual(JSON.parse(readFileSync(cfgPath, 'utf8')).models['implementor-hard'], { model: 'anthropic/claude-opus-4-8', effort: 'xhigh' });
     const pins = readFileSync(join(dir, '.claude', 'agents', 'implementor-hard.md'), 'utf8').split('\n').filter((l) => /^(model|effort): /.test(l));
     assert.deepEqual(pins, ['model: claude-opus-4-8', 'effort: xhigh'], 'the installed pin is the migrated entry');
   } finally {
@@ -1530,7 +1533,9 @@ const setConfigKey = (dir, patch) => {
   const p = join(dir, '.sterling', 'config.json');
   writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), ...patch }, null, 2));
 };
-const setMode = (dir, mode) => setConfigKey(dir, { mode });
+// A pre-cutover project carries its mode and no workflow (decision settings-redesign-build-shape-one-legacy-to-canonical-config:
+// the migration derives the workflow from the mode only when there is none), so the helper removes the workflow init wrote.
+const setMode = (dir, mode) => setConfigKey(dir, { mode, workflow: undefined });
 const setHandoff = (dir, enabled) => setConfigKey(dir, { handoff: { enabled } });
 const HANDOFF_OFF_ROW = /^\.opencode\/agents\/ \+ handoff projection\s+skipped\s+handoff files are off \(config\.handoff\.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted\)/m;
 const HANDOFF_SET = ['.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md', 'architecture.md', 'rulings.md'];
@@ -1785,7 +1790,8 @@ test('--invoking-project: a legacy work project gives the new project pull reque
     const cfg = configOf(fresh);
     assert.deepEqual(cfg.workflow, { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: false });
     assert.ok(!('mode' in cfg));
-    assert.deepEqual(cfg.models.implementor, { model: 'claude-opus-5-5', effort: 'high' }, 'the invoking model is copied');
+    // Changed with the cutover: the copied model is written as <provider>/<id>.
+    assert.deepEqual(cfg.models.implementor, { model: 'anthropic/claude-opus-5-5', effort: 'high' }, 'the invoking model is copied');
     assert.match(r.stdout, WORKFLOW_LINE(`merge path pull request, 3 reviewers, Copilot loop on, auto-merge on clean off \\(copied from the invoking project ${invoking.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, with its agent models\\)$`));
     assert.equal(r.stdout.split('\n').filter((l) => /^workflow: /.test(l)).length, 1, 'exactly one workflow line');
   });
