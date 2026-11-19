@@ -66,6 +66,16 @@ export function latestUsage(path) {
     } catch {
       continue; // first line of the tail window may be truncated
     }
+    if (entry.type === 'PLANNER_RESPONSE') {
+      // Antigravity CLI (agy) turn: token counts at the top level (GitHub #318).
+      sawAssistant = true;
+      if (typeof entry.input_tokens === 'number') {
+        const usage = { input_tokens: entry.input_tokens };
+        if (typeof entry.cache_read_tokens === 'number') usage.cache_read_input_tokens = entry.cache_read_tokens;
+        return { usage, model: entry.model, reason: null };
+      }
+      continue;
+    }
     if (entry.type !== 'assistant') continue;
     sawAssistant = true;
     const usage = entry.message?.usage;

@@ -379,7 +379,9 @@ test('a SessionStart envelope far above the pipe buffer arrives whole', () => {
     const h = harness(dir, `exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ${JSON.stringify(big)} } }), 0);`);
     const r = run(h, agy('SessionStart', dir), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(JSON.parse(r.stdout).injectSteps[0].systemMessage.systemMessage.length, big.length);
+    // the envelope splits it into chunks under agy's truncation limit (GitHub #317); together they are the whole text
+    const rejoined = JSON.parse(r.stdout).injectSteps.map((s) => s.systemMessage.systemMessage).join('');
+    assert.equal(rejoined, big);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
