@@ -1153,12 +1153,15 @@ test('#208 ensure: OpenCode pins (role and maintenance worker) are added as vend
   try {
     store.create(withDates(catalogRecordAt(NOW, [{ id: 'gpt-6-astra', label: 'Astra', tier: 'x', status: 'active', vendor: 'openai' } as never])) as never);
     store.ensureCatalogPinnedModels({
-      models: { implementor: { model: 'claude-sonnet-5-5', opencode_model: 'openai/gpt-5.6-terra' } },
+      // Changed with the cutover (item G): an agent's one model is <provider>/<id>; the worker's legacy opencode_model is still pinned.
+      models: { implementor: { model: 'openai/gpt-5.6-terra' } },
       maintenance_worker: { opencode_model: 'openai/gpt-5.6-mini' },
     });
     const entries = (catalogRecords(store)[0].catalog as { entries: { id: string; vendor?: string; label: string }[] }).entries;
     const openai = entries.filter((e) => e.vendor === 'openai').map((e) => e.id).sort();
-    assert.deepEqual(openai, ['gpt-5.6-mini', 'gpt-5.6-terra', 'gpt-6-astra', 'gpt-6.1-sol'], 'shipped reviewer/sparring pins plus configured ones; the existing astra entry is not duplicated');
+    // Changed with the cutover: the shipped reviewer and sparring models are Opus (no per-host openai default), so only the configured
+    // OpenAI refs join the existing astra entry, which is not duplicated.
+    assert.deepEqual(openai, ['gpt-5.6-mini', 'gpt-5.6-terra', 'gpt-6-astra'], 'configured pins plus the existing astra entry, which is not duplicated');
     assert.equal(entries.find((e) => e.id === 'gpt-6-astra')?.label, 'Astra', 'existing vendor entry untouched');
   } finally {
     store.close();
