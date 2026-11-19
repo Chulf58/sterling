@@ -252,37 +252,6 @@ test('same-session guard: a hazard shown as a question pointer is not re-shown o
   }
 });
 
-test('same-session guard: a hazard shown as a question pointer must still render WHOLE on a later consult (the former ruling question-surface-gets-hazards-as-pointers (not in the current store))', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
-    const first = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
-    assert.match(first, /HAZARD: Any breach countdown widget that shows countdown seconds/, 'the pointer rendered on the question surface');
-    // A codex consult on the SAME subject, same session (shared guard). A
-    // discovery mark must never suppress the consult's own WHOLE rendering.
-    const second = runHook(
-      {
-        hook_event_name: 'PreToolUse',
-        tool_name: 'mcp__codex__codex',
-        tool_input: { prompt: 'Investigate: should the breach countdown widget show countdown seconds when the HUD timer reloads during a breach?' },
-        session_id: 's1',
-        cwd: dir,
-      },
-      dir
-    );
-    const ctx2 = ctxOf(second);
-    assert.match(
-      ctx2,
-      /⚠ ANTI-PATTERN \[WARN\] for this subject — 'Breach countdown widget re-triggers a HUD timer reload mid-breach'/,
-      'the hazard renders WHOLE on the consult, even though it was already shown as a question pointer'
-    );
-    assert.match(ctx2, /TRIGGER: Any breach countdown widget that shows countdown seconds/);
-    assert.match(ctx2, /RIGHT WAY: right way text the question surface must never inline/);
-  } finally {
-    cleanup();
-  }
-});
-
 test('same-session guard: after the question surface, the hazard sits in guard.discovery, never guard.substance', () => {
   const { dir, store, cleanup } = makeProject();
   try {

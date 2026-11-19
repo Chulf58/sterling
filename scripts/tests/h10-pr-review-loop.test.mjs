@@ -148,13 +148,16 @@ for (const outcome of ['clean', 'capped', 'escalated']) {
 }
 
 for (const mode of ['hobby', undefined]) {
-  test(`a ${mode ?? 'mode-less'} project never carries the duty, even with a stray pr-loop.json`, () => {
+  // Changed with the cutover (item G, user-ruled "Finish owed loops", decision settings-redesign-build-shape-one-legacy-to-canonical-config):
+  // the settings do not gate the duty, so a loop that is armed stays owed on a direct-merge project too. /sterling:merge arms
+  // a loop only on the pull-request path with the Copilot loop on, so a project that never armed one still carries nothing.
+  test(`a ${mode ?? 'mode-less'} project with an armed loop still carries the duty until it settles`, () => {
     const p = makeProject(mode);
     try {
       arm(p.dir);
       const r = stop(p.dir);
-      assert.equal(r.code, 0, r.stderr);
-      assert.ok(!(r.stdout + r.stderr).includes(PR_URL));
+      assert.equal(r.code, 2, `the first Stop blocks on the owed loop: ${r.stdout}${r.stderr}`);
+      assert.ok((r.stdout + r.stderr).includes(PR_URL));
     } finally {
       p.cleanup();
     }
@@ -229,28 +232,17 @@ test('sessionless Stops (Sol review): with no session_id the owed loop NEVER blo
   }
 });
 
-test('an INVALID mode with a pr-loop.json present is disclosed: the mode is unreadable and the PR loop state was not evaluated (never silently suppressed)', () => {
-  const p = makeProject('banana');
-  try {
-    arm(p.dir);
-    const r = stop(p.dir);
-    assert.equal(r.code, 0, r.stderr);
-    const msg = systemMessage(r);
-    assert.match(msg, /mode/i, r.stdout);
-    assert.match(msg, /not evaluated/, r.stdout);
-    assert.match(msg, /pr-loop\.json/);
-  } finally {
-    p.cleanup();
-  }
-});
-
-test('an invalid mode with NO pr-loop.json adds no PR-loop disclosure', () => {
-  const p = makeProject('banana');
-  try {
-    const r = stop(p.dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.doesNotMatch(r.stdout + r.stderr, /pr-loop/);
-  } finally {
-    p.cleanup();
+// Changed with the cutover (item G): parseConfig is canonical and refuses an invalid legacy mode, so H10 skips ALL its session-end
+// duties and says so, naming the value (check_skipped), rather than disclosing only the PR loop. Nothing is silently suppressed.
+test('an INVALID mode skips the session-end duties loudly, naming the value, with or without a pr-loop.json', () => {
+  for (const armed of [true, false]) {
+    const p = makeProject('banana');
+    try {
+      if (armed) arm(p.dir);
+      const r = stop(p.dir);
+      assert.match(r.stdout + r.stderr, /session-end duties skipped — config\.mode is "banana"/, `armed=${armed}: ${r.stdout}${r.stderr}`);
+    } finally {
+      p.cleanup();
+    }
   }
 });

@@ -63,11 +63,8 @@ export const TARGET_LEADS = [
   // block found under the OLD lead is replaced by the new bullet under the SAME
   // template-descended guard as the normal replace path.
   '- **Knowledge is born structured.**',
-  // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER below. Codex
-  // stays BEFORE READY TO CLEAR here: leads are processed in order, and READY TO CLEAR
-  // anchors on the Codex bullet, so a sibling missing both gets them back in template order.
-  '- **Codex runs through the MCP tool, never the shell.**',
+  // 2026-09-26: the READY TO CLEAR bullet is NEW to older siblings, so it
+  // arrives through the insert path — see INSERT_AFTER below.
   '- **Say `READY TO CLEAR` plainly when it is time.**',
   // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
   // and the new bullet replacing it reads right after "Ask, don't guess" in the template, so
@@ -138,12 +135,10 @@ export const TARGET_SECTIONS = [{ heading: '## Domains', before: '## Conventions
 // absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
 // carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
 // reordering TARGET_LEADS no longer retargets an insert (the old index-pinned hazard).
-// READY TO CLEAR sits after the Codex bullet in the template; when the Codex bullet is
-// refused (e.g. present only in the wrong layer) the Knowledge bullet is the fallback.
+// READY TO CLEAR is inserted after the Knowledge bullet.
 export const INSERT_AFTER = new Map([
   ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
-  ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
-  ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
+  ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Knowledge is born structured.**']],
   ['- **Instruction-file proposals replace memory.**', ["- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ['- **Lint and tests before done.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Write plainly; no AI tells.**', ['- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
@@ -196,7 +191,6 @@ export const RENAMED_LEADS = new Map([
 // lookaheads requires every subject term at once, in any order. Declared, never fuzzy.
 export const SUBJECT_MARKERS = new Map([
   ['- **Concept articles — capture design the moment it settles', [/^(?=.*\bconcept (articles?|famil(y|ies))\b)(?=.*\b(capture|design|knowledge|record|settles?)\b)/i]],
-  ['- **Codex runs through the MCP tool, never the shell.**', [/^(?=.*\bcodex\b)(?=.*\bmcp\b)/i, /^(?=.*\bcodex\b)(?=.*\b(never|not)\b)(?=.*\bshell\b)/i]],
   // Case-sensitive on purpose: the rule is the literal capitalised line, and 'ready to clear' alone is ordinary English.
   ['- **Say `READY TO CLEAR` plainly when it is time.**', [/\bREADY (TO CLEAR|FOR NEW SESSION)\b/]],
   ['- **Instruction-file proposals replace memory.**', [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],

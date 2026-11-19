@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE, CONDUCTOR_MODEL_KEY, canonicalModelsSchema, hostRunsModel, toCanonicalConfig } from '@sterling/schemas';
 import { MCP_PREFIXES } from './checks.mjs';
 import { renderClaudeText } from './agent-fences.mjs';
 import { writeFileAtomicIfChanged } from './atomic-write.mjs';
@@ -106,18 +106,67 @@ export const HEADER_RE =
 // (config stays optional), so a token-free template renders byte-identically with
 // or without config. When the tokens ARE present, config.models must resolve them
 // or we refuse loudly (P5) rather than emit a half-baked frontmatter.
+//
+// The entry is read through the legacy-to-canonical transform (decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config): its ONE model is
+// <provider>/<id>, and only an anthropic model runs on Claude Code (hostRunsModel). A
+// model Claude Code cannot run gives { unsupported } instead of vars, and the agent gets
+// no Claude copy (prepareRegisteredAgents). A role whose legacy entry still names two
+// models keeps its Claude model until /sterling:update asks which to keep, so its Claude
+// copy is neither changed nor removed meanwhile. An unset effort stays unset: the
+// template's effort line is dropped (EFFORT null).
 function resolveModelVars(templateContent, label, config) {
-  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return conductorModelVars(templateContent, label, config);
   const { name } = parseTemplate(templateContent, label);
   const key = AGENT_MODEL_KEY[name];
   if (!key) {
     throw new Error(`model resolution failed for ${label}: agent '${name}' has no AGENT_MODEL_KEY entry — cannot resolve {{MODEL}}/{{EFFORT}}`);
   }
-  const entry = config && config.models && config.models[key];
-  if (!entry || typeof entry.model !== 'string' || typeof entry.effort !== 'string') {
+  if (!config?.models?.[key] || typeof config.models[key] !== 'object') {
     throw new Error(`model resolution failed for ${label}: config.models['${key}'] is missing model/effort — a tokenized template needs config.models (P5)`);
   }
-  return { MODEL: entry.model, EFFORT: entry.effort };
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const conflict = conflicts.find((c) => c.role === key);
+  let entry;
+  if (conflict) entry = conflict.claude;
+  else {
+    const parsed = canonicalModelsSchema.safeParse({ [key]: canon.models[key] });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new Error(`model resolution failed for ${label}: config.models.${[key, ...issue.path.slice(1)].join('.')}: ${issue.message} (P5)`);
+    }
+    entry = parsed.data[key];
+  }
+  if (!hostRunsModel(entry.model, 'claude')) return { unsupported: `config.models.${key} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { MODEL: entry.model.slice(entry.model.indexOf('/') + 1), EFFORT: entry.effort ?? null };
+}
+
+// The conductor's template carries no {{MODEL}}/{{EFFORT}} tokens: with no models.conductor the
+// main session runs on the model the user picks, and the template renders as it is. With one, the
+// same rules as every other agent apply: a model Claude Code cannot run gives { unsupported } (no
+// Claude copy, the unedited one removed), and an anthropic model gives { conductorPin }, the
+// model and effort lines renderInstalledAgent adds to the frontmatter (an unset effort adds none).
+function conductorModelVars(templateContent, label, config) {
+  if (!config?.models || typeof config.models !== 'object') return {};
+  const { name } = parseTemplate(templateContent, label);
+  if (name !== CONDUCTOR_MODEL_KEY) return {};
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const conflict = conflicts.find((c) => c.role === CONDUCTOR_MODEL_KEY);
+  const raw = conflict ? conflict.claude : canon.models?.[CONDUCTOR_MODEL_KEY];
+  if (raw === undefined) return {};
+  const parsed = canonicalModelsSchema.safeParse({ [CONDUCTOR_MODEL_KEY]: raw });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`model resolution failed for ${label}: config.models.${[CONDUCTOR_MODEL_KEY, ...issue.path.slice(1)].join('.')}: ${issue.message} (P5)`);
+  }
+  const entry = parsed.data[CONDUCTOR_MODEL_KEY];
+  if (!hostRunsModel(entry.model, 'claude')) return { unsupported: `config.models.${CONDUCTOR_MODEL_KEY} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { conductorPin: { model: entry.model.slice(entry.model.indexOf('/') + 1), effort: entry.effort ?? null } };
+}
+
+/** Why Claude Code gets no copy of this template under `config` (its model is one it cannot run), or null. */
+export function claudeUnsupportedReason(templateContent, label, config) {
+  return resolveModelVars(templateContent, label, config).unsupported ?? null;
 }
 
 // Per-project tool extension (decision
@@ -178,18 +227,30 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   // tokens that install bakes to machine-detected forward-slash paths (§6
   // emission rule — the backslash check below guards the substituted result) and
   // {{MODEL}}/{{EFFORT}} tokens resolved per agent from config.models (98064d77).
-  const allVars = { ...vars, ...resolveModelVars(templateContent, label, config) };
+  const { conductorPin, ...modelVars } = resolveModelVars(templateContent, label, config);
+  if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
+  const allVars = { ...vars, ...modelVars };
   // Fences (agent-fences.mjs): the Claude render keeps sterling-only content and
   // drops only its marker lines, and drops portable-only blocks whole, so a fenced
   // template installs byte-identically to its unfenced form. template_hash below
   // stays the hash of the RAW template.
   let substituted = renderClaudeText(templateContent, label);
+  // An unset effort is not written: the effort line goes with its token.
+  if (allVars.EFFORT === null) {
+    substituted = substituted.replace(/^effort:[ \t]*\{\{EFFORT\}\}[ \t]*\r?\n/m, '');
+    delete allVars.EFFORT;
+  }
   for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
   }
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
-  const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config);
+  let pinned = parsed.frontmatter;
+  if (conductorPin) {
+    if (/^(model|effort):/m.test(pinned)) throw new Error(`${label}: the conductor template already has a model or effort line, so config.models.${CONDUCTOR_MODEL_KEY} cannot be applied (P5)`);
+    pinned = `${pinned}\nmodel: ${conductorPin.model}${conductorPin.effort ? `\neffort: ${conductorPin.effort}` : ''}`;
+  }
+  const frontmatter = appendExtraTools(pinned, name, label, config);
   // WHOLE rendered template, not just the frontmatter: a substitution token in
   // the BODY would otherwise ship silently as a literal '{{TOKEN}}' in an
   // installed agent's prose, i.e. an instruction the agent cannot run. Same P5
@@ -474,7 +535,25 @@ export const RESTART_INSTRUCTION = [
 ].join('\n');
 
 export function agentChangesRequireRestart(report) {
-  return report.some((entry) => ['installed', 'refreshed', 'header_repaired', 'machine_rebaked', 'retired'].includes(entry.status));
+  return report.some((entry) => ['installed', 'refreshed', 'header_repaired', 'machine_rebaked', 'retired', 'unsupported_removed'].includes(entry.status));
+}
+
+/** The refusal for an edited copy of an agent Claude Code no longer gets (its model is one it cannot run). */
+export function unsupportedModifiedInstruction(name, reason) {
+  return [
+    `REFUSED: .claude/agents/${name}.md is no longer generated (${reason}), but it was edited after install,`,
+    'so Sterling keeps it. It may run another model or allow other tools than the agent is configured with.',
+    `Remove it by hand (move it out of .claude/agents/), or choose an anthropic model for ${name} in config.models (TUI System tab).`,
+  ].join('\n');
+}
+
+// The Claude roster agents the config gives a model Claude Code cannot run: each is left out of
+// the render, its unedited generated copy is removed through the retirement path (the same
+// ownership rule as the custom-agent cleanup in custom-agent-render.mjs planCustomAgents: only
+// an unedited Sterling copy is deleted; an edited one is kept and reported), and an agent with
+// no copy on disk is still reported, so the gap is never silent.
+function unsupportedRoster(prepared) {
+  return new Map(prepared.filter((e) => e.unsupported).map((e) => [e.name, e.unsupported]));
 }
 
 function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config }) {
@@ -493,6 +572,8 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, no
   // a bad template/config may not turn a registry typo into an irreversible prune.
   return entries.map((entry) => {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
+    const unsupported = claudeUnsupportedReason(templateContent, entry.file, config);
+    if (unsupported) return { ...entry, templateContent, unsupported };
     const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
@@ -513,9 +594,10 @@ export function retirementRefuseInstruction(name) {
 
 // Retire only recognized, unmodified generated artifacts. lstat is deliberate:
 // a symlink in .claude/agents is neither our regular file nor ours to follow.
-export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
+export function retireAgents({ targetAgentsDir, registryNames, unsupported = new Map(), fs = {} }) {
   const io = { readdirSync, lstatSync, readFileSync, unlinkSync, renameSync, linkSync, ...fs };
   const report = [];
+  const seenUnsupported = new Set();
   let entries;
   try {
     entries = io.readdirSync(targetAgentsDir);
@@ -558,8 +640,11 @@ export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
       report.push({ name, status: 'retired_identity_mismatch', refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
+    const unsupportedWhy = unsupported.get(name);
+    if (unsupportedWhy) seenUnsupported.add(name);
     if (isLocallyModified(content, header)) {
-      report.push({ name, status: 'retired_but_modified', refused: true, instruction: retirementRefuseInstruction(name) });
+      if (unsupportedWhy) report.push({ name, status: 'unsupported_but_modified', refused: true, detail: unsupportedWhy, instruction: unsupportedModifiedInstruction(name, unsupportedWhy) });
+      else report.push({ name, status: 'retired_but_modified', refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
     // Rename first: after this atomic move the original pathname is free for a
@@ -584,7 +669,7 @@ export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
       io.afterQuarantineVerify?.({ path, quarantine, name });
       verifyQuarantine();
       io.unlinkSync(quarantine);
-      report.push({ name, status: 'retired' });
+      report.push(unsupportedWhy ? { name, status: 'unsupported_removed', detail: unsupportedWhy } : { name, status: 'retired' });
     } catch (err) {
       // Never overwrite a file that appeared at the original path.  Restore
       // only into an absent name; otherwise preserve the quarantine for manual
@@ -600,11 +685,16 @@ export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
       report.push({ name, status: 'retired_delete_failed', refused: true, instruction: `${retirementRefuseInstruction(name)}\nUnable to retire safely (${err?.code ?? err?.message ?? err}); ${restored ? 'the candidate was restored.' : `it remains quarantined at ${quarantine}.`}` });
     }
   }
+  for (const [name, why] of unsupported) {
+    if (!seenUnsupported.has(name)) report.push({ name, status: 'unsupported', detail: why });
+  }
   return report;
 }
 
 export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const all = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const unsupported = unsupportedRoster(all);
+  const prepared = all.filter((entry) => !entry.unsupported);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of prepared) {
@@ -635,7 +725,7 @@ export function installAgents({ templatesDir, registryPath, targetAgentsDir, plu
     writeFileAtomicIfChanged(installedPath, entry.installedContent);
     report.push({ name: entry.name, status: 'installed' });
   }
-  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
+  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), unsupported, fs: retirementFs }));
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 
@@ -688,7 +778,9 @@ export function foreignFileInstruction(name) {
 // config_drift | up_to_date | locally_modified_up_to_date |
 // refused_local_modification | foreign_file.
 export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const all = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  const unsupported = unsupportedRoster(all);
+  const prepared = all.filter((entry) => !entry.unsupported);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of prepared) {
@@ -763,7 +855,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       }
     }
   }
-  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
+  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), unsupported, fs: retirementFs }));
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 
@@ -981,6 +1073,8 @@ export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs 
 // refusal would make every /sterling:update on the machine exit 2 for one project's
 // deliberate choice. null counts as absent.
 const CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = new Set(['installed', 'up_to_date', 'refreshed', 'header_repaired']);
+// The conductor's sync results when its model is one Claude Code cannot run (retireAgents).
+const CONDUCTOR_UNSUPPORTED_STATUSES = new Set(['unsupported', 'unsupported_removed', 'unsupported_but_modified']);
 
 export function ensureConductorActivation(targetDir, agentResults) {
   const settingsPath = join(targetDir, '.claude', 'settings.json');
@@ -1014,7 +1108,23 @@ export function ensureConductorActivation(targetDir, agentResults) {
 
   const result = {};
   const conductorResult = (agentResults ?? []).find((r) => r.name === 'conductor');
-  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
+  if (conductorResult && CONDUCTOR_UNSUPPORTED_STATUSES.has(conductorResult.status) && parsed.agent === 'conductor') {
+    // Fail closed and say so (P5): the conductor's model is one Claude Code cannot run, so it has no
+    // Claude copy (or only an edited one Sterling no longer maintains), while settings.json still turns
+    // it on. The "agent" key is NOT cleared: that would silently switch the session to Claude Code's
+    // default behaviour. autoMemoryEnabled is still ensured below (that write is decoupled from the agent
+    // outcome), so settings.json can change, but never its "agent" key. The sync counts this as a refusal
+    // and H1's host-fit line names the conductor.
+    // NOT GUARANTEED: what Claude Code does at start with an "agent" naming a missing file is its own
+    // behaviour; this only makes the mismatch loud until the model or the setting is changed.
+    result.activation = 'refused';
+    const why = conductorResult.detail ?? "the conductor's model is one Claude Code cannot run";
+    const fix = `pick an anthropic model for models.conductor in the System tab, or remove "agent" from ${settingsPath} by hand`;
+    result.reason = conductorResult.status === 'unsupported_but_modified'
+      ? `${why}; your edited .claude/agents/conductor.md is kept but Sterling no longer maintains it, and ${settingsPath} still sets "agent": "conductor", so Claude Code runs that edited copy on whatever model it names; ${fix}`
+      : `${why}, so there is no Claude Code conductor copy, but ${settingsPath} still sets "agent": "conductor", so Claude Code starts without Sterling's conductor; ${fix}`;
+    console.error(`REFUSED: ${result.reason}`);
+  } else if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
     result.activation = 'skipped';
     result.reason = conductorResult
       ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired`

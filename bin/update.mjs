@@ -6152,11 +6152,51 @@ function judgeProjectMode(mode, where) {
   }
   return mode;
 }
+function modeOfConfig(parsed, where) {
+  if (parsed.mode !== void 0 || parsed.workflow === void 0)
+    return judgeProjectMode(parsed.mode, where);
+  const workflow = parsed.workflow;
+  if (workflow === null || typeof workflow !== "object" || Array.isArray(workflow)) {
+    throw new ProjectModeError(`config.workflow is ${JSON.stringify(workflow)} in ${where} \u2014 it must be an object; fix it in the TUI System tab or the file`);
+  }
+  const merge = workflow.merge;
+  if (merge === void 0 || merge === "direct")
+    return "hobby";
+  if (merge === "pr")
+    return "work";
+  throw new ProjectModeError(`config.workflow.merge is ${JSON.stringify(merge)} in ${where} \u2014 it must be 'direct' or 'pr'; fix it in the TUI System tab or the file`);
+}
 function readProjectMode(root) {
   const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
   if (parsed === void 0)
     return "hobby";
-  return judgeProjectMode(parsed.mode, where);
+  return modeOfConfig(parsed, where);
+}
+function workflowOfConfig(parsed, where) {
+  if (parsed === void 0)
+    return workflowSchema.parse(void 0);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProjectWorkflowError(`${where} is not a JSON object \u2014 the workflow settings cannot be read`);
+  }
+  let canonical2;
+  try {
+    canonical2 = toCanonicalConfig(parsed).config;
+  } catch (err) {
+    if (!(err instanceof Error))
+      throw err;
+    throw new ProjectWorkflowError(`${err.message} (in ${where}) \u2014 the workflow settings cannot be read; fix it in the TUI System tab or the file`);
+  }
+  const workflow = canonical2.workflow;
+  const checked = workflowSchema.safeParse(workflow);
+  if (!checked.success) {
+    const issues = checked.error.issues.map((i) => `${["workflow", ...i.path].join(".")}: ${i.message}`).join("; ");
+    throw new ProjectWorkflowError(`config.workflow is invalid in ${where} (${issues}) \u2014 fix it in the TUI System tab or the file`);
+  }
+  return checked.data;
+}
+function readProjectWorkflow(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectWorkflowError, "the workflow settings");
+  return workflowOfConfig(parsed, where);
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -6167,10 +6207,11 @@ function readProjectIdentity(root) {
   }
   return { project_id: parsed.project_id };
 }
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId;
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId, ProjectWorkflowError;
 var init_project = __esm({
   "packages/schemas/dist/project.js"() {
     "use strict";
+    init_config();
     PROJECT_MODES = ["hobby", "work"];
     ProjectModeError = class extends Error {
       constructor(message) {
@@ -6189,10 +6230,19 @@ var init_project = __esm({
     fwd2 = (p) => p.replace(/\\/g, "/");
     UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+    ProjectWorkflowError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectWorkflowError";
+      }
+    };
   }
 });
 
 // packages/schemas/dist/config.js
+function isCustomAgentKey(key) {
+  return CUSTOM_AGENT_KEY_RE.test(key);
+}
 function resolveOverpassRoles(raw, provider) {
   if (raw !== void 0 && !isPlainObject(raw)) {
     throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
@@ -6261,20 +6311,6 @@ function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
   let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -6299,7 +6335,7 @@ function migrateStaleAgyModels(raw) {
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
+  return parseCanonicalConfig(raw);
 }
 function addModelDefaults(raw) {
   const none = { config: raw, changed: false, added: [] };
@@ -6435,8 +6471,6 @@ function unreadConfigKeys(raw) {
     for (const [key, child] of Object.entries(value)) {
       const path = prefix ? `${prefix}.${key}` : key;
       if (!Object.prototype.hasOwnProperty.call(shape, key)) {
-        if (path === "sparring_partner.model")
-          continue;
         if (!(s2._def.catchall instanceof external_exports.ZodNever) && !(prefix === "models" && RETIRED_MODEL_KEYS.includes(key)))
           continue;
         const renamed = CONFIG_KEY_RENAMES[path];
@@ -6446,14 +6480,189 @@ function unreadConfigKeys(raw) {
       }
     }
   };
-  walk(raw, configSchema, "");
+  let doc = raw;
+  try {
+    doc = toCanonicalConfig(raw).config;
+  } catch {
+    doc = raw;
+  }
+  walk(doc, canonicalConfigObject, "");
+  if (isPlainObject(raw) && isPlainObject(raw.models)) {
+    for (const key of Object.keys(raw.models)) {
+      if (!RETIRED_MODEL_KEYS.includes(key))
+        continue;
+      const renamed = CONFIG_KEY_RENAMES[`models.${key}`];
+      out.push(renamed ? { path: `models.${key}`, renamed_to: renamed } : { path: `models.${key}` });
+    }
+  }
   return out;
 }
 function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
+function toCanonicalConfig(legacy, opts2 = {}) {
+  if (!isPlainObject(legacy))
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
+  const raw = normalizeRawConfig(legacy);
+  const out = { ...raw };
+  const changes = [];
+  const conflicts = [];
+  const origins = {};
+  const resolutions = opts2.resolutions ?? {};
+  const mode = judgeProjectMode(raw.mode, "the config");
+  let autoMerge;
+  if (raw.pr_review !== void 0) {
+    if (!isPlainObject(raw.pr_review))
+      throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} \u2014 it must be an object`);
+    if (has(raw.pr_review, "auto_merge_on_clean")) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== "boolean")
+        throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} \u2014 it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === void 0) {
+    const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  }
+  if (autoMerge !== void 0)
+    changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
+  if (has(raw, "mode")) {
+    delete out.mode;
+    changes.push({ path: "mode", was: raw.mode });
+  }
+  let overpass = null;
+  if (raw.overpass !== void 0) {
+    if (!isPlainObject(raw.overpass))
+      throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} \u2014 it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: "opencode" });
+      const kept = {};
+      for (const [k, v] of Object.entries(block)) {
+        if (LEGACY_OVERPASS_KEYS.includes(k))
+          changes.push({ path: `overpass.${k}`, was: v });
+        else
+          kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+  const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return { config: out, conflicts, changes, origins };
+  const models = { ...raw.models ?? {} };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry))
+      continue;
+    const next = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === "model" || k === "effort" || k === "opencode_model")
+        continue;
+      if (k === "agy_model" || k === "hard_task") {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v;
+    }
+    const claude = typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model)
+      changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== void 0) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === void 0 || opencode === claude) {
+        model = opencode;
+      } else if (resolutions[role] !== void 0) {
+        model = resolutions[role] === "claude" ? claude : opencode;
+      } else if (!(effective && OVERPASS_ROLES.includes(role))) {
+        const effort = typeof entry.effort === "string" ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: "opencode" });
+        model = opencode;
+      }
+    }
+    if (model !== void 0)
+      next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
+    if (entry.effort !== void 0)
+      next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : void 0;
+    const claude = isPlainObject(entry) && typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : void 0;
+    const answered = isPlainObject(entry) && entry.opencode_model !== void 0 && claude !== void 0 && entry.opencode_model !== claude;
+    if (!answered)
+      throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+      origins[`models.${role}`] = "overpass";
+    }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: void 0, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, "opencode_model")) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === "string" && old.trim() !== "") {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== "string") {
+        const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: "maintenance_worker.opencode_model", was: old });
+    }
+  }
+  if (modelsChanged)
+    out.models = models;
+  if (has(raw, "sparring_partner")) {
+    delete out.sparring_partner;
+    changes.push({ path: "sparring_partner", was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes, origins };
+}
+function parseCanonicalConfig(raw) {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
+function parseCanonicalModels(raw) {
+  const config = toCanonicalConfig(raw).config;
+  return canonicalModelsSchema.parse(isPlainObject(config) ? config.models : void 0);
+}
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_PREFIX, CUSTOM_AGENT_SLUG_RE, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS, OverpassUnknownRoleError, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema, LegacyConfigError, has, LEGACY_OVERPASS_KEYS;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6474,6 +6683,10 @@ var init_config = __esm({
       opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
       agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
     }).strict();
+    CUSTOM_AGENT_KEY_PREFIX = "custom-";
+    CUSTOM_AGENT_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+    CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+    customAgentEntry = agentModelEntry.partial();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
       anthropic: modelPin.optional()
@@ -6684,7 +6897,17 @@ var init_config = __esm({
         // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
         // lookup, so a cheap model at low effort like the scout.
         preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
-      }).catchall(agentModelEntry).default({}),
+      }).catchall(customAgentEntry).superRefine((models, ctx) => {
+        for (const [key, entry] of Object.entries(models)) {
+          if (isCustomAgentKey(key))
+            continue;
+          const e = entry;
+          for (const field of ["model", "effort"]) {
+            if (e[field] === void 0)
+              ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, field], message: "Required" });
+          }
+        }
+      }).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
       // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -6887,31 +7110,12 @@ var init_config = __esm({
         // three-state guard used for other config-derived delivery values.
         total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
       }).default({}),
-      // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-      // whether the automatic consult moments (design/review/gate second opinions via
-      // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-      // additive advisory-block pattern (every field has a default; an absent
-      // block still parses) — a project without the
-      // Codex CLI installed still parses and defaults to true; the TUI System tab
-      // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-      // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-      // — this field never stands in for that absence, only for a deliberate OFF.
-      sparring_partner: external_exports.object({
-        enabled: external_exports.boolean().default(true),
-        // Which vendor's model the consult runs on (decision
-        // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-        // 'openai' is the behaviour before the setting existed.
-        vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-        // The model pinned per vendor. Absent = no pin (the host's default). The
-        // old sparring_partner.model is converted to models.openai by
-        // normalizeRawConfig, before this schema strips unknown keys. The default
-        // ships no pin: the decision names no model per vendor.
-        models: vendorPins
-      }).default({}),
+      // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+      // Sterling's Codex integration is gone and the legacy transform drops the key.
       // Reviews (same decision): the vendor policy and the model pinned per vendor.
       // cross_vendor = the other family than the model that wrote the diff; openai
       // and anthropic force one vendor even when that makes reviewer and author the
-      // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+      // same family (user-ruled 2026-10-03). Ships no pin.
       review: external_exports.object({
         policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
         models: vendorPins
@@ -6919,7 +7123,7 @@ var init_config = __esm({
       // TDD-by-default posture toggle (decision foreign_752caf98,
       // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
       // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-      // Mirrors sparring_partner's additive-optional shape exactly — an absent
+      // An additive-optional shape — an absent
       // block still parses with {enabled: true}, and an unknown field inside the
       // block strips silently rather than refusing (forward-compat, non-strict).
       // OFF silences only the automatic default posture: an explicit user ask
@@ -6946,6 +7150,11 @@ var init_config = __esm({
       // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // The workflow settings that replace mode (decision
+      // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+      // reader does not report it as unread; its strict judge is workflowOfConfig in
+      // project.ts and canonicalConfigSchema below.
+      workflow: external_exports.unknown().optional(),
       // Where the project's stores live (decision
       // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
       // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -7074,6 +7283,195 @@ var init_config = __esm({
       "models.coder": "models.implementor",
       "models.explorer": "models.scout"
     };
+    MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    CLAUDE_PROVIDER = "anthropic";
+    OVERPASS_MODEL_NAMESPACE = "overpass";
+    AGY_MODEL_NAMESPACE = "agy";
+    CONDUCTOR_MODEL_KEY = "conductor";
+    PLAN_MODEL_KEY = "plan";
+    MERGE_PATHS = ["direct", "pr"];
+    MIN_REVIEWERS = 1;
+    MAX_REVIEWERS = 5;
+    canonicalModelEntry = external_exports.object({
+      model: external_exports.string().regex(MODEL_REF_RE, "model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto"),
+      effort: external_exports.enum(OVERPASS_EFFORTS).optional()
+    }).strict();
+    canonicalModelsSchema = external_exports.object({
+      implementor: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+      "implementor-hard": canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+      researcher: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+      scout: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" }),
+      librarian: canonicalModelEntry.default({ model: "anthropic/claude-haiku-5-5", effort: "low" }),
+      reviewer: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+      sparring: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+      preflight: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" })
+    }).catchall(canonicalModelEntry.partial()).superRefine((models, ctx) => {
+      for (const [key, entry] of Object.entries(models)) {
+        const e = entry;
+        if (e.model === void 0) {
+          if (e.effort === "max")
+            ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+          if (!isCustomAgentKey(key))
+            ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: "Required" });
+          continue;
+        }
+        const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+        if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+        }
+        if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
+        }
+        if (e.effort === "max" && overpassTier === null) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+        }
+      }
+    }).default({});
+    workflowSchema = external_exports.object({
+      merge: external_exports.enum(MERGE_PATHS).default("direct"),
+      reviewers: external_exports.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+      copilot_loop: external_exports.boolean().default(false),
+      auto_merge_on_clean: external_exports.boolean().default(true)
+    }).strict().default({});
+    canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
+    canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
+      models: canonicalModelsSchema,
+      workflow: workflowSchema,
+      overpass: canonicalOverpassSchema,
+      // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+      pr_review: external_exports.unknown().default({ copilot_logins: [] })
+    });
+    CANONICAL_RETIRED_KEYS = ["mode", "sparring_partner"];
+    canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) => {
+      if (!isPlainObject(raw))
+        return;
+      for (const key of CANONICAL_RETIRED_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(raw, key))
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key], message: `${key} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+      }
+      if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, "auto_merge_on_clean")) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
+      }
+    }).pipe(canonicalConfigObject);
+    LegacyConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "LegacyConfigError";
+      }
+    };
+    has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
+  }
+});
+
+// packages/schemas/dist/custom-agents.js
+function discoveredAgentId(host, name) {
+  return `${host}:${name}`;
+}
+function parseDiscoveredAgentId(id) {
+  const i = id.indexOf(":");
+  if (i < 1)
+    return null;
+  const host = id.slice(0, i);
+  const name = id.slice(i + 1);
+  if (!AGENT_HOSTS.includes(host) || name === "")
+    return null;
+  return { host, name };
+}
+function customAgentSlug(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug === "" || slug.length > 64 ? null : slug;
+}
+function customAgentKey(name) {
+  const slug = customAgentSlug(name);
+  return slug === null ? null : `${CUSTOM_AGENT_KEY_PREFIX}${slug}`;
+}
+function hostRunsModel(model, host) {
+  const ref = model.includes("/") ? model : `${CLAUDE_PROVIDER}/${model}`;
+  const runs = AGENT_HOST_CAPABILITIES[host].runs;
+  if ("models" in runs)
+    return runs.models.includes(ref);
+  const provider = ref.slice(0, ref.indexOf("/"));
+  if (runs.except?.includes(provider))
+    return false;
+  return runs.providers === "*" || runs.providers.includes(provider);
+}
+function opencodeModelRef(model, overpassProvider = DEFAULT_OVERPASS_PROVIDER) {
+  const prefix = `${OVERPASS_MODEL_NAMESPACE}/`;
+  return model.startsWith(prefix) ? `${overpassProvider}/${model.slice(prefix.length)}` : model;
+}
+function resolveHostSettings(entry, host) {
+  const cap = AGENT_HOST_CAPABILITIES[host];
+  const e = entry ?? {};
+  const effortSupported = cap.effortLevels.length > 0;
+  let model = INHERIT;
+  let modelFrom = "inherit";
+  let modelSupported = true;
+  const canonical2 = typeof e.model === "string" && e.model.includes("/") ? e.model : void 0;
+  if (host === "claude") {
+    if (canonical2) {
+      modelSupported = hostRunsModel(canonical2, "claude");
+      ({ model, modelFrom } = { model: modelSupported ? canonical2.slice(CLAUDE_PROVIDER.length + 1) : canonical2, modelFrom: "model" });
+    } else if (e.model)
+      ({ model, modelFrom } = { model: e.model, modelFrom: "model" });
+  } else if (host === "opencode") {
+    if (e.opencode_model)
+      ({ model, modelFrom } = { model: e.opencode_model, modelFrom: "override" });
+    else if (canonical2)
+      ({ model, modelFrom } = { model: canonical2, modelFrom: "model" });
+    else if (e.model)
+      ({ model, modelFrom } = { model: `anthropic/${e.model}`, modelFrom: "model" });
+  } else if (e.agy_model) {
+    ({ model, modelFrom } = { model: e.agy_model, modelFrom: "override" });
+  } else if (canonical2) {
+    modelSupported = hostRunsModel(canonical2, "agy");
+    ({ model, modelFrom } = { model: modelSupported ? canonical2.slice(AGY_MODEL_NAMESPACE.length + 1) : canonical2, modelFrom: "model" });
+  }
+  const out = { host, model, modelFrom, modelSupported, effortSupported };
+  if (e.effort !== void 0) {
+    if (cap.effortLevels.includes(e.effort))
+      out.effort = e.effort;
+    else
+      out.effortIgnored = e.effort;
+  }
+  return out;
+}
+function twoModelsReason(role) {
+  return `role ${role} has two models; run /sterling:update to choose`;
+}
+function unsupportedAgents(config, hosts = AGENT_HOSTS) {
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const out = conflicts.map((c) => ({ agent: c.role, host: "*", reason: twoModelsReason(c.role) }));
+  const conflicted = new Set(conflicts.map((c) => c.role));
+  const models = canonicalModelsSchema.parse(isPlainObj(canon) && isPlainObj(canon.models) ? canon.models : void 0);
+  for (const agent of Object.keys(models).sort()) {
+    const model = models[agent].model;
+    if (conflicted.has(agent) || model === void 0)
+      continue;
+    for (const host of hosts) {
+      if (agent === PLAN_MODEL_KEY && host !== "opencode")
+        continue;
+      if (!hostRunsModel(model, host))
+        out.push({ agent, host, model, reason: `${host} cannot run ${model}, so it gets no copy of ${agent}` });
+    }
+  }
+  return out;
+}
+var AGENT_HOSTS, CLAUDE_EFFORT_LEVELS, AGY_CANONICAL_MODELS, AGENT_HOST_CAPABILITIES, INHERIT, isPlainObj;
+var init_custom_agents = __esm({
+  "packages/schemas/dist/custom-agents.js"() {
+    "use strict";
+    init_config();
+    AGENT_HOSTS = ["claude", "opencode", "agy"];
+    CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+    AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
+    AGENT_HOST_CAPABILITIES = Object.freeze({
+      claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+      opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+      agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
+    });
+    INHERIT = "inherit";
+    isPlainObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   }
 });
 
@@ -7282,9 +7680,13 @@ var init_store_fence = __esm({
 // packages/schemas/dist/index.js
 var dist_exports = {};
 __export(dist_exports, {
+  AGENT_HOSTS: () => AGENT_HOSTS,
+  AGENT_HOST_CAPABILITIES: () => AGENT_HOST_CAPABILITIES,
   AGENT_MODEL_KEY: () => AGENT_MODEL_KEY,
   AGENT_TOOL_NAME_RE: () => AGENT_TOOL_NAME_RE,
+  AGY_CANONICAL_MODELS: () => AGY_CANONICAL_MODELS,
   AGY_MODEL_IDS: () => AGY_MODEL_IDS,
+  AGY_MODEL_NAMESPACE: () => AGY_MODEL_NAMESPACE,
   ARTICLE_KINDS: () => ARTICLE_KINDS,
   ARTICLE_STATE_REQUIRES: () => ARTICLE_STATE_REQUIRES,
   AUTHOR_RE: () => AUTHOR_RE,
@@ -7299,7 +7701,14 @@ __export(dist_exports, {
   BROKER_PROTOCOL: () => BROKER_PROTOCOL,
   BROKER_REGISTRY_MAX_BYTES: () => BROKER_REGISTRY_MAX_BYTES,
   BUILD_ID_FILE: () => BUILD_ID_FILE,
+  CANONICAL_RETIRED_KEYS: () => CANONICAL_RETIRED_KEYS,
+  CLAUDE_EFFORT_LEVELS: () => CLAUDE_EFFORT_LEVELS,
   CLAUDE_MODEL_ID_RE: () => CLAUDE_MODEL_ID_RE,
+  CLAUDE_PROVIDER: () => CLAUDE_PROVIDER,
+  CONDUCTOR_MODEL_KEY: () => CONDUCTOR_MODEL_KEY,
+  CUSTOM_AGENT_KEY_PREFIX: () => CUSTOM_AGENT_KEY_PREFIX,
+  CUSTOM_AGENT_KEY_RE: () => CUSTOM_AGENT_KEY_RE,
+  CUSTOM_AGENT_SLUG_RE: () => CUSTOM_AGENT_SLUG_RE,
   DEFAULT_OVERPASS_PROVIDER: () => DEFAULT_OVERPASS_PROVIDER,
   DEFAULT_OVERPASS_ROLE_EFFORTS: () => DEFAULT_OVERPASS_ROLE_EFFORTS,
   DEFAULT_OVERPASS_ROLE_TIERS: () => DEFAULT_OVERPASS_ROLE_TIERS,
@@ -7312,6 +7721,7 @@ __export(dist_exports, {
   HANDOFF_MILESTONE_MAX: () => HANDOFF_MILESTONE_MAX,
   HEADLINE_CLIP: () => HEADLINE_CLIP,
   IMPLEMENTOR_HARD_MIGRATION_ID: () => IMPLEMENTOR_HARD_MIGRATION_ID,
+  INHERIT: () => INHERIT,
   KNOWLEDGE_WRITES_COMPACT_LINES: () => KNOWLEDGE_WRITES_COMPACT_LINES,
   KNOWLEDGE_WRITES_DIR_REL: () => KNOWLEDGE_WRITES_DIR_REL,
   KNOWLEDGE_WRITES_KEEP_IDS: () => KNOWLEDGE_WRITES_KEEP_IDS,
@@ -7321,10 +7731,15 @@ __export(dist_exports, {
   KNOWLEDGE_WRITES_TEMP_FILE: () => KNOWLEDGE_WRITES_TEMP_FILE,
   LIFECYCLE_VALUES: () => LIFECYCLE_VALUES,
   LINK_RELS: () => LINK_RELS,
+  LegacyConfigError: () => LegacyConfigError,
   MAINTENANCE_WORKER_CLAUDE_EFFORT: () => MAINTENANCE_WORKER_CLAUDE_EFFORT,
   MAINTENANCE_WORKER_CLAUDE_MODEL: () => MAINTENANCE_WORKER_CLAUDE_MODEL,
   MAINTENANCE_WORKER_ROLE: () => MAINTENANCE_WORKER_ROLE,
+  MAX_REVIEWERS: () => MAX_REVIEWERS,
+  MERGE_PATHS: () => MERGE_PATHS,
+  MIN_REVIEWERS: () => MIN_REVIEWERS,
   MODEL_DEFAULTS_MIGRATION_ID: () => MODEL_DEFAULTS_MIGRATION_ID,
+  MODEL_REF_RE: () => MODEL_REF_RE,
   NAME_CLIP: () => NAME_CLIP,
   NOT_APPLICABLE_EXEMPT_KINDS: () => NOT_APPLICABLE_EXEMPT_KINDS,
   NO_CAPTURE_LANES: () => NO_CAPTURE_LANES,
@@ -7333,15 +7748,18 @@ __export(dist_exports, {
   OPEN_QUESTION_TERMINUS_FIELD: () => OPEN_QUESTION_TERMINUS_FIELD,
   OVERPASS_DEFAULTS_MIGRATION_ID: () => OVERPASS_DEFAULTS_MIGRATION_ID,
   OVERPASS_EFFORTS: () => OVERPASS_EFFORTS,
+  OVERPASS_MODEL_NAMESPACE: () => OVERPASS_MODEL_NAMESPACE,
   OVERPASS_PROVIDER_RE: () => OVERPASS_PROVIDER_RE,
   OVERPASS_ROLES: () => OVERPASS_ROLES,
   OVERPASS_TIERS: () => OVERPASS_TIERS,
   OVERPASS_TIER_RE: () => OVERPASS_TIER_RE,
   OverpassUnknownRoleError: () => OverpassUnknownRoleError,
+  PLAN_MODEL_KEY: () => PLAN_MODEL_KEY,
   PROJECT_IDENTITY_REL: () => PROJECT_IDENTITY_REL,
   PROJECT_MODES: () => PROJECT_MODES,
   ProjectIdentityError: () => ProjectIdentityError,
   ProjectModeError: () => ProjectModeError,
+  ProjectWorkflowError: () => ProjectWorkflowError,
   RECORD_TYPES: () => RECORD_TYPES,
   REPO_PATH_FORMAT: () => REPO_PATH_FORMAT,
   REPO_PATH_REFUSALS: () => REPO_PATH_REFUSALS,
@@ -7375,15 +7793,20 @@ __export(dist_exports, {
   brokerResultSchema: () => brokerResultSchema,
   brokerWelcomeSchema: () => brokerWelcomeSchema,
   buildIdPath: () => buildIdPath,
+  canonicalConfigSchema: () => canonicalConfigSchema,
+  canonicalModelsSchema: () => canonicalModelsSchema,
   classifyLocation: () => classifyLocation,
   clipName: () => clipName,
   collectRetiredTerms: () => collectRetiredTerms,
   configSchema: () => configSchema,
+  customAgentKey: () => customAgentKey,
+  customAgentSlug: () => customAgentSlug,
   decisionSchema: () => decisionSchema,
   describeUnreadConfigKeys: () => describeUnreadConfigKeys,
   describeZod: () => describeZod,
   digestRecord: () => digestRecord,
   disconfirmedHypothesisSchema: () => disconfirmedHypothesisSchema,
+  discoveredAgentId: () => discoveredAgentId,
   displayHandle: () => displayHandle,
   envelopeFields: () => envelopeFields,
   exampleFor: () => exampleFor,
@@ -7397,9 +7820,11 @@ __export(dist_exports, {
   handoffEvidenceFileSchema: () => handoffEvidenceFileSchema,
   handoffEvidenceSchema: () => handoffEvidenceSchema,
   headlineRecord: () => headlineRecord,
+  hostRunsModel: () => hostRunsModel,
   isAbsolutePathAnyHost: () => isAbsolutePathAnyHost,
   isBrokerOperation: () => isBrokerOperation,
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
+  isCustomAgentKey: () => isCustomAgentKey,
   isProjectId: () => isProjectId,
   isSourcePath: () => isSourcePath,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
@@ -7414,6 +7839,7 @@ __export(dist_exports, {
   matchesGlob: () => matchesGlob,
   migrateRetiredModelKeys: () => migrateRetiredModelKeys,
   migrateStaleAgyModels: () => migrateStaleAgyModels,
+  modeOfConfig: () => modeOfConfig,
   modelsCatalogSchema: () => modelsCatalogSchema,
   moveFenceSchema: () => moveFenceSchema,
   moveImplementorHardTask: () => moveImplementorHardTask,
@@ -7425,12 +7851,17 @@ __export(dist_exports, {
   normalizeRepoPath: () => normalizeRepoPath,
   objectShapeFor: () => objectShapeFor,
   openQuestionSchema: () => openQuestionSchema,
+  opencodeModelRef: () => opencodeModelRef,
+  parseCanonicalConfig: () => parseCanonicalConfig,
+  parseCanonicalModels: () => parseCanonicalModels,
   parseConfig: () => parseConfig,
+  parseDiscoveredAgentId: () => parseDiscoveredAgentId,
   parseStoreFence: () => parseStoreFence,
   projectRegistrationSchema: () => projectRegistrationSchema,
   protectedSpans: () => protectedSpans,
   readProjectIdentity: () => readProjectIdentity,
   readProjectMode: () => readProjectMode,
+  readProjectWorkflow: () => readProjectWorkflow,
   recordSizes: () => recordSizes,
   referenceMaterialSchema: () => referenceMaterialSchema,
   refineSupersession: () => refineSupersession,
@@ -7440,6 +7871,7 @@ __export(dist_exports, {
   repoPathOfLocation: () => repoPathOfLocation,
   researchFindingSchema: () => researchFindingSchema,
   resetOverpassDefaults: () => resetOverpassDefaults,
+  resolveHostSettings: () => resolveHostSettings,
   resolveOverpass: () => resolveOverpass,
   retiredTermRegex: () => retiredTermRegex,
   retiredTermScanFields: () => retiredTermScanFields,
@@ -7455,6 +7887,7 @@ __export(dist_exports, {
   sessionEventSchema: () => sessionEventSchema,
   sourceExtensionOf: () => sourceExtensionOf,
   stalenessVerdict: () => stalenessVerdict,
+  toCanonicalConfig: () => toCanonicalConfig,
   toRepoRelative: () => toRepoRelative,
   todoBlocksItself: () => todoBlocksItself,
   todoBoardItemReadSchema: () => todoBoardItemReadSchema,
@@ -7463,13 +7896,17 @@ __export(dist_exports, {
   todoHandoffSchema: () => todoHandoffSchema,
   todoSchema: () => todoSchema,
   todoWaitFieldsReadSchema: () => todoWaitFieldsReadSchema,
+  twoModelsReason: () => twoModelsReason,
   undeclaredPhaseInterfaces: () => undeclaredPhaseInterfaces,
   unknownFieldsIn: () => unknownFieldsIn,
   unreadConfigKeys: () => unreadConfigKeys,
+  unsupportedAgents: () => unsupportedAgents,
   validateRecord: () => validateRecord,
   verifiableAt: () => verifiableAt,
   workerPolicyItemSchema: () => workerPolicyItemSchema,
-  workerPolicySchema: () => workerPolicySchema
+  workerPolicySchema: () => workerPolicySchema,
+  workflowOfConfig: () => workflowOfConfig,
+  workflowSchema: () => workflowSchema
 });
 var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
@@ -7482,6 +7919,9 @@ var init_dist = __esm({
     init_transient();
     init_transient();
     init_config();
+    init_config();
+    init_config();
+    init_custom_agents();
     init_registry();
     init_staleness();
     init_project();
@@ -15083,9 +15523,9 @@ var init_dist2 = __esm({
        * Keep the models catalog covering every model the System tab pickers must offer
        * (GitHub #208: bootstrapCatalogIfAbsent leaves an older catalog without newer ids).
        * Pinned = the shipped config.models defaults (parseConfig({})), the caller's configured
-       * models (each role's `model`, and its `opencode_model` and the maintenance worker's
-       * `opencode_model` when a <provider>/<model> string) and the maintenance worker's Claude
-       * model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
+       * models (each agent's one canonical `model`, <provider>/<id>; overpass/ and agy/ models are
+       * not catalog models, and the maintenance worker's legacy `opencode_model` when a
+       * <provider>/<model> string) and the maintenance worker's Claude model. A Claude id becomes `{id, label: id, tier: 'unknown', status: 'active'}`; an
        * OpenCode ref `vendor/model` becomes the same shape plus `vendor`, because the pickers
        * read one catalog and rebuild the ref as `${vendor}/${id}`. Existing entries are never
        * edited or removed, and nothing is written when nothing is missing. The read-modify-write
@@ -15098,8 +15538,14 @@ var init_dist2 = __esm({
         const claude = /* @__PURE__ */ new Set([MAINTENANCE_WORKER_CLAUDE_MODEL]);
         const refs = /* @__PURE__ */ new Set();
         const addPins = (v) => {
-          if (v?.model)
-            claude.add(v.model);
+          if (typeof v?.model === "string") {
+            if (!v.model.includes("/"))
+              claude.add(v.model);
+            else if (v.model.startsWith("anthropic/"))
+              claude.add(v.model.slice("anthropic/".length));
+            else if (!v.model.startsWith("overpass/") && !v.model.startsWith("agy/") && OPENCODE_MODEL_REF_RE.test(v.model))
+              refs.add(v.model);
+          }
           if (typeof v?.opencode_model === "string" && OPENCODE_MODEL_REF_RE.test(v.opencode_model))
             refs.add(v.opencode_model);
         };
@@ -16471,17 +16917,20 @@ function refreshAgentsMdKnowledgeFile(path, projected) {
   return r;
 }
 
+// scripts/lib/update.mjs
+init_dist();
+
 // scripts/lib/project-identity.mjs
 init_dist();
-function workIdentityRefusal(root, mode) {
+function identityRefusal(root) {
   let onPostgres;
   try {
     onPostgres = readProjectStorage(root) === "postgres";
   } catch (err) {
     return `project storage cannot be read: ${err.message}`;
   }
-  if (mode !== "work" && !onPostgres) return null;
-  const subject = mode === "work" ? "work-mode project" : "project with storage postgres";
+  if (!onPostgres) return null;
+  const subject = "project with storage postgres";
   try {
     if (readProjectIdentity(root)) return null;
   } catch (err) {
@@ -17384,7 +17833,7 @@ function parseDomainProposal(stdout) {
   return { add: map.proposal.add.map((a) => ({ domain: a.domain, reason: a.reason })), registered: map.registered_by_this_run === true };
 }
 var isFsError = (err) => typeof err?.code === "string" && typeof err?.syscall === "string";
-var isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
+var isProjectReadRefusal = (err) => err instanceof ProjectWorkflowError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
 function handoffRefusalRemedy(repoPath2) {
   return `fix it in ${repoPath2} and rerun /sterling:update (every registered project is refreshed on every run). If it cannot be repaired: retire it (move or delete the project, then \`node scripts/list-projects.mjs --prune-missing\` unregisters it), or set "store_authority": "secondary" in its .sterling/config.json so the refusal becomes a standing one.`;
 }
@@ -17510,20 +17959,19 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report2.projects.push(entry);
-      let projectMode;
       try {
-        projectMode = readProjectMode(p.repo_path);
+        readProjectWorkflow(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
-        log(`  \u2717 ${p.name}: REFUSED \u2014 project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
-        entry.handoff = "refused_project_mode";
+        log(`  \u2717 ${p.name}: REFUSED \u2014 workflow settings: ${err.message}. Nothing was synced or projected for this project; fix config.workflow (TUI System tab) and rerun /sterling:update.`);
+        entry.handoff = "refused_project_workflow";
         fail(2);
         failures++;
         continue;
       }
-      const identityRefusal = workIdentityRefusal(p.repo_path, projectMode);
-      if (identityRefusal) {
-        log(`  \u2717 ${p.name}: REFUSED \u2014 ${identityRefusal}. Nothing was synced or projected for this project.`);
+      const identityRefusal2 = identityRefusal(p.repo_path);
+      if (identityRefusal2) {
+        log(`  \u2717 ${p.name}: REFUSED \u2014 ${identityRefusal2}. Nothing was synced or projected for this project.`);
         entry.handoff = "refused_project_identity";
         fail(2);
         failures++;
@@ -17563,9 +18011,15 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
       const autoMemoryNotices = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^auto-memory off: (kept|wrong_type)\b/.test(l));
       const configMigrationLines = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
-      const changedAgents = statuses.filter((l) => !l.startsWith("up_to_date") && !l.startsWith("locally_modified_up_to_date") && !l.startsWith("config_drift: "));
+      const changedAgents = statuses.filter((l) => !l.startsWith("up_to_date") && !l.startsWith("locally_modified_up_to_date") && !l.startsWith("config_drift: ") && !l.startsWith("unsupported: "));
+      const modelConflictLine = r.stdout.split("\n").map((l) => l.trim()).find((l) => l.startsWith("refused_model_conflicts: "));
       Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length, config_migration: configMigrationLines.length });
-      if (r.status === 2) {
+      if (r.status === 2 && modelConflictLine) {
+        log(`  \u2717 ${p.name}: MODEL CHOICE NEEDED (project at ${p.repo_path}) \u2014 ${modelConflictLine}`);
+        entry.model_conflicts = modelConflictLine.slice("refused_model_conflicts: ".length).split(" each name")[0].split(", ");
+        fail(2);
+        failed = true;
+      } else if (r.status === 2) {
         log(`  \u2717 ${p.name}: agent sync REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:
 ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         fail(2);

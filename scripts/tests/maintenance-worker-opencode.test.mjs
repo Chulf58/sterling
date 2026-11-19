@@ -439,19 +439,25 @@ test('the OpenCode plugin picks the host: claude on PATH -> claude; else the Ope
       return { launched: true, reason: 'launched' };
     };
     const at = new Date(NOW).toISOString();
-    writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify({ maintenance_worker: { opencode_model: 'openai/gpt-5.6-terra' } }));
+    // Changed with the cutover (item G, decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude): the worker has ONE model,
+    // models['maintenance-worker'] (a legacy maintenance_worker.opencode_model moves into it). With no model set the worker is on the
+    // Claude CLI when it is on PATH; a model Claude Code cannot run (openai/...) sends it through OpenCode even when claude is on PATH.
+    writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify({}));
     worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true })(fx.project, at);
+    writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify({ maintenance_worker: { opencode_model: 'openai/gpt-5.6-terra' } }));
     worker.createWorkerLaunch({ openStore, claudeOnPath: () => false, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true })(fx.project, at);
-    assert.deepEqual(seen, [{ host: undefined, opencodeBin: undefined }, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe' }]);
+    worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true })(fx.project, at);
+    assert.deepEqual(seen, [{ host: undefined, opencodeBin: undefined }, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe' }, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe' }]);
 
     assert.equal(worker.opencodeBinDefault('/opt/oc/opencode.exe'), '/opt/oc/opencode.exe');
     assert.equal(worker.opencodeBinDefault('/usr/bin/node'), null, 'under node there is no OpenCode binary to run');
     assert.equal(worker.opencodeBinDefault('/usr/bin/bun'), null);
 
+    writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify({})); // no non-Claude worker model: the neither-runner notice is the one under test
     const neither = worker.createWorkerLaunch({ openStore, claudeOnPath: () => false, opencodeBin: () => null, launchWorker, execPath: '/usr/bin/node' });
     neither(fx.project, at);
     neither(fx.project, at);
-    assert.equal(seen.length, 2, 'nothing launches with neither runner');
+    assert.equal(seen.length, 3, 'nothing launches with neither runner');
     const skip = notices(fx.project).filter((t) => /maintenance worker did not run/.test(t));
     assert.equal(skip.length, 1, 'one notice per process');
     assert.match(skip[0], /neither `claude` nor an OpenCode binary/);
@@ -573,24 +579,32 @@ test('[overpass] effective Overpass with claude on PATH runs the worker through 
 
     const noBinary = pluginLaunch(fx, on, { execPath: '/usr/bin/node' });
     assert.deepEqual(noBinary, [], 'effective Overpass with no OpenCode binary does not fall back to claude');
-    assert.match(notices(fx.project).join('\n'), /Overpass is effective/);
+    // reworded with the settings redesign: a tier is the worker's own model, not a global switch
+    assert.match(notices(fx.project).join('\n'), /Its model in config\.models \(an Overpass tier or another non-Claude model\) runs only through OpenCode/);
   } finally {
     fx.cleanup();
   }
 });
 
-test('[overpass] off, hobby mode and a missing mode leave the launch exactly as before: claude on PATH -> claude with no pinned model; claude absent -> the configured opencode_model', () => {
+// Changed with the cutover (item G): the worker has one model, models['maintenance-worker'], and a legacy maintenance_worker.opencode_model
+// moves into it. With no model set the launch is as before (Claude CLI on PATH, else OpenCode with the runner's own model lookup); a
+// non-Claude model sends the worker through OpenCode and pins it, even with claude on PATH. A legacy Overpass that was not effective
+// (disabled, or hobby / no mode) migrates to no tiers, so it changes nothing.
+test('[overpass] off, hobby mode and a missing mode leave the launch as before; a non-Claude worker model goes through OpenCode and is pinned', () => {
   const fx = fixture();
   try {
     for (const overpass of [undefined, { enabled: false }, { enabled: false, provider: 'acme-gw' }]) {
-      const cfg = { mode: 'work', ...WORK_MODEL, ...(overpass ? { overpass } : {}) };
+      const cfg = { mode: 'work', ...(overpass ? { overpass } : {}) };
       assert.deepEqual(pluginLaunch(fx, cfg).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: undefined, workerModel: undefined }]);
-      assert.deepEqual(pluginLaunch(fx, cfg, { claude: false }).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: 'opencode', workerModel: undefined }]);
+      assert.deepEqual(pluginLaunch(fx, cfg, { claude: false }).map(({ host, workerModel }) => ({ host, workerModel })), [], 'no Claude CLI and no model set: the OpenCode worker refuses to start without one, so nothing launches');
     }
     for (const mode of [{ mode: 'hobby' }, {}]) {
-      const cfg = { ...mode, ...WORK_MODEL, overpass: { enabled: true } };
+      const cfg = { ...mode, overpass: { enabled: true } };
       assert.deepEqual(pluginLaunch(fx, cfg).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: undefined, workerModel: undefined }], 'configured but not effective');
     }
+    const cfg = { mode: 'work', ...WORK_MODEL };
+    assert.deepEqual(pluginLaunch(fx, cfg).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: 'opencode', workerModel: 'openai/gpt-5.6-terra' }], 'a non-Claude model needs OpenCode even with claude on PATH');
+    assert.deepEqual(pluginLaunch(fx, cfg, { claude: false }).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: 'opencode', workerModel: 'openai/gpt-5.6-terra' }]);
   } finally {
     fx.cleanup();
   }

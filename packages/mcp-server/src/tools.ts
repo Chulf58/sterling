@@ -8,7 +8,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSy
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, migrateStaleAgyModels, AGY_MODEL_IDS, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, toCanonicalConfig, canonicalConfigSchema, migrateStaleAgyModels, AGY_MODEL_IDS, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1755,6 +1755,93 @@ function unreadKeyWarnings(path: string, keys: readonly UnreadConfigKey[]): stri
     .map((k) => (k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`));
 }
 
+/** The value at a dotted path (or a path array) inside a parsed document; undefined when any step is missing. */
+function valueAtPath(doc: unknown, path: string | readonly (string | number)[]): unknown {
+  let cur: unknown = doc;
+  for (const seg of typeof path === 'string' ? path.split('.') : path) {
+    if (cur === null || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string | number, unknown>)[seg];
+  }
+  return cur;
+}
+
+/**
+ * Why a write to a LEGACY config.json (one /sterling:update has not migrated yet) is refused, or
+ * undefined when it may land. The transform tolerates what is already on disk, but a write is judged
+ * by what it newly introduces (anti_pattern config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes).
+ * A value counts as already there only when the LEGACY value it comes from is byte-identical
+ * (JSON.stringify) in the file before and after the write; the transform's `origins` give the legacy
+ * path of a moved value (maintenance_worker.opencode_model for models.maintenance-worker.model), and a
+ * value read at its own path is compared there. Refused when the write newly introduces:
+ *   - a value the transform would drop (a retired field: mode, a per-host model field, hard_task,
+ *     the Overpass switch keys) or rewrite (a legacy form);
+ *   - a value the strict canonical check refuses on the transformed document.
+ * A legacy value the transform cannot carry at all (overpass: "bad") is tolerated while unchanged: the
+ * top-level keys holding such values are set aside, in both documents alike, until the rest transforms,
+ * and the checks run on what is left. A write to such a key itself is judged by the transform.
+ */
+function legacyWriteIssues(raw: Record<string, unknown>, mutated: Record<string, unknown>, path: string): string | undefined {
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+  const writtenTop = path.split('.')[0];
+  const tryTransform = (doc: Record<string, unknown>): ReturnType<typeof toCanonicalConfig> | Error => {
+    try {
+      return toCanonicalConfig(doc);
+    } catch (e) {
+      return e as Error;
+    }
+  };
+  let r = { ...raw };
+  let m = { ...mutated };
+  let after = tryTransform(m);
+  while (after instanceof Error) {
+    const failure: Error = after;
+    // set aside one unchanged top-level key whose removal makes progress (the transform succeeds or fails differently)
+    const culprit = Object.keys(m).find((k) => {
+      if (k === writtenTop || !same(r[k], m[k])) return false;
+      const { [k]: _gone, ...rest } = m;
+      const probe = tryTransform(rest);
+      return !(probe instanceof Error) || probe.message !== failure.message;
+    });
+    if (culprit === undefined) return failure.message;
+    const { [culprit]: _r, ...restR } = r;
+    const { [culprit]: _m, ...restM } = m;
+    r = restR;
+    m = restM;
+    after = tryTransform(m);
+  }
+  const done = after;
+  const hasNow = (c: { now?: unknown }): boolean => Object.prototype.hasOwnProperty.call(c, 'now');
+  // a change is the file's own when the raw value at its path is byte-identical before and after the write
+  const fresh = done.changes.filter((c) => !same(valueAtPath(r, c.path), valueAtPath(m, c.path)));
+  if (fresh.length) {
+    return fresh
+      .map((c) =>
+        hasNow(c)
+          ? `${c.path}: ${JSON.stringify(c.was)} is a legacy form the canonical config stores as ${JSON.stringify(c.now)}; write that instead`
+          : `${c.path}: a retired field the canonical config does not carry (value ${JSON.stringify(c.was)}); the migration would drop it, so the write is refused (decision settings-redesign-build-shape-one-legacy-to-canonical-config)`
+      )
+      .join('; ');
+  }
+  const checked = canonicalConfigSchema.safeParse(normalizeRawConfig(done.config));
+  if (checked.success) return undefined;
+  // The legacy path a canonical path was read from: the longest moved prefix in `origins`, else itself.
+  const originOf = (p: readonly (string | number)[]): string => {
+    for (let n = p.length; n > 0; n--) {
+      const prefix = p.slice(0, n).join('.');
+      if (Object.prototype.hasOwnProperty.call(done.origins, prefix)) return done.origins[prefix];
+    }
+    return p.join('.');
+  };
+  // a MISSING value (a required key) is judged by the object that lacks it, so a new half entry is refused
+  const judged = (i: ZodIssue): readonly (string | number)[] => (valueAtPath(done.config, i.path) === undefined ? i.path.slice(0, -1) : i.path);
+  const added = checked.error.issues.filter((i) => {
+    if (i.path.length === 0) return true;
+    const origin = originOf(judged(i));
+    return !same(valueAtPath(r, origin), valueAtPath(m, origin));
+  });
+  return added.length ? added.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ') : undefined;
+}
+
 function configSetImpl(
   repoRoot: string | undefined,
   path: string,
@@ -1874,19 +1961,6 @@ function configSetImpl(
     raw = parsed as Record<string, unknown>;
   }
 
-  // The old sparring_partner.model is read only while sparring_partner.models.openai
-  // is absent (normalizeRawConfig converts it; the new key wins). Once the new key
-  // exists a write to the old path would validate, land on disk and change nothing.
-  if (path === 'sparring_partner.model') {
-    const sp = raw.sparring_partner;
-    const spModels = sp !== null && typeof sp === 'object' && !Array.isArray(sp) ? (sp as Record<string, unknown>).models : undefined;
-    if (spModels !== null && typeof spModels === 'object' && !Array.isArray(spModels) && (spModels as Record<string, unknown>).openai !== undefined) {
-      throw new Error(
-        `config_set: 'sparring_partner.model' is the old path and is not read once sparring_partner.models.openai exists, so this write would have no effect — set 'sparring_partner.models.openai.model' instead. Nothing was written.`
-      );
-    }
-  }
-
   // The path can be ANY depth now the allowlist is gone — a bare root key
   // (`machine_role`, 0 dots) or a path several segments deep
   // (`context_watch.windows.claude-fable-5-1`, 2 dots) alike. Walk the
@@ -1935,10 +2009,29 @@ function configSetImpl(
     );
   }
 
-  const validation = configSchema.safeParse(normalizeRawConfig(mutated));
-  if (!validation.success) {
-    const issues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-    throw new Error(`config_set: the resulting config.json would fail schema validation — ${issues}. Nothing was written.`);
+  // A config already in the canonical shape is held to the STRICT canonical check, so a write can
+  // never put a retired key (mode, sparring_partner, a per-host model field) back. A legacy config
+  // on disk and awaiting /sterling:update is read through the one transform (parseConfig),
+  // which tolerates what is already there (anti_pattern
+  // config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes: the write is still
+  // validated, never stripped).
+  let validationIssues: string | undefined;
+  let wasCanonical = false;
+  try {
+    const before = toCanonicalConfig(raw);
+    wasCanonical = before.changes.length === 0 && before.conflicts.length === 0;
+  } catch {
+    wasCanonical = false; // a legacy document the transform cannot carry: the write is judged by parseConfig below
+  }
+  if (wasCanonical) {
+    // a retired models key is dropped before the check, as it always was (it is reported as unread, never judged)
+    const validation = canonicalConfigSchema.safeParse(normalizeRawConfig(mutated));
+    if (!validation.success) validationIssues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+  } else {
+    validationIssues = legacyWriteIssues(raw, mutated, path);
+  }
+  if (validationIssues !== undefined) {
+    throw new Error(`config_set: the resulting config.json would fail schema validation — ${validationIssues}. Nothing was written.`);
   }
 
   const serialized = JSON.stringify(mutated, null, 2) + '\n';

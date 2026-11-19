@@ -91,33 +91,24 @@ test('the OpenCode conductor names no Claude-only mechanism and carries the Open
   assert.match(frontmatter(content), /^mode: primary$/m);
 });
 
-// GitHub issue #24 (user-ruled 2026-10-05 through the question form): on OpenCode the Sol, Astra
-// and Terra lanes are native `subagent` dispatches on openai models; the `codex` MCP tool is the
-// Claude Code route only. The model-string form is the one measured; only the Sol dispatch was run live.
-test('the OpenCode conductor routes Sol, Astra and Terra through native subagent dispatches; the Claude conductor keeps the codex MCP route', () => {
+// Codex is removed (decision decommission-the-codex-model-setting-codex-is-no-longer-used). These
+// replace the two tests that pinned the codex MCP route, the Sol/Astra/Terra pairing and the model ids
+// in the conductor text (GitHub issue #24 and the 2026-10-05 ruling): review and sparring are plain
+// `reviewer` and `sparring` dispatches on the one model selected for each agent, on both hosts.
+test('neither conductor render carries the codex route, a model pairing or a MODEL-INTENT line; both state the plain review and sparring dispatch', () => {
   const opencode = fullRender('conductor');
-  // Changed with the dispatch model resolver (decision subagent-model-choice-on-opencode-conductor-states-dispatch):
-  // the OpenCode conductor states dispatch intent and the plugin picks the model from config.models, so the
-  // openai model ids left the OpenCode text and the intent lines took their place.
-  for (const native of ['sterling/reviewer', 'MODEL-INTENT: review-of=openai', 'MODEL-INTENT: hard', 'MODEL-INTENT: fallback=<reason>', 'sterling/implementor', 'do not modify the worktree', 'user-ruled 2026-10-05']) {
+  const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
+  for (const [host, text] of [['OpenCode', opencode], ['Claude', claude]]) {
+    for (const gone of ['`codex` MCP tool', 'MODEL-INTENT', 'OVERPASS-BYPASS', 'gpt-5.6-sol', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.6-terra', 'openai/gpt-', 'Cross-family pairing', 'Astra is the solution-sparring partner']) {
+      assert.ok(!text.includes(gone), `${host} conductor still carries ${JSON.stringify(gone)}`);
+    }
+    assert.ok(text.includes('**Reviewer never the author.**'), `${host} conductor lacks the plain review paragraph`);
+    assert.ok(text.includes('Codex is not used (decision `decommission-the-codex-model-setting-codex-is-no-longer-used`)'), `${host} conductor lacks the sparring paragraph`);
+  }
+  for (const native of ['sterling/reviewer', 'sterling/sparring', 'do not modify the worktree']) {
     assert.ok(opencode.includes(native), `OpenCode conductor lacks ${JSON.stringify(native)}`);
   }
-  for (const id of ['openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'openai/gpt-5.6-terra']) {
-    assert.ok(!opencode.includes(id), `OpenCode conductor still names the model id ${JSON.stringify(id)}`);
-  }
-  for (const codexRoute of ['dispatched through the `codex` MCP tool', 'as on Claude Code', 'through the `codex` MCP tool, never a shelled `codex exec`', 'through the `review-brief` skill', 'sandbox: read-only']) {
-    assert.ok(!opencode.includes(codexRoute), `OpenCode conductor still carries ${JSON.stringify(codexRoute)}`);
-  }
-  assert.match(opencode, /The `codex` MCP tool is the Claude Code route only/);
-  assert.match(opencode, /openai provider is not logged in/);
-
-  const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
-  for (const kept of ['dispatched through the `codex` MCP tool at `sandbox: read-only`', 'through the `codex` MCP tool, never a shelled `codex exec`', 'the Sol call is handed the same body through the `review-brief` skill']) {
-    assert.ok(claude.includes(kept), `Claude conductor lost ${JSON.stringify(kept)}`);
-  }
-  for (const openCodeOnly of ['openai/', 'sterling/reviewer', 'sterling/implementor']) {
-    assert.ok(!claude.includes(openCodeOnly), `Claude conductor carries the OpenCode route ${JSON.stringify(openCodeOnly)}`);
-  }
+  assert.ok(!claude.includes('openai/'), 'the Claude conductor names no openai model');
 });
 
 // Board f40400d6 (user-ruled 2026-10-05 through the question form, "Add the rule (Recommended)"):
@@ -153,23 +144,6 @@ test('the OpenCode conductor carries the progress rule; the Claude conductor doe
 // 2026-10-20, reversing the #165 ruling): the Claude Code route stays on gpt-5.6-sol because the
 // Codex MCP route is frozen at client 0.153.4 and cannot reach gpt-6.1-sol; a refusal is reported
 // and the review runs on Opus, with no retry on another Sol id.
-test('Sol is gpt-6.1-sol on the OpenCode conductor and gpt-5.6-sol on the Claude conductor, which falls back loudly to Opus', () => {
-  const opencode = fullRender('conductor');
-  // Changed with the dispatch model resolver: the Sol id is config's (models.reviewer.opencode_model), not a call pin in the text.
-  assert.ok(!opencode.includes('openai/gpt-6.1-sol#high'), 'OpenCode conductor no longer pins a Sol model on the call');
-  assert.ok(opencode.includes('**Sol** (`gpt-6.1-sol`)'), 'the OpenCode pairing paragraph names the new Sol id');
-  assert.ok(!opencode.includes('openai/gpt-5.6-sol'), 'OpenCode conductor no longer dispatches the old Sol id');
-  assert.ok(opencode.includes('Claude Code\'s `codex` MCP route stays on `gpt-5.6-sol`, because the Codex MCP route is frozen at client 0.153.4, which cannot reach `gpt-6.1-sol`; a refusal there is reported and the review runs on Opus'), 'the OpenCode conductor says why the Claude Code route stays on gpt-5.6-sol');
-  assert.ok(!opencode.includes('refuses the 6.x Sol models') && !opencode.includes('retries once'), 'the OpenCode conductor carries neither the stale refusal rationale nor the retry');
-  assert.equal(opencode.split('gpt-5.6-sol').length - 1, 1, 'the old id is named once on OpenCode, in the Claude Code route sentence');
-
-  const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
-  assert.ok(claude.includes('Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)'), 'Claude conductor names gpt-5.6-sol for the codex route');
-  assert.ok(claude.includes('say so, review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently'), 'Claude conductor carries the loud Opus fallback');
-  assert.ok(!claude.includes('Codex **Sol** (`gpt-6.1-sol`') && !claude.includes('retry once'), 'Claude conductor does not default to gpt-6.1-sol or retry on another Sol id');
-  assert.ok(!claude.includes('refuses the 6.x Sol models'), 'Claude conductor no longer carries the stale refusal rationale');
-});
-
 // Board b43ddc10 (user-ruled 2026-10-05 through the question form, "Reviewer checks reuse",
 // "Regression test must fail first", "Project lint and check commands"). The templates install
 // into projects of any stack, so each rule is asserted on both hosts' renders.

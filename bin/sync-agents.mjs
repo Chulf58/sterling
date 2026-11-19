@@ -8,8 +8,8 @@ var __export = (target, all) => {
 
 // scripts/sync-agents.mjs
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { dirname as dirname5, join as join17, resolve as resolve9 } from "node:path";
-import { readFileSync as readFileSync13, existsSync as existsSync12 } from "node:fs";
+import { dirname as dirname6, join as join18, resolve as resolve9 } from "node:path";
+import { readFileSync as readFileSync14, existsSync as existsSync13 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5013,11 +5013,37 @@ function judgeProjectMode(mode, where) {
   }
   return mode;
 }
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+var ProjectWorkflowError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectWorkflowError";
+  }
+};
+function workflowOfConfig(parsed, where) {
   if (parsed === void 0)
-    return "hobby";
-  return judgeProjectMode(parsed.mode, where);
+    return workflowSchema.parse(void 0);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProjectWorkflowError(`${where} is not a JSON object \u2014 the workflow settings cannot be read`);
+  }
+  let canonical2;
+  try {
+    canonical2 = toCanonicalConfig(parsed).config;
+  } catch (err) {
+    if (!(err instanceof Error))
+      throw err;
+    throw new ProjectWorkflowError(`${err.message} (in ${where}) \u2014 the workflow settings cannot be read; fix it in the TUI System tab or the file`);
+  }
+  const workflow = canonical2.workflow;
+  const checked = workflowSchema.safeParse(workflow);
+  if (!checked.success) {
+    const issues = checked.error.issues.map((i) => `${["workflow", ...i.path].join(".")}: ${i.message}`).join("; ");
+    throw new ProjectWorkflowError(`config.workflow is invalid in ${where} (${issues}) \u2014 fix it in the TUI System tab or the file`);
+  }
+  return checked.data;
+}
+function readProjectWorkflow(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectWorkflowError, "the workflow settings");
+  return workflowOfConfig(parsed, where);
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -5045,6 +5071,12 @@ var agentModelEntry = external_exports.object({
   opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional(),
   agy_model: external_exports.enum(AGY_MODEL_IDS).optional()
 }).strict();
+var CUSTOM_AGENT_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+var CUSTOM_AGENT_KEY_RE = /^custom-[a-z0-9]+(-[a-z0-9]+)*$/;
+function isCustomAgentKey(key2) {
+  return CUSTOM_AGENT_KEY_RE.test(key2);
+}
+var customAgentEntry = agentModelEntry.partial();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
   anthropic: modelPin.optional()
@@ -5255,7 +5287,17 @@ var configSchema = external_exports.object({
     // knowledge-pre-flight-agent-sterling-preflight-a-read-only-la): a read-only store
     // lookup, so a cheap model at low effort like the scout.
     preflight: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" })
-  }).catchall(agentModelEntry).default({}),
+  }).catchall(customAgentEntry).superRefine((models, ctx) => {
+    for (const [key2, entry] of Object.entries(models)) {
+      if (isCustomAgentKey(key2))
+        continue;
+      const e = entry;
+      for (const field of ["model", "effort"]) {
+        if (e[field] === void 0)
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, field], message: "Required" });
+      }
+    }
+  }).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -5458,31 +5500,12 @@ var configSchema = external_exports.object({
     // three-state guard used for other config-derived delivery values.
     total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
-  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-  // whether the automatic consult moments (design/review/gate second opinions via
-  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern (every field has a default; an absent
-  // block still parses) — a project without the
-  // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-  // — this field never stands in for that absence, only for a deliberate OFF.
-  sparring_partner: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    // Which vendor's model the consult runs on (decision
-    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-    // 'openai' is the behaviour before the setting existed.
-    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-    // The model pinned per vendor. Absent = no pin (the host's default). The
-    // old sparring_partner.model is converted to models.openai by
-    // normalizeRawConfig, before this schema strips unknown keys. The default
-    // ships no pin: the decision names no model per vendor.
-    models: vendorPins
-  }).default({}),
+  // sparring_partner is retired (decision decommission-the-codex-model-setting-codex-is-no-longer-used):
+  // Sterling's Codex integration is gone and the legacy transform drops the key.
   // Reviews (same decision): the vendor policy and the model pinned per vendor.
   // cross_vendor = the other family than the model that wrote the diff; openai
   // and anthropic force one vendor even when that makes reviewer and author the
-  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  // same family (user-ruled 2026-10-03). Ships no pin.
   review: external_exports.object({
     policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
     models: vendorPins
@@ -5490,7 +5513,7 @@ var configSchema = external_exports.object({
   // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-  // Mirrors sparring_partner's additive-optional shape exactly — an absent
+  // An additive-optional shape — an absent
   // block still parses with {enabled: true}, and an unknown field inside the
   // block strips silently rather than refusing (forward-compat, non-strict).
   // OFF silences only the automatic default posture: an explicit user ask
@@ -5517,6 +5540,11 @@ var configSchema = external_exports.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: external_exports.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
@@ -5583,6 +5611,105 @@ var configSchema = external_exports.object({
   // Written by sync and init only.
   applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
+var DEFAULT_OVERPASS_PROVIDER = "overpass";
+var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+var OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+var MAINTENANCE_WORKER_ROLE = "maintenance-worker";
+var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
+var DEFAULT_OVERPASS_TIER = "agentic-high";
+var DEFAULT_OVERPASS_ROLE_TIERS = {
+  implementor: "agentic-auto",
+  "implementor-hard": "agentic-premium",
+  researcher: DEFAULT_OVERPASS_TIER,
+  scout: "agentic-auto",
+  reviewer: DEFAULT_OVERPASS_TIER,
+  librarian: "agentic-auto",
+  sparring: "agentic-premium-max",
+  preflight: "agentic-auto",
+  "maintenance-worker": "agentic-auto"
+};
+var DEFAULT_OVERPASS_ROLE_EFFORTS = {
+  implementor: "medium",
+  "implementor-hard": "xhigh",
+  scout: "high",
+  librarian: "high",
+  sparring: "xhigh",
+  preflight: "high",
+  "maintenance-worker": "high"
+};
+var OverpassUnknownRoleError = class extends Error {
+  role;
+  constructor(role) {
+    super(`config.overpass.roles has the unknown role ${JSON.stringify(role)} \u2014 the roles are ${OVERPASS_ROLES.join(", ")}`);
+    this.name = "OverpassUnknownRoleError";
+    this.role = role;
+  }
+};
+function resolveOverpassRoles(raw, provider) {
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
+  }
+  const block = raw ?? {};
+  for (const key2 of Object.keys(block)) {
+    if (!OVERPASS_ROLES.includes(key2)) {
+      throw new OverpassUnknownRoleError(key2);
+    }
+  }
+  const out = {};
+  for (const role of OVERPASS_ROLES) {
+    const entry = block[role];
+    if (entry !== void 0 && !isPlainObject(entry)) {
+      throw new Error(`config.overpass.roles.${role} is ${JSON.stringify(entry)} \u2014 it must be an object with an optional "tier" and "effort"`);
+    }
+    const fields = entry ?? {};
+    for (const key2 of Object.keys(fields)) {
+      if (key2 !== "tier" && key2 !== "effort")
+        throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key2)} \u2014 only "tier" and "effort" are allowed`);
+    }
+    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
+    if (typeof tier !== "string" || !OVERPASS_TIER_RE.test(tier)) {
+      throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} \u2014 it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
+    }
+    const effort = fields.effort;
+    if (effort !== void 0 && (typeof effort !== "string" || !OVERPASS_EFFORTS.includes(effort))) {
+      throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} \u2014 it must be one of ${OVERPASS_EFFORTS.join(", ")}`);
+    }
+    const chosen = effort ?? DEFAULT_OVERPASS_ROLE_EFFORTS[role];
+    out[role] = chosen === void 0 ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: chosen };
+  }
+  return out;
+}
+function resolveOverpass(config2, opts) {
+  const cfg = isPlainObject(config2) ? config2 : {};
+  const raw = cfg.overpass;
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} \u2014 it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === void 0 ? false : block.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === void 0 ? true : block.conductor_bypass;
+  if (typeof bypass !== "boolean") {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
+  }
+  const provider = block.provider === void 0 ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const roles = resolveOverpassRoles(block.roles, provider);
+  const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
+  if (!enabled)
+    return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts.host !== "opencode")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
+  return { ...base2, effective: true, conductorRouted: !bypass };
+}
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -5598,20 +5725,6 @@ function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
   let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
   const models = raw.models;
   if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
     out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
@@ -5636,46 +5749,7 @@ function migrateStaleAgyModels(raw) {
   return dropped.length === 0 ? { config: raw, changed: false, dropped } : { config: { ...raw, models }, changed: true, dropped };
 }
 function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
-}
-var MODEL_DEFAULTS_MIGRATION_ID = "model-defaults-2026-10-23";
-var MODEL_DEFAULT_FIELDS = [
-  ["implementor", "hard_task"],
-  ["reviewer", "opencode_model"],
-  ["sparring", "opencode_model"]
-];
-var ADDED_IMPLEMENTOR_HARD_TASK = { model: "claude-opus-5-5" };
-function addModelDefaults(raw) {
-  const none = { config: raw, changed: false, added: [] };
-  if (!isPlainObject(raw))
-    return none;
-  const applied = raw.applied_config_migrations;
-  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
-    return none;
-  if ((applied ?? []).includes(MODEL_DEFAULTS_MIGRATION_ID))
-    return none;
-  if (raw.models !== void 0 && !isPlainObject(raw.models))
-    return none;
-  const schemaDefaults = configSchema.shape.models.parse({});
-  const defaults = {
-    ...schemaDefaults,
-    implementor: { ...schemaDefaults.implementor, hard_task: { ...ADDED_IMPLEMENTOR_HARD_TASK, effort: schemaDefaults["implementor-hard"].effort } }
-  };
-  const models = { ...raw.models ?? {} };
-  const added = [];
-  for (const [role, field] of MODEL_DEFAULT_FIELDS) {
-    const entry = models[role];
-    if (entry === void 0) {
-      models[role] = defaults[role];
-      added.push({ role, field: "entry", value: defaults[role] });
-    } else if (isPlainObject(entry) && !Object.prototype.hasOwnProperty.call(entry, field)) {
-      const value = field === "hard_task" ? ADDED_IMPLEMENTOR_HARD_TASK : defaults[role][field];
-      models[role] = { ...entry, [field]: value };
-      added.push({ role, field, value });
-    }
-  }
-  const config2 = { ...raw, ...added.length ? { models } : {}, applied_config_migrations: [...applied ?? [], MODEL_DEFAULTS_MIGRATION_ID] };
-  return { config: config2, changed: true, added };
+  return parseCanonicalConfig(raw);
 }
 var IMPLEMENTOR_HARD_MIGRATION_ID = "implementor-hard-2026-10-23";
 function moveImplementorHardTask(raw) {
@@ -5720,28 +5794,6 @@ function moveImplementorHardTask(raw) {
   models["implementor-hard"] = entry;
   return record(models, { kind: "moved", hard_task, entry });
 }
-var OVERPASS_DEFAULTS_MIGRATION_ID = "overpass-defaults-2026-10-23";
-function resetOverpassDefaults(raw) {
-  const none = { config: raw, changed: false };
-  if (!isPlainObject(raw))
-    return none;
-  const applied = raw.applied_config_migrations;
-  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
-    return none;
-  if ((applied ?? []).includes(OVERPASS_DEFAULTS_MIGRATION_ID))
-    return none;
-  if (raw.overpass !== void 0 && !isPlainObject(raw.overpass)) {
-    return { ...none, refusal: `config.overpass is ${JSON.stringify(raw.overpass)}, not an object, so the Overpass defaults reset cannot be applied` };
-  }
-  const { roles, ...block } = raw.overpass ?? {};
-  const result = { config: raw, changed: true };
-  if (Object.prototype.hasOwnProperty.call(raw.overpass ?? {}, "roles"))
-    result.rolesRemoved = { value: roles };
-  if (block.conductor_bypass !== true)
-    result.bypassSet = { was: block.conductor_bypass };
-  result.config = { ...raw, overpass: { ...block, conductor_bypass: true }, applied_config_migrations: [...applied ?? [], OVERPASS_DEFAULTS_MIGRATION_ID] };
-  return result;
-}
 function migrateRetiredModelKeys(raw) {
   const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
   if (!isPlainObject(raw) || !isPlainObject(raw.models))
@@ -5762,6 +5814,332 @@ var CONFIG_KEY_RENAMES = {
   "models.coder": "models.implementor",
   "models.explorer": "models.scout"
 };
+var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var CLAUDE_PROVIDER = "anthropic";
+var OVERPASS_MODEL_NAMESPACE = "overpass";
+var AGY_MODEL_NAMESPACE = "agy";
+var CONDUCTOR_MODEL_KEY = "conductor";
+var PLAN_MODEL_KEY = "plan";
+var MERGE_PATHS = ["direct", "pr"];
+var MIN_REVIEWERS = 1;
+var MAX_REVIEWERS = 5;
+var canonicalModelEntry = external_exports.object({
+  model: external_exports.string().regex(MODEL_REF_RE, "model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto"),
+  effort: external_exports.enum(OVERPASS_EFFORTS).optional()
+}).strict();
+var canonicalModelsSchema = external_exports.object({
+  implementor: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  "implementor-hard": canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  researcher: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  scout: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" }),
+  librarian: canonicalModelEntry.default({ model: "anthropic/claude-haiku-5-5", effort: "low" }),
+  reviewer: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  sparring: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  preflight: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" })
+}).catchall(canonicalModelEntry.partial()).superRefine((models, ctx) => {
+  for (const [key2, entry] of Object.entries(models)) {
+    const e = entry;
+    if (e.model === void 0) {
+      if (e.effort === "max")
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+      if (!isCustomAgentKey(key2))
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "model"], message: "Required" });
+      continue;
+    }
+    const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+    if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.model.startsWith(`${AGY_MODEL_NAMESPACE}/`) && !AGY_MODEL_IDS.includes(e.model.slice(AGY_MODEL_NAMESPACE.length + 1))) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "model"], message: `${JSON.stringify(e.model)} is not an agy model: after agy/ it must be one of ${AGY_MODEL_IDS.join(", ")}` });
+    }
+    if (e.effort === "max" && overpassTier === null) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+    }
+  }
+}).default({});
+var workflowSchema = external_exports.object({
+  merge: external_exports.enum(MERGE_PATHS).default("direct"),
+  reviewers: external_exports.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+  copilot_loop: external_exports.boolean().default(false),
+  auto_merge_on_clean: external_exports.boolean().default(true)
+}).strict().default({});
+var canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
+var canonicalConfigObject = configSchema.omit({ mode: true, models: true, overpass: true, pr_review: true }).extend({
+  models: canonicalModelsSchema,
+  workflow: workflowSchema,
+  overpass: canonicalOverpassSchema,
+  // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+});
+var CANONICAL_RETIRED_KEYS = ["mode", "sparring_partner"];
+var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) => {
+  if (!isPlainObject(raw))
+    return;
+  for (const key2 of CANONICAL_RETIRED_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(raw, key2))
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2], message: `${key2} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+  }
+  if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, "auto_merge_on_clean")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
+  }
+}).pipe(canonicalConfigObject);
+var LegacyConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LegacyConfigError";
+  }
+};
+var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+var LEGACY_OVERPASS_KEYS = ["enabled", "roles", "conductor_bypass"];
+function toCanonicalConfig(legacy, opts = {}) {
+  if (!isPlainObject(legacy))
+    return { config: legacy, conflicts: [], changes: [], origins: {} };
+  const raw = normalizeRawConfig(legacy);
+  const out = { ...raw };
+  const changes = [];
+  const conflicts = [];
+  const origins = {};
+  const resolutions2 = opts.resolutions ?? {};
+  const mode = judgeProjectMode(raw.mode, "the config");
+  let autoMerge;
+  if (raw.pr_review !== void 0) {
+    if (!isPlainObject(raw.pr_review))
+      throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} \u2014 it must be an object`);
+    if (has(raw.pr_review, "auto_merge_on_clean")) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== "boolean")
+        throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} \u2014 it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === void 0) {
+    const derived = mode === "work" ? { merge: "pr", reviewers: 3, copilot_loop: true } : { merge: "direct", reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: "workflow", was: void 0, now: out.workflow });
+    origins.workflow = "mode";
+    if (autoMerge !== void 0)
+      origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  } else if (autoMerge !== void 0 && isPlainObject(raw.workflow) && !has(raw.workflow, "auto_merge_on_clean")) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: "workflow.auto_merge_on_clean", was: void 0, now: autoMerge });
+    origins["workflow.auto_merge_on_clean"] = "pr_review.auto_merge_on_clean";
+  }
+  if (autoMerge !== void 0)
+    changes.push({ path: "pr_review.auto_merge_on_clean", was: autoMerge });
+  if (has(raw, "mode")) {
+    delete out.mode;
+    changes.push({ path: "mode", was: raw.mode });
+  }
+  let overpass = null;
+  if (raw.overpass !== void 0) {
+    if (!isPlainObject(raw.overpass))
+      throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} \u2014 it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: "opencode" });
+      const kept = {};
+      for (const [k, v] of Object.entries(block)) {
+        if (LEGACY_OVERPASS_KEYS.includes(k))
+          changes.push({ path: `overpass.${k}`, was: v });
+        else
+          kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+  const tierOf = (routeModel) => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass.provider.length + 1)}`;
+  if (raw.models !== void 0 && !isPlainObject(raw.models))
+    return { config: out, conflicts, changes, origins };
+  const models = { ...raw.models ?? {} };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry))
+      continue;
+    const next = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === "model" || k === "effort" || k === "opencode_model")
+        continue;
+      if (k === "agy_model" || k === "hard_task") {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v;
+    }
+    const claude = typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model)
+      changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== void 0) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === void 0 || opencode === claude) {
+        model = opencode;
+      } else if (resolutions2[role] !== void 0) {
+        model = resolutions2[role] === "claude" ? claude : opencode;
+      } else if (!(effective && OVERPASS_ROLES.includes(role))) {
+        const effort = typeof entry.effort === "string" ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: "opencode" });
+        model = opencode;
+      }
+    }
+    if (model !== void 0)
+      next.model = model;
+    if (opencode !== void 0 && model === opencode)
+      origins[`models.${role}.model`] = `models.${role}.opencode_model`;
+    if (entry.effort !== void 0)
+      next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions2)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : void 0;
+    const claude = isPlainObject(entry) && typeof entry.model === "string" && !entry.model.includes("/") ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : void 0;
+    const answered = isPlainObject(entry) && entry.opencode_model !== void 0 && claude !== void 0 && entry.opencode_model !== claude;
+    if (!answered)
+      throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...route.effort === void 0 ? {} : { effort: route.effort } };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+      origins[`models.${role}`] = "overpass";
+    }
+    origins[`models.${PLAN_MODEL_KEY}`] = "overpass";
+    if (overpass.conductorRouted)
+      origins[`models.${CONDUCTOR_MODEL_KEY}`] = "overpass";
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: void 0, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: void 0, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (isPlainObject(raw.maintenance_worker) && has(raw.maintenance_worker, "opencode_model")) {
+    const old = raw.maintenance_worker.opencode_model;
+    if (typeof old === "string" && old.trim() !== "") {
+      const { opencode_model: _gone, ...rest } = raw.maintenance_worker;
+      out.maintenance_worker = rest;
+      const existing = models[MAINTENANCE_WORKER_ROLE];
+      if (!isPlainObject(existing) || typeof existing.model !== "string") {
+        const entry = { ...isPlainObject(existing) ? existing : {}, model: old };
+        models[MAINTENANCE_WORKER_ROLE] = entry;
+        origins[`models.${MAINTENANCE_WORKER_ROLE}.model`] = "maintenance_worker.opencode_model";
+        modelsChanged = true;
+        changes.push({ path: `models.${MAINTENANCE_WORKER_ROLE}`, was: existing, now: entry });
+      }
+      changes.push({ path: "maintenance_worker.opencode_model", was: old });
+    }
+  }
+  if (modelsChanged)
+    out.models = models;
+  if (has(raw, "sparring_partner")) {
+    delete out.sparring_partner;
+    changes.push({ path: "sparring_partner", was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes, origins };
+}
+function parseCanonicalConfig(raw) {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
+function parseCanonicalModels(raw) {
+  const config2 = toCanonicalConfig(raw).config;
+  return canonicalModelsSchema.parse(isPlainObject(config2) ? config2.models : void 0);
+}
+
+// packages/schemas/dist/custom-agents.js
+var AGENT_HOSTS = ["claude", "opencode", "agy"];
+function customAgentSlug(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug === "" || slug.length > 64 ? null : slug;
+}
+var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"];
+var AGY_CANONICAL_MODELS = AGY_MODEL_IDS.map((id) => `${AGY_MODEL_NAMESPACE}/${id}`);
+var AGENT_HOST_CAPABILITIES = Object.freeze({
+  claude: { host: "claude", model: { kind: "claude_catalog" }, effortLevels: CLAUDE_EFFORT_LEVELS, runs: { providers: [CLAUDE_PROVIDER] } },
+  opencode: { host: "opencode", model: { kind: "opencode_ref" }, effortLevels: [], runs: { providers: "*", except: [AGY_MODEL_NAMESPACE] } },
+  agy: { host: "agy", model: { kind: "agy_enum", values: AGY_MODEL_IDS }, effortLevels: [], runs: { models: AGY_CANONICAL_MODELS } }
+});
+function hostRunsModel(model, host) {
+  const ref = model.includes("/") ? model : `${CLAUDE_PROVIDER}/${model}`;
+  const runs = AGENT_HOST_CAPABILITIES[host].runs;
+  if ("models" in runs)
+    return runs.models.includes(ref);
+  const provider = ref.slice(0, ref.indexOf("/"));
+  if (runs.except?.includes(provider))
+    return false;
+  return runs.providers === "*" || runs.providers.includes(provider);
+}
+function opencodeModelRef(model, overpassProvider = DEFAULT_OVERPASS_PROVIDER) {
+  const prefix = `${OVERPASS_MODEL_NAMESPACE}/`;
+  return model.startsWith(prefix) ? `${overpassProvider}/${model.slice(prefix.length)}` : model;
+}
+var INHERIT = "inherit";
+function resolveHostSettings(entry, host) {
+  const cap = AGENT_HOST_CAPABILITIES[host];
+  const e = entry ?? {};
+  const effortSupported = cap.effortLevels.length > 0;
+  let model = INHERIT;
+  let modelFrom = "inherit";
+  let modelSupported = true;
+  const canonical2 = typeof e.model === "string" && e.model.includes("/") ? e.model : void 0;
+  if (host === "claude") {
+    if (canonical2) {
+      modelSupported = hostRunsModel(canonical2, "claude");
+      ({ model, modelFrom } = { model: modelSupported ? canonical2.slice(CLAUDE_PROVIDER.length + 1) : canonical2, modelFrom: "model" });
+    } else if (e.model)
+      ({ model, modelFrom } = { model: e.model, modelFrom: "model" });
+  } else if (host === "opencode") {
+    if (e.opencode_model)
+      ({ model, modelFrom } = { model: e.opencode_model, modelFrom: "override" });
+    else if (canonical2)
+      ({ model, modelFrom } = { model: canonical2, modelFrom: "model" });
+    else if (e.model)
+      ({ model, modelFrom } = { model: `anthropic/${e.model}`, modelFrom: "model" });
+  } else if (e.agy_model) {
+    ({ model, modelFrom } = { model: e.agy_model, modelFrom: "override" });
+  } else if (canonical2) {
+    modelSupported = hostRunsModel(canonical2, "agy");
+    ({ model, modelFrom } = { model: modelSupported ? canonical2.slice(AGY_MODEL_NAMESPACE.length + 1) : canonical2, modelFrom: "model" });
+  }
+  const out = { host, model, modelFrom, modelSupported, effortSupported };
+  if (e.effort !== void 0) {
+    if (cap.effortLevels.includes(e.effort))
+      out.effort = e.effort;
+    else
+      out.effortIgnored = e.effort;
+  }
+  return out;
+}
+function twoModelsReason(role) {
+  return `role ${role} has two models; run /sterling:update to choose`;
+}
+var isPlainObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+function unsupportedAgents(config2, hosts = AGENT_HOSTS) {
+  const { config: canon, conflicts } = toCanonicalConfig(config2);
+  const out = conflicts.map((c) => ({ agent: c.role, host: "*", reason: twoModelsReason(c.role) }));
+  const conflicted = new Set(conflicts.map((c) => c.role));
+  const models = canonicalModelsSchema.parse(isPlainObj(canon) && isPlainObj(canon.models) ? canon.models : void 0);
+  for (const agent of Object.keys(models).sort()) {
+    const model = models[agent].model;
+    if (conflicted.has(agent) || model === void 0)
+      continue;
+    for (const host of hosts) {
+      if (agent === PLAN_MODEL_KEY && host !== "opencode")
+        continue;
+      if (!hostRunsModel(model, host))
+        out.push({ agent, host, model, reason: `${host} cannot run ${model}, so it gets no copy of ${agent}` });
+    }
+  }
+  return out;
+}
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -6095,17 +6473,49 @@ function findBackslashHookCommands(frontmatter) {
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
 function resolveModelVars(templateContent, label, config2) {
-  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return conductorModelVars(templateContent, label, config2);
   const { name } = parseTemplate(templateContent, label);
   const key2 = AGENT_MODEL_KEY[name];
   if (!key2) {
     throw new Error(`model resolution failed for ${label}: agent '${name}' has no AGENT_MODEL_KEY entry \u2014 cannot resolve {{MODEL}}/{{EFFORT}}`);
   }
-  const entry = config2 && config2.models && config2.models[key2];
-  if (!entry || typeof entry.model !== "string" || typeof entry.effort !== "string") {
+  if (!config2?.models?.[key2] || typeof config2.models[key2] !== "object") {
     throw new Error(`model resolution failed for ${label}: config.models['${key2}'] is missing model/effort \u2014 a tokenized template needs config.models (P5)`);
   }
-  return { MODEL: entry.model, EFFORT: entry.effort };
+  const { config: canon, conflicts } = toCanonicalConfig(config2);
+  const conflict = conflicts.find((c) => c.role === key2);
+  let entry;
+  if (conflict) entry = conflict.claude;
+  else {
+    const parsed = canonicalModelsSchema.safeParse({ [key2]: canon.models[key2] });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new Error(`model resolution failed for ${label}: config.models.${[key2, ...issue.path.slice(1)].join(".")}: ${issue.message} (P5)`);
+    }
+    entry = parsed.data[key2];
+  }
+  if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${key2} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { MODEL: entry.model.slice(entry.model.indexOf("/") + 1), EFFORT: entry.effort ?? null };
+}
+function conductorModelVars(templateContent, label, config2) {
+  if (!config2?.models || typeof config2.models !== "object") return {};
+  const { name } = parseTemplate(templateContent, label);
+  if (name !== CONDUCTOR_MODEL_KEY) return {};
+  const { config: canon, conflicts } = toCanonicalConfig(config2);
+  const conflict = conflicts.find((c) => c.role === CONDUCTOR_MODEL_KEY);
+  const raw = conflict ? conflict.claude : canon.models?.[CONDUCTOR_MODEL_KEY];
+  if (raw === void 0) return {};
+  const parsed = canonicalModelsSchema.safeParse({ [CONDUCTOR_MODEL_KEY]: raw });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`model resolution failed for ${label}: config.models.${[CONDUCTOR_MODEL_KEY, ...issue.path.slice(1)].join(".")}: ${issue.message} (P5)`);
+  }
+  const entry = parsed.data[CONDUCTOR_MODEL_KEY];
+  if (!hostRunsModel(entry.model, "claude")) return { unsupported: `config.models.${CONDUCTOR_MODEL_KEY} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { conductorPin: { model: entry.model.slice(entry.model.indexOf("/") + 1), effort: entry.effort ?? null } };
+}
+function claudeUnsupportedReason(templateContent, label, config2) {
+  return resolveModelVars(templateContent, label, config2).unsupported ?? null;
 }
 function refusesSterlingGrant(entry) {
   const lower = entry.toLowerCase();
@@ -6143,14 +6553,27 @@ function appendExtraTools(frontmatter, name, label, config2) {
   return lines.join("\n");
 }
 function renderInstalledAgent(templateContent, label, { pluginVersion: pluginVersion2, now, vars = {}, config: config2 } = {}) {
-  const allVars = { ...vars, ...resolveModelVars(templateContent, label, config2) };
+  const { conductorPin, ...modelVars } = resolveModelVars(templateContent, label, config2);
+  if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
+  const allVars = { ...vars, ...modelVars };
   let substituted = renderClaudeText(templateContent, label);
+  if (allVars.EFFORT === null) {
+    substituted = substituted.replace(/^effort:[ \t]*\{\{EFFORT\}\}[ \t]*\r?\n/m, "");
+    delete allVars.EFFORT;
+  }
   for (const [key2, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key2}}}`).join(value);
   }
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
-  const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config2);
+  let pinned = parsed.frontmatter;
+  if (conductorPin) {
+    if (/^(model|effort):/m.test(pinned)) throw new Error(`${label}: the conductor template already has a model or effort line, so config.models.${CONDUCTOR_MODEL_KEY} cannot be applied (P5)`);
+    pinned = `${pinned}
+model: ${conductorPin.model}${conductorPin.effort ? `
+effort: ${conductorPin.effort}` : ""}`;
+  }
+  const frontmatter = appendExtraTools(pinned, name, label, config2);
   const unsubstituted = substituted.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {
     throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value \u2014 refusing to install a half-baked agent (P5)`);
@@ -6251,10 +6674,10 @@ function validateOpenCodeEntry(entry, where) {
   if (block.permission === void 0) return;
   validatePermissionMap(block.permission, `${where}.permission`);
 }
-var AGENT_HOSTS = ["claude", "opencode"];
+var AGENT_HOSTS2 = ["claude", "opencode"];
 var OPENCODE_FULL_MODES = ["primary", "subagent"];
 function agentHosts(entry) {
-  return entry.hosts ?? AGENT_HOSTS;
+  return entry.hosts ?? AGENT_HOSTS2;
 }
 function claudeAgentEntries(registry) {
   return registry.agents.filter((entry) => agentHosts(entry).includes("claude"));
@@ -6262,8 +6685,8 @@ function claudeAgentEntries(registry) {
 function validateHosts(entry, where) {
   if (entry.hosts !== void 0) {
     const hosts = entry.hosts;
-    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS.includes(h)) || new Set(hosts).size !== hosts.length) {
-      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS.join(", ")}`);
+    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS2.includes(h)) || new Set(hosts).size !== hosts.length) {
+      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS2.join(", ")}`);
     }
   }
   const full = entry.opencode_full;
@@ -6322,7 +6745,17 @@ var RESTART_INSTRUCTION = [
   "================================================================"
 ].join("\n");
 function agentChangesRequireRestart(report2) {
-  return report2.some((entry) => ["installed", "refreshed", "header_repaired", "machine_rebaked", "retired"].includes(entry.status));
+  return report2.some((entry) => ["installed", "refreshed", "header_repaired", "machine_rebaked", "retired", "unsupported_removed"].includes(entry.status));
+}
+function unsupportedModifiedInstruction(name, reason) {
+  return [
+    `REFUSED: .claude/agents/${name}.md is no longer generated (${reason}), but it was edited after install,`,
+    "so Sterling keeps it. It may run another model or allow other tools than the agent is configured with.",
+    `Remove it by hand (move it out of .claude/agents/), or choose an anthropic model for ${name} in config.models (TUI System tab).`
+  ].join("\n");
+}
+function unsupportedRoster(prepared) {
+  return new Map(prepared.filter((e) => e.unsupported).map((e) => [e.name, e.unsupported]));
 }
 function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars, config: config2 }) {
   const entries = claudeAgentEntries(loadRegistry(registryPath));
@@ -6334,6 +6767,8 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pl
   }
   return entries.map((entry) => {
     const templateContent = readFileSync3(join3(templatesDir, entry.file), "utf8");
+    const unsupported = claudeUnsupportedReason(templateContent, entry.file, config2);
+    if (unsupported) return { ...entry, templateContent, unsupported };
     const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion: pluginVersion2, now, vars, config: config2 });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
@@ -6350,9 +6785,10 @@ function retirementRefuseInstruction(name) {
     "  3) delete it."
   ].join("\n");
 }
-function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
+function retireAgents({ targetAgentsDir, registryNames, unsupported = /* @__PURE__ */ new Map(), fs = {} }) {
   const io = { readdirSync, lstatSync: lstatSync2, readFileSync: readFileSync3, unlinkSync, renameSync: renameSync2, linkSync, ...fs };
   const report2 = [];
+  const seenUnsupported = /* @__PURE__ */ new Set();
   let entries;
   try {
     entries = io.readdirSync(targetAgentsDir);
@@ -6398,8 +6834,11 @@ Unable to read the file: ${err?.code ?? err?.message ?? err}` });
       report2.push({ name, status: "retired_identity_mismatch", refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
+    const unsupportedWhy = unsupported.get(name);
+    if (unsupportedWhy) seenUnsupported.add(name);
     if (isLocallyModified(content, header)) {
-      report2.push({ name, status: "retired_but_modified", refused: true, instruction: retirementRefuseInstruction(name) });
+      if (unsupportedWhy) report2.push({ name, status: "unsupported_but_modified", refused: true, detail: unsupportedWhy, instruction: unsupportedModifiedInstruction(name, unsupportedWhy) });
+      else report2.push({ name, status: "retired_but_modified", refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
     const quarantine = join3(targetAgentsDir, `.sterling-retire-${name}-${randomUUID2()}`);
@@ -6423,7 +6862,7 @@ Unable to read the file: ${err?.code ?? err?.message ?? err}` });
       io.afterQuarantineVerify?.({ path, quarantine, name });
       verifyQuarantine();
       io.unlinkSync(quarantine);
-      report2.push({ name, status: "retired" });
+      report2.push(unsupportedWhy ? { name, status: "unsupported_removed", detail: unsupportedWhy } : { name, status: "retired" });
     } catch (err) {
       let restored = false;
       try {
@@ -6435,6 +6874,9 @@ Unable to read the file: ${err?.code ?? err?.message ?? err}` });
       report2.push({ name, status: "retired_delete_failed", refused: true, instruction: `${retirementRefuseInstruction(name)}
 Unable to retire safely (${err?.code ?? err?.message ?? err}); ${restored ? "the candidate was restored." : `it remains quarantined at ${quarantine}.`}` });
     }
+  }
+  for (const [name, why] of unsupported) {
+    if (!seenUnsupported.has(name)) report2.push({ name, status: "unsupported", detail: why });
   }
   return report2;
 }
@@ -6462,7 +6904,9 @@ function foreignFileInstruction(name) {
   ].join("\n");
 }
 function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: pluginVersion2, now, vars = {}, config: config2, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars, config: config2 });
+  const all = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars, config: config2 });
+  const unsupported = unsupportedRoster(all);
+  const prepared = all.filter((entry) => !entry.unsupported);
   mkdirSync(targetAgentsDir, { recursive: true });
   const report2 = [];
   for (const entry of prepared) {
@@ -6518,10 +6962,11 @@ function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion
       }
     }
   }
-  report2.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
+  report2.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), unsupported, fs: retirementFs }));
   return { report: report2, restartInstruction: RESTART_INSTRUCTION };
 }
 var CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = /* @__PURE__ */ new Set(["installed", "up_to_date", "refreshed", "header_repaired"]);
+var CONDUCTOR_UNSUPPORTED_STATUSES = /* @__PURE__ */ new Set(["unsupported", "unsupported_removed", "unsupported_but_modified"]);
 function ensureConductorActivation(targetDir2, agentResults) {
   const settingsPath = join3(targetDir2, ".claude", "settings.json");
   let parsed;
@@ -6549,7 +6994,13 @@ function ensureConductorActivation(targetDir2, agentResults) {
   }
   const result = {};
   const conductorResult = (agentResults ?? []).find((r) => r.name === "conductor");
-  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
+  if (conductorResult && CONDUCTOR_UNSUPPORTED_STATUSES.has(conductorResult.status) && parsed.agent === "conductor") {
+    result.activation = "refused";
+    const why = conductorResult.detail ?? "the conductor's model is one Claude Code cannot run";
+    const fix = `pick an anthropic model for models.conductor in the System tab, or remove "agent" from ${settingsPath} by hand`;
+    result.reason = conductorResult.status === "unsupported_but_modified" ? `${why}; your edited .claude/agents/conductor.md is kept but Sterling no longer maintains it, and ${settingsPath} still sets "agent": "conductor", so Claude Code runs that edited copy on whatever model it names; ${fix}` : `${why}, so there is no Claude Code conductor copy, but ${settingsPath} still sets "agent": "conductor", so Claude Code starts without Sterling's conductor; ${fix}`;
+    console.error(`REFUSED: ${result.reason}`);
+  } else if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
     result.activation = "skipped";
     result.reason = conductorResult ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired` : "no 'conductor' entry in the agent install/sync report";
   } else if (!("agent" in parsed)) {
@@ -6798,86 +7249,26 @@ function describeMigration(dropped) {
 function describeStaleAgy(dropped) {
   return dropped.map((d) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.role}.agy_model dropped (agy accepts only inherit, flash_lite, flash or pro, and drops a subagent with any other model); value was ${show(d.value)}, so the ${d.role} agy agent now runs on model: inherit; pick one of the four in the System tab if you want one`);
 }
-function describeAdded(added) {
-  return added.map(
-    (a) => a.field === "entry" ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role} added as the shipped default ${show(a.value)}, so the System tab shows the model each OpenCode dispatch of this role runs on; change it there` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${a.role}.${a.field} added as ${show(a.value)} (the model the conductor named on these dispatches before); change it in the System tab, or clear it to run the role on its Claude model${a.field === "hard_task" ? " (cleared: no separate hard lane)" : ""}`
-  );
-}
 function describeHardMove(move) {
   if (!move) return [];
   if (move.kind === "moved") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task ${show(move.hard_task)} moved to models.implementor-hard as ${show(move.entry)}, the sterling/implementor-hard agent's model; change it in the System tab`];
   if (move.kind === "dropped") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task dropped (value was ${show(move.hard_task)}); models.implementor-hard ${show(move.entry)} was already set and is kept`];
   return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
 }
-function describeOverpassReset(reset) {
-  if (!reset.changed) return [];
-  const lines = [];
-  if (reset.rolesRemoved) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.roles removed (value was ${show(reset.rolesRemoved.value)}); every role now runs on its default tier`);
-  if (reset.bypassSet) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.conductor_bypass set to true (was ${reset.bypassSet.was === void 0 ? "unset" : show(reset.bypassSet.was)}); the conductor keeps its direct model pin`);
-  if (!lines.length) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass defaults already in place; recorded ${OVERPASS_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never reset again`);
-  return lines;
-}
 var ConcurrentChange = class extends Error {
 };
-var oneLine = (err) => err.message.replace(/\s+/g, " ");
-function prepareConfigMigration(projectDir) {
-  const configPath2 = join6(projectDir, ".sterling", "config.json");
-  if (!existsSync3(configPath2)) return { status: "absent", lines: [] };
-  const shown = configPath2.replace(/\\/g, "/");
-  const refuse = (why) => ({ status: "refused", lines: [`config migration refused: ${shown} ${why}; left untouched`] });
-  const originalBytes = readFileSync5(configPath2);
-  let raw;
-  try {
-    raw = JSON.parse(originalBytes.toString("utf8"));
-    parseConfig(raw);
-  } catch (err) {
-    return refuse(`does not parse or validate (${oneLine(err)})`);
-  }
-  const m = migrateRetiredModelKeys(raw);
-  const a = migrateStaleAgyModels(m.config);
-  const d = addModelDefaults(a.config);
-  const h = moveImplementorHardTask(d.config);
-  const o = resetOverpassDefaults(h.config);
-  if (o.refusal) return refuse(o.refusal);
-  if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: "unchanged", lines: [] };
+function rewritable(projectDir, configPath2, refuse) {
   try {
     containedPath(projectDir, ".sterling", "dir");
   } catch (err) {
-    if (err instanceof ContainmentError) return refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`);
+    if (err instanceof ContainmentError) return { refused: refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`) };
     throw err;
   }
   const stat = lstatSync5(configPath2);
-  if (stat.isSymbolicLink()) return refuse("is a symlink, which the rewrite would replace");
-  try {
-    parseConfig(o.config);
-  } catch (err) {
-    return refuse(`would not validate after the migration (${oneLine(err)})`);
-  }
-  const text = originalBytes.toString("utf8");
-  return {
-    status: "ready",
-    configPath: configPath2,
-    shown,
-    originalBytes,
-    mode: stat.mode & 511,
-    next: JSON.stringify(o.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
-    config: o.config,
-    dropped: m.dropped,
-    staleAgy: a.dropped,
-    added: d.added,
-    hardMove: h.move,
-    overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
-    lines: [
-      ...describeMigration(m.dropped),
-      ...describeStaleAgy(a.dropped),
-      ...describeAdded(d.added),
-      ...d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : [],
-      ...describeHardMove(h.move),
-      ...h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : [],
-      ...describeOverpassReset(o)
-    ]
-  };
+  if (stat.isSymbolicLink()) return { refused: refuse("is a symlink, which the rewrite would replace") };
+  return { stat };
 }
+var oneLine = (err) => err.message.replace(/\s+/g, " ");
 function commitConfigMigration(plan, { beforeRename } = {}) {
   if (plan.status !== "ready") return plan;
   const unchanged = () => {
@@ -6910,8 +7301,92 @@ function commitConfigMigration(plan, { beforeRename } = {}) {
   }
   return { ...plan, status: "migrated" };
 }
-function migrateProjectConfig(projectDir, opts) {
-  return commitConfigMigration(prepareConfigMigration(projectDir), opts);
+var CANONICAL_CONFIG_MIGRATION_ID = "canonical-config-2026-11-19";
+function isCanonicalAlready(raw) {
+  try {
+    const r = toCanonicalConfig(raw);
+    return r.changes.length === 0 && r.conflicts.length === 0;
+  } catch {
+    return false;
+  }
+}
+var describeValue = (v) => v === void 0 ? "unset" : show(v);
+function describeCanonicalChanges(changes) {
+  return changes.map(
+    (c) => Object.prototype.hasOwnProperty.call(c, "now") ? `${CONFIG_MIGRATION_LINE_PREFIX}${c.path} set to ${show(c.now)} (was ${describeValue(c.was)})` : `${CONFIG_MIGRATION_LINE_PREFIX}${c.path} removed (value was ${show(c.was)})`
+  );
+}
+function describeConflicts(conflicts) {
+  return conflicts.map((c) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${c.role} has two models: Claude Code runs ${show(c.claude.model)}, OpenCode runs ${show(c.opencode.model)}; an agent has one model, so choose one (OpenCode preselected)`);
+}
+function prepareCanonicalConfigMigration(projectDir, { resolutions: resolutions2 } = {}) {
+  const configPath2 = join6(projectDir, ".sterling", "config.json");
+  if (!existsSync3(configPath2)) return { status: "absent", lines: [] };
+  const shown = configPath2.replace(/\\/g, "/");
+  const refuse = (why) => ({ status: "refused", lines: [`config migration refused: ${shown} ${why}; left untouched`] });
+  const originalBytes = readFileSync5(configPath2);
+  let raw;
+  try {
+    raw = JSON.parse(originalBytes.toString("utf8"));
+  } catch (err) {
+    return refuse(`is not valid JSON (${oneLine(err)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return refuse("is not a JSON object");
+  const applied = Array.isArray(raw.applied_config_migrations) ? raw.applied_config_migrations : [];
+  const m = migrateRetiredModelKeys(raw);
+  const a = migrateStaleAgyModels(m.config);
+  let legacy = a.config;
+  const legacyLines = [...describeMigration(m.dropped), ...describeStaleAgy(a.dropped)];
+  if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
+    const h = moveImplementorHardTask(legacy);
+    legacy = h.config;
+    legacyLines.push(...describeHardMove(h.move));
+  }
+  let result;
+  try {
+    result = toCanonicalConfig(legacy, { resolutions: resolutions2 });
+  } catch (err) {
+    return refuse(`cannot be carried to the canonical shape (${oneLine(err)})`);
+  }
+  const config2 = result.config;
+  if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID)) config2.applied_config_migrations = [...Array.isArray(config2.applied_config_migrations) ? config2.applied_config_migrations : [], CANONICAL_CONFIG_MIGRATION_ID];
+  if (result.conflicts.length) return { status: "conflicts", conflicts: result.conflicts, lines: describeConflicts(result.conflicts) };
+  if (JSON.stringify(config2) === JSON.stringify(raw)) return { status: "unchanged", lines: [] };
+  const placed = rewritable(projectDir, configPath2, refuse);
+  if (placed.refused) return placed.refused;
+  const checked = canonicalConfigSchema.safeParse(config2);
+  if (!checked.success) return refuse(`would not validate after the migration (${oneLine(checked.error)})`);
+  const text = originalBytes.toString("utf8");
+  return {
+    status: "ready",
+    configPath: configPath2,
+    shown,
+    originalBytes,
+    mode: placed.stat.mode & 511,
+    next: JSON.stringify(config2, null, 2) + (text.endsWith("\n") ? "\n" : ""),
+    config: config2,
+    changes: result.changes,
+    lines: [...legacyLines, ...describeCanonicalChanges(result.changes)]
+  };
+}
+function migrateProjectConfigCanonical(projectDir, { resolutions: resolutions2, ...opts } = {}) {
+  return commitConfigMigration(prepareCanonicalConfigMigration(projectDir, { resolutions: resolutions2 }), opts);
+}
+function modelChoicesFromArgs(args2) {
+  const resolutions2 = {};
+  for (let i = 0; i < args2.length; i += 1) {
+    if (args2[i] !== "--model-choice") continue;
+    const value = args2[i + 1] ?? "";
+    const m = /^([^=\s]+)=(claude|opencode)$/.exec(value);
+    if (!m) throw new Error(`--model-choice needs <role>=claude|opencode, got ${JSON.stringify(value)}`);
+    resolutions2[m[1]] = m[2];
+    i += 1;
+  }
+  return resolutions2;
+}
+function describeConflictRefusal(conflicts) {
+  const roles = conflicts.map((c) => c.role);
+  return `refused_model_conflicts: ${roles.join(", ")} each name two models (a Claude model and an OpenCode model) and an agent has one; ask which to keep for each, then rerun with ${roles.map((r) => `--model-choice ${r}=claude|opencode`).join(" ")}; nothing synced`;
 }
 
 // scripts/lib/opencode-agents.mjs
@@ -7560,6 +8035,11 @@ function isPlainObject2(data) {
   const prototype = Object.getPrototypeOf(data);
   return prototype === null || prototype === Object.prototype;
 }
+function pick(object, keys) {
+  const result = {};
+  for (const key2 of keys) if (object[key2] !== void 0) result[key2] = object[key2];
+  return result;
+}
 var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
   create: () => ({
     list: [],
@@ -7910,6 +8390,131 @@ var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
     return container[normalizedKey];
   }
 });
+var DEFAULT_SNIPPET_OPTIONS = {
+  maxLength: 79,
+  indent: 1,
+  linesBefore: 3,
+  linesAfter: 2
+};
+function getLine(buffer, lineStart, lineEnd, position, maxLineLength) {
+  let head = "";
+  let tail = "";
+  const maxHalfLength = Math.floor(maxLineLength / 2) - 1;
+  if (position - lineStart > maxHalfLength) {
+    head = " ... ";
+    lineStart = position - maxHalfLength + head.length;
+  }
+  if (lineEnd - position > maxHalfLength) {
+    tail = " ...";
+    lineEnd = position + maxHalfLength - tail.length;
+  }
+  return {
+    str: head + buffer.slice(lineStart, lineEnd).replace(/\t/g, "\u2192") + tail,
+    pos: position - lineStart + head.length
+  };
+}
+function padStart(string, max) {
+  return " ".repeat(Math.max(max - string.length, 0)) + string;
+}
+function makeSnippet(mark, options) {
+  if (!mark.buffer) return null;
+  const opts = {
+    ...DEFAULT_SNIPPET_OPTIONS,
+    ...options
+  };
+  const re = /\r?\n|\r|\0/g;
+  const lineStarts = [0];
+  const lineEnds = [];
+  let match;
+  let foundLineNo = -1;
+  while (match = re.exec(mark.buffer)) {
+    lineEnds.push(match.index);
+    lineStarts.push(match.index + match[0].length);
+    if (mark.position <= match.index && foundLineNo < 0) foundLineNo = lineStarts.length - 2;
+  }
+  if (foundLineNo < 0) foundLineNo = lineStarts.length - 1;
+  let result = "";
+  const lineNoLength = Math.min(mark.line + opts.linesAfter, lineEnds.length).toString().length;
+  const maxLineLength = opts.maxLength - (opts.indent + lineNoLength + 3);
+  for (let i = 1; i <= opts.linesBefore; i++) {
+    if (foundLineNo - i < 0) break;
+    const line2 = getLine(mark.buffer, lineStarts[foundLineNo - i], lineEnds[foundLineNo - i], mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo - i]), maxLineLength);
+    result = `${" ".repeat(opts.indent)}${padStart((mark.line - i + 1).toString(), lineNoLength)} | ${line2.str}
+${result}`;
+  }
+  const line = getLine(mark.buffer, lineStarts[foundLineNo], lineEnds[foundLineNo], mark.position, maxLineLength);
+  result += `${" ".repeat(opts.indent)}${padStart((mark.line + 1).toString(), lineNoLength)} | ${line.str}
+`;
+  result += `${"-".repeat(opts.indent + lineNoLength + 3 + line.pos)}^
+`;
+  for (let i = 1; i <= opts.linesAfter; i++) {
+    if (foundLineNo + i >= lineEnds.length) break;
+    const line2 = getLine(mark.buffer, lineStarts[foundLineNo + i], lineEnds[foundLineNo + i], mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo + i]), maxLineLength);
+    result += `${" ".repeat(opts.indent)}${padStart((mark.line + i + 1).toString(), lineNoLength)} | ${line2.str}
+`;
+  }
+  return result.replace(/\n$/, "");
+}
+function formatError(exception, compact) {
+  let where = "";
+  if (!exception.mark) return exception.reason;
+  if (exception.mark.name) where += `in "${exception.mark.name}" `;
+  where += `(${exception.mark.line + 1}:${exception.mark.column + 1})`;
+  if (!compact && exception.mark.snippet) where += `
+
+${exception.mark.snippet}`;
+  return `${exception.reason} ${where}`;
+}
+var YAMLException = class YAMLException2 extends Error {
+  reason;
+  mark;
+  /**
+  * Optional `mark` contains source snippet data. Usually, use
+  * {@link YAMLException.throwAt} instead of passing it directly.
+  */
+  constructor(reason, mark) {
+    super();
+    this.name = "YAMLException";
+    this.reason = reason;
+    this.mark = mark;
+    this.message = formatError(this, false);
+    if (Error.captureStackTrace) Error.captureStackTrace(this, this.constructor);
+  }
+  /**
+  * Returns the formatted error, omitting the source snippet in compact mode.
+  */
+  toString(compact) {
+    return `${this.name}: ${formatError(this, compact)}`;
+  }
+  /**
+  * Builds a YAMLException with a source snippet and throws it. `source` is
+  * the raw input text; `position` is an offset into it.
+  */
+  static throwAt(source, position, message, filename = "") {
+    let line = 0;
+    let lineStart = 0;
+    for (let index = 0; index < position; index++) {
+      const ch = source.charCodeAt(index);
+      if (ch === 10) {
+        line++;
+        lineStart = index + 1;
+      } else if (ch === 13) {
+        line++;
+        if (source.charCodeAt(index + 1) === 10) index++;
+        lineStart = index + 1;
+      }
+    }
+    const mark = {
+      name: filename,
+      buffer: source,
+      position,
+      line,
+      column: position - lineStart
+    };
+    mark.snippet = makeSnippet(mark);
+    throw new YAMLException2(message, mark);
+  }
+};
 var EVENT_ID = {
   DOCUMENT: 1,
   SEQUENCE: 2,
@@ -7934,6 +8539,7 @@ var CHOMPING_MODE = {
   STRIP: 2,
   KEEP: 3
 };
+var NO_RANGE$3 = -1;
 function simpleEscapeSequence(c) {
   switch (c) {
     case 48:
@@ -7982,12 +8588,218 @@ for (let i = 0; i < 256; i++) {
   simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
   simpleEscapeMap[i] = simpleEscapeSequence(i);
 }
+function charFromCodepoint(c) {
+  if (c <= 65535) return String.fromCharCode(c);
+  return String.fromCharCode((c - 65536 >> 10) + 55296, (c - 65536 & 1023) + 56320);
+}
+function fromHexCode$1(c) {
+  if (c >= 48 && c <= 57) return c - 48;
+  return (c | 32) - 97 + 10;
+}
+function escapedHexLen$1(c) {
+  if (c === 120) return 2;
+  if (c === 117) return 4;
+  return 8;
+}
+function skipFoldedBreaks(input, position, end) {
+  let breaks = 0;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 10) {
+      breaks++;
+      position++;
+    } else if (ch === 13) {
+      breaks++;
+      position++;
+      if (input.charCodeAt(position) === 10) position++;
+    } else if (ch === 32 || ch === 9) position++;
+    else break;
+  }
+  return {
+    position,
+    breaks
+  };
+}
+function foldedBreaks(count) {
+  if (count === 1) return " ";
+  return "\n".repeat(count - 1);
+}
+function getPlainValue(input, start, end) {
+  let result = "";
+  let position = start;
+  let captureStart = start;
+  let captureEnd = start;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 10 || ch === 13) {
+      result += input.slice(captureStart, captureEnd);
+      const fold = skipFoldedBreaks(input, position, end);
+      result += foldedBreaks(fold.breaks);
+      position = captureStart = captureEnd = fold.position;
+    } else {
+      position++;
+      if (ch !== 32 && ch !== 9) captureEnd = position;
+    }
+  }
+  return result + input.slice(captureStart, captureEnd);
+}
+function getSingleQuotedValue(input, start, end) {
+  let result = "";
+  let position = start;
+  let captureStart = start;
+  let captureEnd = start;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 39) {
+      result += input.slice(captureStart, position) + "'";
+      position += 2;
+      captureStart = captureEnd = position;
+    } else if (ch === 10 || ch === 13) {
+      result += input.slice(captureStart, captureEnd);
+      const fold = skipFoldedBreaks(input, position, end);
+      result += foldedBreaks(fold.breaks);
+      position = captureStart = captureEnd = fold.position;
+    } else {
+      position++;
+      if (ch !== 32 && ch !== 9) captureEnd = position;
+    }
+  }
+  return result + input.slice(captureStart, end);
+}
+function getDoubleQuotedValue(input, start, end) {
+  let result = "";
+  let position = start;
+  let captureStart = start;
+  let captureEnd = start;
+  while (position < end) {
+    const ch = input.charCodeAt(position);
+    if (ch === 92) {
+      result += input.slice(captureStart, position);
+      position++;
+      const escaped = input.charCodeAt(position);
+      if (escaped === 10 || escaped === 13) position = skipFoldedBreaks(input, position, end).position;
+      else if (escaped < 256 && simpleEscapeCheck[escaped]) {
+        result += simpleEscapeMap[escaped];
+        position++;
+      } else {
+        let hexLength = escapedHexLen$1(escaped);
+        let hexResult = 0;
+        for (; hexLength > 0; hexLength--) {
+          position++;
+          const digit = fromHexCode$1(input.charCodeAt(position));
+          hexResult = (hexResult << 4) + digit;
+        }
+        result += charFromCodepoint(hexResult);
+        position++;
+      }
+      captureStart = captureEnd = position;
+    } else if (ch === 10 || ch === 13) {
+      result += input.slice(captureStart, captureEnd);
+      const fold = skipFoldedBreaks(input, position, end);
+      result += foldedBreaks(fold.breaks);
+      position = captureStart = captureEnd = fold.position;
+    } else {
+      position++;
+      if (ch !== 32 && ch !== 9) captureEnd = position;
+    }
+  }
+  return result + input.slice(captureStart, end);
+}
+function getBlockValue(input, start, end, indent, chomping, folded) {
+  const textIndent = indent < 0 ? 0 : indent;
+  const region = input.slice(start, end).replace(/\r\n?/g, "\n");
+  const lines = region === "" ? [] : (region.endsWith("\n") ? region.slice(0, -1) : region).split("\n");
+  let result = "";
+  let didReadContent = false;
+  let emptyLines = 0;
+  let atMoreIndented = false;
+  for (const line of lines) {
+    let column = 0;
+    while (column < textIndent && line.charCodeAt(column) === 32) column++;
+    if (indent < 0 || column >= line.length) {
+      emptyLines++;
+      continue;
+    }
+    const content = line.slice(textIndent);
+    const first = content.charCodeAt(0);
+    if (folded) {
+      if (first === 32 || first === 9) {
+        atMoreIndented = true;
+        result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+      } else if (atMoreIndented) {
+        atMoreIndented = false;
+        result += "\n".repeat(emptyLines + 1);
+      } else if (emptyLines === 0) {
+        if (didReadContent) result += " ";
+      } else result += "\n".repeat(emptyLines);
+    } else result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+    result += content;
+    didReadContent = true;
+    emptyLines = 0;
+  }
+  if (chomping === CHOMPING_MODE.KEEP) result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+  else if (chomping !== CHOMPING_MODE.STRIP) {
+    if (didReadContent) result += "\n";
+  }
+  return result;
+}
+function getScalarValue(input, scalar) {
+  if (scalar.valueStart === NO_RANGE$3) return "";
+  const { valueStart, valueEnd } = scalar;
+  if (scalar.fast) return input.slice(valueStart, valueEnd);
+  switch (scalar.style) {
+    case SCALAR_STYLE.SINGLE_QUOTED:
+      return getSingleQuotedValue(input, valueStart, valueEnd);
+    case SCALAR_STYLE.DOUBLE_QUOTED:
+      return getDoubleQuotedValue(input, valueStart, valueEnd);
+    case SCALAR_STYLE.LITERAL_BLOCK:
+      return getBlockValue(input, valueStart, valueEnd, scalar.indent, scalar.chomping, false);
+    case SCALAR_STYLE.FOLDED_BLOCK:
+      return getBlockValue(input, valueStart, valueEnd, scalar.indent, scalar.chomping, true);
+    default:
+      return getPlainValue(input, valueStart, valueEnd);
+  }
+}
 var DEFAULT_TAG_HANDLERS = Object.assign(/* @__PURE__ */ Object.create(null), {
   "!": "!",
   "!!": "tag:yaml.org,2002:"
 });
 var TAG_SUFFIX_CHARS = "-#;/?:@&=+$_.~*'()";
 var TAG_URI_CHARS = TAG_SUFFIX_CHARS + "!,[]";
+function tagPercentDecode(source) {
+  let result = "";
+  let index = 0;
+  while (index < source.length) {
+    if (source.charCodeAt(index) !== 37) {
+      result += source[index++];
+      continue;
+    }
+    let ch = parseInt(source.slice(index + 1, index + 3), 16);
+    index += 3;
+    if (ch >= 192) {
+      let remaining = ch < 224 ? 1 : ch < 240 ? 2 : 3;
+      ch &= (1 << 6 - remaining) - 1;
+      while (remaining-- > 0) {
+        ch = ch << 6 | parseInt(source.slice(index + 1, index + 3), 16) & 63;
+        index += 3;
+      }
+    }
+    if (ch < 65536) result += String.fromCharCode(ch);
+    else {
+      ch -= 65536;
+      result += String.fromCharCode(55296 | ch >> 10, 56320 | ch & 1023);
+    }
+  }
+  return result;
+}
+function tagNameFull(rawTag, tagHandlers) {
+  if (rawTag.startsWith("!<") && rawTag.endsWith(">")) return tagPercentDecode(rawTag.slice(2, -1));
+  const handleEnd = rawTag.indexOf("!", 1);
+  const handle = handleEnd === -1 ? "!" : rawTag.slice(0, handleEnd + 1);
+  return tagPercentDecode(tagHandlers?.[handle] ?? DEFAULT_TAG_HANDLERS[handle] ?? handle) + tagPercentDecode(rawTag.slice(handle.length));
+}
+var NO_RANGE$2 = -1;
+var MERGE_TAG_NAME = "tag:yaml.org,2002:merge";
 var DEFAULT_CONSTRUCTOR_OPTIONS = {
   filename: "",
   schema: CORE_SCHEMA,
@@ -7995,6 +8807,251 @@ var DEFAULT_CONSTRUCTOR_OPTIONS = {
   maxTotalMergeKeys: 1e4,
   maxAliases: -1
 };
+function eventPosition$1(event) {
+  if ("tagStart" in event && event.tagStart !== NO_RANGE$2) return event.tagStart;
+  if ("anchorStart" in event && event.anchorStart !== NO_RANGE$2) return event.anchorStart;
+  if ("valueStart" in event && event.valueStart !== NO_RANGE$2) return event.valueStart;
+  if ("start" in event) return event.start;
+  return 0;
+}
+function throwError$1(state, message) {
+  YAMLException.throwAt(state.source, state.position, message, state.filename);
+}
+function finalizeCollection(state, position, tag, carrier) {
+  try {
+    return tag.finalize(carrier);
+  } catch (error) {
+    if (error instanceof YAMLException) throw error;
+    YAMLException.throwAt(state.source, position, error instanceof Error ? error.message : String(error), state.filename);
+  }
+}
+function constructScalar(state, event) {
+  const source = getScalarValue(state.source, event);
+  const rawTag = event.tagStart === NO_RANGE$2 ? "" : state.source.slice(event.tagStart, event.tagEnd);
+  const strTag2 = state.schema.defaultScalarTag;
+  if (rawTag !== "") {
+    if (rawTag === "!") return {
+      value: source,
+      tag: strTag2
+    };
+    const tagName = tagNameFull(rawTag, state.tagHandlers);
+    const scalarTag = state.schema.lookupScalarTag(tagName);
+    if (scalarTag) {
+      const result = scalarTag.resolve(source, true, tagName);
+      if (result === NOT_RESOLVED) throwError$1(state, `cannot resolve a node with !<${tagName}> explicit tag`);
+      return {
+        value: result,
+        tag: scalarTag
+      };
+    }
+    const collectionTagDef = state.schema.lookupMappingTag(tagName) ?? state.schema.lookupSequenceTag(tagName);
+    if (collectionTagDef) {
+      if (source !== "") throwError$1(state, `cannot resolve a node with !<${tagName}> explicit tag`);
+      const carrier = collectionTagDef.create(tagName);
+      return {
+        value: collectionTagDef.carrierIsResult ? carrier : finalizeCollection(state, state.position, collectionTagDef, carrier),
+        tag: collectionTagDef
+      };
+    }
+    throwError$1(state, `unknown scalar tag !<${tagName}>`);
+  }
+  if (event.style === SCALAR_STYLE.PLAIN) return state.schema.resolveImplicitScalarTag(source);
+  return {
+    value: strTag2.resolve(source, false, strTag2.tagName),
+    tag: strTag2
+  };
+}
+function collectionTagName(state, event, defaultTagName) {
+  const rawTag = event.tagStart === NO_RANGE$2 ? "" : state.source.slice(event.tagStart, event.tagEnd);
+  return rawTag === "" || rawTag === "!" ? defaultTagName : tagNameFull(rawTag, state.tagHandlers);
+}
+function isMappingTag(tag) {
+  return tag.nodeKind === "mapping";
+}
+function chargeMergeWork(state) {
+  state.totalMergeKeys++;
+  if (state.maxTotalMergeKeys !== -1 && state.totalMergeKeys > state.maxTotalMergeKeys) throwError$1(state, `merge keys exceeded maxTotalMergeKeys (${state.maxTotalMergeKeys})`);
+}
+function mergeKeys(state, frame, source, sourceTag) {
+  chargeMergeWork(state);
+  for (const sourceKey of sourceTag.keys(source)) {
+    chargeMergeWork(state);
+    if (frame.tag.has(frame.value, sourceKey)) continue;
+    const err = frame.tag.addPair(frame.value, sourceKey, sourceTag.get(source, sourceKey));
+    if (err) throwError$1(state, err);
+    frame.overridable ??= /* @__PURE__ */ new Set();
+    frame.overridable.add(sourceKey);
+  }
+}
+function mergeSource(state, frame, source, sourceTag) {
+  state.position = frame.keyPosition;
+  if (isMappingTag(sourceTag)) mergeKeys(state, frame, source, sourceTag);
+  else if (sourceTag.nodeKind === "sequence" && Array.isArray(source)) {
+    if (source.length > 100) throwError$1(state, "abnormal merge sequence size");
+    for (const element of source) {
+      const elementTag = state.nodeTags.get(element);
+      if (!elementTag) throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
+      mergeKeys(state, frame, element, elementTag);
+    }
+  } else throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
+}
+function addMappingValue(state, frame, key2, value, tag) {
+  state.position = frame.keyPosition;
+  if (frame.keyIsMerge) {
+    mergeSource(state, frame, value, tag);
+    return;
+  }
+  if (!state.json && frame.tag.has(frame.value, key2) && !frame.overridable?.has(key2)) throwError$1(state, "duplicated mapping key");
+  const err = frame.tag.addPair(frame.value, key2, value);
+  if (err) throwError$1(state, err);
+  frame.overridable?.delete(key2);
+}
+function addValue(state, value, tag) {
+  const frame = state.frames[state.frames.length - 1];
+  if (frame.kind === "document") {
+    frame.value = value;
+    frame.hasValue = true;
+  } else if (frame.kind === "sequence") {
+    if (isMappingTag(tag)) state.nodeTags.set(value, tag);
+    const err = frame.tag.addItem(frame.value, value, frame.index++);
+    if (err) throwError$1(state, err);
+  } else if (frame.hasKey) {
+    const key2 = frame.key;
+    frame.key = void 0;
+    frame.hasKey = false;
+    addMappingValue(state, frame, key2, value, tag);
+  } else {
+    frame.key = value;
+    frame.keyPosition = state.position;
+    frame.hasKey = true;
+    frame.keyIsMerge = tag.tagName === MERGE_TAG_NAME;
+  }
+}
+function storeAnchor(state, event, value, tag, isValueFinal) {
+  if (event.anchorStart !== NO_RANGE$2) {
+    const anchor = {
+      value,
+      tag,
+      isValueFinal
+    };
+    state.anchors.set(state.source.slice(event.anchorStart, event.anchorEnd), anchor);
+    return anchor;
+  }
+  return null;
+}
+function constructFromEvents(events, options) {
+  const state = {
+    ...DEFAULT_CONSTRUCTOR_OPTIONS,
+    ...options,
+    events,
+    documents: [],
+    eventIndex: 0,
+    position: 0,
+    frames: [],
+    anchors: /* @__PURE__ */ new Map(),
+    nodeTags: /* @__PURE__ */ new Map(),
+    tagHandlers: /* @__PURE__ */ Object.create(null),
+    totalMergeKeys: 0,
+    aliasCount: 0
+  };
+  while (state.eventIndex < state.events.length) {
+    const event = state.events[state.eventIndex++];
+    state.position = eventPosition$1(event);
+    switch (event.type) {
+      case EVENT_ID.DOCUMENT:
+        state.anchors = /* @__PURE__ */ new Map();
+        state.nodeTags = /* @__PURE__ */ new Map();
+        state.aliasCount = 0;
+        state.tagHandlers = /* @__PURE__ */ Object.create(null);
+        for (const directive of event.directives) if (directive.kind === "tag") state.tagHandlers[directive.handle] = directive.prefix;
+        state.frames.push({
+          kind: "document",
+          position: state.position,
+          value: void 0,
+          hasValue: false
+        });
+        break;
+      case EVENT_ID.SCALAR: {
+        const { value, tag } = constructScalar(state, event);
+        storeAnchor(state, event, value, tag, true);
+        addValue(state, value, tag);
+        break;
+      }
+      case EVENT_ID.SEQUENCE: {
+        const tagName = collectionTagName(state, event, "tag:yaml.org,2002:seq");
+        const tag = state.schema.lookupSequenceTag(tagName);
+        if (!tag) throwError$1(state, `unknown sequence tag !<${tagName}>`);
+        const value = tag.create(tagName);
+        const anchor = storeAnchor(state, event, value, tag, tag.carrierIsResult);
+        state.frames.push({
+          kind: "sequence",
+          position: state.position,
+          value,
+          tag,
+          anchor,
+          index: 0
+        });
+        break;
+      }
+      case EVENT_ID.MAPPING: {
+        const tagName = collectionTagName(state, event, "tag:yaml.org,2002:map");
+        const tag = state.schema.lookupMappingTag(tagName);
+        if (!tag) throwError$1(state, `unknown mapping tag !<${tagName}>`);
+        const value = tag.create(tagName);
+        const anchor = storeAnchor(state, event, value, tag, tag.carrierIsResult);
+        state.frames.push({
+          kind: "mapping",
+          position: state.position,
+          value,
+          tag,
+          anchor,
+          key: void 0,
+          keyPosition: state.position,
+          hasKey: false,
+          keyIsMerge: false,
+          overridable: null
+        });
+        break;
+      }
+      case EVENT_ID.ALIAS: {
+        if (state.maxAliases !== -1 && ++state.aliasCount > state.maxAliases) throwError$1(state, `aliases exceeded maxAliases (${state.maxAliases})`);
+        const name = state.source.slice(event.anchorStart, event.anchorEnd);
+        const anchor = state.anchors.get(name);
+        if (!anchor) throwError$1(state, `unidentified alias "${name}"`);
+        if (!anchor.isValueFinal) throwError$1(state, `recursive alias "${name}" is not supported for tag ${anchor.tag.tagName} because it uses finalize()`);
+        addValue(state, anchor.value, anchor.tag);
+        break;
+      }
+      case EVENT_ID.POP: {
+        const frame = state.frames.pop();
+        if (frame.kind === "mapping" && frame.hasKey) {
+          state.position = frame.keyPosition;
+          throwError$1(state, "incomplete mapping pair in event stream");
+        }
+        if (frame.kind === "document") state.documents.push(frame.value);
+        else {
+          const value = frame.tag.carrierIsResult ? frame.value : finalizeCollection(state, frame.position, frame.tag, frame.value);
+          if (frame.anchor) {
+            frame.anchor.value = value;
+            frame.anchor.isValueFinal = true;
+          }
+          addValue(state, value, frame.tag);
+        }
+        break;
+      }
+    }
+  }
+  return state.documents;
+}
+var NO_RANGE$1 = -1;
+var HAS_OWN = Object.prototype.hasOwnProperty;
+var CONTEXT_FLOW_IN = 1;
+var CONTEXT_FLOW_OUT = 2;
+var CONTEXT_BLOCK_IN = 3;
+var CONTEXT_BLOCK_OUT = 4;
+var PATTERN_NON_PRINTABLE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
+var PATTERN_FLOW_INDICATORS = /[,\[\]{}]/;
+var PATTERN_TAG_HANDLE = /^(?:!|!!|![0-9A-Za-z-]+!)$/;
 var NS_URI_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$,_.!~*'()\[\]])`;
 var NS_TAG_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$.~*'()_])`;
 var PATTERN_TAG_URI = new RegExp(`^(?:${NS_URI_CHAR})*$`);
@@ -8004,10 +9061,857 @@ var DEFAULT_PARSER_OPTIONS = {
   filename: "",
   maxDepth: 100
 };
+function addDocumentEvent(state, explicitStart, explicitEnd) {
+  state.events.push({
+    type: EVENT_ID.DOCUMENT,
+    explicitStart,
+    explicitEnd,
+    directives: state.directives
+  });
+}
+function addSequenceEvent(state, start, anchorStart, anchorEnd, tagStart, tagEnd, style) {
+  state.events.push({
+    type: EVENT_ID.SEQUENCE,
+    start,
+    anchorStart,
+    anchorEnd,
+    tagStart,
+    tagEnd,
+    style
+  });
+}
+function addMappingEvent(state, start, anchorStart, anchorEnd, tagStart, tagEnd, style) {
+  state.events.push({
+    type: EVENT_ID.MAPPING,
+    start,
+    anchorStart,
+    anchorEnd,
+    tagStart,
+    tagEnd,
+    style
+  });
+}
+function insertFlowPairMappingEvent(state, snapshot) {
+  state.events.splice(snapshot.eventsLength, 0, {
+    type: EVENT_ID.MAPPING,
+    start: snapshot.position,
+    anchorStart: NO_RANGE$1,
+    anchorEnd: NO_RANGE$1,
+    tagStart: NO_RANGE$1,
+    tagEnd: NO_RANGE$1,
+    style: COLLECTION_STYLE.FLOW
+  });
+}
+function addScalarEvent(state, valueStart, valueEnd, anchorStart, anchorEnd, tagStart, tagEnd, style, chomping = CHOMPING_MODE.CLIP, indent = -1, fast = false) {
+  state.events.push({
+    type: EVENT_ID.SCALAR,
+    valueStart,
+    valueEnd,
+    anchorStart,
+    anchorEnd,
+    tagStart,
+    tagEnd,
+    style,
+    chomping,
+    indent,
+    fast
+  });
+}
+function addAliasEvent(state, anchorStart, anchorEnd) {
+  state.events.push({
+    type: EVENT_ID.ALIAS,
+    anchorStart,
+    anchorEnd
+  });
+}
+function addPopEvent(state) {
+  state.events.push({ type: EVENT_ID.POP });
+}
+function addEmptyScalarEvent(state) {
+  addScalarEvent(state, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, SCALAR_STYLE.PLAIN);
+}
+function emptyProperties() {
+  return {
+    anchorStart: NO_RANGE$1,
+    anchorEnd: NO_RANGE$1,
+    tagStart: NO_RANGE$1,
+    tagEnd: NO_RANGE$1
+  };
+}
+function snapshotState(state) {
+  return {
+    position: state.position,
+    line: state.line,
+    lineStart: state.lineStart,
+    lineIndent: state.lineIndent,
+    firstTabInLine: state.firstTabInLine,
+    eventsLength: state.events.length
+  };
+}
+function restoreState(state, snapshot) {
+  state.position = snapshot.position;
+  state.line = snapshot.line;
+  state.lineStart = snapshot.lineStart;
+  state.lineIndent = snapshot.lineIndent;
+  state.firstTabInLine = snapshot.firstTabInLine;
+  state.events.length = snapshot.eventsLength;
+}
+function throwError(state, message) {
+  YAMLException.throwAt(state.input.slice(0, state.length), state.position, message, state.filename);
+}
+function isEol(c) {
+  return c === 10 || c === 13;
+}
+function isWhiteSpace(c) {
+  return c === 9 || c === 32;
+}
+function isWsOrEol(c) {
+  return isWhiteSpace(c) || isEol(c);
+}
+function isWsOrEolOrEnd(c) {
+  return c === 0 || isWsOrEol(c);
+}
+function isFlowIndicator(c) {
+  return c === 44 || c === 91 || c === 93 || c === 123 || c === 125;
+}
+function fromDecimalCode(c) {
+  return c >= 48 && c <= 57 ? c - 48 : -1;
+}
+function fromHexCode(c) {
+  if (c >= 48 && c <= 57) return c - 48;
+  const lc = c | 32;
+  if (lc >= 97 && lc <= 102) return lc - 97 + 10;
+  return -1;
+}
+function escapedHexLen(c) {
+  if (c === 120) return 2;
+  if (c === 117) return 4;
+  if (c === 85) return 8;
+  return 0;
+}
+function isSimpleEscape(c) {
+  return c === 48 || c === 97 || c === 98 || c === 116 || c === 9 || c === 110 || c === 118 || c === 102 || c === 114 || c === 101 || c === 32 || c === 34 || c === 47 || c === 92 || c === 78 || c === 95 || c === 76 || c === 80;
+}
+function consumeLineBreak(state) {
+  if (state.input.charCodeAt(state.position) === 10) state.position++;
+  else {
+    state.position++;
+    if (state.input.charCodeAt(state.position) === 10) state.position++;
+  }
+  state.line++;
+  state.lineStart = state.position;
+  state.lineIndent = 0;
+  state.firstTabInLine = -1;
+}
+function skipSeparationSpace(state, allowComments) {
+  let lineBreaks = 0;
+  let ch = state.input.charCodeAt(state.position);
+  let hasSeparation = state.position === state.lineStart || isWsOrEol(state.input.charCodeAt(state.position - 1));
+  while (ch !== 0) {
+    while (isWhiteSpace(ch)) {
+      hasSeparation = true;
+      if (ch === 9 && state.firstTabInLine === -1) state.firstTabInLine = state.position;
+      ch = state.input.charCodeAt(++state.position);
+    }
+    if (allowComments && hasSeparation && ch === 35) do
+      ch = state.input.charCodeAt(++state.position);
+    while (!isEol(ch) && ch !== 0);
+    if (!isEol(ch)) break;
+    consumeLineBreak(state);
+    lineBreaks++;
+    hasSeparation = true;
+    ch = state.input.charCodeAt(state.position);
+    while (ch === 32) {
+      state.lineIndent++;
+      ch = state.input.charCodeAt(++state.position);
+    }
+  }
+  return lineBreaks;
+}
+function testDocumentSeparator(state, position = state.position) {
+  const ch = state.input.charCodeAt(position);
+  if ((ch === 45 || ch === 46) && ch === state.input.charCodeAt(position + 1) && ch === state.input.charCodeAt(position + 2)) {
+    const following = state.input.charCodeAt(position + 3);
+    return following === 0 || isWsOrEol(following);
+  }
+  return false;
+}
+function skipByteOrderMark(state) {
+  if (state.position === state.lineStart && state.input.charCodeAt(state.position) === 65279) {
+    state.position++;
+    state.lineStart = state.position;
+  }
+}
+function testDocumentBoundary(state) {
+  if (state.position !== state.lineStart) return false;
+  if (testDocumentSeparator(state)) return true;
+  if (state.input.charCodeAt(state.position) !== 65279) return false;
+  const snapshot = snapshotState(state);
+  skipByteOrderMark(state);
+  skipSeparationSpace(state, true);
+  const ch = state.input.charCodeAt(state.position);
+  const result = state.position === state.lineStart && (ch === 37 || ch === 45 && testDocumentSeparator(state));
+  restoreState(state, snapshot);
+  return result;
+}
+function skipUntilLineEnd(state) {
+  let ch = state.input.charCodeAt(state.position);
+  while (ch !== 0 && !isEol(ch)) ch = state.input.charCodeAt(++state.position);
+}
+function checkPrintable(state, start, end) {
+  const match = PATTERN_NON_PRINTABLE.exec(state.input.slice(start, end));
+  if (match !== null) {
+    state.position = start + match.index + match[0].length - 1;
+    throwError(state, "the stream contains non-printable characters");
+  }
+}
+function readTagProperty(state, props, inFlow) {
+  if (state.input.charCodeAt(state.position) !== 33) return false;
+  if (props.tagStart !== NO_RANGE$1) throwError(state, "duplication of a tag property");
+  const start = state.position;
+  let isVerbatim = false;
+  let isNamed = false;
+  let tagHandle = "!";
+  let ch = state.input.charCodeAt(++state.position);
+  if (ch === 60) {
+    isVerbatim = true;
+    ch = state.input.charCodeAt(++state.position);
+  } else if (ch === 33) {
+    isNamed = true;
+    tagHandle = "!!";
+    ch = state.input.charCodeAt(++state.position);
+  }
+  let suffixStart = state.position;
+  let tagName;
+  if (isVerbatim) {
+    while (ch !== 0 && ch !== 62) ch = state.input.charCodeAt(++state.position);
+    if (ch !== 62) throwError(state, "unexpected end of the stream within a verbatim tag");
+    tagName = state.input.slice(suffixStart, state.position);
+    state.position++;
+  } else {
+    while (ch !== 0 && !isWsOrEol(ch) && !(inFlow && isFlowIndicator(ch))) {
+      if (ch === 33) {
+        if (!isNamed) {
+          tagHandle = state.input.slice(suffixStart - 1, state.position + 1);
+          if (!PATTERN_TAG_HANDLE.test(tagHandle)) throwError(state, "named tag handle cannot contain such characters");
+          isNamed = true;
+          suffixStart = state.position + 1;
+        } else throwError(state, "tag suffix cannot contain exclamation marks");
+      }
+      ch = state.input.charCodeAt(++state.position);
+    }
+    tagName = state.input.slice(suffixStart, state.position);
+    if (PATTERN_FLOW_INDICATORS.test(tagName)) throwError(state, "tag suffix cannot contain flow indicator characters");
+  }
+  if (tagName && !(isVerbatim ? PATTERN_TAG_URI.test(tagName) : PATTERN_TAG_SUFFIX.test(tagName))) throwError(state, `tag name cannot contain such characters: ${tagName}`);
+  if (!isVerbatim && tagHandle !== "!" && tagHandle !== "!!" && !HAS_OWN.call(state.tagHandlers, tagHandle)) throwError(state, `undeclared tag handle "${tagHandle}"`);
+  props.tagStart = start;
+  props.tagEnd = state.position;
+  return true;
+}
+function readAnchorProperty(state, props) {
+  if (state.input.charCodeAt(state.position) !== 38) return false;
+  if (props.anchorStart !== NO_RANGE$1) throwError(state, "duplication of an anchor property");
+  state.position++;
+  const start = state.position;
+  while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position)) && !isFlowIndicator(state.input.charCodeAt(state.position))) state.position++;
+  if (state.position === start) throwError(state, "name of an anchor node must contain at least one character");
+  props.anchorStart = start;
+  props.anchorEnd = state.position;
+  return true;
+}
+function readAlias(state, props) {
+  if (state.input.charCodeAt(state.position) !== 42) return false;
+  if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) throwError(state, "alias node should not have any properties");
+  state.position++;
+  const start = state.position;
+  while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position)) && !isFlowIndicator(state.input.charCodeAt(state.position))) state.position++;
+  if (state.position === start) throwError(state, "name of an alias node must contain at least one character");
+  addAliasEvent(state, start, state.position);
+  return true;
+}
+function readFlowScalarBreak(state, nodeIndent) {
+  skipSeparationSpace(state, false);
+  if (state.lineIndent < nodeIndent) throwError(state, "deficient indentation");
+}
+function readSingleQuotedScalar(state, nodeIndent, props) {
+  if (state.input.charCodeAt(state.position) !== 39) return false;
+  state.position++;
+  const start = state.position;
+  let simple = true;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const ch = state.input.charCodeAt(state.position);
+    if (ch === 39) {
+      if (state.input.charCodeAt(state.position + 1) === 39) {
+        simple = false;
+        state.position += 2;
+        continue;
+      }
+      const end = state.position;
+      state.position++;
+      addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.SINGLE_QUOTED, CHOMPING_MODE.CLIP, -1, simple);
+      return true;
+    }
+    if (isEol(ch)) {
+      simple = false;
+      readFlowScalarBreak(state, nodeIndent);
+    } else if (state.position === state.lineStart && testDocumentSeparator(state)) throwError(state, "unexpected end of the document within a single quoted scalar");
+    else if (ch !== 9 && ch < 32) throwError(state, "expected valid JSON character");
+    else state.position++;
+  }
+  throwError(state, "unexpected end of the stream within a single quoted scalar");
+}
+function readDoubleQuotedScalar(state, nodeIndent, props) {
+  if (state.input.charCodeAt(state.position) !== 34) return false;
+  state.position++;
+  const start = state.position;
+  let simple = true;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const ch = state.input.charCodeAt(state.position);
+    if (ch === 34) {
+      const end = state.position;
+      state.position++;
+      addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.DOUBLE_QUOTED, CHOMPING_MODE.CLIP, -1, simple);
+      return true;
+    }
+    if (ch === 92) {
+      simple = false;
+      const escaped = state.input.charCodeAt(++state.position);
+      if (isEol(escaped)) readFlowScalarBreak(state, nodeIndent);
+      else if (isSimpleEscape(escaped)) state.position++;
+      else {
+        let hexLength = escapedHexLen(escaped);
+        if (hexLength === 0) throwError(state, "unknown escape sequence");
+        while (hexLength-- > 0) {
+          state.position++;
+          if (fromHexCode(state.input.charCodeAt(state.position)) < 0) throwError(state, "expected hexadecimal character");
+        }
+        state.position++;
+      }
+    } else if (isEol(ch)) {
+      simple = false;
+      readFlowScalarBreak(state, nodeIndent);
+    } else if (state.position === state.lineStart && testDocumentSeparator(state)) throwError(state, "unexpected end of the document within a double quoted scalar");
+    else if (ch !== 9 && ch < 32) throwError(state, "expected valid JSON character");
+    else state.position++;
+  }
+  throwError(state, "unexpected end of the stream within a double quoted scalar");
+}
+function readBlockScalar(state, parentIndent, props) {
+  const ch = state.input.charCodeAt(state.position);
+  let chomping = CHOMPING_MODE.CLIP;
+  let indent = -1;
+  let detectedIndent = false;
+  if (ch !== 124 && ch !== 62) return false;
+  const style = ch === 124 ? SCALAR_STYLE.LITERAL_BLOCK : SCALAR_STYLE.FOLDED_BLOCK;
+  state.position++;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const current = state.input.charCodeAt(state.position);
+    const digit = fromDecimalCode(current);
+    if (current === 43 || current === 45) {
+      if (chomping !== CHOMPING_MODE.CLIP) throwError(state, "repeat of a chomping mode identifier");
+      chomping = current === 43 ? CHOMPING_MODE.KEEP : CHOMPING_MODE.STRIP;
+      state.position++;
+    } else if (digit >= 0) {
+      if (digit === 0) throwError(state, "bad explicit indentation width of a block scalar; it cannot be less than one");
+      if (detectedIndent) throwError(state, "repeat of an indentation width identifier");
+      indent = parentIndent + digit - 1;
+      detectedIndent = true;
+      state.position++;
+    } else break;
+  }
+  let hadWhitespace = false;
+  while (isWhiteSpace(state.input.charCodeAt(state.position))) {
+    hadWhitespace = true;
+    state.position++;
+  }
+  if (hadWhitespace && state.input.charCodeAt(state.position) === 35) skipUntilLineEnd(state);
+  if (isEol(state.input.charCodeAt(state.position))) consumeLineBreak(state);
+  else if (state.input.charCodeAt(state.position) !== 0) throwError(state, "a line break is expected");
+  let contentIndent = detectedIndent ? indent : -1;
+  let maxLeadingIndent = 0;
+  const valueStart = state.position;
+  let valueEnd = state.position;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    const linePosition = state.position;
+    let column = 0;
+    while (state.input.charCodeAt(linePosition + column) === 32) column++;
+    const first = state.input.charCodeAt(linePosition + column);
+    if (first === 0) {
+      if (contentIndent >= 0) {
+        if (column > contentIndent) valueEnd = linePosition + column;
+      } else if (column > 0) valueEnd = linePosition + column;
+      break;
+    }
+    if (testDocumentBoundary(state)) break;
+    if (!detectedIndent && contentIndent === -1 && isEol(first)) maxLeadingIndent = Math.max(maxLeadingIndent, column);
+    if (!detectedIndent && contentIndent === -1 && !isEol(first)) {
+      if (first === 9 && column < parentIndent) {
+        state.position = linePosition + column;
+        throwError(state, "tab characters must not be used in indentation");
+      }
+      if (column >= parentIndent && column < maxLeadingIndent) {
+        state.position = linePosition + column;
+        throwError(state, "bad indentation of a mapping entry");
+      }
+    }
+    if (contentIndent === -1 && first !== 0 && !isEol(first) && column < parentIndent) {
+      state.lineIndent = column;
+      state.position = linePosition + column;
+      break;
+    }
+    if (!detectedIndent && first !== 0 && !isEol(first) && contentIndent === -1) contentIndent = column;
+    const requiredIndent = contentIndent === -1 ? parentIndent + 1 : contentIndent;
+    if (first !== 0 && !isEol(first) && column < requiredIndent) {
+      state.lineIndent = column;
+      state.position = linePosition + column;
+      break;
+    }
+    skipUntilLineEnd(state);
+    valueEnd = state.position;
+    if (isEol(state.input.charCodeAt(state.position))) {
+      consumeLineBreak(state);
+      valueEnd = state.position;
+    }
+  }
+  checkPrintable(state, valueStart, valueEnd);
+  addScalarEvent(state, valueStart, valueEnd, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, style, chomping, contentIndent);
+  return true;
+}
+function canStartPlainScalar(state, nodeContext) {
+  const ch = state.input.charCodeAt(state.position);
+  const inFlow = nodeContext === CONTEXT_FLOW_IN;
+  if (ch === 0 || isWsOrEol(ch) || ch === 35 || ch === 38 || ch === 42 || ch === 33 || ch === 124 || ch === 62 || ch === 39 || ch === 34 || ch === 37 || ch === 64 || ch === 96 || isFlowIndicator(ch)) return false;
+  if (ch === 63 || ch === 45) {
+    const following = state.input.charCodeAt(state.position + 1);
+    if (isWsOrEolOrEnd(following) || inFlow && isFlowIndicator(following)) return false;
+  }
+  return true;
+}
+function readPlainScalar(state, nodeIndent, nodeContext, props) {
+  if (!canStartPlainScalar(state, nodeContext)) return false;
+  const start = state.position;
+  let end = state.position;
+  let ch = state.input.charCodeAt(state.position);
+  const inFlow = nodeContext === CONTEXT_FLOW_IN;
+  let multiline = false;
+  while (ch !== 0) {
+    if (testDocumentBoundary(state)) break;
+    if (ch === 58) {
+      const following = state.input.charCodeAt(state.position + 1);
+      if (isWsOrEolOrEnd(following) || inFlow && isFlowIndicator(following)) break;
+    } else if (ch === 35) {
+      if (isWsOrEol(state.input.charCodeAt(state.position - 1))) break;
+    } else if (inFlow && isFlowIndicator(ch)) break;
+    else if (isEol(ch)) {
+      const savedPosition = state.position;
+      const savedLine = state.line;
+      const savedLineStart = state.lineStart;
+      const savedLineIndent = state.lineIndent;
+      skipSeparationSpace(state, false);
+      if (state.lineIndent >= nodeIndent) {
+        multiline = true;
+        ch = state.input.charCodeAt(state.position);
+        continue;
+      }
+      state.position = savedPosition;
+      state.line = savedLine;
+      state.lineStart = savedLineStart;
+      state.lineIndent = savedLineIndent;
+      break;
+    }
+    if (!isWhiteSpace(ch)) end = state.position + 1;
+    ch = state.input.charCodeAt(++state.position);
+  }
+  if (end === start) return false;
+  checkPrintable(state, start, end);
+  addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.PLAIN, CHOMPING_MODE.CLIP, -1, !multiline);
+  return true;
+}
+function skipFlowSeparationSpace(state, nodeIndent) {
+  const startLine = state.line;
+  skipSeparationSpace(state, true);
+  if (state.line > startLine && state.lineIndent < nodeIndent || state.firstTabInLine !== -1 && state.lineIndent < nodeIndent) throwError(state, "deficient indentation");
+}
+function readFlowCollection(state, nodeIndent, props) {
+  const ch = state.input.charCodeAt(state.position);
+  const isMapping = ch === 123;
+  const start = state.position;
+  let readNext = true;
+  if (ch !== 91 && ch !== 123) return false;
+  const terminator = isMapping ? 125 : 93;
+  if (isMapping) addMappingEvent(state, start, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.FLOW);
+  else addSequenceEvent(state, start, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.FLOW);
+  state.position++;
+  while (state.input.charCodeAt(state.position) !== 0) {
+    skipFlowSeparationSpace(state, nodeIndent);
+    let ch2 = state.input.charCodeAt(state.position);
+    if (ch2 === terminator) {
+      state.position++;
+      addPopEvent(state);
+      return true;
+    } else if (!readNext) throwError(state, "missed comma between flow collection entries");
+    else if (ch2 === 44) throwError(state, "expected the node content, but found ','");
+    let isPair = false;
+    let isExplicitPair = false;
+    if (ch2 === 63 && isWsOrEol(state.input.charCodeAt(state.position + 1))) {
+      isPair = isExplicitPair = true;
+      state.position += 1;
+      skipFlowSeparationSpace(state, nodeIndent);
+    }
+    const entryLine = state.line;
+    const entryStart = snapshotState(state);
+    const keyWasRead = parseNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
+    skipFlowSeparationSpace(state, nodeIndent);
+    ch2 = state.input.charCodeAt(state.position);
+    if ((isMapping || isExplicitPair || state.line === entryLine) && ch2 === 58) {
+      isPair = true;
+      state.position++;
+      skipFlowSeparationSpace(state, nodeIndent);
+      if (!isMapping) {
+        insertFlowPairMappingEvent(state, entryStart);
+        if (!keyWasRead) addEmptyScalarEvent(state);
+      } else if (!keyWasRead) addEmptyScalarEvent(state);
+      if (!parseNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true)) addEmptyScalarEvent(state);
+      skipFlowSeparationSpace(state, nodeIndent);
+      if (!isMapping) addPopEvent(state);
+    } else if (isMapping && isPair) {
+      if (!keyWasRead) addEmptyScalarEvent(state);
+      addEmptyScalarEvent(state);
+    } else if (isMapping) addEmptyScalarEvent(state);
+    else if (isPair) {
+      insertFlowPairMappingEvent(state, entryStart);
+      if (!keyWasRead) addEmptyScalarEvent(state);
+      addEmptyScalarEvent(state);
+      addPopEvent(state);
+    }
+    ch2 = state.input.charCodeAt(state.position);
+    if (ch2 === 44) {
+      readNext = true;
+      state.position++;
+    } else readNext = false;
+  }
+  throwError(state, "unexpected end of the stream within a flow collection");
+}
+function readBlockSequence(state, nodeIndent, props) {
+  if (state.firstTabInLine !== -1 || state.input.charCodeAt(state.position) !== 45 || !isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) return false;
+  addSequenceEvent(state, state.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+  while (state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) {
+    if (state.firstTabInLine !== -1) {
+      state.position = state.firstTabInLine;
+      throwError(state, "tab characters must not be used in indentation");
+    }
+    const entryLine = state.line;
+    state.position++;
+    const hadBreak = skipSeparationSpace(state, true) > 0;
+    if (state.firstTabInLine !== -1 && state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) throwError(state, "bad indentation of a sequence entry");
+    if (hadBreak && state.lineIndent <= nodeIndent) addEmptyScalarEvent(state);
+    else parseNode(state, nodeIndent, CONTEXT_BLOCK_IN, false, true);
+    skipSeparationSpace(state, true);
+    if (state.lineIndent < nodeIndent || state.position >= state.length) break;
+    if (state.lineIndent > nodeIndent) throwError(state, "bad indentation of a sequence entry");
+    if (state.line === entryLine && state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) throwError(state, "bad indentation of a sequence entry");
+  }
+  addPopEvent(state);
+  return true;
+}
+function readBlockMapping(state, nodeIndent, flowIndent, props) {
+  let atExplicitKey = false;
+  let detected = false;
+  let mappingOpened = false;
+  let pendingExplicitKey = false;
+  if (state.firstTabInLine !== -1) return false;
+  let ch = state.input.charCodeAt(state.position);
+  while (ch !== 0) {
+    if (!atExplicitKey && state.firstTabInLine !== -1) {
+      state.position = state.firstTabInLine;
+      throwError(state, "tab characters must not be used in indentation");
+    }
+    const following = state.input.charCodeAt(state.position + 1);
+    const entryLine = state.line;
+    if ((ch === 63 || ch === 58) && isWsOrEolOrEnd(following)) {
+      if (!mappingOpened) {
+        addMappingEvent(state, state.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+        mappingOpened = true;
+      }
+      if (ch === 63) {
+        if (atExplicitKey) addEmptyScalarEvent(state);
+        detected = true;
+        atExplicitKey = true;
+      } else if (atExplicitKey) atExplicitKey = false;
+      else {
+        addEmptyScalarEvent(state);
+        detected = true;
+        atExplicitKey = false;
+      }
+      state.position += 1;
+      pendingExplicitKey = true;
+    } else {
+      if (atExplicitKey) {
+        addEmptyScalarEvent(state);
+        atExplicitKey = false;
+      }
+      const beforeKey = snapshotState(state);
+      if (!parseNode(state, flowIndent, CONTEXT_FLOW_OUT, false, true)) break;
+      if (state.line === entryLine) {
+        ch = state.input.charCodeAt(state.position);
+        while (isWhiteSpace(ch)) ch = state.input.charCodeAt(++state.position);
+        if (ch === 58) {
+          ch = state.input.charCodeAt(++state.position);
+          if (!isWsOrEolOrEnd(ch)) throwError(state, "a whitespace character is expected after the key-value separator within a block mapping");
+          if (!mappingOpened) {
+            state.events.splice(beforeKey.eventsLength, 0, {
+              type: EVENT_ID.MAPPING,
+              start: beforeKey.position,
+              anchorStart: props.anchorStart,
+              anchorEnd: props.anchorEnd,
+              tagStart: props.tagStart,
+              tagEnd: props.tagEnd,
+              style: COLLECTION_STYLE.BLOCK
+            });
+            mappingOpened = true;
+          }
+          detected = true;
+          atExplicitKey = false;
+          pendingExplicitKey = false;
+        } else if (detected) throwError(state, "expected ':' after a mapping key");
+        else {
+          if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) {
+            restoreState(state, beforeKey);
+            return false;
+          }
+          return true;
+        }
+      } else if (detected) throwError(state, "can not read a block mapping entry; a multiline key may not be an implicit key");
+      else {
+        if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) {
+          restoreState(state, beforeKey);
+          return false;
+        }
+        return true;
+      }
+    }
+    if (parseNode(state, nodeIndent, CONTEXT_BLOCK_OUT, true, pendingExplicitKey)) pendingExplicitKey = false;
+    if (!atExplicitKey) {
+      if (pendingExplicitKey) {
+        addEmptyScalarEvent(state);
+        pendingExplicitKey = false;
+      }
+    }
+    skipSeparationSpace(state, true);
+    ch = state.input.charCodeAt(state.position);
+    if ((state.line === entryLine || state.lineIndent > nodeIndent) && ch !== 0) throwError(state, "bad indentation of a mapping entry");
+    else if (state.lineIndent < nodeIndent) break;
+  }
+  if (!detected) return false;
+  if (atExplicitKey) addEmptyScalarEvent(state);
+  if (mappingOpened) addPopEvent(state);
+  return true;
+}
+function parseNode(state, parentIndent, nodeContext, allowToSeek, allowCompact, allowPropertyMapping = true) {
+  if (state.depth >= state.maxDepth) throwError(state, `nesting exceeded maxDepth (${state.maxDepth})`);
+  state.depth++;
+  let indentStatus = 1;
+  let atNewLine = false;
+  let hasContent = false;
+  let propertyStart = null;
+  const props = emptyProperties();
+  let allowBlockScalars = nodeContext === CONTEXT_BLOCK_OUT || nodeContext === CONTEXT_BLOCK_IN;
+  let allowBlockCollections = allowBlockScalars;
+  const allowBlockStyles = allowBlockScalars;
+  if (allowToSeek && skipSeparationSpace(state, true)) {
+    atNewLine = true;
+    if (state.lineIndent > parentIndent) indentStatus = 1;
+    else if (state.lineIndent === parentIndent) indentStatus = 0;
+    else indentStatus = -1;
+  }
+  if (indentStatus === 1) while (true) {
+    const ch = state.input.charCodeAt(state.position);
+    const propertyState = snapshotState(state);
+    if (atNewLine && indentStatus !== 1 && (ch === 33 || ch === 38)) break;
+    if (atNewLine && allowBlockStyles && (props.tagStart !== NO_RANGE$1 || props.anchorStart !== NO_RANGE$1) && (ch === 33 || ch === 38)) {
+      const fallbackState = snapshotState(state);
+      const flowIndent = parentIndent + 1;
+      if (readBlockMapping(state, state.position - state.lineStart, flowIndent, props) && state.events[fallbackState.eventsLength]?.type === EVENT_ID.MAPPING) {
+        state.depth--;
+        return true;
+      }
+      restoreState(state, fallbackState);
+    }
+    if (atNewLine && (ch === 33 && props.tagStart !== NO_RANGE$1 || ch === 38 && props.anchorStart !== NO_RANGE$1)) break;
+    if (!readTagProperty(state, props, nodeContext === CONTEXT_FLOW_IN) && !readAnchorProperty(state, props)) break;
+    if (propertyStart === null) propertyStart = propertyState;
+    if (skipSeparationSpace(state, true)) {
+      atNewLine = true;
+      allowBlockCollections = allowBlockStyles;
+      if (state.lineIndent > parentIndent) indentStatus = 1;
+      else if (state.lineIndent === parentIndent) indentStatus = 0;
+      else indentStatus = -1;
+    } else allowBlockCollections = false;
+  }
+  if (allowBlockCollections) allowBlockCollections = atNewLine || allowCompact;
+  if (indentStatus === 1 || nodeContext === CONTEXT_BLOCK_OUT) {
+    const flowIndent = nodeContext === CONTEXT_FLOW_IN || nodeContext === CONTEXT_FLOW_OUT ? parentIndent : parentIndent + 1;
+    const blockIndent = state.position - state.lineStart;
+    if (indentStatus === 1) {
+      if (allowBlockCollections && (readBlockSequence(state, blockIndent, props) || readBlockMapping(state, blockIndent, flowIndent, props)) || readFlowCollection(state, flowIndent, props)) hasContent = true;
+      else {
+        const ch = state.input.charCodeAt(state.position);
+        if (propertyStart !== null && allowPropertyMapping && allowBlockStyles && !allowBlockCollections && ch !== 124 && ch !== 62) {
+          const fallbackState = snapshotState(state);
+          const propertyIndent = propertyStart.position - propertyStart.lineStart;
+          restoreState(state, propertyStart);
+          if (readBlockMapping(state, propertyIndent, flowIndent, emptyProperties()) && state.events[fallbackState.eventsLength]?.type === EVENT_ID.MAPPING) hasContent = true;
+          else restoreState(state, fallbackState);
+        }
+        if (!hasContent && (allowBlockScalars && readBlockScalar(state, flowIndent, props) || readSingleQuotedScalar(state, flowIndent, props) || readDoubleQuotedScalar(state, flowIndent, props) || readAlias(state, props) || readPlainScalar(state, flowIndent, nodeContext, props))) hasContent = true;
+      }
+    } else if (indentStatus === 0) hasContent = allowBlockCollections && readBlockSequence(state, blockIndent, props);
+  }
+  allowBlockScalars = allowBlockScalars && !hasContent;
+  if (!hasContent && (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1 || allowBlockScalars)) {
+    addScalarEvent(state, NO_RANGE$1, NO_RANGE$1, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.PLAIN);
+    hasContent = true;
+  }
+  state.depth--;
+  return hasContent || props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1;
+}
+function readDirective(state) {
+  if (state.lineIndent > 0 || state.input.charCodeAt(state.position) !== 37) return false;
+  state.position++;
+  const nameStart = state.position;
+  while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position))) state.position++;
+  const name = state.input.slice(nameStart, state.position);
+  const args2 = [];
+  if (name.length === 0) throwError(state, "directive name must not be less than one character in length");
+  while (state.input.charCodeAt(state.position) !== 0 && !isEol(state.input.charCodeAt(state.position))) {
+    while (isWhiteSpace(state.input.charCodeAt(state.position))) state.position++;
+    if (state.input.charCodeAt(state.position) === 35 || isEol(state.input.charCodeAt(state.position)) || state.input.charCodeAt(state.position) === 0) break;
+    const start = state.position;
+    while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position))) state.position++;
+    args2.push(state.input.slice(start, state.position));
+  }
+  if (isEol(state.input.charCodeAt(state.position))) consumeLineBreak(state);
+  if (name === "YAML") {
+    if (state.directives.some((directive) => directive.kind === "yaml")) throwError(state, "duplication of %YAML directive");
+    if (args2.length !== 1) throwError(state, "YAML directive accepts exactly one argument");
+    const match = /^([0-9]+)\.([0-9]+)$/.exec(args2[0]);
+    if (match === null) throwError(state, "ill-formed argument of the YAML directive");
+    if (parseInt(match[1], 10) !== 1) throwError(state, "unacceptable YAML version of the document");
+    state.directives.push({
+      kind: "yaml",
+      version: args2[0]
+    });
+  } else if (name === "TAG") {
+    if (args2.length !== 2) throwError(state, "TAG directive accepts exactly two arguments");
+    const [handle, prefix] = args2;
+    if (!PATTERN_TAG_HANDLE.test(handle)) throwError(state, "ill-formed tag handle (first argument) of the TAG directive");
+    if (HAS_OWN.call(state.tagHandlers, handle)) throwError(state, `there is a previously declared suffix for "${handle}" tag handle`);
+    if (!PATTERN_TAG_PREFIX.test(prefix)) throwError(state, "ill-formed tag prefix (second argument) of the TAG directive");
+    state.tagHandlers[handle] = prefix;
+    state.directives.push({
+      kind: "tag",
+      handle,
+      prefix
+    });
+  }
+  return true;
+}
+function readDocument(state) {
+  state.directives = [];
+  state.tagHandlers = /* @__PURE__ */ Object.create(null);
+  let hasDirectives = false;
+  skipSeparationSpace(state, true);
+  while (readDirective(state)) {
+    hasDirectives = true;
+    skipSeparationSpace(state, true);
+  }
+  let explicitStart = false;
+  let explicitEnd = false;
+  let allowCompact = true;
+  if (state.lineIndent === 0 && state.input.charCodeAt(state.position) === 45 && state.input.charCodeAt(state.position + 1) === 45 && state.input.charCodeAt(state.position + 2) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 3))) {
+    explicitStart = true;
+    const markerLine = state.line;
+    state.position += 3;
+    skipSeparationSpace(state, true);
+    allowCompact = state.line > markerLine;
+  } else if (hasDirectives) throwError(state, "directives end mark is expected");
+  const documentEventIndex = state.events.length;
+  if (!explicitStart && state.position === state.lineStart && state.input.charCodeAt(state.position) === 46 && testDocumentSeparator(state)) {
+    state.position += 3;
+    skipSeparationSpace(state, true);
+    return;
+  }
+  addDocumentEvent(state, explicitStart, false);
+  if (!parseNode(state, state.lineIndent - 1, CONTEXT_BLOCK_OUT, false, allowCompact, allowCompact)) addEmptyScalarEvent(state);
+  skipSeparationSpace(state, true);
+  if (state.position === state.lineStart && testDocumentSeparator(state)) {
+    explicitEnd = state.input.charCodeAt(state.position) === 46;
+    if (explicitEnd) {
+      const markerLine = state.line;
+      state.position += 3;
+      skipSeparationSpace(state, true);
+      if (state.line === markerLine && state.position < state.length) throwError(state, "end of the stream or a document separator is expected");
+    }
+  }
+  const documentEvent = state.events[documentEventIndex];
+  if (documentEvent?.type === EVENT_ID.DOCUMENT) documentEvent.explicitEnd = explicitEnd;
+  addPopEvent(state);
+  if (!explicitEnd && state.position < state.length && !testDocumentBoundary(state)) throwError(state, "end of the stream or a document separator is expected");
+}
+function parseEvents(input, options) {
+  const length = input.length;
+  const state = {
+    ...DEFAULT_PARSER_OPTIONS,
+    ...options,
+    input: `${input}\0`,
+    length,
+    position: 0,
+    line: 0,
+    lineStart: 0,
+    lineIndent: 0,
+    firstTabInLine: -1,
+    depth: 0,
+    directives: [],
+    tagHandlers: /* @__PURE__ */ Object.create(null),
+    events: []
+  };
+  const nullpos = input.indexOf("\0");
+  if (nullpos !== -1) YAMLException.throwAt(input, nullpos, "null byte is not allowed in input", state.filename);
+  while (state.position < state.length) {
+    skipByteOrderMark(state);
+    skipSeparationSpace(state, true);
+    if (state.position >= state.length) break;
+    const documentStart = state.position;
+    readDocument(state);
+    if (state.position === documentStart)
+      throwError(state, "can not read a document");
+  }
+  return state.events;
+}
 var DEFAULT_LOAD_OPTIONS = {
   ...DEFAULT_PARSER_OPTIONS,
   ...DEFAULT_CONSTRUCTOR_OPTIONS
 };
+function loadDocuments(input, options = {}) {
+  const opts = {
+    ...DEFAULT_LOAD_OPTIONS,
+    ...options
+  };
+  const source = String(input);
+  const PARSER_OPT_KEYS = Object.keys(DEFAULT_PARSER_OPTIONS);
+  const CONSTRUCTOR_OPT_KEYS = Object.keys(DEFAULT_CONSTRUCTOR_OPTIONS);
+  return constructFromEvents(parseEvents(source, pick(opts, PARSER_OPT_KEYS)), {
+    ...pick(opts, CONSTRUCTOR_OPT_KEYS),
+    source
+  });
+}
+function load(input, options) {
+  const documents = loadDocuments(input, options);
+  if (documents.length === 0) throw new YAMLException("expected a document, but the input is empty");
+  if (documents.length === 1) return documents[0];
+  throw new YAMLException("expected a single document in the stream, but found more");
+}
 function hasBit(mask, bit) {
   return (mask & 1 << bit) !== 0;
 }
@@ -8933,9 +10837,9 @@ function ensureStampedFile(path, content, label) {
   if (!statSync3(path).isFile()) return refusal(label, `${fwd3(path)} exists and is not a file`, `move it aside, then rerun /sterling:update`);
   const disk = normalize3(readFileSync10(path, "utf8"));
   if (disk === content) return { item: label, status: "matches" };
-  const stamp = verifyStamp(disk, "//");
-  if (stamp === null) return refusal(label, `${fwd3(path)} exists and Sterling did not write it`, `rename or remove it (it would shadow Sterling's), then rerun /sterling:update`);
-  if (!stamp.unmodified) return refusal(label, `${fwd3(path)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`);
+  const stamp2 = verifyStamp(disk, "//");
+  if (stamp2 === null) return refusal(label, `${fwd3(path)} exists and Sterling did not write it`, `rename or remove it (it would shadow Sterling's), then rerun /sterling:update`);
+  if (!stamp2.unmodified) return refusal(label, `${fwd3(path)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`);
   writeFileSync4(path, content);
   return { item: label, status: "refreshed" };
 }
@@ -8947,9 +10851,9 @@ function retireServerShim(path) {
   const item = fwd3(path);
   if (!existsSync9(path)) return { item, status: "skipped", detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
   if (!statSync3(path).isFile()) return { item, status: "skipped", detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
-  const stamp = verifyStamp(normalize3(readFileSync10(path, "utf8")), "//");
-  if (stamp === null) return { item, status: "skipped", detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
-  if (!stamp.unmodified) return { item, status: "skipped", detail: `KEPT: ${item} was edited after Sterling wrote it, so it stays; ${TWICE}` };
+  const stamp2 = verifyStamp(normalize3(readFileSync10(path, "utf8")), "//");
+  if (stamp2 === null) return { item, status: "skipped", detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
+  if (!stamp2.unmodified) return { item, status: "skipped", detail: `KEPT: ${item} was edited after Sterling wrote it, so it stays; ${TWICE}` };
   unlinkSync3(path);
   return { item, status: "removed", detail: `the server shim an earlier init wrote: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server, so the shim would load it twice` };
 }
@@ -9090,83 +10994,6 @@ function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, en
   }
   rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot2, installed), fwd3(mcpLauncherPath({ home }))));
   return rows;
-}
-var PINNED_CODEX_REL = ".local/codex-mcp-0.153.4/bin/codex";
-var PINNED_CODEX_INSTALL = "npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4";
-var CODEX_PROBE_TIMEOUT_MS = 1e4;
-var isFile = (p) => existsSync9(p) && statSync3(p).isFile();
-function codexCandidates({ env, home }) {
-  const out = [];
-  const notes = [];
-  const claudeJson = join14(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
-  if (isFile(claudeJson)) {
-    let command;
-    try {
-      command = JSON.parse(readFileSync10(claudeJson, "utf8"))?.mcpServers?.codex?.command;
-    } catch (err) {
-      notes.push(`${fwd3(claudeJson)} not read (${err.message})`);
-    }
-    if (typeof command === "string" && isAbsolute(command)) out.push(command);
-  }
-  out.push(join14(home, PINNED_CODEX_REL));
-  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join14(dir, "codex"));
-  return { candidates: [...new Set(out)].filter(isFile), notes };
-}
-function resolveCodexMcp({ env = process.env, home = homedir3(), nodeBinDir, spawnFn = spawnSync4 }) {
-  const { candidates, notes } = codexCandidates({ env, home });
-  const tried = [...notes];
-  for (const command of candidates) {
-    const r = spawnFn(command, ["mcp-server", "--help"], { encoding: "utf8", timeout: CODEX_PROBE_TIMEOUT_MS, env: { ...env, PATH: codexPath(nodeBinDir) } });
-    const help = `${r.stdout ?? ""}
-${r.stderr ?? ""}`;
-    if (!r.error && r.status === 0 && /\bcodex\s+mcp-server\b/i.test(help)) return { command };
-    tried.push(`${fwd3(command)} (${r.error ? r.error.message : r.status !== 0 ? `exit ${r.status}` : "generic help, no mcp-server subcommand"})`);
-  }
-  return { tried };
-}
-var codexPath = (nodeBinDir) => `${fwd3(nodeBinDir)}:/usr/local/bin:/usr/bin:/bin`;
-function codexServerEntry(command, nodeBinDir) {
-  return {
-    type: "local",
-    command: [fwd3(command), "mcp-server"],
-    environment: { PATH: codexPath(nodeBinDir) },
-    timeout: { startup: 3e4, execution: 9e5 }
-  };
-}
-function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = dirname3(process.execPath), spawnFn = spawnSync4 }) {
-  const path = join14(opencodeConfigDir({ env, home }), "opencode.json");
-  const label = `${fwd3(path)} mcp.servers.codex`;
-  const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
-  if (!found.command) {
-    const tried = found.tried.length ? `tried ${found.tried.join("; ")}` : "no Codex binary found";
-    return { item: label, status: "skipped", detail: `codex MCP for OpenCode SKIPPED: no Codex whose \`mcp-server --help\` prints mcp-server help (${tried}). Install the pinned Codex (${PINNED_CODEX_INSTALL}), then run /sterling:update` };
-  }
-  let config2 = {};
-  let before = null;
-  if (existsSync9(path)) {
-    before = normalize3(readFileSync10(path, "utf8"));
-    try {
-      config2 = JSON.parse(before);
-    } catch (err) {
-      return refusal(label, `${fwd3(path)} is not valid JSON (${err.message})`, `fix or remove ${fwd3(path)}, then rerun /sterling:update`);
-    }
-    if (config2 === null || typeof config2 !== "object" || Array.isArray(config2)) return refusal(label, `${fwd3(path)} is not a JSON object`, `fix or remove ${fwd3(path)}, then rerun /sterling:update`);
-  }
-  const mcp = config2.mcp ?? {};
-  if (typeof mcp !== "object" || Array.isArray(mcp)) return refusal(label, `${fwd3(path)}: "mcp" is not an object`, `fix ${fwd3(path)}, then rerun /sterling:update`);
-  const servers = mcp.servers ?? {};
-  if (typeof servers !== "object" || Array.isArray(servers)) return refusal(label, `${fwd3(path)}: "mcp.servers" is not an object`, `fix ${fwd3(path)}, then rerun /sterling:update`);
-  const want = codexServerEntry(found.command, nodeBinDir);
-  const legacy = mcp.codex !== void 0 ? "; a legacy mcp.codex entry is also present, which 2.0.21 drops silently when it carries a timeout" : "";
-  if (servers.codex !== void 0) {
-    if (JSON.stringify(servers.codex) === JSON.stringify(want)) return { item: label, status: "matches", detail: `${fwd3(found.command)}${legacy}` };
-    return { item: label, status: "skipped", detail: `kept: mcp.servers.codex is already set and differs from Sterling's (yours); Sterling's would be ${JSON.stringify(want)}${legacy}` };
-  }
-  config2.mcp = { ...mcp, servers: { ...servers, codex: want } };
-  mkdirSync3(dirname3(path), { recursive: true });
-  writeFileSync4(path, `${JSON.stringify(config2, null, 2)}
-`);
-  return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd3(found.command)}${legacy}` };
 }
 function git(projectDir, args2) {
   const r = spawnSync4("git", args2, { cwd: projectDir, encoding: "utf8" });
@@ -9512,17 +11339,6 @@ function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
   if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd3(implementorTemplatePath(pluginRoot2))} disallowedTools (P5)`);
   return tools;
 }
-function opencodeModelRef(model) {
-  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
-  return `anthropic/${model}`;
-}
-function opencodeModelFor({ model, opencodeModel } = {}) {
-  if (opencodeModel === void 0) return opencodeModelRef(model);
-  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
-    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
-  }
-  return opencodeModel;
-}
 function configuredFullAgentModels(projectDir) {
   const where = fwd3(join14(projectDir, ".sterling", "config.json"));
   const leave = (why) => ({
@@ -9547,14 +11363,24 @@ function configuredFullAgentModels(projectDir) {
     return leave(`${where} does not validate (${err.message.replace(/\s+/g, " ")})`);
   }
   const models = {};
+  const unsupported = {};
   for (const name of ROSTER) {
     const key2 = AGENT_MODEL_KEY[name];
     if (key2 === void 0) continue;
     const entry = parsed.models[key2];
     if (entry === void 0) continue;
-    models[name] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
+    if (typeof entry.model !== "string") continue;
+    if (!hostRunsModel(entry.model, "opencode")) {
+      unsupported[name] = `config.models.${key2} is ${entry.model}, which OpenCode cannot run`;
+      continue;
+    }
+    models[name] = opencodeModelRef(entry.model, parsed.overpass.provider);
   }
-  return { models };
+  for (const [name, key2] of [[CONDUCTOR_ROLE, CONDUCTOR_MODEL_KEY], ["plan", PLAN_MODEL_KEY]]) {
+    const model = parsed.models[key2]?.model;
+    if (typeof model === "string" && !hostRunsModel(model, "opencode")) unsupported[name] = `config.models.${key2} is ${model}, which OpenCode cannot run`;
+  }
+  return { models, unsupported };
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname3(fileURLToPath(moduleUrl));
@@ -9615,8 +11441,8 @@ function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
-function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
-  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models });
+function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {}, unsupported = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models, unsupported });
   return {
     rows: planned.map(({ path, content, previous, ...row }) => row),
     writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
@@ -9636,7 +11462,7 @@ function fullAgentTargets(registry) {
   }
   return targets;
 }
-function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
+function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {}, unsupported = {} }) {
   const registry = loadRegistry(join14(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const vars = { PROJECT_DIR: fwd3(projectDir), STERLING_ROOT: fwd3(pluginRoot2) };
@@ -9659,9 +11485,17 @@ function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models =
       }
       if (sha256(disk.replace(`${m[0]}
 `, "")) !== m[3]) {
+        if (Object.hasOwn(unsupported, name)) {
+          rows.push(refusal(rel, `${rel} was edited after Sterling wrote it, and ${unsupported[name]}, so Sterling would remove it; it is kept and may still run`, `delete it by hand, or pick a model OpenCode can run in the System tab, then rerun /sterling:update`));
+          continue;
+        }
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (Object.hasOwn(unsupported, name)) {
+      rows.push(disk === null ? { item: rel, status: "skipped", detail: `${unsupported[name]}; no OpenCode copy is created` } : { item: rel, status: "removed", detail: `${unsupported[name]}; the copy Sterling wrote is removed`, path, content: null, previous: raw });
+      continue;
     }
     if (unsafe.length) {
       const why = `it needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`;
@@ -9688,6 +11522,11 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
+      if (w.content === null) {
+        rmSync2(w.path, { force: true });
+        done.push(w);
+        continue;
+      }
       mkdirSync3(dirname3(w.path), { recursive: true });
       writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
@@ -9723,7 +11562,6 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   const isInstalled = installed ?? isInstalledCopy(pluginRoot2, { env, home });
   const npmCopy = isInstalled && installHostOf(pluginRoot2, { env, home }) === "opencode";
   const rows = installGlobal({ pluginRoot: pluginRoot2, installed: isInstalled, npmCopy, env, home });
-  rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   let handoff;
@@ -9739,10 +11577,10 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained, ownAgentPaths: opencodeOwnAgentPaths(pluginRoot2) }));
   const configured = configuredFullAgentModels(configDir2);
   if (configured.refused) rows.push(configured.refused);
-  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {} });
+  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {}, unsupported: configured.unsupported ?? {} });
   let agentRows = staged.rows;
   if (configured.refused) {
-    agentRows = agentRows.map((r) => ["created", "refreshed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
+    agentRows = agentRows.map((r) => ["created", "refreshed", "removed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
   } else {
     writeFullAgentFiles(staged.writes);
   }
@@ -9760,7 +11598,7 @@ function formatOpenCodeRows(result) {
 // scripts/lib/agy-setup.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
-import { existsSync as existsSync10, lstatSync as lstatSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync11, readlinkSync, statSync as statSync4, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync11, readdirSync as readdirSync5, readlinkSync, rmdirSync, statSync as statSync4, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute2, join as join15, resolve as resolve8 } from "node:path";
 var AGY_AGENTS_DIR = ".agents/agents";
@@ -9902,11 +11740,19 @@ function trackedFiles(projectDir, paths, runGit = git2) {
   const why = ls.error ? ls.error.message : `exit ${ls.status}: ${(ls.stderr || "").trim().split("\n")[0] || "no message"}`;
   return { failed: why };
 }
-function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath, agyModels = {} }) {
+function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath = process.execPath, agyModels = {}, unsupported = /* @__PURE__ */ new Map(), frozen = /* @__PURE__ */ new Map() }) {
   const rows = [];
   for (const name of AGY_ROSTER) {
     const rel = `${AGY_AGENTS_DIR}/${name}/agent.md`;
     const path = join15(projectDir, rel);
+    if (frozen.has(name)) {
+      rows.push({ item: rel, status: "kept", detail: `${frozen.get(name)}; the agy copy is left as it is until then` });
+      continue;
+    }
+    if (unsupported.has(name)) {
+      rows.push(removeUnsupported(projectDir, rel, name, unsupported.get(name), tracked));
+      continue;
+    }
     if (tracked.includes(rel)) {
       rows.push(refusal2(rel, `${rel} is tracked by git, and the Sterling agy agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
@@ -9939,6 +11785,39 @@ function ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, n
     rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
   }
   return rows;
+}
+function removeUnsupported(projectDir, rel, name, why, tracked) {
+  const path = join15(projectDir, rel);
+  if (!existsSync10(path)) return { item: rel, status: "unsupported", detail: `${why}; agy gets no copy` };
+  const keep = (what) => refusal2(rel, `${why}, but ${what}, so Sterling keeps it`, `delete it by hand, or choose a model agy runs for ${name}`);
+  if (tracked.includes(rel)) return keep(`${rel} is tracked by git`);
+  if (!statSync4(path).isFile()) return keep(`${rel} is not a file`);
+  const disk = normalize4(readFileSync11(path, "utf8"));
+  const h = disk.match(HEADER_RE2);
+  if (!h || h[1] !== name) return keep(`${rel} carries no Sterling agy header (a file Sterling did not write)`);
+  if (sha2563(unstamped(disk, h[0])) !== h[3]) return keep(`${rel} was edited after Sterling wrote it`);
+  unlinkSync4(path);
+  const dir = dirname4(path);
+  if (readdirSync5(dir).length === 0) rmdirSync(dir);
+  return { item: rel, status: "removed", detail: `${why}; the unedited copy Sterling wrote is removed` };
+}
+function readAgyFit(projectDir) {
+  const unsupported = /* @__PURE__ */ new Map();
+  const frozen = /* @__PURE__ */ new Map();
+  const models = {};
+  const configPath2 = join15(storeRootFor(projectDir), ".sterling", "config.json");
+  if (!existsSync10(configPath2)) return { unsupported, frozen, models };
+  const config2 = JSON.parse(readFileSync11(configPath2, "utf8"));
+  const rows = unsupportedAgents(config2, ["agy"]);
+  const canonical2 = parseCanonicalModels(config2);
+  for (const name of AGY_ROSTER) {
+    const key2 = AGENT_MODEL_KEY[name];
+    if (!key2) continue;
+    for (const r of rows.filter((x) => x.agent === key2)) (r.host === "*" ? frozen : unsupported).set(name, r.reason);
+    const model = canonical2[key2]?.model;
+    if (model && !unsupported.has(name) && !frozen.has(name)) models[name] = resolveHostSettings({ model }, "agy").model;
+  }
+  return { unsupported, frozen, models };
 }
 function readAgyModels(projectDir) {
   const pins = {};
@@ -10077,7 +11956,8 @@ function setupAgy({ projectDir, pluginRoot: pluginRoot2, env = process.env, home
     for (const { role, value } of ignored) {
       rows.push({ item: `models.${role}.agy_model`, status: "ignored", detail: `${JSON.stringify(value)} is not one of ${AGY_MODEL_IDS.join(", ")}, which agy accepts; the ${role} agent renders model: inherit (run /sterling:update to drop the stale value)` });
     }
-    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath, agyModels: pins }));
+    const { unsupported, frozen, models } = readAgyFit(projectDir);
+    rows.push(...ensureAgyAgents({ projectDir, pluginRoot: pluginRoot2, root, tracked, nodePath, agyModels: { ...pins, ...models }, unsupported, frozen }));
   } else {
     const remedy = resolve8(root) !== resolve8(pluginRoot2) ? `install this Sterling into agy (agy plugin install ${fwd4(resolve8(pluginRoot2))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd4(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
     rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
@@ -10093,16 +11973,549 @@ function formatAgyRows(result) {
   return result.rows.map((r) => `Antigravity CLI (agy) ${r.status}: ${r.item}${r.detail ? ` \u2014 ${r.detail}` : ""}`);
 }
 
+// scripts/lib/custom-agent-render.mjs
+import { createHash as createHash6 } from "node:crypto";
+import { existsSync as existsSync11, lstatSync as lstatSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync12, readdirSync as readdirSync6, rmSync as rmSync3, rmdirSync as rmdirSync2 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname5, join as join16 } from "node:path";
+
+// scripts/lib/agent-adoption.mjs
+var AGENT_SOURCE_DIR = "agent-sources";
+
+// scripts/lib/custom-agent-render.mjs
+var CUSTOM_RENDERER = "custom-agent/1";
+var CUSTOM_HOSTS = ["claude", "opencode", "agy"];
+var STAMP_RE = /^<!-- sterling-custom renderer=(\S+) host=(claude|opencode|agy) key=(\S+) source_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
+var sha2564 = (t) => createHash6("sha256").update(t).digest("hex");
+var normalize5 = (s) => s.replace(/\r\n/g, "\n");
+var RESERVED_NAMES = /* @__PURE__ */ new Set([...Object.keys(AGENT_MODEL_KEY), ...AGY_ROSTER, "conductor", "plan", "build", "general", "explore"]);
+function outputPath(host, name) {
+  if (host === "claude") return `.claude/agents/${name}.md`;
+  if (host === "opencode") return `.opencode/agents/${name}.md`;
+  return `${AGY_AGENTS_DIR}/${name}/agent.md`;
+}
+var TOOL_MAP = {
+  Read: { agy: ["read_file"] },
+  Grep: { agy: ["grep_search"] },
+  Glob: { agy: ["find_by_name", "list_dir"] },
+  LS: { agy: ["list_dir"] },
+  Bash: { agy: ["run_command", "command_status"] },
+  Edit: { agy: ["edit_file"] },
+  Write: { agy: ["write_file"] },
+  MultiEdit: { agy: ["multi_replace_file_content"] },
+  NotebookEdit: { agy: null },
+  WebFetch: { agy: ["read_url_content"] },
+  WebSearch: { agy: ["search_web"] },
+  Task: { agy: ["invoke_subagent", "send_message"] },
+  Agent: { agy: ["invoke_subagent", "send_message"] },
+  TodoWrite: { agy: [] }
+};
+var OC_ACTIONS = [
+  ["read", ["Read"]],
+  ["grep", ["Grep"]],
+  ["glob", ["Glob"]],
+  ["list", ["LS"]],
+  ["edit", ["Edit", "Write", "MultiEdit"]],
+  ["bash", ["Bash"]],
+  ["webfetch", ["WebFetch"]],
+  ["websearch", ["WebSearch"]],
+  ["task", ["Task", "Agent"]]
+];
+var AGY_ALL = [...new Set(Object.values(TOOL_MAP).flatMap((t) => t.agy ?? []))];
+function toolList(value) {
+  if (value === void 0 || value === null) return null;
+  if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
+  return String(value).split(",").map((v) => v.trim()).filter(Boolean);
+}
+function translateTools(host, { tools, disallowedTools }) {
+  if (host === "claude") return { ok: true };
+  const allow = toolList(tools);
+  const deny = toolList(disallowedTools) ?? [];
+  const names = [...allow ?? [], ...deny];
+  const unknown = names.filter((n) => !(n in TOOL_MAP) && !n.startsWith("mcp__"));
+  if (unknown.length) return { ok: false, reason: `${host} cannot express the tool name(s) ${unknown.join(", ")}` };
+  if (host === "agy") {
+    if ((allow ?? []).some((n) => n.startsWith("mcp__"))) return { ok: false, reason: "agy cannot limit MCP tools per agent, so an allowlist naming MCP tools cannot be kept to what it lists" };
+    const deniedMcp = deny.filter((n) => n.startsWith("mcp__"));
+    if (deniedMcp.length) return { ok: false, reason: `agy cannot limit MCP tools per agent, so the denial of ${deniedMcp.join(", ")} would be dropped and the agent left broader` };
+    const noAgy = [...allow ?? [], ...deny].filter((n) => TOOL_MAP[n].agy === null);
+    if (noAgy.length) return { ok: false, reason: `agy has no tool for ${[...new Set(noAgy)].join(", ")}` };
+    if (allow === null && deny.length === 0) return { ok: true, tools: null };
+    const granted2 = new Set(allow === null ? AGY_ALL : allow.flatMap((n) => TOOL_MAP[n]?.agy ?? []));
+    for (const n of deny) for (const t of TOOL_MAP[n]?.agy ?? []) granted2.delete(t);
+    return { ok: true, tools: AGY_ALL.filter((t) => granted2.has(t)) };
+  }
+  const mcpAction = (entry) => {
+    const m = /^mcp__([^_](?:[^_]|_(?!_))*)__(.+)$/.exec(entry);
+    if (!m || m[2].includes("*")) return null;
+    return `${m[1]}_${m[2]}`.replace(/[^A-Za-z0-9_-]/g, "_");
+  };
+  const mcpEntries = (list) => list.filter((n) => n.startsWith("mcp__"));
+  const badMcp = names.filter((n) => n.startsWith("mcp__") && mcpAction(n) === null);
+  if (badMcp.length) return { ok: false, reason: `opencode names an MCP tool as <server>_<tool>, so ${badMcp.join(", ")} (a whole server or a wildcard) cannot be kept to what it lists` };
+  const granted = new Set(allow === null ? Object.keys(TOOL_MAP) : allow);
+  for (const n of deny) granted.delete(n);
+  const rules = [];
+  if (allow !== null) rules.push({ action: "*", verdict: "deny" });
+  for (const [action, members] of OC_ACTIONS) {
+    const have = members.filter((m) => granted.has(m));
+    if (have.length === members.length || action === "task" && have.length > 0) {
+      if (allow !== null) rules.push({ action, verdict: "allow" });
+    } else if (have.length === 0) {
+      if (allow === null) rules.push({ action, verdict: "deny" });
+    } else {
+      return { ok: false, reason: `opencode grants ${action} as one permission, and this agent's tools allow only ${have.join(", ")} of ${members.join(", ")}` };
+    }
+  }
+  const denied = new Set(mcpEntries(deny).map(mcpAction));
+  if (allow !== null) {
+    for (const e of mcpEntries(allow)) if (!denied.has(mcpAction(e)) && !rules.some((r) => r.action === mcpAction(e))) rules.push({ action: mcpAction(e), verdict: "allow" });
+  }
+  for (const action of denied) rules.push({ action, verdict: "deny" });
+  return { ok: true, rules };
+}
+var ORIGIN_FIELD = "sterling-origin";
+var ORIGIN_LINE_RE = new RegExp(`^(?:${ORIGIN_FIELD}|"${ORIGIN_FIELD}"|'${ORIGIN_FIELD}')[ 	]*:.*(?:
+|$)`, "m");
+function originOf(data) {
+  const v = data[ORIGIN_FIELD];
+  if (v === void 0) return { origin: "claude" };
+  if (!CUSTOM_HOSTS.includes(v)) return { error: `${ORIGIN_FIELD} must be one of ${CUSTOM_HOSTS.join(", ")}, got ${JSON.stringify(v)}` };
+  return { origin: v };
+}
+var keyLineRe = (field) => new RegExp(`^(?:${field}|"${field}"|'${field}')[ 	]*:.*$`, "m");
+var withoutOrigin = (frontmatter) => frontmatter.replace(ORIGIN_LINE_RE, "").replace(/\n$/, "");
+var OC_ALIAS = { shell: "bash", write: "edit", patch: "edit" };
+var OC_V2_KEYS = ["permissions", "request", "system", "disabled"];
+function openCodeRules(data) {
+  const v2 = OC_V2_KEYS.some((k) => k in data);
+  const effectOk = (e) => e === "allow" || e === "deny" || e === "ask";
+  if (v2) {
+    if (data.disabled === true) return { reason: "the agent is disabled on OpenCode (disabled: true), and no other host can carry that" };
+    const list = data.permissions ?? [];
+    if (!Array.isArray(list)) return { reason: "its permissions value is not a list of rules" };
+    const rules2 = [];
+    for (const r of list) {
+      const resource = r?.resource ?? "*";
+      if (typeof r?.action !== "string" || typeof resource !== "string" || !effectOk(r?.effect)) return { reason: `the permissions rule ${JSON.stringify(r)} is not {action, resource, effect}` };
+      rules2.push({ action: r.action, resource, effect: r.effect });
+    }
+    return rules2;
+  }
+  if ("tools" in data) return { reason: "its OpenCode tools map is not translated; write the same rules under permission" };
+  const perm = data.permission;
+  if (perm === void 0 || perm === null) return [];
+  if (typeof perm === "string") return effectOk(perm) ? [{ action: "*", resource: "*", effect: perm }] : { reason: `permission ${JSON.stringify(perm)} is not allow, deny or ask` };
+  if (typeof perm !== "object" || Array.isArray(perm)) return { reason: "its permission value is not a map" };
+  const rules = [];
+  for (const [action, value] of Object.entries(perm)) {
+    if (typeof value === "string" && effectOk(value)) rules.push({ action, resource: "*", effect: value });
+    else if (value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(effectOk)) {
+      for (const [resource, effect] of Object.entries(value)) rules.push({ action, resource, effect });
+    } else return { reason: `permission.${action} is not allow, deny, ask or a map of them` };
+  }
+  return rules;
+}
+function fromOpenCode(data) {
+  const rules = openCodeRules(data);
+  if (!Array.isArray(rules)) return rules;
+  const known = new Set(OC_ACTIONS.map(([a]) => a));
+  for (const r of rules) {
+    if (r.action !== "*" && !known.has(OC_ALIAS[r.action] ?? r.action)) return { reason: `its OpenCode rule for ${r.action} names a tool or pattern no other host has a name for` };
+  }
+  const verdict = (action) => {
+    let v;
+    let partial = false;
+    for (const r of rules) {
+      if (r.action !== "*" && (OC_ALIAS[r.action] ?? r.action) !== action) continue;
+      if (r.resource === "*") {
+        v = r.effect;
+        partial = false;
+      } else partial = true;
+    }
+    if (partial) return { reason: `OpenCode allows ${action === "*" ? "every tool" : action} only for some patterns, and that cannot be written without the patterns` };
+    if (v === "ask") return { reason: `OpenCode asks before ${action === "*" ? "every tool" : action}; allowing it would be broader and denying it narrower than written` };
+    return { v };
+  };
+  const base2 = verdict("*");
+  if (base2.reason) return base2;
+  const allowlist = base2.v === "deny";
+  const tools = [];
+  const disallowedTools = [];
+  for (const [action, members] of OC_ACTIONS) {
+    const r = verdict(action);
+    if (r.reason) return r;
+    if (allowlist && r.v === "allow") tools.push(...members);
+    if (!allowlist && r.v === "deny") disallowedTools.push(...members);
+  }
+  return { tools: allowlist ? tools : null, disallowedTools };
+}
+function fromAgy(data) {
+  if (data.tools === void 0 || data.tools === null) return { tools: null, disallowedTools: [] };
+  if (!Array.isArray(data.tools) || data.tools.some((t) => typeof t !== "string")) return { reason: "its agy tools value is not a list of tool names" };
+  const unknown = data.tools.filter((t) => !AGY_ALL.includes(t));
+  if (unknown.length) return { reason: `the agy tool(s) ${unknown.join(", ")} have no name on other hosts` };
+  const granted = new Set(data.tools);
+  const tools = Object.entries(TOOL_MAP).filter(([, t]) => Array.isArray(t.agy) && t.agy.length > 0 && t.agy.every((n) => granted.has(n))).map(([name]) => name);
+  return { tools, disallowedTools: [] };
+}
+function sourceRestrictions(origin, data) {
+  if (origin === "opencode") return fromOpenCode(data);
+  if (origin === "agy") return fromAgy(data);
+  return { tools: data.tools, disallowedTools: data.disallowedTools };
+}
+var NON_PORTABLE_KEYS = { claude: ["hooks", "mcpServers", "permissionMode", "isolation"], opencode: [], agy: ["mcpServers"] };
+function hostRestrictionRefusal(host, origin, data) {
+  if (host === origin) return null;
+  const bad = NON_PORTABLE_KEYS[origin].filter((k) => k in data);
+  if (bad.length) return `${host} cannot express the frontmatter key(s) ${bad.join(", ")}`;
+  const restr = sourceRestrictions(origin, data);
+  if (restr.reason) return `${host} cannot be given this ${origin} agent's permissions: ${restr.reason}`;
+  if (host === "claude") {
+    const tools = toolList(restr.tools);
+    if (tools !== null && tools.length === 0) return "claude cannot write an agent that may use no tool at all (an empty tools line is read as every tool)";
+    return null;
+  }
+  const t = translateTools(host, restr);
+  if (!t.ok) return t.reason;
+  if (host === "agy" && Array.isArray(t.tools) && t.tools.length === 0) return "agy cannot write an agent that may use no tool at all";
+  return null;
+}
+function parseSource(text) {
+  const m = normalize5(text).match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { error: "the source has no frontmatter block" };
+  let data;
+  try {
+    data = load(m[1], { schema: CORE_SCHEMA });
+  } catch (err) {
+    return { error: `the source frontmatter is not valid YAML: ${err.message.split("\n")[0]}` };
+  }
+  if (data === null || data === void 0) data = {};
+  if (typeof data !== "object" || Array.isArray(data)) return { error: "the source frontmatter is not a mapping" };
+  return { frontmatter: m[1], body: m[2], data };
+}
+function detectInstalledHosts(projectRoot, { env = process.env, home = homedir5(), probes = {} } = {}) {
+  const po = probes.opencode ?? probeOpenCode;
+  const pa = probes.agy ?? probeAgy;
+  return CUSTOM_HOSTS.filter((h) => {
+    if (h === "claude") return existsSync11(join16(projectRoot, ".claude"));
+    if (h === "opencode") return po({ env, home }).installed === true;
+    return pa({ env, home }).installed === true;
+  });
+}
+var yamlString2 = (s) => JSON.stringify(s);
+function stamp(host, key2, sourceHash, content) {
+  return `<!-- sterling-custom renderer=${CUSTOM_RENDERER} host=${host} key=${key2} source_hash=${sourceHash} content_hash=${sha2564(content)} -->`;
+}
+function withStamp(frontmatterBlock, body, host, key2, sourceHash) {
+  const content = `${frontmatterBlock}
+${body}`;
+  return `${frontmatterBlock}
+${stamp(host, key2, sourceHash, content)}
+${body}`;
+}
+function renderCustomAgent({ host, key: key2, name, source, entry, sourceHash, overpassProvider = DEFAULT_OVERPASS_PROVIDER }) {
+  const { data, body } = source;
+  const cfg = entry ?? {};
+  if (cfg.model && !hostRunsModel(cfg.model, host)) return { ok: false, reason: `${host} cannot run ${cfg.model}, the model config.models.${key2} names` };
+  const o = originOf(data);
+  if (o.error) return { ok: false, reason: o.error };
+  const origin = o.origin;
+  const srcModel = typeof data.model === "string" ? data.model : void 0;
+  if (host === origin) {
+    let fm = withoutOrigin(source.frontmatter);
+    const set = {};
+    const setLine = (field, value) => {
+      const re = keyLineRe(field);
+      fm = re.test(fm) ? fm.replace(re, `${field}: ${value}`) : `${fm}
+${field}: ${value}`;
+      set[field] = value;
+    };
+    if (host === "claude") {
+      const resolved2 = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, "claude");
+      if (cfg.model) setLine("model", resolved2.model);
+      if (cfg.effort && resolved2.effort) setLine("effort", resolved2.effort);
+      if (!keyLineRe("name").test(fm)) {
+        fm = `name: ${name}
+${fm}`;
+        set.name = name;
+      }
+    } else if (host === "opencode") {
+      const resolved2 = resolveHostSettings({ model: cfg.model }, "opencode");
+      if (cfg.model && resolved2.model !== "inherit") setLine("model", opencodeModelRef(resolved2.model, overpassProvider));
+    } else if (cfg.model) {
+      setLine("model", resolveHostSettings({ model: cfg.model }, "agy").model);
+    }
+    const check = parseSource(`---
+${fm}
+---
+`);
+    if (check.error) return { ok: false, reason: `the frontmatter with Sterling's model lines does not parse (${check.error})` };
+    const wrong = Object.entries(set).filter(([field, value]) => String(check.data[field]) !== String(value));
+    if (wrong.length) return { ok: false, reason: `the frontmatter with Sterling's model lines does not read back ${wrong.map(([f, v]) => `${f}: ${v}`).join(", ")}` };
+    return { ok: true, name, content: withStamp(`---
+${fm}
+---`, body, host, key2, sourceHash) };
+  }
+  const refusal3 = hostRestrictionRefusal(host, origin, data);
+  if (refusal3) return { ok: false, reason: refusal3 };
+  if (typeof data.description !== "string" || data.description.trim() === "") return { ok: false, reason: `${host} needs a description in the source frontmatter` };
+  const restr = sourceRestrictions(origin, data);
+  if (host === "claude") {
+    const fromOc = origin === "opencode" ? /^anthropic\/(claude-.+)$/.exec(srcModel ?? "")?.[1] : void 0;
+    const resolved2 = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, "claude");
+    const lines2 = ["---", `name: ${name}`, `description: ${yamlString2(data.description)}`];
+    if (cfg.model || fromOc) lines2.push(`model: ${cfg.model ? resolved2.model : fromOc}`);
+    if (cfg.effort && resolved2.effort) lines2.push(`effort: ${resolved2.effort}`);
+    const tools = toolList(restr.tools);
+    const denied = toolList(restr.disallowedTools) ?? [];
+    if (tools !== null) lines2.push(`tools: ${tools.join(", ")}`);
+    if (denied.length) lines2.push(`disallowedTools: ${denied.join(", ")}`);
+    lines2.push("---");
+    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key2, sourceHash) };
+  }
+  const translated = translateTools(host, restr);
+  if (host === "opencode") {
+    const claudeModel = origin === "claude" && srcModel?.startsWith("claude-") ? srcModel : void 0;
+    const resolved2 = resolveHostSettings({ model: cfg.model ?? claudeModel }, "opencode");
+    const lines2 = ["---", `description: ${yamlString2(data.description)}`, "mode: subagent"];
+    if (resolved2.model !== "inherit") lines2.push(`model: ${opencodeModelRef(resolved2.model, overpassProvider)}`);
+    if (translated.rules.length) lines2.push("permission:", ...translated.rules.map((r) => `  ${r.action === "*" ? '"*"' : r.action}: ${r.verdict}`));
+    lines2.push("---");
+    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key2, sourceHash) };
+  }
+  const resolved = resolveHostSettings({ model: cfg.model }, "agy");
+  const lines = ["---", `name: ${name}`, `description: ${yamlString2(data.description)}`, `model: ${resolved.model}`, "mainAgent: false", "subagent: true"];
+  if (translated.tools !== null) lines.push("tools:", ...translated.tools.map((t) => `  - ${t}`));
+  lines.push("---");
+  return { ok: true, name, content: withStamp(lines.join("\n"), body, host, key2, sourceHash) };
+}
+function symlinkIn(root, rel) {
+  let p = root;
+  for (const part of rel.split("/")) {
+    p = join16(p, part);
+    let st;
+    try {
+      st = lstatSync7(p);
+    } catch (err) {
+      if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+      throw err;
+    }
+    if (st.isSymbolicLink()) return p;
+  }
+  return null;
+}
+function inspectTarget(root, rel, host, key2, sourcePath, vacated = []) {
+  if (vacated.includes(rel)) return { state: "absent" };
+  const link = symlinkIn(root, rel);
+  if (link) return { state: "refused", reason: `${rel} is reached through the symlink ${link}; Sterling does not write through links` };
+  const path = join16(root, rel);
+  if (!existsSync11(path)) return { state: "absent" };
+  if (!lstatSync7(path).isFile()) return { state: "refused", reason: `${rel} exists and is not a file` };
+  const disk = normalize5(readFileSync12(path, "utf8"));
+  const h = disk.match(STAMP_RE);
+  if (!h) return { state: "refused", reason: `${rel} carries no Sterling stamp (a file Sterling did not write); the agent's source is ${sourcePath ?? AGENT_SOURCE_DIR}. Move it aside or delete it, then sync again` };
+  if (h[2] !== host || h[3] !== key2) return { state: "refused", reason: `${rel} is stamped for ${h[2]}:${h[3]}, not ${host}:${key2}; it is not overwritten` };
+  if (sha2564(disk.replace(`${h[0]}
+`, "")) !== h[5]) return { state: "refused", reason: `${rel} was edited after Sterling wrote it; edit the source ${sourcePath} instead, or delete the copy so Sterling can regenerate it` };
+  return { state: "owned", disk };
+}
+function stampedOutputs(root) {
+  const out = [];
+  const scan = (host, rel) => {
+    const dir = join16(root, rel);
+    if (!existsSync11(dir) || symlinkIn(root, rel) || !lstatSync7(dir).isDirectory()) return;
+    for (const e of readdirSync6(dir, { withFileTypes: true })) {
+      if (host === "agy" ? !e.isDirectory() : !(e.isFile() && e.name.endsWith(".md"))) continue;
+      const fileRel = host === "agy" ? `${rel}/${e.name}/agent.md` : `${rel}/${e.name}`;
+      if (!existsSync11(join16(root, fileRel)) || !lstatSync7(join16(root, fileRel)).isFile()) continue;
+      const m = normalize5(readFileSync12(join16(root, fileRel), "utf8")).match(STAMP_RE);
+      if (m && m[2] === host) out.push({ host, key: m[3], rel: fileRel });
+    }
+  };
+  scan("claude", ".claude/agents");
+  scan("opencode", ".opencode/agents");
+  scan("agy", AGY_AGENTS_DIR);
+  return out;
+}
+function hasCustomOutputs(projectRoot) {
+  return stampedOutputs(projectRoot).length > 0;
+}
+function readSources(root) {
+  const dir = join16(root, AGENT_SOURCE_DIR);
+  const out = /* @__PURE__ */ new Map();
+  if (!existsSync11(dir)) return out;
+  for (const f of readdirSync6(dir).sort()) {
+    if (!f.endsWith(".md")) continue;
+    const key2 = f.slice(0, -3);
+    if (!CUSTOM_AGENT_KEY_RE.test(key2)) continue;
+    out.set(key2, { key: key2, path: `${AGENT_SOURCE_DIR}/${f}` });
+  }
+  return out;
+}
+function planCustomAgents(projectRoot, config2, { hosts, pending, vacated = [] } = {}) {
+  const root = projectRoot;
+  const { config: canon, conflicts } = toCanonicalConfig(config2 ?? {});
+  const models = canon?.models ?? {};
+  const overpassProvider = canon?.overpass?.provider ?? DEFAULT_OVERPASS_PROVIDER;
+  const frozen = new Set(conflicts.map((c) => c.role));
+  const result = { ops: [], written: [], unchanged: [], refused: [], removed: [], skipped: [] };
+  const targetHosts = hosts ?? CUSTOM_HOSTS;
+  const sources = readSources(root);
+  if (pending) sources.set(pending.key, { key: pending.key, path: `${AGENT_SOURCE_DIR}/${pending.key}.md`, text: pending.text });
+  const live = /* @__PURE__ */ new Set();
+  const desired = /* @__PURE__ */ new Set();
+  const slot = (host, key2, rel) => `${host}\0${key2}\0${rel}`;
+  const refuse = (key2, host, reason, path) => result.refused.push({ key: key2, host, reason, ...path ? { path } : {} });
+  const agents = [];
+  for (const [key2, src] of sources) {
+    if (!Object.hasOwn(models, key2)) {
+      result.skipped.push({ key: key2, reason: `config.models has no ${key2} entry` });
+      continue;
+    }
+    const full = join16(root, src.path);
+    if (src.text === void 0 && symlinkIn(root, src.path)) {
+      refuse(key2, "*", `${src.path} is a symlink; Sterling does not read an agent through a link`, src.path);
+      live.add(key2);
+      continue;
+    }
+    const text = src.text ?? readFileSync12(full, "utf8");
+    const source = parseSource(text);
+    live.add(key2);
+    if (source.error) {
+      refuse(key2, "*", `${src.path}: ${source.error}`, src.path);
+      continue;
+    }
+    const declared = typeof source.data.name === "string" ? source.data.name : void 0;
+    const name = declared ?? key2.slice("custom-".length);
+    if (!CUSTOM_AGENT_SLUG_RE.test(name) || customAgentSlug(name) !== name) {
+      refuse(key2, "*", `${src.path}: the agent name ${JSON.stringify(name)} must be lower-case letters, digits and single hyphens to name a file on every host`, src.path);
+      continue;
+    }
+    if (RESERVED_NAMES.has(name)) {
+      refuse(key2, "*", `${src.path}: the name ${name} belongs to a Sterling role, so no host file is written for it`, src.path);
+      continue;
+    }
+    if (frozen.has(key2)) {
+      refuse(key2, "*", `${twoModelsReason(key2)}; its copies are left as they are until then`, src.path);
+      continue;
+    }
+    agents.push({ key: key2, src, source, name, entry: models[key2], sourceHash: sha2564(normalize5(text)) });
+  }
+  const byName = /* @__PURE__ */ new Map();
+  for (const a of agents) byName.set(a.name, [...byName.get(a.name) ?? [], a.key]);
+  for (const a of agents) {
+    const same = byName.get(a.name);
+    if (same.length > 1) {
+      refuse(a.key, "*", `${a.src.path}: the name ${a.name} is also the output name of ${same.filter((k) => k !== a.key).join(", ")}; rename one`, a.src.path);
+      continue;
+    }
+    for (const host of targetHosts) {
+      const rel = outputPath(host, a.name);
+      let r;
+      try {
+        r = renderCustomAgent({ host, key: a.key, name: a.name, source: a.source, entry: a.entry, sourceHash: a.sourceHash, overpassProvider });
+      } catch (err) {
+        r = { ok: false, reason: err.message };
+      }
+      if (!r.ok) {
+        refuse(a.key, host, `${r.reason}; ${host} gets no copy of ${a.src.path}`, rel);
+        continue;
+      }
+      desired.add(slot(host, a.key, rel));
+      const t = inspectTarget(root, rel, host, a.key, a.src.path, vacated);
+      if (t.state === "refused") {
+        refuse(a.key, host, t.reason, rel);
+        continue;
+      }
+      if (t.state === "owned" && t.disk === r.content) {
+        result.unchanged.push({ key: a.key, host, path: rel });
+        continue;
+      }
+      result.written.push({ key: a.key, host, path: rel, status: t.state === "absent" ? "created" : "refreshed" });
+      result.ops.push({ path: rel, content: r.content, previous: t.state === "owned" ? t.disk : null });
+    }
+  }
+  for (const o of stampedOutputs(root)) {
+    if (desired.has(slot(o.host, o.key, o.rel))) continue;
+    if (live.has(o.key) && !targetHosts.includes(o.host)) continue;
+    if (frozen.has(o.key)) continue;
+    const why = !live.has(o.key) ? "its agent is gone" : "Sterling no longer generates this copy for the current source";
+    const t = inspectTarget(root, o.rel, o.host, o.key, `${AGENT_SOURCE_DIR}/${o.key}.md`, vacated);
+    if (t.state === "owned") {
+      result.removed.push({ key: o.key, host: o.host, path: o.rel });
+      result.ops.push({ path: o.rel, content: null, previous: t.disk });
+    } else if (t.state === "refused") {
+      refuse(o.key, o.host, `${t.reason} (kept and still installed: ${why}, but the file is not an unedited Sterling copy, so it is not deleted; it may allow more than the source now does, so remove it by hand)`, o.rel);
+    }
+  }
+  return result;
+}
+function restore(root, done) {
+  const failed = [];
+  for (const op of done.reverse()) {
+    try {
+      const path = join16(root, op.path);
+      if (op.previous === null) {
+        rmSync3(path, { force: true });
+        pruneEmptyAgyDir(root, op.path);
+      } else {
+        mkdirSync5(dirname5(path), { recursive: true });
+        writeFileAtomicIfChanged(path, op.previous);
+      }
+    } catch (err) {
+      failed.push(`${op.path}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
+}
+function pruneEmptyAgyDir(root, rel) {
+  if (!rel.startsWith(`${AGY_AGENTS_DIR}/`)) return;
+  const dir = join16(root, dirname5(rel));
+  if (existsSync11(dir) && readdirSync6(dir).length === 0) rmdirSync2(dir);
+}
+function syncCustomAgents(projectRoot, config2, { hosts, dryRun = false, env, home, probes, pending, vacated, requireClean = [] } = {}) {
+  const chosen = hosts ?? detectInstalledHosts(projectRoot, { env, home, probes });
+  const plan = planCustomAgents(projectRoot, config2, { hosts: chosen, pending, vacated });
+  const { ops, ...report2 } = plan;
+  if (dryRun) return { ...report2, dryRun: true };
+  const blocking = report2.refused.filter((r) => requireClean.includes(r.key));
+  if (blocking.length) throw new Error(blocking.map((r) => `${r.host}: ${r.reason}`).join("; "));
+  const done = [];
+  try {
+    for (const op of ops) {
+      const path = join16(projectRoot, op.path);
+      if (op.content === null) {
+        rmSync3(path);
+        done.push(op);
+        pruneEmptyAgyDir(projectRoot, op.path);
+      } else {
+        mkdirSync5(dirname5(path), { recursive: true });
+        writeFileAtomicIfChanged(path, op.content);
+        done.push(op);
+      }
+    }
+  } catch (err) {
+    try {
+      restore(projectRoot, done);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+  return { ...report2, dryRun: false };
+}
+
 // scripts/lib/project-identity.mjs
-function workIdentityRefusal(root, mode) {
+function identityRefusal(root) {
   let onPostgres;
   try {
     onPostgres = readProjectStorage(root) === "postgres";
   } catch (err) {
     return `project storage cannot be read: ${err.message}`;
   }
-  if (mode !== "work" && !onPostgres) return null;
-  const subject = mode === "work" ? "work-mode project" : "project with storage postgres";
+  if (!onPostgres) return null;
+  const subject = "project with storage postgres";
   try {
     if (readProjectIdentity(root)) return null;
   } catch (err) {
@@ -10131,8 +12544,8 @@ function probeClaudeWithOverride({ env = process.env } = {}) {
 }
 
 // scripts/lib/claude-md-extras.mjs
-import { existsSync as existsSync11, readFileSync as readFileSync12 } from "node:fs";
-import { join as join16 } from "node:path";
+import { existsSync as existsSync12, readFileSync as readFileSync13 } from "node:fs";
+import { join as join17 } from "node:path";
 var BOLD_RE = /^- \*\*(.+?)\*\*/;
 var PLAIN_RE = /^- (.+)$/;
 var FENCE_LINE = /^\s*(```|~~~)/;
@@ -10157,15 +12570,15 @@ function foreignBulletsIn(referenceText, fileText) {
   return topLevelBullets(fileText).filter((b) => !known.has(key(b.lead)));
 }
 function foreignClaudeMdBullets(pluginRoot2, projectDir) {
-  const claudePath = join16(projectDir, "CLAUDE.md");
-  const templatePath = join16(pluginRoot2, "templates", "target-claude-md.md");
-  if (!existsSync11(claudePath) || !existsSync11(templatePath)) return [];
-  return foreignBulletsIn(readFileSync12(templatePath, "utf8"), readFileSync12(claudePath, "utf8")).map((b) => ({ file: "CLAUDE.md", ...b }));
+  const claudePath = join17(projectDir, "CLAUDE.md");
+  const templatePath = join17(pluginRoot2, "templates", "target-claude-md.md");
+  if (!existsSync12(claudePath) || !existsSync12(templatePath)) return [];
+  return foreignBulletsIn(readFileSync13(templatePath, "utf8"), readFileSync13(claudePath, "utf8")).map((b) => ({ file: "CLAUDE.md", ...b }));
 }
 function foreignGeminiMdBullets(referenceText, projectDir) {
-  const geminiPath = join16(projectDir, "GEMINI.md");
-  if (!existsSync11(geminiPath)) return [];
-  return foreignBulletsIn(referenceText, readFileSync12(geminiPath, "utf8")).map((b) => ({ file: "GEMINI.md", ...b }));
+  const geminiPath = join17(projectDir, "GEMINI.md");
+  if (!existsSync12(geminiPath)) return [];
+  return foreignBulletsIn(referenceText, readFileSync13(geminiPath, "utf8")).map((b) => ({ file: "GEMINI.md", ...b }));
 }
 function foreignBulletWarning({ file = "CLAUDE.md", line, lead }) {
   const shown = lead.length > 80 ? `${lead.slice(0, 77)}...` : lead;
@@ -10181,7 +12594,7 @@ function claudeMdWarnings(pluginRoot2, projectDir, geminiReference) {
   }
   if (geminiReference) {
     try {
-      if (existsSync11(join16(projectDir, "GEMINI.md"))) {
+      if (existsSync12(join17(projectDir, "GEMINI.md"))) {
         for (const b of foreignGeminiMdBullets(geminiReference(), projectDir)) lines.push(foreignBulletWarning(b));
       }
     } catch (err) {
@@ -10192,24 +12605,23 @@ function claudeMdWarnings(pluginRoot2, projectDir, geminiReference) {
 }
 
 // scripts/sync-agents.mjs
-var here = dirname5(fileURLToPath2(new URL("../scripts/sync-agents.mjs", import.meta.url).href));
+var here = dirname6(fileURLToPath2(new URL("../scripts/sync-agents.mjs", import.meta.url).href));
 var pluginRoot = resolve9(here, "..");
 var args = process.argv.slice(2);
 var targetIdx = args.indexOf("--target");
 var targetDir = targetIdx !== -1 ? resolve9(args[targetIdx + 1]) : process.cwd();
 var configDir = storeRootFor(targetDir);
-var pluginVersion = JSON.parse(readFileSync13(join17(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
-var projectMode;
+var pluginVersion = JSON.parse(readFileSync14(join18(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
 try {
-  projectMode = readProjectMode(configDir);
+  readProjectWorkflow(configDir);
 } catch (err) {
-  if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
-  console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  if (!(err instanceof ProjectWorkflowError) && !(err instanceof ContainmentError)) throw err;
+  console.log(`refused_project_workflow: ${err.message}; nothing synced`);
   process.exit(2);
 }
-var identityRefusal = workIdentityRefusal(configDir, projectMode);
-if (identityRefusal) {
-  console.log(`refused_project_identity: ${identityRefusal}; nothing synced`);
+var identityRefusal2 = identityRefusal(configDir);
+if (identityRefusal2) {
+  console.log(`refused_project_identity: ${identityRefusal2}; nothing synced`);
   process.exit(2);
 }
 var handoffEnabled;
@@ -10229,26 +12641,37 @@ try {
   process.exit(2);
 }
 var claudeHost = claudeProbe.installed;
-var configPath = join17(configDir, ".sterling", "config.json");
-var configSource = existsSync12(configPath) ? configPath : join17(pluginRoot, "templates", "default-config.json");
+var configPath = join18(configDir, ".sterling", "config.json");
+var configSource = existsSync13(configPath) ? configPath : join18(pluginRoot, "templates", "default-config.json");
 var config;
 try {
-  config = parseConfig(JSON.parse(readFileSync13(configSource, "utf8")));
+  config = parseConfig(JSON.parse(readFileSync14(configSource, "utf8")));
 } catch (err) {
   console.log(`refused_config: ${configSource.replace(/\\/g, "/")} does not validate (${err.message.replace(/\s+/g, " ")}); fix it (the TUI System tab writes config.models), then rerun /sterling:update; nothing synced`);
   process.exit(2);
 }
-var configMigration = migrateProjectConfig(configDir);
+var resolutions;
+try {
+  resolutions = modelChoicesFromArgs(args);
+} catch (err) {
+  console.log(`refused_model_choice: ${err.message}; nothing synced`);
+  process.exit(2);
+}
+var configMigration = migrateProjectConfigCanonical(configDir, { resolutions });
 for (const line of configMigration.lines) console.log(line);
+if (configMigration.status === "conflicts") {
+  console.log(describeConflictRefusal(configMigration.conflicts));
+  process.exit(2);
+}
 if (configMigration.status === "refused") {
-  console.log("refused_config_migration: .sterling/config.json was not migrated (retired models keys or missing model defaults); rerun /sterling:update once the file is stable; nothing synced");
+  console.log("refused_config_migration: .sterling/config.json was not migrated to the canonical shape; rerun /sterling:update once the file is stable; nothing synced");
   process.exit(2);
 }
 if (configMigration.status === "migrated") config = parseConfig(configMigration.config);
 var { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: "" } : syncAgents({
-  templatesDir: join17(pluginRoot, "agent-templates"),
-  registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
-  targetAgentsDir: join17(targetDir, ".claude", "agents"),
+  templatesDir: join18(pluginRoot, "agent-templates"),
+  registryPath: join18(pluginRoot, "agent-templates", "registry.json"),
+  targetAgentsDir: join18(targetDir, ".claude", "agents"),
   pluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
   config
@@ -10291,6 +12714,16 @@ for (const r of agySetup.rows ?? []) {
     console.error("\n" + r.instruction + "\n");
   }
 }
+if (Object.keys(config.models ?? {}).some(isCustomAgentKey) || hasCustomOutputs(targetDir)) {
+  try {
+    const custom2 = syncCustomAgents(targetDir, config);
+    for (const w of custom2.written) console.log(`${w.status}: ${w.path} (custom agent ${w.key})`);
+    for (const r of custom2.refused) console.log(`custom agent refused: ${r.key} on ${r.host}: ${r.reason}`);
+    for (const r of custom2.removed) console.log(`removed: ${r.path} (custom agent ${r.key} is gone)`);
+  } catch (err) {
+    console.log(`custom agents NOT synced: ${err.message}`);
+  }
+}
 var cloneTarget;
 try {
   cloneTarget = isSterlingClone(targetDir, pluginRoot);
@@ -10305,8 +12738,8 @@ var handoffTarget = cloneTarget === false && handoffEnabled;
 if (cloneTarget === false && !handoffTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED \u2014 ${HANDOFF_OFF_DETAIL}`);
 if (cloneTarget === false && handoffUnmaintained.length) console.log(handoffUnmaintainedNotice(handoffUnmaintained));
 var { report: opencodeReport } = !handoffTarget ? { report: [] } : syncOpenCodeAgents({
-  templatesDir: join17(pluginRoot, "agent-templates"),
-  registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
+  templatesDir: join18(pluginRoot, "agent-templates"),
+  registryPath: join18(pluginRoot, "agent-templates", "registry.json"),
   targetDir
 });
 for (const r of opencodeReport) {

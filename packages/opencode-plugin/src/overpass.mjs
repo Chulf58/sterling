@@ -1,27 +1,29 @@
-// The Overpass toggle on OpenCode (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
-// and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
-// points 2, 3, 4 and 8). The resolver is resolveOverpass in packages/schemas; this
-// file applies what it says on these plugin seams:
-//   - the dispatch pin: while Overpass is effective, every subagent call's model is
-//     its role's lane model (config.overpass.roles tier, else the lane model), replacing
-//     any model the call named (axis.mjs calls dispatchPin);
-//   - the request effort: while effective, a request of a role with an effort set, on
-//     exactly that role's lane model, carries it as options.reasoningEffort (requestEffort,
-//     set from server.mjs's context hook); inside the maintenance worker's child the
-//     effort its launch passed in the environment applies instead (workerRequestEffort);
-//   - the opencode.json overlay: while effective, agent.plan.model is the lane model
-//     and, unless the conductor is bypassed, agent["sterling/conductor"].model is the
-//     conductor model. A `variant` on those entries is taken out while the tier model
-//     is set, because effort comes from the tier member. What was there before is kept
-//     in OVERLAY_REL and put back when Overpass stops being effective;
-//   - the open-session notice: a conductor or Plan session whose model differs from
-//     the one Overpass gives its agent is told, every turn, to pick it in /models or
-//     start a new session. Sterling never switches a session's model.
+// Overpass tiers and the conductor and Plan models on OpenCode. Since the settings redesign
+// (decisions overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi and
+// settings-redesign-build-shape-one-legacy-to-canonical-config) there is no Overpass switch: an
+// agent whose one model in config.models is overpass/<tier> runs on <provider>/<tier>, mapped
+// through config.overpass.provider (dispatch-model.mjs projectRouting reads the config through
+// the legacy-to-canonical transform). This file applies that on these plugin seams:
+//   - the resolution (overpassResolution): which agents run on a tier, and the conductor's
+//     and Plan's own selections (models.conductor, models.plan);
+//   - the request effort: a request of a role on a tier with an effort set, on exactly that
+//     role's tier model, carries it as options.reasoningEffort (requestEffort, set from
+//     server.mjs's context hook); inside the maintenance worker's child the effort its launch
+//     passed in the environment applies instead (workerRequestEffort);
+//   - the opencode.json overlay: agent.plan.model is models.plan and
+//     agent["sterling/conductor"].model is models.conductor, each only when selected. A
+//     model's effort is written as the entry's `variant`, except on a tier, whose effort is
+//     not an OpenCode variant (the variant is then taken out). What was there before is
+//     kept in OVERLAY_REL and put back when the selection goes;
+//   - the open-session notice: a conductor or Plan session whose model differs from its
+//     selection is told, every turn, to pick it in /models or start a new session. Sterling
+//     never switches a session's model.
 //
 // Ownership: OVERLAY_REL (plain JSON, written with fs, never the store) records, per
-// agent entry Sterling changed, the model it wrote, the values of `model` and
-// `variant` it replaced, and whether the entry existed. Removal touches an entry only
-// while its model is still exactly the one Sterling wrote; an entry the user has
+// agent entry Sterling changed, the model (and any variant) it wrote, the values of `model`
+// and `variant` it replaced, and whether the entry existed. A record written before
+// variants were written has no `wroteVariant`: Sterling wrote no variant there.
+// Removal touches an entry only while its model is still exactly the one Sterling wrote; an entry the user has
 // changed since is theirs and is left alone. A change the user makes while Overpass
 // is on is kept as the value to put back, so the latest choice returns. A write of
 // opencode.json is bracketed by a `pending` record in that file (convergeOverlay), so a
@@ -30,12 +32,14 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OverpassUnknownRoleError, resolveOverpass } from '@sterling/schemas';
+import { CONDUCTOR_MODEL_KEY, MAINTENANCE_WORKER_ROLE, OVERPASS_EFFORTS, OverpassUnknownRoleError, PLAN_MODEL_KEY, hostRunsModel } from '@sterling/schemas';
 import { WORKER_EFFORT_ENV, WORKER_EFFORT_MODEL_ENV } from '../../../scripts/hooks/lib/maintenance-worker-opencode.mjs';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, sterlingRootFrom, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
 import { readCopyVersion } from '../../../scripts/lib/sterling-roots.mjs';
+import { openCodeCustomAgentKeys } from '../../../scripts/lib/custom-agent-render.mjs';
 import { agentRole } from './agent-name.mjs';
+import { projectRouting, routingKey } from './dispatch-model.mjs';
 import { remember } from './bounded.mjs';
 
 export const OVERLAY_REL = '.sterling/overpass-overlay.json';
@@ -43,9 +47,44 @@ export const PLAN_AGENT = 'plan';
 // The entry keys the overlay owns while it is in place: `model` is set, `variant` is taken out.
 const OWNED_KEYS = ['model', 'variant'];
 
-/** The project's Overpass resolution on this host. Throws on an unreadable config or an invalid overpass block. */
+/**
+ * What the canonical models give Overpass and the overlay, from projectRouting's `routing`:
+ * { provider, effective, roles, plan, conductor, routing }. `roles` holds each agent on a tier
+ * (other than the conductor and Plan): { model: <provider>/<tier>, effort? }. `plan` and
+ * `conductor` are their own selections, { model, tier, variant? } (variant = effort, never on a
+ * tier), or null when none is made. `effective` is true when any agent runs on a tier. A role with
+ * an unresolved two-model conflict or an invalid entry is in none of them.
+ */
+export function overpassResolution(routing) {
+  const usable = (key) => {
+    const e = routing.entries[key];
+    return e && !e.problem && !routing.conflicts.has(key) ? e : null;
+  };
+  const roles = {};
+  for (const key of Object.keys(routing.entries)) {
+    if (key === PLAN_MODEL_KEY || key === CONDUCTOR_MODEL_KEY) continue;
+    const e = usable(key);
+    if (e?.tier) roles[key] = { model: e.model, ...(e.effort ? { effort: e.effort } : {}) };
+  }
+  // A tier's effort is not an OpenCode variant: it is kept as `effort` and sent as the request's
+  // reasoning effort on the primary session's own requests (requestEffort).
+  // A selection OpenCode cannot run (an agy/<id>) gets no overlay model and no substitute: the session-start
+  // host-fit line (unsupportedAgentsLine) names it, and the installer gives that agent no copy.
+  const selection = (key) => {
+    const e = usable(key);
+    if (!e || !hostRunsModel(e.canonical, 'opencode')) return null;
+    if (!e.effort) return { model: e.model, tier: e.tier };
+    return e.tier ? { model: e.model, tier: true, effort: e.effort } : { model: e.model, tier: false, variant: e.effort };
+  };
+  const plan = selection(PLAN_MODEL_KEY);
+  const conductor = selection(CONDUCTOR_MODEL_KEY);
+  const effective = Object.keys(roles).length > 0 || plan?.tier === true || conductor?.tier === true;
+  return { provider: routing.provider, effective, roles, plan, conductor, routing };
+}
+
+/** The project's resolution on this host (overpassResolution). Throws on an unreadable config or a value the transform cannot carry. */
 export function projectOverpass(root) {
-  return resolveOverpass(loadConfig(root) ?? {}, { host: 'opencode' });
+  return overpassResolution(projectRouting(loadConfig(root) ?? {}, { agentKeys: openCodeCustomAgentKeys(root) }));
 }
 
 /**
@@ -64,97 +103,19 @@ export function dispatchOverpass(root) {
     return { res: null, unreadable: e };
   }
   if (!isObject(config)) return { res: null, unreadable: new Error('it is not a JSON object') };
-  // `config` is the raw object read, for the model resolver that runs while Overpass is not effective (dispatch-model.mjs).
-  return { res: resolveOverpass(config, { host: 'opencode' }), unreadable: null, config };
+  // `routing` is what dispatch-model.mjs resolves each dispatch from.
+  // An adopted agent is dispatched by the name OpenCode serves it under; agentKeys maps that to its config key.
+  const routing = projectRouting(config, { agentKeys: openCodeCustomAgentKeys(root) });
+  return { res: overpassResolution(routing), unreadable: null, routing };
 }
 
 /** The loud line a dispatch carries when .sterling/config.json could not be read (`error` from dispatchOverpass). */
 export function overpassUnknownLine(error) {
-  return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
-}
-
-// A brief line that opts one dispatch out of the tier (decision
-// overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re). Only a line that starts
-// with the marker counts, so a brief that merely quotes it mid-sentence does not bypass,
-// and a line inside a fenced code block (``` or ~~~, any info string, an unclosed fence
-// running to the end) is quoted text, not a marker.
-const BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/**
- * The text after the marker on every unfenced brief line that `lineRe` matches (its first
- * group, trimmed), in order. A line inside a fenced code block is quoted text and never
- * counts. Shared by the OVERPASS-BYPASS and MODEL-INTENT markers (dispatch-model.mjs).
- */
-export function unfencedMarkers(prompt, lineRe) {
-  if (typeof prompt !== 'string') return [];
-  let fence = null;
-  const found = [];
-  for (const line of prompt.split(/\r?\n/)) {
-    if (fence) {
-      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
-      continue;
-    }
-    const open = FENCE_OPEN.exec(line);
-    if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
-      fence = open[1];
-      continue;
-    }
-    const m = lineRe.exec(line);
-    if (m) found.push(m[1].trim());
-  }
-  return found;
-}
-
-/**
- * The OVERPASS-BYPASS marker in a brief: null when no unfenced line carries one, else
- * { reason }. The reason is the first marker's, trimmed; it is empty when ANY unfenced
- * marker line has no reason, so a valid first marker cannot hide an empty second one.
- */
-export function bypassMarker(prompt) {
-  const reasons = unfencedMarkers(prompt, BYPASS_LINE);
-  if (!reasons.length) return null;
-  return { reason: reasons.every(Boolean) ? reasons[0] : '' };
-}
-
-/** The message a dispatch is refused with when its OVERPASS-BYPASS marker cannot be honoured (`why` names the defect). */
-export function bypassRefusal(why) {
-  return `Sterling refused this subagent dispatch: its brief carries an OVERPASS-BYPASS line but ${why}. A bypass must name the model the call should run on (the call's \`model\`) and say why on the marker line, as "OVERPASS-BYPASS: <reason>". Fix the dispatch and send it again, or drop the line to run on the Overpass tier.`;
-}
-
-/**
- * The dispatch pin for a subagent call's arguments: { model, line, notice? }. `model` is the
- * lane model while Overpass is effective (null otherwise, and the call is left alone); `line`
- * names the model a call asked for when the toggle replaced it, else null. A brief with an
- * OVERPASS-BYPASS marker keeps the call's own model (`model` null, `line` and `notice` say
- * so); the marker with no model on the call or an empty reason throws, which refuses the
- * dispatch. Without Overpass in effect the marker means nothing and is ignored.
- */
-export function dispatchPin(res, args) {
-  if (!res.effective) return { model: null, line: null };
-  const lane = laneRoute(res, args?.agent).model;
-  const marker = bypassMarker(args?.prompt);
-  if (marker) {
-    const named = args?.model;
-    if (typeof named !== 'string' || !named) throw new Error(bypassRefusal('the call names no model'));
-    if (!marker.reason) throw new Error(bypassRefusal('the marker gives no reason'));
-    return {
-      model: null,
-      line: `OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to ${named} instead of ${lane} (reason: ${marker.reason}).`,
-      notice: `Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to ${named} instead of ${lane} (reason: ${marker.reason}).`,
-    };
-  }
-  const asked = args?.model;
-  const replaced = typeof asked === 'string' && asked && asked !== lane;
-  return {
-    model: lane,
-    line: replaced ? `OVERPASS: this dispatch ran on ${lane}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null,
-  };
+  return `Model routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches get no model from config.models, Overpass tiers included, until it is fixed.`;
 }
 
 // The availability check (GitHub #257, #258, #281; user-ruled 2026-11-17 "Check and refuse
-// loudly"). INVARIANT: while Overpass is effective, a routed tier model `<provider>/<tier>`
+// loudly"). INVARIANT: a routed tier model `<provider>/<tier>` (an agent whose model is overpass/<tier>)
 // counts as available only when OpenCode's model list (ctx.model.list(), read at the moment
 // of the check) has an entry with that providerID and that id. A route the list lacks is
 // MISSING: a dispatch to it is refused before it starts, a worker launch on it is skipped,
@@ -203,18 +164,14 @@ export function routeAvailability(inv, ref) {
   return { state: 'available' };
 }
 
-/** The fix steps for a missing route; `bypass` adds the per-dispatch OVERPASS-BYPASS way out. */
-export function missingRouteRemedy(provider, { bypass = true } = {}) {
-  return (
-    `To fix: check the ${provider} credential (the gateway drops its models when it rejects the key), then run /reload in the TUI (or \`opencode reload\`) so OpenCode loads the provider again;` +
-    (bypass ? ' or put a line "OVERPASS-BYPASS: <reason>" in the brief and name a loaded model on the call;' : '') +
-    ' or turn Overpass off with "overpass": {"enabled": false} in .sterling/config.json (TUI System tab).'
-  );
+/** The fix steps for a missing route. */
+export function missingRouteRemedy(provider) {
+  return `To fix: check the ${provider} credential (the gateway drops its models when it rejects the key), then run /reload in the TUI (or \`opencode reload\`) so OpenCode loads the provider again; or choose another model for that agent in config.models (TUI System tab).`;
 }
 
 /** The message a dispatch to a missing route is refused with. */
 export function missingRouteRefusal(res, agent, model, why) {
-  return `Sterling refused this subagent dispatch: Overpass is ON but its route ${model} for ${agent || 'this agent'} is not available: ${why}. Nothing was sent, and the dispatch is not moved to a direct provider. ${missingRouteRemedy(res.provider)} Then dispatch again.`;
+  return `Sterling refused this subagent dispatch: the Overpass route ${model} for ${agent || 'this agent'} is not available: ${why}. Nothing was sent, and the dispatch is not moved to a direct provider. ${missingRouteRemedy(res.provider)} Then dispatch again.`;
 }
 
 /** The line a dispatch carries when the availability of its route is UNKNOWN. */
@@ -222,16 +179,16 @@ export function unknownRouteLine(model, why) {
   return `OVERPASS: Overpass availability UNKNOWN: ${why}; this dispatch was sent to ${model} unchecked, and OpenCode reports it if that model is not loaded.`;
 }
 
-/** Each distinct routed model while Overpass is effective, with who runs on it: [{ model, users }]. */
+/** Each distinct tier model an agent runs on, with who runs on it: [{ model, users }]. */
 export function overpassRoutes(res) {
   const byModel = new Map();
   const add = (model, user) => {
     if (!byModel.has(model)) byModel.set(model, []);
     byModel.get(model).push(user);
   };
-  if (res.conductorRouted) add(res.conductorModel, 'the conductor');
+  if (res.conductor?.tier) add(res.conductor.model, 'the conductor');
   for (const [role, route] of Object.entries(res.roles ?? {})) add(route.model, role === MAINTENANCE_WORKER_ROLE ? 'the maintenance worker' : role);
-  add(res.laneModel, 'Plan and other agents');
+  if (res.plan?.tier) add(res.plan.model, 'Plan');
   return [...byModel].map(([model, users]) => ({ model, users }));
 }
 
@@ -254,33 +211,33 @@ export function availableAgainLine(res) {
 }
 
 /**
- * The Overpass route of a subagent `agent` (an OpenCode agent name): { model, effort? }.
- * A Sterling role (agentRole) takes its config.overpass.roles entry; any other agent
- * takes the default lane model with no effort.
- */
-export function laneRoute(res, agent) {
-  const role = agentRole(agent);
-  return (typeof role === 'string' && Object.hasOwn(res.roles ?? {}, role) && res.roles[role]) || { model: res.laneModel };
-}
-
-/**
  * The client reasoning effort for one model request of `agent` on `model` (the context
- * hook's Model.Ref, { providerID, id }), or null to leave the request alone. Set only
- * while Overpass is effective, the request's session is known to come from a dispatch
- * that was not bypassed (`dispatched`, from createLaneDispatches().dispatchOf; null when
- * that cannot be told), the agent maps to a role with an effort set, and the request runs
- * on exactly that role's lane model. A bypassed dispatch is never touched, even one that
- * named the role's own lane model, and neither is any other model.
+ * hook's Model.Ref, { providerID, id }), or null to leave the request alone. Two cases:
+ *   - the conductor's or Plan's own session (agent sterling/conductor or plan, both primary
+ *     agents a dispatch cannot start): its selection is a tier with an effort, and the request
+ *     runs on exactly that tier model;
+ *   - a subagent: set only when the request's session is known to come from a dispatch
+ *     (`dispatched`, from createLaneDispatches().dispatchOf; null when that cannot be told),
+ *     the agent maps to a config key (routingKey: an adopted agent's served name to its
+ *     custom-<slug> key) on an Overpass tier with an effort set, and the request runs on
+ *     exactly that key's tier model.
+ * Any other model is never touched, and neither is a lane whose call named its own model, even the tier
+ * model itself (`dispatched.explicitModel`).
  */
 export function requestEffort(res, agent, model, dispatched) {
   if (!res?.effective) return null;
-  if (!dispatched || dispatched.bypassed !== false) return null;
-  const role = agentRole(agent);
+  if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
+  const ref = `${model.providerID}/${model.id}`;
+  const primary = agent === CONDUCTOR_AGENT ? res.conductor : agent === PLAN_AGENT ? res.plan : undefined;
+  if (primary !== undefined) return primary?.tier && primary.effort && ref === primary.model ? primary.effort : null;
+  if (!dispatched) return null;
+  // a lane whose call named its own model keeps it as named, with no inherited role effort
+  if (dispatched.explicitModel === true) return null;
+  const role = res.routing ? routingKey(res.routing, agent) : agentRole(agent);
   if (typeof role !== 'string' || !Object.hasOwn(res.roles ?? {}, role)) return null;
   const route = res.roles[role];
   if (!route?.effort) return null;
-  if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
-  return `${model.providerID}/${model.id}` === route.model ? route.effort : null;
+  return ref === route.model ? route.effort : null;
 }
 
 /**
@@ -300,8 +257,8 @@ export function workerRequestEffort(env, model) {
 }
 
 /**
- * Which subagent dispatch each child session came from, so a request in the child knows
- * whether its dispatch was bypassed. In memory and bounded (bounded.mjs).
+ * Which subagent dispatch each child session came from, so a request in the child is known
+ * to be a dispatched lane's. In memory and bounded (bounded.mjs).
  *
  * The link, as OpenCode 2.1.2's subagent tool makes it: execute.before gives the call id,
  * the parent session and the arguments; the tool then creates the child session with
@@ -329,10 +286,12 @@ export function createLaneDispatches() {
     remember(children, child, key);
   };
   return {
-    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments. */
-    noteDispatch(parentSessionID, callID, args) {
+    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments.
+     *  `explicitModel` is true when the call itself named a model (before the pin filled one in): such a
+     *  lane keeps the model it named and gets no role effort, even when that model equals the role's tier. */
+    noteDispatch(parentSessionID, callID, args, { explicitModel = false } = {}) {
       const key = keyOf(parentSessionID, callID);
-      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), bypassed: bypassMarker(args?.prompt) !== null, child: null });
+      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), explicitModel: explicitModel === true, child: null });
     },
     linkChild,
     /** A call that ended: linked to `child` when its result names one, else its record is dropped. */
@@ -344,11 +303,11 @@ export function createLaneDispatches() {
     onEvent(ev) {
       if (ev?.type === 'session.tool.progress') linkChild(ev.data?.sessionID, ev.data?.id, ev.data?.metadata?.sessionID);
     },
-    /** { bypassed } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
+    /** { role, explicitModel? } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
     dispatchOf(sessionID, parentID, agent) {
       const call = calls.get(children.get(sessionID));
       if (!call || call.child !== sessionID || typeof parentID !== 'string' || call.parent !== parentID || call.role !== agentRole(agent)) return null;
-      return { bypassed: call.bypassed };
+      return call.explicitModel ? { role: call.role, explicitModel: true } : { role: call.role };
     },
   };
 }
@@ -370,20 +329,20 @@ export function pluginVersion(moduleUrl = import.meta.url) {
  * plugin's version (`version`, default pluginVersion()) and the update that teaches it the role.
  */
 export function overpassRefusal(error, { version } = {}) {
-  const head = `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}).`;
-  const tail = 'While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs.';
+  const head = `Sterling refused this subagent dispatch: the model settings in .sterling/config.json cannot be read (${error?.message ?? error}).`;
+  const tail = 'While they cannot be read, a dispatch might run on another model than the one chosen for it, so none runs.';
   if (error instanceof OverpassUnknownRoleError) {
-    return `${head} This Sterling plugin is version ${version ?? pluginVersion()} and does not know the role ${JSON.stringify(error.role)}; a newer Sterling most likely wrote it. Run \`opencode plugin update\`, then /reload, so the plugin knows that role. ${tail} Or remove that role from overpass.roles, or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+    return `${head} This Sterling plugin is version ${version ?? pluginVersion()} and does not know the role ${JSON.stringify(error.role)}; a newer Sterling most likely wrote it. Run \`opencode plugin update\`, then /reload, so the plugin knows that role. ${tail} Or remove that role from overpass.roles, then dispatch again.`;
   }
-  return `${head} ${tail} Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+  return `${head} ${tail} Fix that value in .sterling/config.json (TUI System tab), then dispatch again.`;
 }
 
-/** The agent entries the overlay should hold: { [agent]: model }. */
+/** The agent entries the overlay should hold: { [agent]: { model, variant? } }, from each agent's own selection. */
 export function desiredOverlay(res) {
   const out = {};
-  if (!res.effective) return out;
-  out[PLAN_AGENT] = res.laneModel;
-  if (res.conductorRouted) out[CONDUCTOR_AGENT] = res.conductorModel;
+  const want = (sel) => ({ model: sel.model, ...(sel.variant ? { variant: sel.variant } : {}) });
+  if (res?.plan) out[PLAN_AGENT] = want(res.plan);
+  if (res?.conductor) out[CONDUCTOR_AGENT] = want(res.conductor);
   return out;
 }
 
@@ -441,7 +400,7 @@ function isTracked(root) {
  * skipped and nothing else changes (decision
  * overpass-with-a-tracked-opencode-opencode-json-keep-routing).
  */
-export const TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on their own configured models. Subagent dispatches still route through Overpass.`;
+export const TRACKED_OVERLAY_NOTICE = `Sterling Overpass: ${PROJECT_CONFIG_REL} is tracked by git, and Sterling does not write tracked project files, so the conductor and Plan run on the models that file gives them, not on their config.models selections. Subagent dispatches still get their models from config.models.`;
 
 /**
  * The notice for Sterling-written entries a tracked opencode.json still holds, so the
@@ -551,7 +510,9 @@ export function convergeOverlay(root, res, { fs } = {}) {
     after[name] = entry === undefined ? null : entry;
   };
   for (const name of [...names].sort()) {
-    const model = want[name];
+    const wanted = want[name];
+    const model = wanted?.model;
+    const variant = wanted?.variant;
     const rec = own.agent[name];
     const entry = agents[name];
     if (entry !== undefined && !isObject(entry)) throw new Error(`${PROJECT_CONFIG_REL}: "agent.${name}" is not an object, so the Overpass agent models were not changed`);
@@ -560,23 +521,26 @@ export function convergeOverlay(root, res, { fs } = {}) {
       let next = rec;
       if (!next) next = { created: entry === undefined, prior: pick(cur, OWNED_KEYS) };
       else {
-        // Changed by hand while Overpass was on: that value is the one to put back.
+        // Changed by hand while Sterling's value was in place: that value is the one to put back.
         const prior = { ...next.prior };
         if (cur.model !== next.wrote) {
           if (Object.hasOwn(cur, 'model')) prior.model = cur.model;
           else delete prior.model;
         }
-        if (Object.hasOwn(cur, 'variant')) prior.variant = cur.variant;
+        if (Object.hasOwn(cur, 'variant') && cur.variant !== next.wroteVariant) prior.variant = cur.variant;
         next = { ...next, prior };
       }
       next = { ...next, wrote: model };
+      if (variant) next.wroteVariant = variant;
+      else delete next.wroteVariant;
       if (JSON.stringify(next) !== JSON.stringify(rec)) {
         own.agent[name] = next;
         ownChanged = true;
       }
-      if (cur.model !== model || Object.hasOwn(cur, 'variant') || entry === undefined) {
+      if (cur.model !== model || cur.variant !== variant || entry === undefined) {
         const updated = { ...cur, model };
-        delete updated.variant;
+        if (variant) updated.variant = variant;
+        else delete updated.variant;
         touch(name, updated);
       }
       continue;
@@ -595,6 +559,8 @@ export function convergeOverlay(root, res, { fs } = {}) {
     stranded.push({ name, model: rec.wrote, prior: rec.prior });
     const restored = { ...entry };
     delete restored.model;
+    // A variant Sterling wrote goes with its model; one the user set since stays.
+    if (rec.wroteVariant !== undefined && restored.variant === rec.wroteVariant) delete restored.variant;
     if (Object.hasOwn(rec.prior ?? {}, 'model')) restored.model = rec.prior.model;
     if (Object.hasOwn(rec.prior ?? {}, 'variant') && !Object.hasOwn(restored, 'variant')) restored.variant = rec.prior.variant;
     touch(name, rec.created && !Object.keys(restored).length ? undefined : restored);
@@ -618,11 +584,10 @@ export function convergeOverlay(root, res, { fs } = {}) {
   return { changed, notes };
 }
 
-/** The model Overpass gives `agent`'s sessions, or null when it gives that agent none. */
+/** The model config.models gives `agent`'s sessions (the conductor or Plan), or null when it selects none. */
 export function expectedSessionModel(res, agent) {
-  if (!res.effective) return null;
-  if (agent === CONDUCTOR_AGENT) return res.conductorRouted ? res.conductorModel : null;
-  if (agent === PLAN_AGENT) return res.laneModel;
+  if (agent === CONDUCTOR_AGENT) return res?.conductor?.model ?? null;
+  if (agent === PLAN_AGENT) return res?.plan?.model ?? null;
   return null;
 }
 
@@ -630,7 +595,7 @@ export function expectedSessionModel(res, agent) {
 export function mismatchNotice(res, agent, model) {
   const expected = expectedSessionModel(res, agent);
   if (!expected || !model || model === expected) return '';
-  return `STERLING OVERPASS: Overpass is ON but this session runs on ${model}: pick ${expected} in /models or start a new session. Sterling does not switch an open session's model.`;
+  return `STERLING MODELS: config.models gives this agent ${expected}, but this session runs on ${model}: pick ${expected} in /models or start a new session. Sterling does not switch an open session's model.`;
 }
 
 /**

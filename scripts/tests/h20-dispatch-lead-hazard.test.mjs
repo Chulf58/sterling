@@ -239,14 +239,3 @@ test('dispatch header: pinned first line, says the audit arrives WITH the dispat
   }
 });
 
-test('consult surface is unchanged: a codex consult still gets up to three whole hazards', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    seed(store, 4);
-    const r = runHook({ hook_event_name: 'PreToolUse', tool_name: 'mcp__codex__codex', tool_input: { prompt: PROMPT }, session_id: 's1', cwd: dir }, dir);
-    const ctx = ctxOf(r);
-    assert.equal(count(ctx, /^RIGHT WAY: /m), 3, `the ruling covers the dispatch surface only:\n${ctx}`);
-  } finally {
-    cleanup();
-  }
-});

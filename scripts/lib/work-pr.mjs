@@ -14,6 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { ProjectWorkflowError, workflowOfConfig } from '@sterling/schemas';
 import { resolveGhPath } from './gh-path.mjs';
 import { describeReset, isRateLimitText, readCoreRateLimit } from './gh-rate-limit.mjs';
 
@@ -74,9 +75,9 @@ export function noOriginRemote(cwd) {
   return r.status === 0 && !r.stdout.split('\n').map((l) => l.trim()).includes('origin');
 }
 
-/** The loud line printed when work mode falls back to a local merge. */
+/** The loud line printed when the pull-request merge path falls back to a local merge. */
 export const NO_ORIGIN_LOCAL_MERGE_NOTICE =
-  "direct-merge: WORK mode, but this repository has no 'origin' remote — merging LOCALLY like hobby mode. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
+  "direct-merge: the pull-request merge path, but this repository has no 'origin' remote — merging LOCALLY like the direct merge path. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
 
 /** Cheap preconditions, checked BEFORE the battery. Returns { repo } or { refusal }. */
 export function workPreflight(cwd) {
@@ -889,31 +890,28 @@ export class AutoMergeSettingError extends Error {
   }
 }
 
-/** The auto-merge switch, config.pr_review.auto_merge_on_clean (decision
- * work-mode-pr-auto-merge-when-copilot-loop-ends-clean): whether the conductor
- * squash-merges a PR whose review loop settled clean. `cfg` is the parsed
- * .sterling/config.json object (undefined when the file is absent). An absent
- * block or key is on, the shipped default. A pr_review that is not an object,
- * or a switch that is not a boolean, or a config whose root is not an object
- * (null, a number, a string, an array), throws an AutoMergeSettingError naming
- * the value: a typo must never read as on, and must never silently read as off
- * either. Only an undefined cfg (no config file) is on without inspection. */
+/** The auto-merge switch, config.workflow.auto_merge_on_clean (decisions
+ * work-mode-pr-auto-merge-when-copilot-loop-ends-clean and
+ * settings-redesign-build-shape-one-legacy-to-canonical-config): whether the
+ * conductor squash-merges a PR whose review loop settled clean. `cfg` is the parsed
+ * .sterling/config.json object (undefined when the file is absent). It is read
+ * through workflowOfConfig, so a legacy config's pr_review.auto_merge_on_clean is
+ * carried by the one transform. An absent switch is on, the shipped default. A
+ * config whose root is not an object (null, a number, a string, an array), or a
+ * switch or block the reader refuses, throws an AutoMergeSettingError naming the
+ * value: a typo must never read as on, and must never silently read as off either.
+ * Only an undefined cfg (no config file) is on without inspection. */
 export function autoMergeOnCleanOf(cfg) {
   if (cfg === undefined) return true;
   if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
     throw new AutoMergeSettingError(`config root must be an object, got ${JSON.stringify(cfg)}`);
   }
-  const block = cfg.pr_review;
-  if (block === undefined) return true;
-  if (block === null || typeof block !== 'object' || Array.isArray(block)) {
-    throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);
+  try {
+    return workflowOfConfig(cfg, '.sterling/config.json').auto_merge_on_clean;
+  } catch (err) {
+    if (err instanceof ProjectWorkflowError) throw new AutoMergeSettingError(`${err.message} — switch it in the TUI System tab or fix the file`);
+    throw err;
   }
-  const value = block.auto_merge_on_clean;
-  if (value === undefined) return true;
-  if (typeof value !== 'boolean') {
-    throw new AutoMergeSettingError(`config pr_review.auto_merge_on_clean must be true or false, got ${JSON.stringify(value)} — switch it in the TUI System tab or fix the file`);
-  }
-  return value;
 }
 
 /** Resolve the review thread of each given review-comment id (the REST id the

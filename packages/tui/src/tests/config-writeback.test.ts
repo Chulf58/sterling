@@ -116,10 +116,9 @@ async function withCwdAndExplicitConfig<T>(
 // Existence
 // ===========================================================================
 
-test('config-writeback: applyTddToggle and applySparringToggle are both exported as functions (frozen extraction target)', async () => {
+test('config-writeback: applyTddToggle is exported as a function (frozen extraction target; the sparring toggle is gone with the Sparring partner row)', async () => {
   const mod = await loadWriteback();
   assert.strictEqual(typeof mod.applyTddToggle, 'function', 'applyTddToggle must be exported from config-writeback.ts');
-  assert.strictEqual(typeof mod.applySparringToggle, 'function', 'applySparringToggle must be exported from config-writeback.ts');
 });
 
 // ===========================================================================

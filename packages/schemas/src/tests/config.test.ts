@@ -5,6 +5,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig, normalizeRawConfig, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, IMPLEMENTOR_HARD_MIGRATION_ID, configSchema, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
 
+// parseConfig returns the canonical shape since the settings redesign cutover (decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config); the tests below that pin the LEGACY base schema
+// (per-host model fields, hard_task, shipped legacy defaults) read it through legacyParse. The canonical shape
+// is pinned in canonical-config.test.ts.
+const legacyParse = (raw: unknown) => configSchema.parse(normalizeRawConfig(raw));
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
 test('shipped default config parses and carries the spec defaults (§12, §7.2)', () => {
@@ -17,7 +23,7 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // all four roles -> claude-sonnet-5-5 per decision implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause
   // (user-ruled 2026-09-28, replacing implementor-default-model-opus-5-5); Opus 5.5
   // stays available as a per-dispatch pin.
-  assert.equal(shipped.models.implementor.model, 'claude-sonnet-5-5');
+  assert.equal(shipped.models.implementor.model, 'anthropic/claude-sonnet-5-5');
   // Changed 2026-10-25: medium (was high, user-ruled 2026-09-28, decision implementor-default-effort-high).
   // User-ruled "Trial medium, then measure"; decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2.
   assert.equal(shipped.models.implementor.effort, 'medium');
@@ -26,7 +32,7 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // to one silently misses projects that inherit from the other.
   assert.deepEqual(parseConfig({}).models, shipped.models, 'schema models defaults match templates/default-config.json');
   for (const [role, v] of Object.entries(shipped.models)) {
-    assert.match(v.model, /^claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
+    assert.match(v.model ?? '', /^anthropic\/claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
   }
   for (const role of Object.values(shipped.models)) {
     assert.notEqual(role.effort, 'max', 'max effort is never used for subagents (§7.2 hard rule)');
@@ -43,23 +49,23 @@ test('models carries no retired debugger key, in the schema defaults or the ship
 });
 
 test('empty config gets full defaults; malformed config fails loud', () => {
-  const empty = parseConfig({});
+  const empty = legacyParse({});
   assert.equal(empty.context_watch.conductor.soft_pct, 35);
-  assert.throws(() => parseConfig({ context_watch: { conductor: { soft_pct: 'thirty' } } }));
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
+  assert.throws(() => legacyParse({ context_watch: { conductor: { soft_pct: 'thirty' } } }));
+  assert.throws(() => legacyParse({ models: { implementor: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
 });
 
 // decision opencode-only-model-override-per-role-for-openai-picks
 test('models.<role>.opencode_model: an optional <provider>/<model> override beside the Claude model', () => {
-  const set = parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } });
+  const set = legacyParse({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } });
   assert.equal(set.models.implementor.opencode_model, 'openai/gpt-5.6-terra');
   assert.equal(set.models.implementor.model, 'claude-sonnet-5-5', 'the Claude model is kept beside the override');
   // a catchall role (any installed agent's name) takes the override too
-  assert.equal(parseConfig({ models: { conductor: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } }).models.conductor.opencode_model, 'openai/gpt-6.1-sol');
-  assert.equal(parseConfig({}).models.implementor.opencode_model, undefined, 'absent by default');
+  assert.equal(legacyParse({ models: { conductor: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } }).models.conductor.opencode_model, 'openai/gpt-6.1-sol');
+  assert.equal(legacyParse({}).models.implementor.opencode_model, undefined, 'absent by default');
   assert.deepEqual(unreadConfigKeys({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } }), [], 'the override is a read key');
   for (const bad of ['gpt-5.6-terra', 'openai/', '/gpt-5.6-terra', 'openai/gpt 5', 'openai/gpt-5\nhooks: x', '']) {
-    assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: bad } } }), /opencode_model/, JSON.stringify(bad));
+    assert.throws(() => legacyParse({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: bad } } }), /opencode_model/, JSON.stringify(bad));
   }
 });
 
@@ -196,30 +202,9 @@ test('delivery.total_cap_bytes: an explicit value is honored; negative and non-n
 // until parseConfig grows the block.
 type CfgWithSparringPartner = { sparring_partner?: { enabled?: boolean } };
 
-test('sparring_partner: absent block defaults to {enabled: true}', () => {
-  const empty = parseConfig({}) as unknown as CfgWithSparringPartner;
-  assert.ok(empty.sparring_partner, 'parseConfig defaults must add a sparring_partner block even when absent from input');
-  assert.equal(empty.sparring_partner?.enabled, true, 'sparring_partner.enabled defaults to true when the block is absent');
-});
 
-test('sparring_partner: an explicit {enabled: false} round-trips', () => {
-  const off = parseConfig({ sparring_partner: { enabled: false } }) as unknown as CfgWithSparringPartner;
-  assert.equal(off.sparring_partner?.enabled, false, 'an explicit enabled:false overrides the true default and survives parsing');
-});
 
-test('sparring_partner: a junk (non-boolean) enabled value is refused loud', () => {
-  assert.throws(
-    () => parseConfig({ sparring_partner: { enabled: 'yes' } }),
-    /invalid/i,
-    'sparring_partner.enabled must be a boolean — a non-boolean value fails loud'
-  );
-});
 
-test('templates/default-config.json still parses and carries sparring_partner enabled true', () => {
-  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithSparringPartner;
-  assert.ok(shipped.sparring_partner, 'parseConfig always supplies a sparring_partner block, shipped config or not');
-  assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped/defaulted sparring_partner.enabled is true');
-});
 
 // ------------------- sparring_partner.model (slice 2, article 'sparring-partner' interaction i /
 // decision foreign_cd019e0b point 8: the System-tab model selector; optional, empty/absent = CLI default) -------------------
@@ -230,37 +215,9 @@ test('templates/default-config.json still parses and carries sparring_partner en
 // cleanly (not the package build) until parseConfig grows the field.
 type CfgWithSparringPartnerModel = { sparring_partner?: { enabled?: boolean; model?: string } };
 
-test('sparring_partner.model: absent from input parses to undefined — no CLI-default value is invented at parse time', () => {
-  const empty = parseConfig({}) as unknown as CfgWithSparringPartnerModel;
-  assert.ok(empty.sparring_partner, 'parseConfig defaults must add a sparring_partner block');
-  assert.equal(empty.sparring_partner?.model, undefined, 'model is undefined when absent — "use the CLI default" is a display convention, never a stored value');
-  assert.equal(empty.sparring_partner?.enabled, true, 'the existing enabled default is untouched by the new sibling field');
-});
 
-// CHANGED by vendor-pins step 2 (decision system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
-// the old key no longer survives parsing; it is converted to sparring_partner.models.openai.
-// The verbatim-string and untouched-enabled expectations are kept; only where the value lands moved.
-test('sparring_partner.model: an explicit string is converted to models.openai verbatim, alongside the untouched enabled default', () => {
-  const withModel = parseConfig({ sparring_partner: { model: 'gpt-5.6' } }) as unknown as CfgWithSparringPartnerModel & { sparring_partner: { models: { openai?: { model: string } } } };
-  assert.equal(withModel.sparring_partner.models.openai?.model, 'gpt-5.6', 'an explicit model string survives parsing verbatim, under models.openai');
-  assert.equal(withModel.sparring_partner?.model, undefined, 'the old key itself is gone');
-  assert.equal(withModel.sparring_partner?.enabled, true, 'enabled still defaults to true when only model is supplied');
-});
 
-test('sparring_partner.model: a non-string value is refused loud', () => {
-  assert.throws(
-    () => parseConfig({ sparring_partner: { model: 42 } }),
-    /invalid/i,
-    'sparring_partner.model must be a string — a non-string value fails loud'
-  );
-});
 
-test('templates/default-config.json still parses with sparring_partner.model omitted (ships no pinned model — the CLI default applies until set via the System tab)', () => {
-  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithSparringPartnerModel;
-  assert.ok(shipped.sparring_partner, 'the shipped default-config carries a sparring_partner block');
-  assert.equal(shipped.sparring_partner?.model, undefined, 'the shipped config ships no model value');
-  assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped enabled default is untouched by the new sibling field');
-});
 
 // ------------------- tdd config toggle (decision foreign_752caf98,
 // tdd-and-mutation-toggles-in-system-tab; mutation_verification removed by
@@ -363,26 +320,28 @@ test('agents: a non-array extra_tools (e.g. a string) still parses — refused a
 // templates/default-config.json. A missing key means hobby; the two copies must agree.
 type CfgWithMode = { mode?: string };
 
-test('mode: an empty config defaults to hobby, and the shipped template carries the same default', () => {
-  const empty = parseConfig({}) as unknown as CfgWithMode;
-  assert.equal(empty.mode, 'hobby', 'a missing mode key means hobby');
-  const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')) as CfgWithMode;
-  assert.equal(rawTemplate.mode, 'hobby', 'templates/default-config.json declares mode explicitly');
-  const shipped = parseConfig(rawTemplate) as unknown as CfgWithMode;
-  assert.equal(shipped.mode, empty.mode, 'schema default and shipped template agree');
+// config.mode is retired (decision settings-redesign-build-shape-one-legacy-to-canonical-config): parseConfig
+// returns config.workflow, and a legacy mode is carried through the one transform. The strict workflow
+// judge is readProjectWorkflow (scripts/tests/project-mode-gating.test.mjs); the transform itself is
+// pinned in canonical-config.test.ts.
+test('workflow: an empty config defaults to direct merge, 1 reviewer, loop off; the shipped template carries the same default', () => {
+  const empty = parseConfig({});
+  assert.deepEqual(empty.workflow, { merge: 'direct', reviewers: 1, copilot_loop: false, auto_merge_on_clean: true });
+  const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')) as { workflow?: unknown; mode?: unknown };
+  assert.deepEqual(rawTemplate.workflow, empty.workflow, 'templates/default-config.json declares workflow explicitly');
+  assert.equal(rawTemplate.mode, undefined, 'the shipped template carries no mode');
+  assert.deepEqual(parseConfig(rawTemplate).workflow, empty.workflow, 'schema default and shipped template agree');
 });
 
-test('mode: parseConfig is PERMISSIVE — hobby/work pass, any other value is preserved raw, never coerced and never thrown on', () => {
-  // A typo in config.mode must not brick every parseConfig reader (the MCP
-  // server boots through it). readProjectMode (scripts/lib/handoff-projection.mjs)
-  // is the strict judge wherever the mode is ACTED on; its refusal tests live in
-  // scripts/tests/project-mode-gating.test.mjs.
-  assert.equal((parseConfig({ mode: 'work' }) as unknown as CfgWithMode).mode, 'work');
-  assert.equal((parseConfig({ mode: 'hobby' }) as unknown as CfgWithMode).mode, 'hobby');
-  for (const raw of ['Work', 'hobbyist', '', 1, true, null, ['work'], { mode: 'work' }]) {
-    const parsed = parseConfig({ mode: raw }) as unknown as { mode?: unknown };
-    assert.deepEqual(parsed.mode, raw, `mode ${JSON.stringify(raw)} is preserved verbatim, never coerced to hobby`);
+test('workflow: a legacy mode work reads as pull request, 3 reviewers, loop on; an invalid mode fails loud, never reads as hobby', () => {
+  assert.deepEqual(parseConfig({ mode: 'work' }).workflow, { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true });
+  assert.equal(parseConfig({ mode: 'hobby' }).workflow.merge, 'direct');
+  // Changed with the cutover: parseConfig used to preserve an invalid mode raw (permissive). The mode has no
+  // meaning in the canonical shape, so a value that is neither hobby nor work is refused by name (P5).
+  for (const raw of ['Work', 'hobbyist', '', 1, true, null, ['work']]) {
+    assert.throws(() => parseConfig({ mode: raw }), /mode/, `mode ${JSON.stringify(raw)} is refused`);
   }
+  assert.equal((parseConfig({ mode: 'work' }) as unknown as { mode?: unknown }).mode, undefined, 'the canonical result carries no mode');
 });
 
 // The handoff setting (decision
@@ -410,20 +369,21 @@ test('handoff: parseConfig is PERMISSIVE — any value is preserved raw, never c
   assert.deepEqual(unreadConfigKeys({ handoff: { enabled: true } }), [], 'handoff is a key the schema reads');
 });
 
-test('pr_review (PR review loop identity pin and auto-merge switch): permissive, defaults to copilot_logins [] with auto_merge_on_clean true, and the template carries the same default', () => {
-  assert.deepEqual(parseConfig({}).pr_review, { copilot_logins: [], auto_merge_on_clean: true });
+test('pr_review (PR review loop identity pin): permissive, defaults to copilot_logins [], and the template carries the same default; the auto-merge switch moved to workflow', () => {
+  assert.deepEqual(parseConfig({}).pr_review, { copilot_logins: [] });
+  assert.equal(parseConfig({}).workflow.auto_merge_on_clean, true);
   const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
-  assert.deepEqual(rawTemplate.pr_review, { copilot_logins: [], auto_merge_on_clean: true }, 'templates/default-config.json declares pr_review explicitly');
+  assert.deepEqual(rawTemplate.pr_review, { copilot_logins: [] }, 'templates/default-config.json declares pr_review explicitly');
   assert.deepEqual(parseConfig(rawTemplate).pr_review, parseConfig({}).pr_review);
-  // PERMISSIVE like mode: a malformed value is preserved raw, never thrown on;
-  // pr-review-wait.mjs (autoMergeOnCleanOf in scripts/lib/work-pr.mjs for the
-  // switch) is the strict judge.
+  // PERMISSIVE: a malformed value is preserved raw, never thrown on; pr-review-wait.mjs is the strict judge.
   assert.doesNotThrow(() => parseConfig({ pr_review: { copilot_logins: 'x' } }));
-  assert.doesNotThrow(() => parseConfig({ pr_review: { copilot_logins: [], auto_merge_on_clean: 'yes' } }));
-  assert.deepEqual(parseConfig({ pr_review: { auto_merge_on_clean: 'yes' } }).pr_review, { auto_merge_on_clean: 'yes' }, 'a malformed switch is preserved raw, never coerced to on');
   assert.deepEqual(parseConfig({ pr_review: { copilot_logins: ['a[bot]'] } }).pr_review, { copilot_logins: ['a[bot]'] });
-  assert.deepEqual(parseConfig({ pr_review: { copilot_logins: [], auto_merge_on_clean: false } }).pr_review, { copilot_logins: [], auto_merge_on_clean: false });
-  assert.deepEqual(unreadConfigKeys({ pr_review: { auto_merge_on_clean: false } }), [], 'auto_merge_on_clean is a key the schema reads');
+  // A legacy pr_review.auto_merge_on_clean moves to workflow.auto_merge_on_clean through the transform.
+  const off = parseConfig({ pr_review: { copilot_logins: [], auto_merge_on_clean: false } });
+  assert.equal(off.workflow.auto_merge_on_clean, false);
+  assert.deepEqual(off.pr_review, { copilot_logins: [] });
+  assert.throws(() => parseConfig({ pr_review: { auto_merge_on_clean: 'yes' } }), /auto_merge_on_clean/, 'a malformed switch is refused, never read as on');
+  assert.deepEqual(unreadConfigKeys({ workflow: { auto_merge_on_clean: false } }), [], 'workflow is a key the schema reads');
 });
 
 // Undeclared-source default (decision gap-hunt-2026-09-28-rulings item 6): shell
@@ -459,8 +419,8 @@ test('unreadConfigKeys: maintenance_worker.opencode_model is read (the OpenCode 
     ['maintenance_worker.daily_budget_usd'],
     'a key nothing reads still warns',
   );
-  assert.equal(parseConfig({ maintenance_worker: { opencode_model: 'opencode/some-model' } }).maintenance_worker.opencode_model, 'opencode/some-model', 'a parsed config keeps the key the worker reads');
-  assert.equal(parseConfig({ maintenance_worker: { opencode_model: 7 } }).maintenance_worker.opencode_model, 7, 'a malformed value is preserved raw, so the worker (not the MCP boot) refuses it loudly');
+  assert.equal(legacyParse({ maintenance_worker: { opencode_model: 'opencode/some-model' } }).maintenance_worker.opencode_model, 'opencode/some-model', 'a parsed config keeps the key the worker reads');
+  assert.equal(legacyParse({ maintenance_worker: { opencode_model: 7 } }).maintenance_worker.opencode_model, 7, 'a malformed value is preserved raw, so the worker (not the MCP boot) refuses it loudly');
 });
 
 test('unreadConfigKeys: the Dome Farmer pre-rename models keys are each named, with the known renames', () => {
@@ -517,7 +477,7 @@ type PinCfg = {
   sparring_partner: { enabled: boolean; vendor: string; models: VendorPins };
   review: { policy: string; models: VendorPins };
 };
-const pins = (raw: unknown) => parseConfig(raw) as unknown as PinCfg;
+const pins = (raw: unknown) => legacyParse(raw) as unknown as PinCfg;
 
 test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-trips, and a junk pin is refused loud', () => {
   // Changed with the OpenCode dispatch model resolver (decision
@@ -536,9 +496,9 @@ test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-
   assert.deepEqual(withHard.models.implementor.hard_task, { model: 'claude-opus-5-5', effort: 'high' });
   const noEffort = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } } } });
   assert.deepEqual(noEffort.models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'hard_task effort is optional and not invented');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', effort: 'low', hard_task: { effort: 'high' } } } }), /invalid|required/i, 'hard_task needs a model');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', effort: 'low', hard_task: { model: 'm', effort: 'max' } } } }), /invalid/i, 'hard_task effort is the same enum');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', effort: 'low', hard_task: { model: 'm', junk: 1 } } } }), /unrecognized/i, 'a pin is strict');
+  assert.throws(() => legacyParse({ models: { implementor: { model: 'm', effort: 'low', hard_task: { effort: 'high' } } } }), /invalid|required/i, 'hard_task needs a model');
+  assert.throws(() => legacyParse({ models: { implementor: { model: 'm', effort: 'low', hard_task: { model: 'm', effort: 'max' } } } }), /invalid/i, 'hard_task effort is the same enum');
+  assert.throws(() => legacyParse({ models: { implementor: { model: 'm', effort: 'low', hard_task: { model: 'm', junk: 1 } } } }), /unrecognized/i, 'a pin is strict');
 });
 
 // The agent's DEFAULT entry needs an effort: scripts/lib/agent-distribution.mjs
@@ -546,20 +506,18 @@ test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-
 // happen when the config is written. Effort is optional only on hard_task and on the
 // vendor pins, where omitted means the host's own default.
 test('models.<agent>.effort is required on the default entry and optional only on hard_task and the vendor pins', () => {
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5' } } }), /required/i, 'a shipped agent key without effort is refused');
-  assert.throws(() => parseConfig({ models: { 'my-custom-agent': { model: 'claude-haiku-4-5' } } }), /required/i, 'any other agent key without effort is refused');
+  assert.throws(() => legacyParse({ models: { implementor: { model: 'claude-sonnet-5-5' } } }), /required/i, 'a shipped agent key without effort is refused');
+  assert.throws(() => legacyParse({ models: { 'my-custom-agent': { model: 'claude-haiku-4-5' } } }), /required/i, 'any other agent key without effort is refused');
   assert.throws(
-    () => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } }),
+    () => legacyParse({ models: { implementor: { model: 'claude-sonnet-5-5', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } }),
     /required/i,
     'an effort on hard_task does not stand in for the default entry\'s',
   );
   const p = pins({
     models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } } },
-    sparring_partner: { models: { openai: { model: 'gpt-6-astra' } } },
     review: { models: { anthropic: { model: 'claude-opus-5-5' } } },
   });
   assert.deepEqual(p.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } });
-  assert.deepEqual(p.sparring_partner.models.openai, { model: 'gpt-6-astra' });
   assert.deepEqual(p.review.models.anthropic, { model: 'claude-opus-5-5' });
 });
 
@@ -567,8 +525,8 @@ test('models accepts any installed agent name as a key, validates its pin, and k
   const p = pins({ models: { 'my-custom-agent': { model: 'claude-haiku-4-5', effort: 'low', hard_task: { model: 'claude-opus-5-5' } } } });
   assert.deepEqual(p.models['my-custom-agent'], { model: 'claude-haiku-4-5', effort: 'low', hard_task: { model: 'claude-opus-5-5' } });
   assert.equal(p.models.implementor.model, 'claude-sonnet-5-5', 'the shipped per-key defaults still fill in');
-  assert.throws(() => parseConfig({ models: { 'my-custom-agent': { model: 'm', effort: 'max' } } }), /invalid/i, 'an agent key with a bad pin is refused loud');
-  assert.throws(() => parseConfig({ models: { 'my-custom-agent': 'claude-haiku-4-5' } }), /invalid/i, 'an agent key must hold a pin object');
+  assert.throws(() => legacyParse({ models: { 'my-custom-agent': { model: 'm', effort: 'max' } } }), /invalid/i, 'an agent key with a bad pin is refused loud');
+  assert.throws(() => legacyParse({ models: { 'my-custom-agent': 'claude-haiku-4-5' } }), /invalid/i, 'an agent key must hold a pin object');
 });
 
 test('models: retired pre-rename keys stay disclosed as unread and are never parsed as agent keys', () => {
@@ -579,28 +537,12 @@ test('models: retired pre-rename keys stay disclosed as unread and are never par
   assert.deepEqual(unreadConfigKeys({ models: { 'my-custom-agent': { model: 'm' } } }), [], 'an agent-name key under models is read, not unread');
 });
 
-test('sparring_partner: defaults to {enabled: true, vendor: openai, models: {}} and the template agrees', () => {
-  assert.deepEqual(pins({}).sparring_partner, { enabled: true, vendor: 'openai', models: {} });
-  assert.deepEqual(pins({}).sparring_partner, pins(shippedRaw()).sparring_partner, 'schema default equals templates/default-config.json');
-  assert.deepEqual(shippedRaw().sparring_partner, { enabled: true, vendor: 'openai', models: {} }, 'the template carries the block in full');
-});
 
-test('sparring_partner.vendor: openai and anthropic round-trip, anything else is refused loud', () => {
-  assert.equal(pins({ sparring_partner: { vendor: 'anthropic' } }).sparring_partner.vendor, 'anthropic');
-  assert.equal(pins({ sparring_partner: { vendor: 'openai' } }).sparring_partner.vendor, 'openai');
-  assert.throws(() => parseConfig({ sparring_partner: { vendor: 'google' } }), /invalid/i);
-});
 
-test('sparring_partner.models: a pin per vendor round-trips with effort optional; a junk pin is refused loud', () => {
-  const p = pins({ sparring_partner: { models: { openai: { model: 'gpt-6-astra', effort: 'high' }, anthropic: { model: 'claude-opus-5-5' } } } });
-  assert.deepEqual(p.sparring_partner.models, { openai: { model: 'gpt-6-astra', effort: 'high' }, anthropic: { model: 'claude-opus-5-5' } });
-  assert.throws(() => parseConfig({ sparring_partner: { models: { openai: { effort: 'high' } } } }), /invalid|required/i, 'a pin needs a model');
-  assert.throws(() => parseConfig({ sparring_partner: { models: { openai: 'gpt-6-astra' } } }), /invalid/i, 'a pin is an object, not a string');
-});
 
 test('review: defaults to {policy: cross_vendor, models: {}} and the template agrees', () => {
   assert.deepEqual(pins({}).review, { policy: 'cross_vendor', models: {} });
-  assert.deepEqual(pins({}).review, pins(shippedRaw()).review, 'schema default equals templates/default-config.json');
+  assert.deepEqual(parseConfig({}).review, parseConfig(shippedRaw()).review, 'schema default equals templates/default-config.json');
   assert.deepEqual(shippedRaw().review, { policy: 'cross_vendor', models: {} }, 'the template carries the block in full');
 });
 
@@ -620,68 +562,19 @@ test('review.models: a pin per vendor round-trips with effort optional; a junk p
 });
 
 test('parseConfig({}) agrees with templates/default-config.json on every block the vendor pins touch', () => {
-  const empty = pins({});
-  const shipped = pins(shippedRaw());
+  const empty = parseConfig({});
+  const shipped = parseConfig(shippedRaw());
   assert.deepEqual(empty.models, shipped.models);
-  assert.deepEqual(empty.sparring_partner, shipped.sparring_partner);
   assert.deepEqual(empty.review, shipped.review);
 });
 
-// The old sparring_partner.model is converted to sparring_partner.models.openai
-// when config is read, before the schema strips unknown keys; the new key wins.
-test('old sparring_partner.model conversion: old key only becomes models.openai and the old key is gone', () => {
-  const p = pins({ sparring_partner: { enabled: true, model: 'gpt-5.6-sol' } });
-  assert.deepEqual(p.sparring_partner.models.openai, { model: 'gpt-5.6-sol' });
-  assert.ok(!('model' in p.sparring_partner), 'the old key does not survive parsing');
-  assert.equal(p.sparring_partner.models.anthropic, undefined, 'only the openai pin is created');
-});
 
-test('old sparring_partner.model conversion: new key only is read as is', () => {
-  const p = pins({ sparring_partner: { models: { openai: { model: 'gpt-6-astra', effort: 'high' } } } });
-  assert.deepEqual(p.sparring_partner.models.openai, { model: 'gpt-6-astra', effort: 'high' });
-});
 
-test('old sparring_partner.model conversion: when both exist the new key wins, effort included', () => {
-  const p = pins({ sparring_partner: { model: 'gpt-5.6-sol', models: { openai: { model: 'gpt-6-astra', effort: 'high' }, anthropic: { model: 'claude-opus-5-5' } } } });
-  assert.deepEqual(p.sparring_partner.models.openai, { model: 'gpt-6-astra', effort: 'high' });
-  assert.deepEqual(p.sparring_partner.models.anthropic, { model: 'claude-opus-5-5' }, 'sibling vendor pins are kept');
-});
 
-test('old sparring_partner.model conversion: the old key joins an existing models block that has no openai pin', () => {
-  const p = pins({ sparring_partner: { model: 'gpt-5.6-sol', models: { anthropic: { model: 'claude-opus-5-5' } } } });
-  assert.deepEqual(p.sparring_partner.models, { anthropic: { model: 'claude-opus-5-5' }, openai: { model: 'gpt-5.6-sol' } });
-});
 
-test("old sparring_partner.model conversion: '' (the clear-to-unset signal) creates no pin, and a non-string is still refused loud", () => {
-  assert.deepEqual(pins({ sparring_partner: { enabled: true, model: '' } }).sparring_partner.models, {});
-  assert.throws(() => parseConfig({ sparring_partner: { model: 42 } }), /invalid/i);
-});
 
-test('old sparring_partner.model conversion: a non-string old value is refused even when models.openai already exists', () => {
-  const both = (model: unknown) => ({ sparring_partner: { model, models: { openai: { model: 'gpt-6-astra', effort: 'high' } } } });
-  for (const bad of [42, null, { model: 'm' }, ['m']]) {
-    assert.throws(() => parseConfig(both(bad)), /invalid|expected/i, `old model ${JSON.stringify(bad)} is not dropped silently`);
-    assert.equal(configSchema.safeParse(normalizeRawConfig(both(bad))).success, false, 'the validator path (config_set) refuses it too');
-  }
-  assert.deepEqual(pins(both('gpt-5.6-sol')).sparring_partner.models.openai, { model: 'gpt-6-astra', effort: 'high' }, 'a string old value still loses to the new key');
-  assert.deepEqual(pins(both('')).sparring_partner.models.openai, { model: 'gpt-6-astra', effort: 'high' }, "'' still creates and changes nothing");
-});
 
-test('unreadConfigKeys: the old sparring_partner.model is read (converted), not reported as unread', () => {
-  assert.deepEqual(unreadConfigKeys({ sparring_partner: { enabled: true, model: 'gpt-5.6-sol', models: { openai: { model: 'm' } } } }), []);
-});
 
-test('normalizeRawConfig: converts without mutating its input, and passes non-objects through for the schema to refuse', () => {
-  const raw = { sparring_partner: { model: 'gpt-5.6-sol' }, models: { coder: { model: 'm' } } };
-  const before = JSON.stringify(raw);
-  const out = normalizeRawConfig(raw) as { sparring_partner: Record<string, unknown>; models: Record<string, unknown> };
-  assert.equal(JSON.stringify(raw), before, "the caller's raw config is never mutated (config_set round-trips the raw document)");
-  assert.deepEqual(out.sparring_partner, { models: { openai: { model: 'gpt-5.6-sol' } } });
-  assert.ok(!('coder' in out.models));
-  assert.equal(normalizeRawConfig(null), null);
-  assert.deepEqual(normalizeRawConfig([1]), [1]);
-  assert.equal(configSchema.safeParse(normalizeRawConfig({ sparring_partner: { model: 42 } })).success, false, 'the validator path (config_set) refuses it too');
-});
 
 test('migrateRetiredModelKeys: drops every retired key with its value, names the successor of a renamed one, never carries, keeps live keys', () => {
   const raw = {
@@ -751,7 +644,7 @@ test('addModelDefaults: adds only what is absent, once, and records the migratio
 test('addModelDefaults then moveImplementorHardTask: an absent models block leaves implementor-hard at its own default effort', async () => {
   const { addModelDefaults } = await import('../config.js');
   const chained = moveImplementorHardTask(addModelDefaults({}).config);
-  const models = parseConfig(chained.config).models;
+  const models = legacyParse(chained.config).models;
   assert.deepEqual(models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
   assert.deepEqual(models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'the plain implementor takes its new default');
 });
@@ -786,9 +679,9 @@ test('moveImplementorHardTask: moves the hard_task, records its id once, and lea
 // the shipped template alike.
 test('models.preflight: Sonnet 5.5 at low effort by default, in the schema and in templates/default-config.json', () => {
   const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
-  assert.deepEqual(shippedRaw.models.preflight, { model: 'claude-sonnet-5-5', effort: 'low' });
-  assert.deepEqual(parseConfig({}).models.preflight, { model: 'claude-sonnet-5-5', effort: 'low' });
-  assert.deepEqual(parseConfig({ models: { preflight: { model: 'claude-opus-5-5', effort: 'high' } } }).models.preflight, { model: 'claude-opus-5-5', effort: 'high' }, 'an explicit entry wins');
+  assert.deepEqual(shippedRaw.models.preflight, { model: 'anthropic/claude-sonnet-5-5', effort: 'low' });
+  assert.deepEqual(parseConfig({}).models.preflight, { model: 'anthropic/claude-sonnet-5-5', effort: 'low' });
+  assert.deepEqual(parseConfig({ models: { preflight: { model: 'anthropic/claude-opus-5-5', effort: 'high' } } }).models.preflight, { model: 'anthropic/claude-opus-5-5', effort: 'high' }, 'an explicit entry wins');
 });
 
 // Decision overpass-default-effort-per-role-high-for-agentic-auto-roles, v2 (user-ruled
@@ -796,10 +689,10 @@ test('models.preflight: Sonnet 5.5 at low effort by default, in the schema and i
 // the direct route, in the schema and in the shipped template; implementor-hard stays high.
 test('models.implementor: medium effort by default, in the schema and in templates/default-config.json; implementor-hard unchanged', () => {
   const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
-  assert.deepEqual(shippedRaw.models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' });
-  assert.deepEqual(parseConfig({}).models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' });
-  assert.deepEqual(parseConfig({}).models['implementor-hard'], { model: 'claude-opus-5-5', effort: 'high' });
-  assert.deepEqual(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high' } } }).models.implementor, { model: 'claude-sonnet-5-5', effort: 'high' }, 'an explicit entry wins');
+  assert.deepEqual(shippedRaw.models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'medium' });
+  assert.deepEqual(parseConfig({}).models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'medium' });
+  assert.deepEqual(parseConfig({}).models['implementor-hard'], { model: 'anthropic/claude-opus-5-5', effort: 'high' });
+  assert.deepEqual(parseConfig({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } }).models.implementor, { model: 'anthropic/claude-sonnet-5-5', effort: 'high' }, 'an explicit entry wins');
 });
 
 test('multi_session: absent key is off with max_sessions 1; enabled with 3 parses; 0 and non-integers are refused', () => {
@@ -826,17 +719,17 @@ test('issue_mirror (mirror ceiling): permissive and WITHOUT a default, so an abs
 // by v0.19.155 may still hold an exact id; it must load (ignored, rendered as inherit), never throw.
 test('models.<role>.agy_model: only agy\'s four values; the schema refuses any other; absent by default', () => {
   for (const v of ['inherit', 'flash_lite', 'flash', 'pro']) {
-    assert.equal(parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: v } } }).models.implementor.agy_model, v);
+    assert.equal(legacyParse({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: v } } }).models.implementor.agy_model, v);
   }
   assert.throws(() => configSchema.parse({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' } } }));
-  assert.equal(parseConfig({}).models.implementor.agy_model, undefined, 'absent by default');
-  assert.equal(parseConfig({}).models.sparring.agy_model, undefined, 'the sparring default no longer pins an agy model');
-  assert.equal(parseConfig({}).models.reviewer.opencode_model, 'openai/gpt-6.1-sol', 'the opencode defaults are untouched');
+  assert.equal(legacyParse({}).models.implementor.agy_model, undefined, 'absent by default');
+  assert.equal(legacyParse({}).models.sparring.agy_model, undefined, 'the sparring default no longer pins an agy model');
+  assert.equal(legacyParse({}).models.reviewer.opencode_model, 'openai/gpt-6.1-sol', 'the opencode defaults are untouched');
 });
 
 test('an old exact agy_model id from v0.19.155 loads: parseConfig ignores it, and migrateStaleAgyModels reports it', () => {
   const raw = { models: { sparring: { model: 'claude-opus-5-5', effort: 'high', agy_model: 'claude-opus-5-5-high' }, scout: { model: 'claude-sonnet-5-5', effort: 'low', agy_model: 'pro' } } };
-  const parsed = parseConfig(raw);
+  const parsed = legacyParse(raw);
   assert.equal(parsed.models.sparring.agy_model, undefined);
   assert.equal(parsed.models.scout.agy_model, 'pro', 'a valid value is kept');
   const m = migrateStaleAgyModels(raw);

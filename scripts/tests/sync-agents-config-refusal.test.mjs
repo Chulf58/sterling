@@ -28,7 +28,7 @@ function sync(dir) {
 }
 
 for (const [label, models, why] of [
-  ['a model with a newline', { scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } }, /Claude model id/],
+  ['a model with a newline', { scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } }, /<provider>\/<id>/],
   ['an unknown effort', { scout: { model: 'claude-sonnet-5-5', effort: 'extreme' } }, /effort/],
 ]) {
   test(`a config.json that fails the schema (${label}) is refused with exit 2 and nothing is written`, () => {

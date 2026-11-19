@@ -113,13 +113,33 @@ export type { SessionEvent, NoCaptureLane, WorkerPolicyLane, WorkerPolicyItem, W
 export { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid } from './transient.js';
 export type { KnowledgeWrite } from './transient.js';
 export { configSchema, parseConfig, normalizeRawConfig, migrateRetiredModelKeys, migrateStaleAgyModels, addModelDefaults, MODEL_DEFAULTS_MIGRATION_ID, moveImplementorHardTask, IMPLEMENTOR_HARD_MIGRATION_ID, resetOverpassDefaults, OVERPASS_DEFAULTS_MIGRATION_ID, AGENT_TOOL_NAME_RE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, CLAUDE_MODEL_ID_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys, resolveOverpass, OverpassUnknownRoleError, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, OVERPASS_TIERS, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_ROLE_EFFORTS } from './config.js';
+export { CUSTOM_AGENT_KEY_PREFIX, CUSTOM_AGENT_SLUG_RE, CUSTOM_AGENT_KEY_RE, isCustomAgentKey } from './config.js';
+export { toCanonicalConfig, parseCanonicalConfig, parseCanonicalModels, canonicalConfigSchema, canonicalModelsSchema, workflowSchema, LegacyConfigError, MODEL_REF_RE, CLAUDE_PROVIDER, OVERPASS_MODEL_NAMESPACE, AGY_MODEL_NAMESPACE, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, CANONICAL_RETIRED_KEYS } from './config.js';
+export type { CanonicalConfig, CanonicalConfigResult, CanonicalChange, ModelConflict, ConflictResolutions, MergePath } from './config.js';
+export {
+  AGENT_HOSTS,
+  CLAUDE_EFFORT_LEVELS,
+  AGENT_HOST_CAPABILITIES,
+  INHERIT,
+  discoveredAgentId,
+  parseDiscoveredAgentId,
+  customAgentSlug,
+  customAgentKey,
+  resolveHostSettings,
+  AGY_CANONICAL_MODELS,
+  hostRunsModel,
+  opencodeModelRef,
+  unsupportedAgents,
+  twoModelsReason,
+} from './custom-agents.js';
+export type { AgentHost, ClaudeEffortLevel, HostCapability, AgentModelSettings, ResolvedHostSettings, UnsupportedAgent } from './custom-agents.js';
 export type { StaleAgyModelDrop, SterlingConfig, UnreadConfigKey, OverpassResolution } from './config.js';
 export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
 export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';
 export type { RuntimeMarker, StalenessVerdict } from './staleness.js';
-export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, judgeProjectMode, readProjectIdentity, isProjectId } from './project.js';
-export type { ProjectMode } from './project.js';
+export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, judgeProjectMode, modeOfConfig, readProjectIdentity, isProjectId, ProjectWorkflowError, workflowOfConfig, readProjectWorkflow } from './project.js';
+export type { ProjectMode, ProjectWorkflow } from './project.js';
 export {
   BROKER_PROTOCOL,
   BROKER_MAX_REQUEST_BYTES,

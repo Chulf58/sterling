@@ -14,7 +14,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { withIdentityIgnore, withNestedIgnore, workIdentityRefusal, ensureProjectIdentity } from '../lib/project-identity.mjs';
+import { withIdentityIgnore, withNestedIgnore, identityRefusal, ensureProjectIdentity } from '../lib/project-identity.mjs';
 import { runUpdate } from '../lib/update.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -114,39 +114,35 @@ test('ensureProjectIdentity: creates a UUID v4 file when absent, never overwrite
   assert.equal(readFileSync(identityPath(dir), 'utf8'), '{ broken');
 });
 
-test('workIdentityRefusal: a work project or a Postgres-storage project is checked; missing and invalid are named refusals', () => {
-  const dir = scratch();
-  mkdirSync(join(dir, '.sterling'));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on SQLite is never checked');
-  assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has no \.sterling\/project\.json: run \/sterling:init/);
-  writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on SQLite is not checked even when the file is invalid');
-  assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has an invalid \.sterling\/project\.json: .*"nope".*UUID v4/);
-  writeFileSync(identityPath(dir), JSON.stringify({ project_id: OTHER_ID }));
-  assert.equal(workIdentityRefusal(dir, 'work'), null);
-});
-
-test('workIdentityRefusal: storage postgres needs the identity in any mode; the config decides, not the mode alone', () => {
+// CHANGED with the settings redesign (item C, decision
+// settings-that-replace-project-mode-merge-path-reviewer-count): the identity file is
+// required only by Postgres storage, no longer by work mode, so the refusals below are
+// driven by storage postgres and a work-mode project without the file is not checked.
+test('identityRefusal: only a Postgres-storage project is checked; missing and invalid are named refusals', () => {
   const dir = scratch();
   mkdirSync(join(dir, '.sterling'));
   const configPath = join(dir, '.sterling', 'config.json');
+  assert.equal(identityRefusal(dir), null, 'no config (SQLite) is never checked');
+  for (const config of [{ mode: 'work' }, { workflow: { merge: 'pr' } }, { storage: 'sqlite', mode: 'work' }]) {
+    writeFileSync(configPath, JSON.stringify(config));
+    assert.equal(identityRefusal(dir), null, `${JSON.stringify(config)}: the workflow never requires the identity`);
+  }
   writeFileSync(configPath, JSON.stringify({ mode: 'hobby', storage: 'postgres' }));
-  assert.match(workIdentityRefusal(dir, 'hobby'), /project with storage postgres has no \.sterling\/project\.json: run \/sterling:init/);
+  assert.match(identityRefusal(dir), /project with storage postgres has no \.sterling\/project\.json: run \/sterling:init/);
   writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
-  assert.match(workIdentityRefusal(dir, 'hobby'), /project with storage postgres has an invalid \.sterling\/project\.json/);
+  assert.match(identityRefusal(dir), /project with storage postgres has an invalid \.sterling\/project\.json: .*"nope".*UUID v4/);
   writeFileSync(identityPath(dir), JSON.stringify({ project_id: OTHER_ID }));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null);
-  rmSync(identityPath(dir));
-  writeFileSync(configPath, JSON.stringify({ mode: 'hobby', storage: 'sqlite' }));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on explicit SQLite is not checked');
-  assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has no/, 'work on SQLite is still checked');
+  assert.equal(identityRefusal(dir), null);
+  writeFileSync(configPath, JSON.stringify({ storage: 'sqlite' }));
+  writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
+  assert.equal(identityRefusal(dir), null, 'SQLite is not checked even when the file is invalid');
 });
 
-test('workIdentityRefusal: an invalid config.storage is a refusal naming it, never a guess', () => {
+test('identityRefusal: an invalid config.storage is a refusal naming it, never a guess', () => {
   const dir = scratch();
   mkdirSync(join(dir, '.sterling'));
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', storage: 'pg' }));
-  assert.match(workIdentityRefusal(dir, 'hobby'), /project storage cannot be read: config\.storage is "pg"/);
+  assert.match(identityRefusal(dir), /project storage cannot be read: config\.storage is "pg"/);
 });
 
 // ---------------------------------------------------------------- init
@@ -187,14 +183,14 @@ test('init on a fresh project writes a valid project.json and ignores .sterling/
   for (const f of ['.sterling/sterling.db', '.sterling/config.json']) assert.equal(git(dir, 'check-ignore', '-q', f).status, 0, `${f} stays ignored`);
 });
 
-test('init writes the identity file whatever the mode', () => {
-  for (const mode of ['hobby', 'work']) {
-    const dir = scratch();
-    const r = init(dir, ['--mode', mode]);
-    assert.equal(r.code, 0, `${mode}: ${r.stderr}${r.stdout}`);
-    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, mode);
-    assert.match(readIdentityFile(dir).project_id, UUID_V4, mode);
-  }
+// CHANGED with the settings redesign (item C): --mode is retired, so this pins the
+// identity file on a fresh init, which now records the default workflow and no mode.
+test('init writes the identity file on a fresh project', () => {
+  const dir = scratch();
+  const r = init(dir);
+  assert.equal(r.code, 0, `${r.stderr}${r.stdout}`);
+  assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).workflow.merge, 'direct');
+  assert.match(readIdentityFile(dir).project_id, UUID_V4);
 });
 
 test('init on an existing project never overwrites project.json, valid or invalid, and a rerun changes nothing', () => {
@@ -238,10 +234,10 @@ test('init on an existing project (pre-identity: `.sterling/` ignored, no projec
 
 // ---------------------------------------------------------------- sync-agents
 
-function projectOf({ mode, identity, ignore } = {}) {
+function projectOf({ mode, storage, identity, ignore } = {}) {
   const dir = scratch('sterling-identity-proj-');
   mkdirSync(join(dir, '.sterling'));
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture', ...(mode ? { mode } : {}) }, null, 2) + '\n');
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture', ...(mode ? { mode } : {}), ...(storage ? { storage } : {}) }, null, 2) + '\n');
   new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
   if (identity !== undefined) writeFileSync(identityPath(dir), identity);
   if (ignore !== undefined) writeFileSync(join(dir, '.gitignore'), ignore);
@@ -250,26 +246,28 @@ function projectOf({ mode, identity, ignore } = {}) {
 const VALID = JSON.stringify({ project_id: OTHER_ID });
 const syncAgents = (dir) => spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir });
 
-test('sync-agents: a work project without project.json is refused (exit 2) naming the file; nothing is synced', () => {
-  const dir = projectOf({ mode: 'work' });
+// CHANGED with the settings redesign (item C): the identity is required by Postgres
+// storage only, so these refusals use storage postgres where they used work mode.
+test('sync-agents: a Postgres-storage project without project.json is refused (exit 2) naming the file; nothing is synced', () => {
+  const dir = projectOf({ storage: 'postgres' });
   const r = syncAgents(dir);
   assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(r.stdout, /^refused_project_identity: work-mode project has no \.sterling\/project\.json: run \/sterling:init.*; nothing synced$/m);
+  assert.match(r.stdout, /^refused_project_identity: project with storage postgres has no \.sterling\/project\.json: run \/sterling:init.*; nothing synced$/m);
   assert.ok(!existsSync(join(dir, '.claude', 'agents')), 'no agent was written');
 });
 
-test('sync-agents: a work project with an invalid project.json is refused (exit 2), whatever is wrong with it', () => {
+test('sync-agents: a Postgres-storage project with an invalid project.json is refused (exit 2), whatever is wrong with it', () => {
   for (const identity of ['{ broken', '[]', '{}', JSON.stringify({ project_id: 'x' })]) {
-    const dir = projectOf({ mode: 'work', identity });
+    const dir = projectOf({ storage: 'postgres', identity });
     const r = syncAgents(dir);
     assert.equal(r.status, 2, `${identity}: ${r.stdout}${r.stderr}`);
-    assert.match(r.stdout, /^refused_project_identity: work-mode project has an invalid \.sterling\/project\.json: .*; nothing synced$/m, identity);
+    assert.match(r.stdout, /^refused_project_identity: project with storage postgres has an invalid \.sterling\/project\.json: .*; nothing synced$/m, identity);
     assert.ok(!existsSync(join(dir, '.claude', 'agents')), 'no agent was written');
   }
 });
 
-test('sync-agents: a work project with a valid project.json syncs; hobby projects are not checked, with or without the file', () => {
-  for (const [label, opts] of [['work, valid', { mode: 'work', identity: VALID }], ['hobby, absent', { mode: 'hobby' }], ['default mode, absent', {}], ['hobby, invalid', { mode: 'hobby', identity: '{ broken' }]]) {
+test('sync-agents: a valid project.json syncs; SQLite projects are not checked, work mode included, with or without the file', () => {
+  for (const [label, opts] of [['work, valid', { mode: 'work', identity: VALID }], ['work, absent', { mode: 'work' }], ['work, invalid', { mode: 'work', identity: '{ broken' }], ['hobby, absent', { mode: 'hobby' }], ['default mode, absent', {}], ['hobby, invalid', { mode: 'hobby', identity: '{ broken' }]]) {
     const dir = projectOf(opts);
     const r = syncAgents(dir);
     assert.equal(r.status, 0, `${label}: ${r.stdout}${r.stderr}`);
@@ -321,33 +319,34 @@ async function update(projects) {
   return { report, log: out.join('\n'), syncCalls: calls.filter((c) => c.includes('sync-agents.mjs')) };
 }
 
-test('update: a work project without project.json is refused (exit 2) naming the file; nothing is synced for it', async () => {
-  const dir = projectOf({ mode: 'work', ignore: '.sterling/\n' });
+test('update: a Postgres-storage project without project.json is refused (exit 2) naming the file; nothing is synced for it', async () => {
+  const dir = projectOf({ storage: 'postgres', ignore: '.sterling/\n' });
   const { report, log, syncCalls } = await update([dir]);
   assert.equal(report.exit, 2, log);
-  assert.match(log, /✗ .*REFUSED — work-mode project has no \.sterling\/project\.json: run \/sterling:init/);
+  assert.match(log, /✗ .*REFUSED — project with storage postgres has no \.sterling\/project\.json: run \/sterling:init/);
   assert.equal(syncCalls.length, 0, 'sync-agents is not run for the refused project');
   assert.equal(report.projects[0].handoff, 'refused_project_identity');
   assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), '.sterling/\n', 'a refused project is not touched');
 });
 
-test('update: a work project with an invalid project.json is refused (exit 2); one with a valid file is refreshed', async () => {
-  const bad = projectOf({ mode: 'work', identity: JSON.stringify({ project_id: 'nope' }) });
+test('update: a Postgres-storage project with an invalid project.json is refused (exit 2); one with a valid file is refreshed', async () => {
+  const bad = projectOf({ storage: 'postgres', identity: JSON.stringify({ project_id: 'nope' }) });
   const good = projectOf({ mode: 'work', identity: VALID });
   const { report, log, syncCalls } = await update([bad, good]);
   assert.equal(report.exit, 2, log);
-  assert.match(log, /✗ .*REFUSED — work-mode project has an invalid \.sterling\/project\.json: .*"nope".*UUID v4/);
+  assert.match(log, /✗ .*REFUSED — project with storage postgres has an invalid \.sterling\/project\.json: .*"nope".*UUID v4/);
   assert.deepEqual(syncCalls.map((c) => c.split(' ').pop()), [good], 'only the valid project is synced; the refusal does not stop the next one');
   assert.deepEqual(report.projects.map((p) => p.handoff === 'refused_project_identity'), [true, false]);
 });
 
-test('update: a hobby project is not checked for project.json, with the file absent or invalid', async () => {
+test('update: a SQLite project is not checked for project.json, work mode included, with the file absent or invalid', async () => {
   const absent = projectOf({ mode: 'hobby' });
   const invalid = projectOf({ identity: '{ broken' });
-  const { report, log, syncCalls } = await update([absent, invalid]);
+  const work = projectOf({ mode: 'work' });
+  const { report, log, syncCalls } = await update([absent, invalid, work]);
   assert.equal(report.exit, 0, log);
   assert.doesNotMatch(log, /project\.json/);
-  assert.equal(syncCalls.length, 2);
+  assert.equal(syncCalls.length, 3);
 });
 
 test('update repairs an existing project\'s `.sterling/` ignore line, hobby or work, and a second run is a no-op', async () => {

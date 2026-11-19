@@ -53,8 +53,6 @@
 // not exclude — stage 2 now also requires hasDiscriminatingHit, a third floor
 // that a match matching ONLY generic terms (test, check, file, ...) cannot
 // clear on its own.
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore } from './lib/common.mjs';
 import { boardReadyNotice, boardReadyNoticeDue, markBoardReadyNoticed, laneCeiling, liveLanes } from './lib/board-ready.mjs';
 import { readProjectConfig } from './lib/operating-state.mjs';
@@ -69,7 +67,7 @@ import {
   markDiscoveryDelivered,
 } from './lib/delivery.mjs';
 import { dispatchOverlapNotice } from './lib/dispatch-overlap.mjs';
-import { codexMcpDisable, codexModelPin, composeMechanismAxis } from './lib/axis-compose.mjs';
+import { composeMechanismAxis } from './lib/axis-compose.mjs';
 
 // The injection ceilings, the question-shape test and the composition itself
 // live in lib/axis-compose.mjs (shared with the OpenCode plugin).
@@ -77,89 +75,18 @@ const NARROW_CLIP = 700;
 
 const input = readStdin();
 
-// ===========================================================================
-// CODEX MODEL PIN — THE FIRST STEP, AHEAD OF EVERYTHING BELOW (board 7423f7a2
-// slice 5; decision foreign_8b329d57 as CORRECTED FORWARD; research_finding foreign_be284452).
-//
-// config.sparring_partner.model is the per-project SOURCE for which model a
-// consult lands on, and until now NOTHING read it — the TUI wrote the value and
-// no code path ever consumed it, which is the whole defect the user reported
-// ("the System tab ... just says default and doesnt work"). The server-side
-// `codex mcp-server -c model=` pin was REJECTED (per-clone file vs per-project
-// config, restart latency, breaks init's managed compare), so the mechanism is
-// the PER-CALL `model` parameter, filled here via hookSpecificOutput.updatedInput.
-//
-// PLACEMENT IS LOAD-BEARING, and it is why this block sits above the extraction:
-// every relevance path below exits early on ordinary shapes (no prompt, empty
-// prompt, too little vocabulary, no candidates, everything already delivered
-// this session). Those are normal consults; riding the model pin on whether the
-// store happened to match would make the model a lottery. So the pin is computed
-// here, unconditionally for a codex opener, and COMPOSED into every output path
-// through envelopeFor()/finish() — including the catch below.
-//
-// NEVER ON codex-reply: that tool's schema has no `model` field at all (a thread
-// inherits its opener's model), so the injection guard is the EXACT opener name,
-// not the 'mcp__codex__' matcher prefix that isConsult uses for the header.
-//
-// ADVISORY ALWAYS (decision foreign_ea68735d point 3): enabled:false prints a loud OFF
-// line and changes nothing else — enablement and model selection are separate
-// axes, and an explicitly user-asked consult still runs. An explicit call-site
-// model always wins. A missing, unreadable or empty-valued config injects
-// NOTHING and says so (P5 degraded-loud). No shape here ever denies.
-// ===========================================================================
-/**
- * The model-pin decision for this call: `{ line, updatedInput? }`, or null when
- * this is not a codex call (or not a Sterling project — P1, no ceremony).
- * NEVER THROWS: the shared codexModelPin (lib/axis-compose.mjs) never throws.
- */
-function buildModelPin(inp) {
-  if (typeof inp.tool_name !== 'string' || !inp.tool_name.startsWith('mcp__codex__')) return null;
-  // The config is the store root's (the main checkout for a linked worktree outside it).
-  const root = inp.storeRoot ? String(inp.storeRoot) : '';
-  const sterling = join(root, '.sterling');
-  // Outside a Sterling project there is no config to read and nothing to say.
-  if (!existsSync(join(sterling, 'sterling.db')) && !existsSync(join(sterling, 'config.json'))) return null;
-  // NEVER ON codex-reply: that tool's schema has no `model` field at all, so the
-  // opener test is the EXACT tool name, not the 'mcp__codex__' prefix.
-  const pin = codexModelPin(root, { opener: inp.tool_name === 'mcp__codex__codex', toolInput: inp.tool_input });
-  const base = inp.tool_input && typeof inp.tool_input === 'object' ? inp.tool_input : {};
-  // The user's own Codex MCP servers are disabled per call (GitHub #262). Opener only:
-  // codex-reply has no config argument.
-  const mcp = inp.tool_name === 'mcp__codex__codex' ? codexMcpDisable(base) : {};
-  const line = [pin.line, mcp.line].filter(Boolean).join('\n');
-  if (!pin.model && !mcp.config) return { line };
-  return { line, updatedInput: { ...base, ...(pin.model ? { model: pin.model } : {}), ...(mcp.config ? { config: mcp.config } : {}) } };
-}
-
-/** Computed ONCE, on first use, and memoized — `let` + a resolver rather than a
- *  top-level initialized const for the same fail-closed-boundary reason as the
- *  label above. buildModelPin never throws, so laziness changes no semantics:
- *  every reader below goes through modelPin(). */
-let pinMemo;
-function modelPin() {
-  if (pinMemo === undefined) pinMemo = buildModelPin(input);
-  return pinMemo;
-}
-
-/** One envelope carrying the pin (always, when there is one) plus whatever
- *  relevance carriage this path produced. The pin leads: it is one line about
- *  the call itself, and the carriage below it can run to many. */
+/** One envelope carrying whatever relevance carriage this path produced. */
 function envelopeFor(extraContext) {
-  const pin = modelPin();
-  const parts = [];
-  if (pin?.line) parts.push(pin.line);
-  if (extraContext) parts.push(extraContext);
   const hookSpecificOutput = { hookEventName: input.hook_event_name };
-  if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
-  if (parts.length) hookSpecificOutput.additionalContext = parts.join('\n\n');
+  if (extraContext) hookSpecificOutput.additionalContext = extraContext;
   return { hookSpecificOutput };
 }
 
 /** EXACTLY ONE STDOUT WRITE PER PROCESS, structurally rather than by ordering
  *  discipline (outside-family review finding, 2026-09-05). Claude Code parses
  *  this hook's stdout as ONE JSON object: two writes produce `{…}{…}`, which
- *  parses as nothing at all — so updatedInput is dropped and the codex model pin
- *  is lost exactly when something has already gone wrong.
+ *  parses as nothing at all — so the delivery is lost exactly when something has
+ *  already gone wrong.
  *
  *  THAT RULE IS THE SHARED HELPER'S NOW
  *  (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous): exitAfterWrite holds the
@@ -190,7 +117,7 @@ let boardMemo;
 function boardReady() {
   if (boardMemo !== undefined) return boardMemo;
   boardMemo = null;
-  const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__'));
+  const onDispatch = !Array.isArray(input.tool_input?.questions);
   if (!onDispatch || input.agent_id) return boardMemo;
   try {
     const store = openStore(input.cwd);
@@ -224,27 +151,26 @@ function markBoardReadyShown() {
 /** DISPATCH OVERLAP
  *  (decision h20-warns-on-dispatch-file-overlap-with-live-agents): on the Task|Agent surface only, the advisory block naming files
  *  this brief shares with a live dispatch, a degraded line when the register
- *  cannot be read, or null. Computed once and memoized, like the model pin,
+ *  cannot be read, or null. Computed once and memoized,
  *  because EVERY output path below carries it: the early exits through
  *  finish(), the full delivery as a pinned part, and the catch arm.
  *  dispatchOverlapNotice never throws. */
 let overlapMemo;
 function overlapNotice() {
   if (overlapMemo === undefined) {
-    const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__'));
+    const onDispatch = !Array.isArray(input.tool_input?.questions);
     overlapMemo = [onDispatch ? dispatchOverlapNotice(input) : null, boardReady()?.line].filter(Boolean).join('\n\n') || null;
   }
   return overlapMemo;
 }
 
 /** Exit 0, emitting the composed envelope — the replacement for a bare allow()
- *  on every early-exit below. With no pin, no carriage and no overlap it is
- *  exactly allow(): silence, so a non-codex dispatch that matched nothing
- *  still prints nothing. The overlap block rides after any carriage. */
+ *  on every early-exit below. With no carriage and no overlap it is
+ *  exactly allow(): silence, so a dispatch that matched nothing still prints
+ *  nothing. The overlap block rides after any carriage. */
 function finish(extraContext) {
-  const pin = modelPin();
   const context = [extraContext, overlapNotice()].filter(Boolean).join('\n\n');
-  if (!pin?.line && !pin?.updatedInput && !context) return allow();
+  if (!context) return allow();
   return emitEnvelope(context);
 }
 
@@ -256,11 +182,10 @@ function finish(extraContext) {
 // hook that never fires and a probe that proves nothing, since silence is this
 // hook's default state.
 const isQuestion = Array.isArray(input.tool_input?.questions);
-const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');
 // The Task|Agent surface. Only here do hazards render lead-whole with trigger
 // lines (decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines,
-// the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)); a consult keeps them whole.
-const isDispatch = !isQuestion && !isConsult;
+// the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)).
+const isDispatch = !isQuestion;
 
 
 // THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL INSIDE IT IS A `return`
@@ -276,15 +201,14 @@ function main(input) {
     // openSubjectFan THROWS on a corrupt or locked db (it returns null only for an
     // ABSENT one — anti-pattern foreign_e13f0fb5 pins that distinction). An uncaught throw
     // exits 1, and an exit-1 hook's stdout is not the envelope Claude Code reads
-    // updatedInput from, so the consult would silently lose its model pin — the
-    // exact loss the catch arm below was written to prevent, one statement too
-    // early to catch it. Inside the try, both failures land on that arm and the
-    // pin still ships.
+    // updatedInput from, so the delivery would be lost — the exact loss the
+    // catch arm below was written to prevent, one statement too early to catch
+    // it. Inside the try, both failures land on that arm.
     const outgoing = outgoingProposalText(input.tool_input);
-    if (!outgoing) return finish(); // nothing readable on this surface — the model pin still ships
+    if (!outgoing) return finish(); // nothing readable on this surface
     // The subject fan (lib/subject-fan.mjs): the project store plus the mounted domains.
     const store = openSubjectFan(input.cwd);
-    if (!store) return finish(); // no store — no relevance carriage possible, pin unaffected
+    if (!store) return finish(); // no store — no relevance carriage possible
 
     // THE COMPOSITION IS SHARED (scripts/hooks/lib/axis-compose.mjs, also called
     // by the OpenCode plugin): stages 1-2, the guard pre-filter, the surface
@@ -294,10 +218,9 @@ function main(input) {
       root: input.cwd,
       outgoing,
       toolInput: input.tool_input,
-      surface: isQuestion ? 'question' : isConsult ? 'consult' : 'dispatch',
+      surface: isQuestion ? 'question' : 'dispatch',
       subagentType: input.tool_input?.subagent_type,
       guardFor: () => readGuard(gPath),
-      pinLine: modelPin()?.line,
       overlap: overlapNotice(),
       host: 'claude',
     });
@@ -306,7 +229,6 @@ function main(input) {
     warnFanDegraded(store, 'H20');
     if (!composed) return finish();
     const { assembled, guard } = composed;
-    const pin = modelPin();
     const carriage = assembled.text;
 
     // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19:
@@ -317,14 +239,7 @@ function main(input) {
     // taken the envelope. A failed write therefore records nothing — every
     // record stays eligible — and the process exits non-zero instead of
     // reporting a clean delivery.
-    // Composed, not replaced: on a codex consult this envelope carries BOTH the
-    // model pin and the carriage (board 7423f7a2 — the pin is on every output
-    // path) — but `carriage` above ALREADY contains the pin line (folded in as
-    // a charged part), so this uses the raw envelope shape directly rather
-    // than `emitEnvelope`/`envelopeFor`, which would prepend the pin a SECOND
-    // time.
     const hookSpecificOutput = { hookEventName: input.hook_event_name };
-    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
     if (carriage) hookSpecificOutput.additionalContext = carriage;
     return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
@@ -347,40 +262,21 @@ function main(input) {
           writeGuard(gPath, guard);
         } catch (e) {
           // Cheap failure vs expensive one: a lost guard write costs at most a repeat
-          // delivery next dispatch; a lost envelope costs the pin and the carriage.
+          // delivery next dispatch; a lost envelope costs the carriage.
           process.stderr.write(
-            `H20: delivery bookkeeping failed AFTER the envelope was written (${(e && e.message) || e}) — the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+            `H20: delivery bookkeeping failed AFTER the envelope was written (${(e && e.message) || e}) — the payload above STANDS; these records stay eligible for delivery again this session.`
           );
         }
       },
     });
   } catch (e) {
     const failure = `H20: mechanism-axis delivery failed: ${(e && e.message) || e}`;
-    const pin = modelPin();
     const overlap = overlapNotice();
-    if (overlap && !pin?.line && !pin?.updatedInput) {
+    if (overlap) {
       // A relevance failure must not swallow the overlap warning either: loud
       // on stderr, the warning still delivered, exit 0 (never a gate).
       process.stderr.write(failure);
       return emitEnvelope(`${overlap}\n\n⚠ ${failure} — relevance carriage was SKIPPED for this dispatch.`);
-    }
-    if (pin?.line || pin?.updatedInput) {
-      // THE LAST OUTPUT PATH. A relevance failure must not silently unpin the
-      // consult's model: warnNonBlocking exits 1, and an exit-1 hook's stdout is
-      // not the envelope Claude Code reads updatedInput from, so dropping through
-      // to it here would drop the pin exactly when something is already wrong.
-      // Loud on BOTH channels instead — stderr for the transcript, the payload
-      // line for the reader — and exit 0 so the pin survives (P5: visible, and
-      // still never a gate). The 0 is the REQUESTED code: if this envelope's own
-      // write fails, the helper turns it into a 1 rather than reporting a clean
-      // exit over a lost pin (no envelope, no pin).
-      process.stderr.write(failure);
-      // Through emitEnvelope, never a bare write: if an envelope already landed
-      // this process, THAT one carries the pin and a second object here would
-      // corrupt it into unparseable text — the helper suppresses this one and
-      // discloses the drop (the belt-and-braces half of the one-write rule; the
-      // ordinary route is the contained bookkeeping above).
-      return emitEnvelope(`⚠ ${failure} — the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
     }
     // Delivery is an aid, never a gate: loud but NON-blocking (P5 without AC7 harm).
     return warnNonBlocking(failure);
