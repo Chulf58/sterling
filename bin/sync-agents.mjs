@@ -11676,7 +11676,112 @@ function translateTools(host, { tools, disallowedTools }) {
   for (const action of denied) rules.push({ action, verdict: "deny" });
   return { ok: true, rules };
 }
-var NON_PORTABLE_KEYS = ["hooks", "mcpServers", "permissionMode", "isolation"];
+var ORIGIN_FIELD = "sterling-origin";
+var ORIGIN_LINE_RE = new RegExp(`^${ORIGIN_FIELD}:.*(?:
+|$)`, "m");
+function originOf(data) {
+  const v = data[ORIGIN_FIELD];
+  if (v === void 0) return { origin: "claude" };
+  if (!CUSTOM_HOSTS.includes(v)) return { error: `${ORIGIN_FIELD} must be one of ${CUSTOM_HOSTS.join(", ")}, got ${JSON.stringify(v)}` };
+  return { origin: v };
+}
+var withoutOrigin = (frontmatter) => frontmatter.replace(ORIGIN_LINE_RE, "").replace(/\n$/, "");
+var OC_ALIAS = { shell: "bash", write: "edit", patch: "edit" };
+var OC_V2_KEYS = ["permissions", "request", "system", "disabled"];
+function openCodeRules(data) {
+  const v2 = OC_V2_KEYS.some((k) => k in data);
+  const effectOk = (e) => e === "allow" || e === "deny" || e === "ask";
+  if (v2) {
+    if (data.disabled === true) return { reason: "the agent is disabled on OpenCode (disabled: true), and no other host can carry that" };
+    const list = data.permissions ?? [];
+    if (!Array.isArray(list)) return { reason: "its permissions value is not a list of rules" };
+    const rules2 = [];
+    for (const r of list) {
+      const resource = r?.resource ?? "*";
+      if (typeof r?.action !== "string" || typeof resource !== "string" || !effectOk(r?.effect)) return { reason: `the permissions rule ${JSON.stringify(r)} is not {action, resource, effect}` };
+      rules2.push({ action: r.action, resource, effect: r.effect });
+    }
+    return rules2;
+  }
+  if ("tools" in data) return { reason: "its OpenCode tools map is not translated; write the same rules under permission" };
+  const perm = data.permission;
+  if (perm === void 0 || perm === null) return [];
+  if (typeof perm === "string") return effectOk(perm) ? [{ action: "*", resource: "*", effect: perm }] : { reason: `permission ${JSON.stringify(perm)} is not allow, deny or ask` };
+  if (typeof perm !== "object" || Array.isArray(perm)) return { reason: "its permission value is not a map" };
+  const rules = [];
+  for (const [action, value] of Object.entries(perm)) {
+    if (typeof value === "string" && effectOk(value)) rules.push({ action, resource: "*", effect: value });
+    else if (value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(effectOk)) {
+      for (const [resource, effect] of Object.entries(value)) rules.push({ action, resource, effect });
+    } else return { reason: `permission.${action} is not allow, deny, ask or a map of them` };
+  }
+  return rules;
+}
+function fromOpenCode(data) {
+  const rules = openCodeRules(data);
+  if (!Array.isArray(rules)) return rules;
+  const known = new Set(OC_ACTIONS.map(([a]) => a));
+  for (const r of rules) {
+    if (r.action !== "*" && !known.has(OC_ALIAS[r.action] ?? r.action)) return { reason: `its OpenCode rule for ${r.action} names a tool or pattern no other host has a name for` };
+  }
+  const verdict = (action) => {
+    let v;
+    let partial = false;
+    for (const r of rules) {
+      if (r.action !== "*" && (OC_ALIAS[r.action] ?? r.action) !== action) continue;
+      if (r.resource === "*") {
+        v = r.effect;
+        partial = false;
+      } else partial = true;
+    }
+    if (partial) return { reason: `OpenCode allows ${action === "*" ? "every tool" : action} only for some patterns, and that cannot be written without the patterns` };
+    if (v === "ask") return { reason: `OpenCode asks before ${action === "*" ? "every tool" : action}; allowing it would be broader and denying it narrower than written` };
+    return { v };
+  };
+  const base2 = verdict("*");
+  if (base2.reason) return base2;
+  const allowlist = base2.v === "deny";
+  const tools = [];
+  const disallowedTools = [];
+  for (const [action, members] of OC_ACTIONS) {
+    const r = verdict(action);
+    if (r.reason) return r;
+    if (allowlist && r.v === "allow") tools.push(...members);
+    if (!allowlist && r.v === "deny") disallowedTools.push(...members);
+  }
+  return { tools: allowlist ? tools : null, disallowedTools };
+}
+function fromAgy(data) {
+  if (data.tools === void 0 || data.tools === null) return { tools: null, disallowedTools: [] };
+  if (!Array.isArray(data.tools) || data.tools.some((t) => typeof t !== "string")) return { reason: "its agy tools value is not a list of tool names" };
+  const unknown = data.tools.filter((t) => !AGY_ALL.includes(t));
+  if (unknown.length) return { reason: `the agy tool(s) ${unknown.join(", ")} have no name on other hosts` };
+  const granted = new Set(data.tools);
+  const tools = Object.entries(TOOL_MAP).filter(([, t]) => Array.isArray(t.agy) && t.agy.length > 0 && t.agy.every((n) => granted.has(n))).map(([name]) => name);
+  return { tools, disallowedTools: [] };
+}
+function sourceRestrictions(origin, data) {
+  if (origin === "opencode") return fromOpenCode(data);
+  if (origin === "agy") return fromAgy(data);
+  return { tools: data.tools, disallowedTools: data.disallowedTools };
+}
+var NON_PORTABLE_KEYS = { claude: ["hooks", "mcpServers", "permissionMode", "isolation"], opencode: [], agy: [] };
+function hostRestrictionRefusal(host, origin, data) {
+  if (host === origin) return null;
+  const bad = NON_PORTABLE_KEYS[origin].filter((k) => k in data);
+  if (bad.length) return `${host} cannot express the frontmatter key(s) ${bad.join(", ")}`;
+  const restr = sourceRestrictions(origin, data);
+  if (restr.reason) return `${host} cannot be given this ${origin} agent's permissions: ${restr.reason}`;
+  if (host === "claude") {
+    const tools = toolList(restr.tools);
+    if (tools !== null && tools.length === 0) return "claude cannot write an agent that may use no tool at all (an empty tools line is read as every tool)";
+    return null;
+  }
+  const t = translateTools(host, restr);
+  if (!t.ok) return t.reason;
+  if (host === "agy" && Array.isArray(t.tools) && t.tools.length === 0) return "agy cannot write an agent that may use no tool at all";
+  return null;
+}
 function parseSource(text) {
   const m = normalize5(text).match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!m) return { error: "the source has no frontmatter block" };
@@ -11713,30 +11818,54 @@ ${body}`;
 function renderCustomAgent({ host, key, name, source, entry, sourceHash }) {
   const { data, body } = source;
   const cfg = entry ?? {};
+  const o = originOf(data);
+  if (o.error) return { ok: false, reason: o.error };
+  const origin = o.origin;
   const srcModel = typeof data.model === "string" ? data.model : void 0;
-  if (host === "claude") {
-    const resolved2 = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, "claude");
-    let fm = source.frontmatter;
+  if (host === origin) {
+    let fm = withoutOrigin(source.frontmatter);
     const setLine = (field, value) => {
       const re = new RegExp(`^${field}:.*$`, "m");
       fm = re.test(fm) ? fm.replace(re, `${field}: ${value}`) : `${fm}
 ${field}: ${value}`;
     };
-    if (cfg.model) setLine("model", cfg.model);
-    if (cfg.effort && resolved2.effort) setLine("effort", resolved2.effort);
-    if (!/^name:/m.test(fm)) fm = `name: ${name}
+    if (host === "claude") {
+      const resolved2 = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, "claude");
+      if (cfg.model) setLine("model", cfg.model);
+      if (cfg.effort && resolved2.effort) setLine("effort", resolved2.effort);
+      if (!/^name:/m.test(fm)) fm = `name: ${name}
 ${fm}`;
+    } else if (host === "opencode") {
+      const resolved2 = resolveHostSettings({ model: cfg.model, opencode_model: cfg.opencode_model }, "opencode");
+      if ((cfg.model || cfg.opencode_model) && resolved2.model !== "inherit") setLine("model", resolved2.model);
+    } else if (cfg.agy_model) {
+      setLine("model", resolveHostSettings({ agy_model: cfg.agy_model }, "agy").model);
+    }
     return { ok: true, name, content: withStamp(`---
 ${fm}
 ---`, body, host, key, sourceHash) };
   }
-  const bad = NON_PORTABLE_KEYS.filter((k) => k in data);
-  if (bad.length) return { ok: false, reason: `${host} cannot express the frontmatter key(s) ${bad.join(", ")}` };
+  const refusal3 = hostRestrictionRefusal(host, origin, data);
+  if (refusal3) return { ok: false, reason: refusal3 };
   if (typeof data.description !== "string" || data.description.trim() === "") return { ok: false, reason: `${host} needs a description in the source frontmatter` };
-  const translated = translateTools(host, data);
-  if (!translated.ok) return translated;
+  const restr = sourceRestrictions(origin, data);
+  if (host === "claude") {
+    const fromOc = origin === "opencode" ? /^anthropic\/(claude-.+)$/.exec(srcModel ?? "")?.[1] : void 0;
+    const resolved2 = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, "claude");
+    const lines2 = ["---", `name: ${name}`, `description: ${yamlString2(data.description)}`];
+    if (cfg.model || fromOc) lines2.push(`model: ${cfg.model ?? fromOc}`);
+    if (cfg.effort && resolved2.effort) lines2.push(`effort: ${resolved2.effort}`);
+    const tools = toolList(restr.tools);
+    const denied = toolList(restr.disallowedTools) ?? [];
+    if (tools !== null) lines2.push(`tools: ${tools.join(", ")}`);
+    if (denied.length) lines2.push(`disallowedTools: ${denied.join(", ")}`);
+    lines2.push("---");
+    return { ok: true, name, content: withStamp(lines2.join("\n"), body, host, key, sourceHash) };
+  }
+  const translated = translateTools(host, restr);
   if (host === "opencode") {
-    const resolved2 = resolveHostSettings({ model: cfg.model ?? (srcModel?.startsWith("claude-") ? srcModel : void 0), opencode_model: cfg.opencode_model }, "opencode");
+    const claudeModel = origin === "claude" && srcModel?.startsWith("claude-") ? srcModel : void 0;
+    const resolved2 = resolveHostSettings({ model: cfg.model ?? claudeModel, opencode_model: cfg.opencode_model }, "opencode");
     const lines2 = ["---", `description: ${yamlString2(data.description)}`, "mode: subagent"];
     if (resolved2.model !== "inherit") lines2.push(`model: ${resolved2.model}`);
     if (translated.rules.length) lines2.push("permission:", ...translated.rules.map((r) => `  ${r.action === "*" ? '"*"' : r.action}: ${r.verdict}`));
@@ -11764,7 +11893,8 @@ function symlinkIn(root, rel) {
   }
   return null;
 }
-function inspectTarget(root, rel, host, key, sourcePath) {
+function inspectTarget(root, rel, host, key, sourcePath, vacated = []) {
+  if (vacated.includes(rel)) return { state: "absent" };
   const link = symlinkIn(root, rel);
   if (link) return { state: "refused", reason: `${rel} is reached through the symlink ${link}; Sterling does not write through links` };
   const path = join16(root, rel);
@@ -11796,6 +11926,9 @@ function stampedOutputs(root) {
   scan("agy", AGY_AGENTS_DIR);
   return out;
 }
+function hasCustomOutputs(projectRoot) {
+  return stampedOutputs(projectRoot).length > 0;
+}
 function readSources(root) {
   const dir = join16(root, AGENT_SOURCE_DIR);
   const out = /* @__PURE__ */ new Map();
@@ -11808,13 +11941,16 @@ function readSources(root) {
   }
   return out;
 }
-function planCustomAgents(projectRoot, config2, { hosts } = {}) {
+function planCustomAgents(projectRoot, config2, { hosts, pending, vacated = [] } = {}) {
   const root = projectRoot;
   const models = config2?.models ?? {};
   const result = { ops: [], written: [], unchanged: [], refused: [], removed: [], skipped: [] };
   const targetHosts = hosts ?? CUSTOM_HOSTS;
   const sources = readSources(root);
+  if (pending) sources.set(pending.key, { key: pending.key, path: `${AGENT_SOURCE_DIR}/${pending.key}.md`, text: pending.text });
   const live = /* @__PURE__ */ new Set();
+  const desired = /* @__PURE__ */ new Set();
+  const slot = (host, key, rel) => `${host}\0${key}\0${rel}`;
   const refuse = (key, host, reason, path) => result.refused.push({ key, host, reason, ...path ? { path } : {} });
   const agents = [];
   for (const [key, src] of sources) {
@@ -11823,12 +11959,12 @@ function planCustomAgents(projectRoot, config2, { hosts } = {}) {
       continue;
     }
     const full = join16(root, src.path);
-    if (symlinkIn(root, src.path)) {
+    if (src.text === void 0 && symlinkIn(root, src.path)) {
       refuse(key, "*", `${src.path} is a symlink; Sterling does not read an agent through a link`, src.path);
       live.add(key);
       continue;
     }
-    const text = readFileSync12(full, "utf8");
+    const text = src.text ?? readFileSync12(full, "utf8");
     const source = parseSource(text);
     live.add(key);
     if (source.error) {
@@ -11867,7 +12003,8 @@ function planCustomAgents(projectRoot, config2, { hosts } = {}) {
         refuse(a.key, host, `${r.reason}; ${host} gets no copy of ${a.src.path}`, rel);
         continue;
       }
-      const t = inspectTarget(root, rel, host, a.key, a.src.path);
+      desired.add(slot(host, a.key, rel));
+      const t = inspectTarget(root, rel, host, a.key, a.src.path, vacated);
       if (t.state === "refused") {
         refuse(a.key, host, t.reason, rel);
         continue;
@@ -11881,13 +12018,15 @@ function planCustomAgents(projectRoot, config2, { hosts } = {}) {
     }
   }
   for (const o of stampedOutputs(root)) {
-    if (live.has(o.key)) continue;
-    const t = inspectTarget(root, o.rel, o.host, o.key, `${AGENT_SOURCE_DIR}/${o.key}.md`);
+    if (desired.has(slot(o.host, o.key, o.rel))) continue;
+    if (live.has(o.key) && !targetHosts.includes(o.host)) continue;
+    const why = !live.has(o.key) ? "its agent is gone" : "Sterling no longer generates this copy for the current source";
+    const t = inspectTarget(root, o.rel, o.host, o.key, `${AGENT_SOURCE_DIR}/${o.key}.md`, vacated);
     if (t.state === "owned") {
       result.removed.push({ key: o.key, host: o.host, path: o.rel });
       result.ops.push({ path: o.rel, content: null, previous: t.disk });
     } else if (t.state === "refused") {
-      refuse(o.key, o.host, `${t.reason} (kept: its agent is gone but the file is not an unedited Sterling copy)`, o.rel);
+      refuse(o.key, o.host, `${t.reason} (kept and still installed: ${why}, but the file is not an unedited Sterling copy, so it is not deleted; it may allow more than the source now does, so remove it by hand)`, o.rel);
     }
   }
   return result;
@@ -11915,11 +12054,13 @@ function pruneEmptyAgyDir(root, rel) {
   const dir = join16(root, dirname5(rel));
   if (existsSync11(dir) && readdirSync5(dir).length === 0) rmdirSync(dir);
 }
-function syncCustomAgents(projectRoot, config2, { hosts, dryRun = false, env, home, probes } = {}) {
+function syncCustomAgents(projectRoot, config2, { hosts, dryRun = false, env, home, probes, pending, vacated, requireClean = [] } = {}) {
   const chosen = hosts ?? detectInstalledHosts(projectRoot, { env, home, probes });
-  const plan = planCustomAgents(projectRoot, config2, { hosts: chosen });
+  const plan = planCustomAgents(projectRoot, config2, { hosts: chosen, pending, vacated });
   const { ops, ...report2 } = plan;
   if (dryRun) return { ...report2, dryRun: true };
+  const blocking = report2.refused.filter((r) => requireClean.includes(r.key));
+  if (blocking.length) throw new Error(blocking.map((r) => `${r.host}: ${r.reason}`).join("; "));
   const done = [];
   try {
     for (const op of ops) {
@@ -12082,7 +12223,7 @@ for (const r of agySetup.rows ?? []) {
     console.error("\n" + r.instruction + "\n");
   }
 }
-if (Object.keys(config.models ?? {}).some(isCustomAgentKey)) {
+if (Object.keys(config.models ?? {}).some(isCustomAgentKey) || hasCustomOutputs(targetDir)) {
   try {
     const custom2 = syncCustomAgents(targetDir, config);
     for (const w of custom2.written) console.log(`${w.status}: ${w.path} (custom agent ${w.key})`);
