@@ -4,7 +4,6 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SYSTEM_TAB, buildSystemTab, initialUi, reduce, type AgentRosterSnapshot, type UiState } from '../state.js';
-import { at, lastAgentCursor, SYS } from './system-nav.js';
 import { SterlingStore } from '@sterling/store';
 import { openDashboard } from '../controller.js';
 
@@ -70,13 +69,25 @@ test('Storage row: an unreadable config reads UNKNOWN, never the SQLite default'
 
 test('Storage row is read-only: never selected, no cursor index, no effect, hidden under a model picker', () => {
   const snap = snapshot({ storage: 'postgres' });
-  // The cursor clamp still ends at the handoff row (keys + 4); the storage row adds no stop.
-  const down = reduce({} as SterlingStore, st({ tab: 4, cursor: at(snap, SYS.handoff) }), { type: 'key', key: 'DOWN' } as never, undefined, undefined, snap);
-  assert.equal(down.ui.cursor, at(snap, SYS.handoff));
-  for (let c = 0; c <= at(snap, SYS.autoMerge); c++) {
+  const entries = buildSystemTab(snap, st({ tab: SYSTEM_TAB }), 200).entries;
+  assert.equal(entries.some((e) => e.id === 'sys:storage' && e.cursorable), false, 'the storage row holds no cursor stop');
+  const cursorable = entries.filter((e) => e.cursorable);
+  const last = cursorable.length - 1;
+  assert.equal(cursorable[last].id, 'sys:pr_auto_merge', 'in work mode the auto-merge setting is the last selectable row');
+  // DOWN from the real last selectable row (work mode) stays there: the storage row adds no stop below it
+  const down = reduce({} as SterlingStore, st({ tab: SYSTEM_TAB, cursor: last }), { kind: 'key', name: 'DOWN' }, undefined, undefined, snap);
+  assert.equal(down.ui.cursor, last);
+  // DOWN does move the cursor everywhere else, so the event reaches the reducer
+  const moved = reduce({} as SterlingStore, st({ tab: SYSTEM_TAB, cursor: last - 1 }), { kind: 'key', name: 'DOWN' }, undefined, undefined, snap);
+  assert.equal(moved.ui.cursor, last);
+  for (let c = 0; c <= last; c++) {
     assert.notEqual(buildSystemTab(snap, st({ cursor: c }), 200).storageRows[0].lines[0].selected, true);
   }
-  const enter = reduce({} as SterlingStore, st({ tab: 4, cursor: at(snap, SYS.handoff) }), { type: 'key', key: 'ENTER' } as never, undefined, undefined, snap);
+  // ENTER on the last selectable row acts on THAT row, never on storage
+  const enter = reduce({} as SterlingStore, st({ tab: SYSTEM_TAB, cursor: last }), { kind: 'key', name: 'ENTER' }, undefined, undefined, snap);
+  const action = cursorable[last].action;
+  assert.equal(action?.kind, 'toggle');
+  assert.deepEqual(enter.effects, [(action as { effect: unknown }).effect], 'ENTER flips the auto-merge setting');
   assert.deepEqual(enter.effects.filter((e) => /storage/.test(JSON.stringify(e))), []);
   const picker = buildSystemTab(snap, st({ selector: { key: 'implementor', stage: 'model', highlight: 0 } }), 200);
   assert.deepEqual(picker.storageRows, []);

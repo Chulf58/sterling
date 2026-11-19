@@ -2270,7 +2270,7 @@ function reduceNodes(
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, overpassProviderEdit: undefined, boardEdit: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, overpassProviderEdit: undefined, boardEdit: undefined, adoptConfirm: undefined });
 
   // the tabs this host can reach, in bar order: a digit picks the n-th, left/right step through them
   const reachable = visibleTabs(viewport.agents, viewport.github);
@@ -2363,6 +2363,11 @@ function reduceNodes(
     const row = state.rows[index]!;
     // a read-only row (storage, custom agents) holds no cursor index, so a click on it does nothing
     const clickable = roster ? cursorEntries(roster, ui) : [];
+    // an open adoption confirm belongs to its own row: a click anywhere else only closes it
+    if (ui.adoptConfirm) {
+      const confirmRow = clickable.find((e) => e.action?.kind === 'adopt' && e.action.id === ui.adoptConfirm!.id)?.id;
+      if (row.id !== confirmRow) return { ui: { ...ui, adoptConfirm: undefined }, effects };
+    }
     if (row.type !== 'system' || !clickable.some((e) => e.id === row.id) || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
     const enter: UiEvent = { kind: 'key', name: 'ENTER' };
     const sel = ui.selector;
@@ -2578,12 +2583,14 @@ function reduceNodes(
                 : `Default Codex model cleared — consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
               return { ui: { ...ui, sparringModelEdit: undefined, notice: sparringNotice }, effects };
             }
+            const entry = sysEntries[cursor];
             if (ui.adoptConfirm) {
-              // the confirm is open: an ok plan goes ahead, a refused one just closes
-              if (ui.adoptConfirm.ok) effects.push({ type: 'adopt_run', id: ui.adoptConfirm.id });
+              // the confirm is open: ENTER on the adoption row it was opened from runs an ok plan (a refused
+              // one just closes); ENTER anywhere else only closes it
+              const onRow = entry?.action?.kind === 'adopt' && entry.action.id === ui.adoptConfirm.id;
+              if (onRow && ui.adoptConfirm.ok) effects.push({ type: 'adopt_run', id: ui.adoptConfirm.id });
               return { ui: { ...ui, adoptConfirm: undefined, notice: undefined }, effects };
             }
-            const entry = sysEntries[cursor];
             if (entry?.action?.kind === 'adopt') {
               effects.push({ type: 'adopt_plan', id: entry.action.id });
               return { ui: { ...ui, cursor, notice: undefined }, effects };
@@ -2932,7 +2939,7 @@ function reduceNodes(
     }
     case 'rightclick':
       // collapse everything — the quick "back to overview" gesture
-      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: undefined }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: undefined, adoptConfirm: undefined }, effects };
   }
   return { ui, effects };
 }

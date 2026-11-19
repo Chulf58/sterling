@@ -18,7 +18,7 @@ import { migrateProjectConfig } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
-import { syncCustomAgents } from './lib/custom-agent-render.mjs';
+import { hasCustomOutputs, syncCustomAgents } from './lib/custom-agent-render.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { workIdentityRefusal } from './lib/project-identity.mjs';
@@ -179,8 +179,9 @@ for (const r of agySetup.rows ?? []) {
 // Adopted custom agents (config.models.custom-*, GitHub #312): each is agent-sources/<key>.md plus its config
 // entry, and the host files are generated projections of it, so a sync re-renders them for every installed host.
 // A refusal (a file Sterling did not write, an edited copy) is printed loudly and the file is left alone; it does
-// not count toward exit 2, so one edited custom agent never blocks /sterling:update.
-if (Object.keys(config.models ?? {}).some(isCustomAgentKey)) {
+// not count toward exit 2, so one edited custom agent never blocks /sterling:update. It also runs when no custom-*
+// key is left but stamped copies are still on disk, so removing the last custom agent removes its generated copies.
+if (Object.keys(config.models ?? {}).some(isCustomAgentKey) || hasCustomOutputs(targetDir)) {
   try {
     const custom = syncCustomAgents(targetDir, config);
     for (const w of custom.written) console.log(`${w.status}: ${w.path} (custom agent ${w.key})`);

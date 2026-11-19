@@ -328,3 +328,131 @@ test('retireAgents leaves a sterling-custom generated file alone: only a sterlin
     p.done();
   }
 });
+
+// ── review fixes (feat/system-tab-redesign): origin host, never broader, cleanup by desired set ──
+
+const ocSource = (permissionBlock, extra = '') => `---\nsterling-origin: opencode\ndescription: "Scouts the team folders"\nmode: subagent\n${extra}${permissionBlock}---\nFind things.\n`;
+
+test('an OpenCode-origin source keeps its "*": deny / read: allow on OpenCode and is translated, never dropped, for Claude and agy', () => {
+  const p = project(ocSource('permission:\n  "*": deny\n  read: allow\n'));
+  try {
+    const r = sync(p);
+    assert.deepEqual(r.refused, []);
+    const oc = read(p.root, '.opencode/agents/team-scout.md');
+    assert.match(oc, /^permission:\n {2}"\*": deny\n {2}read: allow$/m, 'the author permission block stays on its own host');
+    assert.doesNotMatch(oc, /sterling-origin/, 'the origin marker is Sterling bookkeeping, never rendered');
+    const claude = read(p.root, '.claude/agents/team-scout.md');
+    assert.match(claude, /^tools: Read$/m, 'Claude gets the same allowlist');
+    assert.doesNotMatch(claude, /permission|sterling-origin|mode: subagent/);
+    const agy = read(p.root, '.agents/agents/team-scout/agent.md');
+    assert.match(agy, /^tools:\n {2}- read_file\n---/m);
+  } finally {
+    p.done();
+  }
+});
+
+test('an OpenCode-origin edit/bash deny becomes disallowedTools on Claude and a narrowed tool list on agy', () => {
+  const p = project(ocSource('permission:\n  edit: deny\n  bash: deny\n'));
+  try {
+    const r = sync(p);
+    assert.deepEqual(r.refused, []);
+    assert.match(read(p.root, '.opencode/agents/team-scout.md'), /^permission:\n {2}edit: deny\n {2}bash: deny$/m);
+    assert.match(read(p.root, '.claude/agents/team-scout.md'), /^disallowedTools: Edit, Write, MultiEdit, Bash$/m);
+    const agy = read(p.root, '.agents/agents/team-scout/agent.md');
+    assert.doesNotMatch(agy, /edit_file|write_file|run_command|multi_replace_file_content/);
+    assert.match(agy, /- read_file/);
+  } finally {
+    p.done();
+  }
+});
+
+test('an OpenCode V2 permissions list is honoured, and a rule no other host can express refuses that host only', () => {
+  const v2 = ocSource('permissions:\n  - { action: "*", resource: "*", effect: deny }\n  - { action: read, resource: "*", effect: allow }\n  - { action: shell, resource: "*", effect: allow }\n');
+  const p = project(v2);
+  try {
+    const r = sync(p);
+    assert.deepEqual(r.refused, []);
+    assert.match(read(p.root, '.claude/agents/team-scout.md'), /^tools: Read, Bash$/m);
+    // ask, a per-command pattern and an MCP rule have no faithful form outside OpenCode
+    for (const block of ['permission:\n  bash: ask\n', 'permission:\n  bash:\n    "*": deny\n    "git status": allow\n', 'permission:\n  "*": deny\n  sterling_knowledge_query: allow\n']) {
+      writeFileSync(join(p.root, 'agent-sources', `${KEY}.md`), ocSource(block));
+      const again = sync(p);
+      assert.deepEqual(again.refused.map((x) => x.host).sort(), ['agy', 'claude'], block);
+      assert.equal(existsSync(join(p.root, '.claude/agents/team-scout.md')), false, `the broader Claude copy is removed (${block})`);
+      assert.match(read(p.root, '.opencode/agents/team-scout.md'), new RegExp(block.split('\n')[1].trim().replace(/[.*"]/g, '.')), 'the origin host still gets its own rules');
+    }
+  } finally {
+    p.done();
+  }
+});
+
+test('an agy-origin tools list is translated back to Claude names', () => {
+  const p = project('---\nsterling-origin: agy\nname: team-scout\ndescription: "Scouts"\nmodel: flash\ntools:\n  - read_file\n  - grep_search\n---\nFind.\n');
+  try {
+    const r = sync(p);
+    assert.deepEqual(r.refused, []);
+    assert.match(read(p.root, '.claude/agents/team-scout.md'), /^tools: Read, Grep$/m);
+    assert.match(read(p.root, '.opencode/agents/team-scout.md'), /"\*": deny\n {2}read: allow\n {2}grep: allow/);
+    assert.match(read(p.root, '.agents/agents/team-scout/agent.md'), /^model: flash$/m, 'agy keeps the author model');
+  } finally {
+    p.done();
+  }
+});
+
+test('tightening a source so a host refuses removes the earlier broader copy Sterling wrote; an edited one is kept with a warning', () => {
+  const p = project(source());
+  try {
+    sync(p);
+    assert.ok(existsSync(join(p.root, '.opencode/agents/team-scout.md')));
+    const agyPath = join(p.root, '.agents/agents/team-scout/agent.md');
+    writeFileSync(agyPath, `${readFileSync(agyPath, 'utf8')}hand edit\n`);
+    // Read + Edit without Write: OpenCode cannot express it; agy has no NotebookEdit
+    writeFileSync(join(p.root, 'agent-sources', `${KEY}.md`), source({ tools: 'Read, Edit, NotebookEdit' }));
+    const r = sync(p);
+    assert.equal(existsSync(join(p.root, '.opencode/agents/team-scout.md')), false, 'the unrestricted OpenCode copy is gone');
+    assert.deepEqual(r.removed.map((x) => x.host), ['opencode']);
+    assert.ok(existsSync(agyPath), 'an edited copy is never deleted');
+    assert.ok(r.refused.some((x) => x.host === 'agy' && /edited after Sterling wrote it/.test(x.reason) && /still installed/.test(x.reason)), JSON.stringify(r.refused));
+  } finally {
+    p.done();
+  }
+});
+
+test('renaming the agent in its frontmatter moves the outputs: the old Sterling copies are removed', () => {
+  const p = project(source());
+  try {
+    sync(p);
+    writeFileSync(join(p.root, 'agent-sources', `${KEY}.md`), source({ name: 'team-finder' }));
+    const r = sync(p);
+    assert.deepEqual(r.refused, []);
+    assert.equal(r.removed.length, 3);
+    for (const h of ALL) {
+      assert.equal(existsSync(join(p.root, outputPath(h, 'team-scout'))), false, `${h} old copy removed`);
+      assert.ok(existsSync(join(p.root, outputPath(h, 'team-finder'))), `${h} new copy written`);
+    }
+  } finally {
+    p.done();
+  }
+});
+
+test('requireClean: a refusal for a named key throws before anything is written', () => {
+  const p = project(source({ tools: 'Read, Edit' }));
+  try {
+    assert.throws(() => sync(p, { requireClean: [KEY] }), /opencode: .*grants edit as one permission/);
+    assert.equal(existsSync(join(p.root, '.claude')), false, 'nothing written for the hosts that would have rendered');
+  } finally {
+    p.done();
+  }
+});
+
+test('hasCustomOutputs sees a stamped copy even when no config key is left', async () => {
+  const { hasCustomOutputs } = await import('../lib/custom-agent-render.mjs');
+  const p = project();
+  try {
+    assert.equal(hasCustomOutputs(p.root), false);
+    sync(p, { hosts: ['claude'] });
+    assert.equal(hasCustomOutputs(p.root), true);
+  } finally {
+    p.done();
+  }
+});

@@ -11,9 +11,10 @@ export interface AdoptionState {
   sourceFiles: string[];
   configKeys: string[];
   others: Array<{ host: 'claude' | 'opencode' | 'agy'; name: string; content?: string }>;
+  hosts?: Array<'claude' | 'opencode' | 'agy'>;
 }
 export interface AdoptionRefusal {
-  code: 'invalid-input' | 'outside-project' | 'unreadable' | 'generated' | 'invalid-name' | 'key-in-use' | 'source-exists' | 'key-collision' | 'ambiguous-duplicate';
+  code: 'invalid-input' | 'outside-project' | 'unreadable' | 'generated' | 'invalid-name' | 'key-in-use' | 'source-exists' | 'key-collision' | 'ambiguous-duplicate' | 'no-frontmatter' | 'invalid-frontmatter' | 'origin-present' | 'permission-unrepresentable';
   message: string;
 }
 export interface AdoptionPlan {
@@ -22,6 +23,8 @@ export interface AdoptionPlan {
   key?: string;
   move?: { from: string; to: string };
   contentHash?: string;
+  sourceContent?: string;
+  origin?: 'claude' | 'opencode' | 'agy';
   duplicates?: Array<{ host: string; name: string }>;
 }
 export function planAdoption(discovered: DiscoveredForAdoption, state: AdoptionState): AdoptionPlan;

@@ -1024,9 +1024,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       return;
     }
     try {
-      const report = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts });
-      const mine = report.refused.filter((r) => r.key === e.key);
-      if (mine.length) throw new Error(mine.map((r) => `${r.host}: ${r.reason}`).join('; '));
+      // requireClean: a refusal found now (the files changed since the dry run) throws before any write
+      const report = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts, requireClean: [e.key] });
       const wrote = [...new Set([...report.written, ...report.unchanged].filter((w) => w.key === e.key).map((w) => w.host))];
       ui = { ...ui, notice: `Custom agent '${e.key}' updated; rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
     } catch (err) {
@@ -1062,7 +1061,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
     const plan = planAdoption(
       { host: found.source, name: found.name, file: found.file, ...(found.content !== undefined ? { content: found.content } : {}) },
-      { sourceFiles: readSourceFiles(projectRoot), configKeys, others: all.filter((a) => a !== found).map((a) => ({ host: a.source, name: a.name, ...(a.content !== undefined ? { content: a.content } : {}) })) },
+      { sourceFiles: readSourceFiles(projectRoot), configKeys, hosts: customHosts(), others: all.filter((a) => a !== found).map((a) => ({ host: a.source, name: a.name, ...(a.content !== undefined ? { content: a.content } : {}) })) },
     );
     return { found, plan };
   }
@@ -1087,7 +1086,11 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   }
 
   /** Execute adopt_run: adopt (move the file into agent-sources), create config.models.<key> with no model or
-   *  effort, render every host. Any failure puts the original file, config.json and the sources back. */
+   *  effort, render every host. The whole render is planned first, as it will be after the move (a dry run
+   *  with the source pending and the original's path vacated): any host refusal for this agent refuses the
+   *  adoption before anything moves, naming each host and reason. The real render runs with requireClean, so a
+   *  refusal that appears in between throws before any output is written, and syncCustomAgents puts back the
+   *  outputs it wrote when a write throws. Any failure after the move puts config.json and the original back. */
   function applyAdoptRun(e: AdoptRunEffect): void {
     const fail = (msg: string) => { ui = { ...ui, notice: `Adopt ${e.id} failed — ${msg}; nothing was changed` }; };
     const r = planAdoptionFor(e.id);
@@ -1097,6 +1100,33 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
     const { found, plan } = r;
     const original = found.content!;
+    const key = plan.key!;
+    let configBefore: Buffer;
+    let configAfter: string;
+    let parsed: ReturnType<typeof parseConfig>;
+    try {
+      configBefore = readFileSync(configPath);
+      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, unknown> };
+      raw.models = { ...(raw.models ?? {}), [key]: {} };
+      parsed = parseConfig(raw);
+      configAfter = JSON.stringify(raw, null, 2) + '\n';
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    const hosts = customHosts();
+    const models = parsed as { models?: Record<string, object> };
+    try {
+      const dry = syncCustomAgents(projectRoot, models, { hosts, dryRun: true, pending: { key, text: plan.sourceContent! }, vacated: [plan.move!.from] });
+      const mine = dry.refused.filter((x) => x.key === key);
+      if (mine.length) {
+        fail(mine.map((x) => `${x.host}: ${x.reason}`).join('; '));
+        return;
+      }
+    } catch (err) {
+      fail(`the render plan failed: ${(err as Error).message}`);
+      return;
+    }
     let result: { from: string; to: string; key: string };
     try {
       result = adopt(projectRoot, plan);
@@ -1110,20 +1140,6 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       writeFileSync(from, original);
       rmSync(join(projectRoot, result.to), { force: true });
     };
-    let configBefore: Buffer;
-    let configAfter: string;
-    let parsed: ReturnType<typeof parseConfig>;
-    try {
-      configBefore = readFileSync(configPath);
-      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, unknown> };
-      raw.models = { ...(raw.models ?? {}), [result.key]: {} };
-      parsed = parseConfig(raw);
-      configAfter = JSON.stringify(raw, null, 2) + '\n';
-    } catch (err) {
-      undo();
-      fail((err as Error).message);
-      return;
-    }
     try {
       replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
     } catch (err) {
@@ -1132,11 +1148,9 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       return;
     }
     try {
-      const report = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts: customHosts() });
-      const mine = report.refused.filter((x) => x.key === result.key);
-      if (mine.length) throw new Error(mine.map((x) => `${x.host}: ${x.reason}`).join('; '));
-      const wrote = [...new Set([...report.written, ...report.unchanged].filter((w) => w.key === result.key).map((w) => w.host))];
-      ui = { ...ui, notice: `Adopted ${e.id} as ${result.key} (${AGENT_SOURCE_DIR}/${result.key}.md); rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
+      const report = syncCustomAgents(projectRoot, models, { hosts, requireClean: [key] });
+      const wrote = [...new Set([...report.written, ...report.unchanged].filter((w) => w.key === key).map((w) => w.host))];
+      ui = { ...ui, notice: `Adopted ${e.id} as ${key} (${AGENT_SOURCE_DIR}/${key}.md); rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
     } catch (err) {
       try {
         replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);

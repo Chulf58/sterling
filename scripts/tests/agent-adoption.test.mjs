@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AGENT_SOURCE_DIR, adopt, planAdoption, readSourceFiles, sha256 } from '../lib/agent-adoption.mjs';
@@ -60,7 +60,7 @@ test('adopt writes the source, verifies, then removes the original', () => {
     const plan = planAdoption(scout(), state({ sourceFiles: readSourceFiles(root) }));
     const done = adopt(root, plan);
     assert.deepEqual(done, { from: '.opencode/agents/team/scout.md', to: 'agent-sources/custom-team-scout.md', key: 'custom-team-scout' });
-    assert.equal(readFileSync(join(root, 'agent-sources/custom-team-scout.md'), 'utf8'), BODY);
+    assert.equal(readFileSync(join(root, 'agent-sources/custom-team-scout.md'), 'utf8'), BODY.replace('---\n', '---\nsterling-origin: opencode\n'), 'the original plus its origin line');
     assert.equal(existsSync(join(root, '.opencode/agents/team/scout.md')), false);
     assert.deepEqual(readdirSync(join(root, 'agent-sources')), ['custom-team-scout.md'], 'no temp file left');
   } finally {
@@ -101,5 +101,63 @@ test('adopt refuses and changes nothing when the original changed, the target ex
     assert.throws(() => adopt(root, planAdoption(scout({ file: 'x/y.md' }), state())), /not adoptable/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── review fixes: the origin host is recorded, unrepresentable restrictions refuse up front, no symlinks ──
+
+test('adopt records the origin host in the source frontmatter; the rest of the file is byte-for-byte the original', () => {
+  const root = project();
+  try {
+    mkdirSync(join(root, '.opencode/agents/team'), { recursive: true });
+    writeFileSync(join(root, '.opencode/agents/team/scout.md'), BODY);
+    adopt(root, planAdoption(scout(), state()));
+    assert.equal(readFileSync(join(root, 'agent-sources/custom-team-scout.md'), 'utf8'), BODY.replace('---\n', '---\nsterling-origin: opencode\n'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('plan refuses up front when an installed host could only get a broader agent, naming the host and the rule', () => {
+  const ask = '---\ndescription: d\npermission:\n  bash: ask\n---\nBody.\n';
+  const plan = planAdoption(scout({ content: ask }), state({ hosts: ['claude', 'opencode'] }));
+  assert.deepEqual(codes(plan), ['permission-unrepresentable']);
+  assert.match(plan.refusals[0].message, /claude: .*asks before bash/);
+  assert.equal(planAdoption(scout({ content: ask }), state({ hosts: ['opencode'] })).ok, true, 'its own host renders it as written');
+  assert.deepEqual(codes(planAdoption(scout({ content: 'no frontmatter\n' }), state())), ['no-frontmatter']);
+  assert.deepEqual(codes(planAdoption(scout({ content: '---\nsterling-origin: claude\n---\nx\n' }), state())), ['origin-present']);
+});
+
+test('adopt refuses a symlinked host folder and never deletes the file behind it', () => {
+  const root = project();
+  const outside = mkdtempSync(join(tmpdir(), 'adopt-outside-'));
+  try {
+    mkdirSync(join(outside, 'team'), { recursive: true });
+    writeFileSync(join(outside, 'team/scout.md'), BODY);
+    mkdirSync(join(root, '.opencode'));
+    symlinkSync(outside, join(root, '.opencode/agents'));
+    const plan = planAdoption(scout(), state());
+    assert.throws(() => adopt(root, plan), /symlink/);
+    assert.equal(readFileSync(join(outside, 'team/scout.md'), 'utf8'), BODY, 'the external original is intact');
+    assert.equal(existsSync(join(root, 'agent-sources')), false, 'nothing written');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('adopt refuses a symlinked agent-sources folder and writes nothing outside the project', () => {
+  const root = project();
+  const outside = mkdtempSync(join(tmpdir(), 'adopt-outside-'));
+  try {
+    mkdirSync(join(root, '.opencode/agents/team'), { recursive: true });
+    writeFileSync(join(root, '.opencode/agents/team/scout.md'), BODY);
+    symlinkSync(outside, join(root, 'agent-sources'));
+    assert.throws(() => adopt(root, planAdoption(scout(), state())), /symlink/);
+    assert.deepEqual(readdirSync(outside), [], 'nothing written through the link');
+    assert.equal(readFileSync(join(root, '.opencode/agents/team/scout.md'), 'utf8'), BODY);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

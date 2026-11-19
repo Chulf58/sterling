@@ -10,11 +10,21 @@
 // own templates are in agent-templates/ (AGENTS.md, repo layout). The file is named by the
 // stable key (`custom-team-scout.md`), not the original path, so the key, the file and the
 // config.models entry are one name.
+//
+// ORIGIN. The source is the original file with one line added as the first frontmatter line,
+// `sterling-origin: <host>` (ORIGIN_FIELD in custom-agent-render.mjs), so the renderer reads its
+// restrictions in the format they were written in; everything else is byte-for-byte the original.
+//
+// FILES. adopt() lstat-walks every component of the original and the new source path below the
+// project root (contained-fs.mjs) before it reads, writes or removes anything, so a symlinked
+// .claude/agents, .opencode/agents, .agents/agents or agent-sources is refused, never followed.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, rmdirSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { customAgentKey, customAgentSlug } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { containedPath, mkdirContained, unlinkContained } from './contained-fs.mjs';
+import { ORIGIN_FIELD, hostRestrictionRefusal, parseSource } from './custom-agent-render.mjs';
 
 export const AGENT_SOURCE_DIR = 'agent-sources';
 
@@ -43,8 +53,11 @@ const refuse = (code, message) => ({ code, message });
  *   sourceFiles: string[]            file names already in agent-sources/,
  *   configKeys: string[]             every key of config.models,
  *   others: [{host, name, content}]  every OTHER discovered agent,
+ *   hosts?: string[]                 the installed hosts; each must be able to carry the agent's
+ *                                    restrictions without broadening them, or adoption is refused
  * }
- * Returns { ok, refusals, key?, move?: {from, to}, contentHash?, duplicates? }. `duplicates` lists
+ * Returns { ok, refusals, key?, move?: {from, to}, contentHash?, sourceContent?, origin?, duplicates? }.
+ * `sourceContent` is what adopt() writes (the original plus the origin line). `duplicates` lists
  * same-slug agents on other hosts whose content is byte-identical: they stay where they are
  * (host copies are regenerated from the source by the rendering step, which owns them).
  */
@@ -62,6 +75,23 @@ export function planAdoption(discovered, state) {
     refusals.push(refuse('unreadable', `${file} could not be read, so it cannot be adopted`));
   } else if (STERLING_STAMP_RE.test(content)) {
     refusals.push(refuse('generated', `${file} carries a Sterling stamp: it is a generated copy, never an agent to adopt`));
+  }
+  let sourceContent;
+  if (typeof content === 'string' && !STERLING_STAMP_RE.test(content)) {
+    const parsed = parseSource(content);
+    if (parsed.error) {
+      refusals.push(refuse(/no frontmatter/.test(parsed.error) ? 'no-frontmatter' : 'invalid-frontmatter', `${file}: ${parsed.error}; Sterling renders an agent from its frontmatter`));
+    } else if (ORIGIN_FIELD in parsed.data) {
+      refusals.push(refuse('origin-present', `${file} already has a ${ORIGIN_FIELD} line, which Sterling writes itself; remove it, then adopt`));
+    } else {
+      sourceContent = content.replace(/^---(\r?\n)/, `---$1${ORIGIN_FIELD}: ${host}$1`);
+      const blocked = (state?.hosts ?? [])
+        .map((h) => [h, hostRestrictionRefusal(h, host, parsed.data)])
+        .filter(([, reason]) => reason !== null);
+      if (blocked.length) {
+        refusals.push(refuse('permission-unrepresentable', `the installed host(s) could only get a broader agent than ${file} allows — ${blocked.map(([h, r]) => `${h}: ${r}`).join('; ')}`));
+      }
+    }
   }
   const slug = customAgentSlug(name);
   const key = customAgentKey(name);
@@ -94,7 +124,7 @@ export function planAdoption(discovered, state) {
     }
   }
   if (refusals.length > 0) return { ok: false, key, refusals };
-  return { ok: true, key, refusals, move: { from: file, to: sourcePathOf(key) }, contentHash: sha256(content), duplicates };
+  return { ok: true, key, refusals, move: { from: file, to: sourcePathOf(key) }, contentHash: sha256(content), sourceContent, origin: host, duplicates };
 }
 
 /** The sourceFiles and the file text a plan needs from disk: the one reader the caller uses. */
@@ -104,21 +134,29 @@ export function readSourceFiles(projectRoot) {
 }
 
 /**
- * Perform an ok plan: write the source file atomically, read it back and compare, then remove
- * the original (and agy's now-empty <name>/ folder). Refuses when the plan is not ok, when the
- * original changed since it was planned (hash), or when the target exists. A failed
- * verification removes the new file and leaves the original untouched.
+ * Perform an ok plan: write the source file (the original plus its origin line) atomically, read
+ * it back and compare, then remove the original (and agy's now-empty <name>/ folder). Refuses when
+ * the plan is not ok, when a path component of the original or the target is a symlink or leaves
+ * the project (checked before anything is read or written), when the original changed since it was
+ * planned (hash), or when the target exists. A failed verification removes the new file and leaves
+ * the original untouched.
  */
 export function adopt(projectRoot, plan) {
-  if (!plan?.ok || !plan.move) throw new Error(`adopt: the plan is not adoptable (${(plan?.refusals ?? []).map((r) => r.code).join(', ') || 'no move'})`);
-  const from = join(projectRoot, plan.move.from);
-  const to = join(projectRoot, plan.move.to);
+  if (!plan?.ok || !plan.move || typeof plan.sourceContent !== 'string') throw new Error(`adopt: the plan is not adoptable (${(plan?.refusals ?? []).map((r) => r.code).join(', ') || 'no move'})`);
+  let from;
+  let to;
+  try {
+    from = containedPath(projectRoot, plan.move.from, 'file');
+    to = containedPath(projectRoot, plan.move.to, 'file');
+  } catch (err) {
+    throw new Error(`adopt: ${err.message}; nothing was written or removed`, { cause: err });
+  }
   if (!existsSync(from)) throw new Error(`adopt: ${plan.move.from} is gone; nothing was written`);
   const original = readFileSync(from, 'utf8');
   if (sha256(original) !== plan.contentHash) throw new Error(`adopt: ${plan.move.from} changed since it was planned; nothing was written`);
   if (existsSync(to)) throw new Error(`adopt: ${plan.move.to} already exists; it is never overwritten`);
-  mkdirSync(dirname(to), { recursive: true });
-  writeFileAtomic(to, original);
+  mkdirContained(projectRoot, dirname(plan.move.to));
+  writeFileAtomic(to, plan.sourceContent);
   let written;
   try {
     written = readFileSync(to, 'utf8');
@@ -126,12 +164,14 @@ export function adopt(projectRoot, plan) {
     rmSync(to, { force: true });
     throw new Error(`adopt: the new file could not be read back (${err.message}); the original is untouched`);
   }
-  if (written !== original) {
+  if (written !== plan.sourceContent) {
     rmSync(to, { force: true });
-    throw new Error(`adopt: the new file differs from the original; it was removed and the original is untouched`);
+    throw new Error(`adopt: the new file differs from what was planned; it was removed and the original is untouched`);
   }
-  rmSync(from);
-  const folder = dirname(from);
-  if (plan.move.from.startsWith(HOST_DIRS.agy) && readdirSync(folder).length === 0) rmdirSync(folder);
+  unlinkContained(projectRoot, plan.move.from);
+  if (plan.move.from.startsWith(HOST_DIRS.agy)) {
+    const folder = containedPath(projectRoot, dirname(plan.move.from), 'dir');
+    if (lstatSync(folder).isDirectory() && readdirSync(folder).length === 0) rmdirSync(folder);
+  }
   return { from: plan.move.from, to: plan.move.to, key: plan.key };
 }

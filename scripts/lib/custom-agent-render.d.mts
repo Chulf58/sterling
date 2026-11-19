@@ -16,5 +16,10 @@ export interface CustomSyncReport {
   removed: Array<{ key: string; host: CustomHost; path: string }>;
   skipped: Array<{ key: string; reason: string }>;
 }
-export function planCustomAgents(projectRoot: string, config: { models?: Record<string, object> }, opts?: { hosts?: CustomHost[]}): CustomSyncReport & { ops: Array<{ path: string; content: string | null; previous: string | null }> };
-export function syncCustomAgents(projectRoot: string, config: { models?: Record<string, object> }, opts?: { hosts?: CustomHost[]; dryRun?: boolean; env?: NodeJS.ProcessEnv; home?: string; probes?: object }): CustomSyncReport & { dryRun: boolean };
+export function planCustomAgents(projectRoot: string, config: { models?: Record<string, object> }, opts?: { hosts?: CustomHost[]; pending?: { key: string; text: string }; vacated?: string[] }): CustomSyncReport & { ops: Array<{ path: string; content: string | null; previous: string | null }> };
+export function syncCustomAgents(projectRoot: string, config: { models?: Record<string, object> }, opts?: { hosts?: CustomHost[]; dryRun?: boolean; env?: NodeJS.ProcessEnv; home?: string; probes?: object; pending?: { key: string; text: string }; vacated?: string[]; requireClean?: string[] }): CustomSyncReport & { dryRun: boolean };
+export const ORIGIN_FIELD: string;
+export function originOf(data: Record<string, unknown>): { origin: CustomHost } | { error: string };
+export function sourceRestrictions(origin: CustomHost, data: Record<string, unknown>): { tools: unknown; disallowedTools: unknown } | { reason: string };
+export function hostRestrictionRefusal(host: CustomHost, origin: CustomHost, data: Record<string, unknown>): string | null;
+export function hasCustomOutputs(projectRoot: string): boolean;

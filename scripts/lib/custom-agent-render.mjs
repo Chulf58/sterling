@@ -2,8 +2,8 @@
 // custom-agents-are-adopted-into-a-source-folder-host-files-are-generated-projections and
 // system-tab-redesign-one-agent-table-every-agent-every-host-settings-section; GitHub #312).
 //
-// An adopted agent is agent-sources/<key>.md (Claude-style frontmatter and body, written by
-// adopt() in agent-adoption.mjs) plus config.models.<key>. syncCustomAgents renders it to
+// An adopted agent is agent-sources/<key>.md (the author's own file, written by adopt() in
+// agent-adoption.mjs) plus config.models.<key>. syncCustomAgents renders it to
 //   Claude    .claude/agents/<name>.md
 //   OpenCode  .opencode/agents/<name>.md   (not under sterling/, which is Sterling's own)
 //   agy       .agents/agents/<name>/agent.md
@@ -15,8 +15,18 @@
 // another agent's file is refused with the source path in the message and left alone. Removal
 // (the config entry or the source went away) deletes only a stamped, unedited output.
 //
+// ORIGIN. The source keeps the frontmatter of the host it was written for, and adopt() records
+// that host as the first frontmatter line, `sterling-origin: claude|opencode|agy` (ORIGIN_FIELD).
+// A source without the line is a Claude agent (every source adopted before the field existed was
+// read as one). The line is Sterling's bookkeeping and is never rendered. The origin host gets the
+// author's frontmatter as written (model and effort replaced only where config names one); every
+// other host gets a translation of the origin's own restriction format (sourceRestrictions):
+// Claude tools/disallowedTools, OpenCode permission (V1 map) or permissions (V2 list), agy tools.
+//
 // NEVER BROADER. A restriction that a host cannot express refuses that host for that agent with
-// a reason; it is never dropped (decision 4736b9ef). See translateTools for the mapping.
+// a reason; it is never dropped (decision 4736b9ef). See translateTools for the mapping. When a
+// host is refused, or an agent's output path changes, the copy Sterling wrote earlier is removed
+// if unedited, so a broader old copy never stays installed; an edited one is kept and reported.
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -150,11 +160,143 @@ export function translateTools(host, { tools, disallowedTools }) {
   return { ok: true, rules };
 }
 
-// ── source parsing ───────────────────────────────────────────────────────────
-// Frontmatter keys that restrict or extend an agent in a way no other host expresses: a host
-// other than Claude refuses an agent that has one, rather than render it without.
-const NON_PORTABLE_KEYS = ['hooks', 'mcpServers', 'permissionMode', 'isolation'];
+// ── origin and source restrictions ───────────────────────────────────────────
+export const ORIGIN_FIELD = 'sterling-origin';
+const ORIGIN_LINE_RE = new RegExp(`^${ORIGIN_FIELD}:.*(?:\n|$)`, 'm');
 
+/** The host a parsed source was written for: { origin } or { error }. */
+export function originOf(data) {
+  const v = data[ORIGIN_FIELD];
+  if (v === undefined) return { origin: 'claude' };
+  if (!CUSTOM_HOSTS.includes(v)) return { error: `${ORIGIN_FIELD} must be one of ${CUSTOM_HOSTS.join(', ')}, got ${JSON.stringify(v)}` };
+  return { origin: v };
+}
+
+/** The author's frontmatter block without the origin line. */
+const withoutOrigin = (frontmatter) => frontmatter.replace(ORIGIN_LINE_RE, '').replace(/\n$/, '');
+
+// OpenCode action names Sterling translates, with their aliases (OpenCode 2.0.22 reads bash as
+// shell and write/patch as edit; opencode-install.mjs EDIT_FAMILY and SHELL_FAMILY).
+const OC_ALIAS = { shell: 'bash', write: 'edit', patch: 'edit' };
+const OC_V2_KEYS = ['permissions', 'request', 'system', 'disabled'];
+
+/** OpenCode permission rules, in written order: [{ action, resource, effect }] or { reason }. */
+function openCodeRules(data) {
+  const v2 = OC_V2_KEYS.some((k) => k in data);
+  const effectOk = (e) => e === 'allow' || e === 'deny' || e === 'ask';
+  if (v2) {
+    // a file with any V2 key is read by its permissions list alone (finding
+    // opencode-agent-permission-wildcard-deny-then-exact-allow-works-for-mcp-tools)
+    if (data.disabled === true) return { reason: 'the agent is disabled on OpenCode (disabled: true), and no other host can carry that' };
+    const list = data.permissions ?? [];
+    if (!Array.isArray(list)) return { reason: 'its permissions value is not a list of rules' };
+    const rules = [];
+    for (const r of list) {
+      const resource = r?.resource ?? '*';
+      if (typeof r?.action !== 'string' || typeof resource !== 'string' || !effectOk(r?.effect)) return { reason: `the permissions rule ${JSON.stringify(r)} is not {action, resource, effect}` };
+      rules.push({ action: r.action, resource, effect: r.effect });
+    }
+    return rules;
+  }
+  if ('tools' in data) return { reason: 'its OpenCode tools map is not translated; write the same rules under permission' };
+  const perm = data.permission;
+  if (perm === undefined || perm === null) return [];
+  if (typeof perm === 'string') return effectOk(perm) ? [{ action: '*', resource: '*', effect: perm }] : { reason: `permission ${JSON.stringify(perm)} is not allow, deny or ask` };
+  if (typeof perm !== 'object' || Array.isArray(perm)) return { reason: 'its permission value is not a map' };
+  const rules = [];
+  for (const [action, value] of Object.entries(perm)) {
+    if (typeof value === 'string' && effectOk(value)) rules.push({ action, resource: '*', effect: value });
+    else if (value && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(effectOk)) {
+      for (const [resource, effect] of Object.entries(value)) rules.push({ action, resource, effect });
+    } else return { reason: `permission.${action} is not allow, deny, ask or a map of them` };
+  }
+  return rules;
+}
+
+/** An OpenCode origin's restriction as Claude tools/disallowedTools, or { reason }. */
+function fromOpenCode(data) {
+  const rules = openCodeRules(data);
+  if (!Array.isArray(rules)) return rules;
+  const known = new Set(OC_ACTIONS.map(([a]) => a));
+  for (const r of rules) {
+    if (r.action !== '*' && !known.has(OC_ALIAS[r.action] ?? r.action)) return { reason: `its OpenCode rule for ${r.action} names a tool or pattern no other host has a name for` };
+  }
+  // the last matching rule wins; a rule for one resource (a command or path pattern) after the last
+  // whole-action rule makes the action depend on what it touches, which no other host can say
+  const verdict = (action) => {
+    let v;
+    let partial = false;
+    for (const r of rules) {
+      if (r.action !== '*' && (OC_ALIAS[r.action] ?? r.action) !== action) continue;
+      if (r.resource === '*') {
+        v = r.effect;
+        partial = false;
+      } else partial = true;
+    }
+    if (partial) return { reason: `OpenCode allows ${action === '*' ? 'every tool' : action} only for some patterns, and that cannot be written without the patterns` };
+    if (v === 'ask') return { reason: `OpenCode asks before ${action === '*' ? 'every tool' : action}; allowing it would be broader and denying it narrower than written` };
+    return { v };
+  };
+  const base = verdict('*');
+  if (base.reason) return base;
+  const allowlist = base.v === 'deny';
+  const tools = [];
+  const disallowedTools = [];
+  for (const [action, members] of OC_ACTIONS) {
+    const r = verdict(action);
+    if (r.reason) return r;
+    if (allowlist && r.v === 'allow') tools.push(...members);
+    if (!allowlist && r.v === 'deny') disallowedTools.push(...members);
+  }
+  return { tools: allowlist ? tools : null, disallowedTools };
+}
+
+/** An agy origin's tools list as Claude tools: a Claude tool is granted only when agy grants every one of its agy tools. */
+function fromAgy(data) {
+  if (data.tools === undefined || data.tools === null) return { tools: null, disallowedTools: [] };
+  if (!Array.isArray(data.tools) || data.tools.some((t) => typeof t !== 'string')) return { reason: 'its agy tools value is not a list of tool names' };
+  const unknown = data.tools.filter((t) => !AGY_ALL.includes(t));
+  if (unknown.length) return { reason: `the agy tool(s) ${unknown.join(', ')} have no name on other hosts` };
+  const granted = new Set(data.tools);
+  const tools = Object.entries(TOOL_MAP)
+    .filter(([, t]) => Array.isArray(t.agy) && t.agy.length > 0 && t.agy.every((n) => granted.has(n)))
+    .map(([name]) => name);
+  return { tools, disallowedTools: [] };
+}
+
+/** The source's restriction in Claude terms ({ tools, disallowedTools }), read in its origin's own format, or { reason }. */
+export function sourceRestrictions(origin, data) {
+  if (origin === 'opencode') return fromOpenCode(data);
+  if (origin === 'agy') return fromAgy(data);
+  return { tools: data.tools, disallowedTools: data.disallowedTools };
+}
+
+// Frontmatter keys that restrict or extend an agent in a way no other host expresses, per origin:
+// a host other than the origin refuses an agent that has one, rather than render it without.
+const NON_PORTABLE_KEYS = { claude: ['hooks', 'mcpServers', 'permissionMode', 'isolation'], opencode: [], agy: [] };
+
+/**
+ * Why `host` cannot carry the restrictions of a source written for `origin`, or null when it can.
+ * The origin host always can: it gets the author's own lines.
+ */
+export function hostRestrictionRefusal(host, origin, data) {
+  if (host === origin) return null;
+  const bad = NON_PORTABLE_KEYS[origin].filter((k) => k in data);
+  if (bad.length) return `${host} cannot express the frontmatter key(s) ${bad.join(', ')}`;
+  const restr = sourceRestrictions(origin, data);
+  if (restr.reason) return `${host} cannot be given this ${origin} agent's permissions: ${restr.reason}`;
+  if (host === 'claude') {
+    const tools = toolList(restr.tools);
+    if (tools !== null && tools.length === 0) return 'claude cannot write an agent that may use no tool at all (an empty tools line is read as every tool)';
+    return null;
+  }
+  const t = translateTools(host, restr);
+  if (!t.ok) return t.reason;
+  if (host === 'agy' && Array.isArray(t.tools) && t.tools.length === 0) return 'agy cannot write an agent that may use no tool at all';
+  return null;
+}
+
+// ── source parsing ───────────────────────────────────────────────────────────
 export function parseSource(text) {
   const m = normalize(text).match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!m) return { error: 'the source has no frontmatter block' };
@@ -200,31 +342,58 @@ function withStamp(frontmatterBlock, body, host, key, sourceHash) {
 /**
  * Render one agent for one host. Returns { ok: true, name, content } or { ok: false, reason }.
  * `source` is parseSource output, `entry` the agent's config.models entry (any field may be absent).
+ * The source's origin host (ORIGIN_FIELD, Claude when absent) gets the author's frontmatter as
+ * written; every other host gets the origin's restrictions translated, or a refusal.
  */
 export function renderCustomAgent({ host, key, name, source, entry, sourceHash }) {
   const { data, body } = source;
   const cfg = entry ?? {};
+  const o = originOf(data);
+  if (o.error) return { ok: false, reason: o.error };
+  const origin = o.origin;
   const srcModel = typeof data.model === 'string' ? data.model : undefined;
-  if (host === 'claude') {
-    // Everything the author wrote stays; model and effort are replaced only where config names one.
-    const resolved = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, 'claude');
-    let fm = source.frontmatter;
+  if (host === origin) {
+    // Everything the author wrote stays; the model (and Claude's effort) is replaced only where config names one.
+    let fm = withoutOrigin(source.frontmatter);
     const setLine = (field, value) => {
       const re = new RegExp(`^${field}:.*$`, 'm');
       fm = re.test(fm) ? fm.replace(re, `${field}: ${value}`) : `${fm}\n${field}: ${value}`;
     };
-    if (cfg.model) setLine('model', cfg.model);
-    if (cfg.effort && resolved.effort) setLine('effort', resolved.effort);
-    if (!/^name:/m.test(fm)) fm = `name: ${name}\n${fm}`;
+    if (host === 'claude') {
+      const resolved = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, 'claude');
+      if (cfg.model) setLine('model', cfg.model);
+      if (cfg.effort && resolved.effort) setLine('effort', resolved.effort);
+      if (!/^name:/m.test(fm)) fm = `name: ${name}\n${fm}`;
+    } else if (host === 'opencode') {
+      const resolved = resolveHostSettings({ model: cfg.model, opencode_model: cfg.opencode_model }, 'opencode');
+      if ((cfg.model || cfg.opencode_model) && resolved.model !== 'inherit') setLine('model', resolved.model);
+    } else if (cfg.agy_model) {
+      setLine('model', resolveHostSettings({ agy_model: cfg.agy_model }, 'agy').model);
+    }
     return { ok: true, name, content: withStamp(`---\n${fm}\n---`, body, host, key, sourceHash) };
   }
-  const bad = NON_PORTABLE_KEYS.filter((k) => k in data);
-  if (bad.length) return { ok: false, reason: `${host} cannot express the frontmatter key(s) ${bad.join(', ')}` };
+  const refusal = hostRestrictionRefusal(host, origin, data);
+  if (refusal) return { ok: false, reason: refusal };
   if (typeof data.description !== 'string' || data.description.trim() === '') return { ok: false, reason: `${host} needs a description in the source frontmatter` };
-  const translated = translateTools(host, data);
-  if (!translated.ok) return translated;
+  const restr = sourceRestrictions(origin, data);
+  if (host === 'claude') {
+    // a Claude copy of another host's agent: its name, description and the translated tools lines
+    const fromOc = origin === 'opencode' ? /^anthropic\/(claude-.+)$/.exec(srcModel ?? '')?.[1] : undefined;
+    const resolved = resolveHostSettings({ model: cfg.model, effort: cfg.effort }, 'claude');
+    const lines = ['---', `name: ${name}`, `description: ${yamlString(data.description)}`];
+    if (cfg.model || fromOc) lines.push(`model: ${cfg.model ?? fromOc}`);
+    if (cfg.effort && resolved.effort) lines.push(`effort: ${resolved.effort}`);
+    const tools = toolList(restr.tools);
+    const denied = toolList(restr.disallowedTools) ?? [];
+    if (tools !== null) lines.push(`tools: ${tools.join(', ')}`);
+    if (denied.length) lines.push(`disallowedTools: ${denied.join(', ')}`);
+    lines.push('---');
+    return { ok: true, name, content: withStamp(lines.join('\n'), body, host, key, sourceHash) };
+  }
+  const translated = translateTools(host, restr);
   if (host === 'opencode') {
-    const resolved = resolveHostSettings({ model: cfg.model ?? (srcModel?.startsWith('claude-') ? srcModel : undefined), opencode_model: cfg.opencode_model }, 'opencode');
+    const claudeModel = origin === 'claude' && srcModel?.startsWith('claude-') ? srcModel : undefined;
+    const resolved = resolveHostSettings({ model: cfg.model ?? claudeModel, opencode_model: cfg.opencode_model }, 'opencode');
     const lines = ['---', `description: ${yamlString(data.description)}`, 'mode: subagent'];
     if (resolved.model !== 'inherit') lines.push(`model: ${resolved.model}`);
     if (translated.rules.length) lines.push('permission:', ...translated.rules.map((r) => `  ${r.action === '*' ? '"*"' : r.action}: ${r.verdict}`));
@@ -256,8 +425,9 @@ function symlinkIn(root, rel) {
   return null;
 }
 
-/** Read one generated-file target: { state: 'absent' | 'owned' | 'refused', ... }. */
-function inspectTarget(root, rel, host, key, sourcePath) {
+/** Read one generated-file target: { state: 'absent' | 'owned' | 'refused', ... }. A path in `vacated` reads as absent. */
+function inspectTarget(root, rel, host, key, sourcePath, vacated = []) {
+  if (vacated.includes(rel)) return { state: 'absent' };
   const link = symlinkIn(root, rel);
   if (link) return { state: 'refused', reason: `${rel} is reached through the symlink ${link}; Sterling does not write through links` };
   const path = join(root, rel);
@@ -291,6 +461,11 @@ function stampedOutputs(root) {
   return out;
 }
 
+/** True when any host folder holds a stamped custom-agent copy: the sync has outputs to reconcile even with no custom key left. */
+export function hasCustomOutputs(projectRoot) {
+  return stampedOutputs(projectRoot).length > 0;
+}
+
 function readSources(root) {
   const dir = join(root, AGENT_SOURCE_DIR);
   const out = new Map();
@@ -307,14 +482,21 @@ function readSources(root) {
 /**
  * Plan the sync without writing: { ops, written, unchanged, refused, removed, skipped }.
  * ops are { path, content, previous } (content null removes the file).
+ * `pending` ({ key, text }) plans a source that is not on disk yet, and `vacated` lists paths to
+ * read as absent: together they plan an adoption before anything moves (the original leaves its
+ * host folder and the source arrives in agent-sources/).
  */
-export function planCustomAgents(projectRoot, config, { hosts } = {}) {
+export function planCustomAgents(projectRoot, config, { hosts, pending, vacated = [] } = {}) {
   const root = projectRoot;
   const models = config?.models ?? {};
   const result = { ops: [], written: [], unchanged: [], refused: [], removed: [], skipped: [] };
   const targetHosts = hosts ?? CUSTOM_HOSTS;
   const sources = readSources(root);
+  if (pending) sources.set(pending.key, { key: pending.key, path: `${AGENT_SOURCE_DIR}/${pending.key}.md`, text: pending.text });
   const live = new Set();
+  // every (host, key, path) this run renders: a stamped copy outside this set is obsolete
+  const desired = new Set();
+  const slot = (host, key, rel) => `${host}\0${key}\0${rel}`;
   const refuse = (key, host, reason, path) => result.refused.push({ key, host, reason, ...(path ? { path } : {}) });
 
   // Parse every source once, then check output-name collisions across agents.
@@ -325,12 +507,12 @@ export function planCustomAgents(projectRoot, config, { hosts } = {}) {
       continue;
     }
     const full = join(root, src.path);
-    if (symlinkIn(root, src.path)) {
+    if (src.text === undefined && symlinkIn(root, src.path)) {
       refuse(key, '*', `${src.path} is a symlink; Sterling does not read an agent through a link`, src.path);
       live.add(key);
       continue;
     }
-    const text = readFileSync(full, 'utf8');
+    const text = src.text ?? readFileSync(full, 'utf8');
     const source = parseSource(text);
     live.add(key);
     if (source.error) {
@@ -369,7 +551,8 @@ export function planCustomAgents(projectRoot, config, { hosts } = {}) {
         refuse(a.key, host, `${r.reason}; ${host} gets no copy of ${a.src.path}`, rel);
         continue;
       }
-      const t = inspectTarget(root, rel, host, a.key, a.src.path);
+      desired.add(slot(host, a.key, rel));
+      const t = inspectTarget(root, rel, host, a.key, a.src.path, vacated);
       if (t.state === 'refused') {
         refuse(a.key, host, t.reason, rel);
         continue;
@@ -382,16 +565,21 @@ export function planCustomAgents(projectRoot, config, { hosts } = {}) {
       result.ops.push({ path: rel, content: r.content, previous: t.state === 'owned' ? t.disk : null });
     }
   }
-  // Removal: a stamped output whose agent is no longer live, and only when it is unedited. An output
-  // of a live agent that this run did not render (a host not asked for) stays.
+  // Removal, by the desired set: a stamped output that this run does not render at that path is
+  // obsolete (its agent is gone, its source no longer parses, the host now refuses it, or its name
+  // changed) and is removed when unedited, so a broader earlier copy never stays installed. An
+  // edited one is kept and reported. The one exception: an output of a live agent on a host this
+  // run was not asked to render stays as it is.
   for (const o of stampedOutputs(root)) {
-    if (live.has(o.key)) continue;
-    const t = inspectTarget(root, o.rel, o.host, o.key, `${AGENT_SOURCE_DIR}/${o.key}.md`);
+    if (desired.has(slot(o.host, o.key, o.rel))) continue;
+    if (live.has(o.key) && !targetHosts.includes(o.host)) continue;
+    const why = !live.has(o.key) ? 'its agent is gone' : 'Sterling no longer generates this copy for the current source';
+    const t = inspectTarget(root, o.rel, o.host, o.key, `${AGENT_SOURCE_DIR}/${o.key}.md`, vacated);
     if (t.state === 'owned') {
       result.removed.push({ key: o.key, host: o.host, path: o.rel });
       result.ops.push({ path: o.rel, content: null, previous: t.disk });
     } else if (t.state === 'refused') {
-      refuse(o.key, o.host, `${t.reason} (kept: its agent is gone but the file is not an unedited Sterling copy)`, o.rel);
+      refuse(o.key, o.host, `${t.reason} (kept and still installed: ${why}, but the file is not an unedited Sterling copy, so it is not deleted; it may allow more than the source now does, so remove it by hand)`, o.rel);
     }
   }
   return result;
@@ -424,15 +612,19 @@ function pruneEmptyAgyDir(root, rel) {
 
 /**
  * Render every adopted agent to every installed host. `hosts` defaults to detectInstalledHosts;
- * `dryRun` returns the plan without writing. Returns { written, unchanged, refused, removed, skipped,
- * dryRun }. All writes are atomic; when one fails the ones already made are put back and the error
- * is rethrown, so the run converges fully or leaves the folders as they were.
+ * `dryRun` returns the plan without writing; `pending` and `vacated` are planCustomAgents'.
+ * `requireClean` lists keys that must render with no refusal: when one has any, the run throws
+ * before writing anything. Returns { written, unchanged, refused, removed, skipped, dryRun }. All
+ * writes are atomic; when one fails the ones already made are put back (the `done` journal) and
+ * the error is rethrown, so the run converges fully or leaves the folders as they were.
  */
-export function syncCustomAgents(projectRoot, config, { hosts, dryRun = false, env, home, probes } = {}) {
+export function syncCustomAgents(projectRoot, config, { hosts, dryRun = false, env, home, probes, pending, vacated, requireClean = [] } = {}) {
   const chosen = hosts ?? detectInstalledHosts(projectRoot, { env, home, probes });
-  const plan = planCustomAgents(projectRoot, config, { hosts: chosen });
+  const plan = planCustomAgents(projectRoot, config, { hosts: chosen, pending, vacated });
   const { ops, ...report } = plan;
   if (dryRun) return { ...report, dryRun: true };
+  const blocking = report.refused.filter((r) => requireClean.includes(r.key));
+  if (blocking.length) throw new Error(blocking.map((r) => `${r.host}: ${r.reason}`).join('; '));
   const done = [];
   try {
     for (const op of ops) {

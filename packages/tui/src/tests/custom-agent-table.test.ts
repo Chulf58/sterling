@@ -173,11 +173,14 @@ test('a not-yet-adopted agent: ENTER asks for the plan, ESC cancels, ENTER confi
     assert.equal(ctl.ui().adoptConfirm, undefined);
     assert.ok(existsSync(join(p.dir, '.opencode/agents/team/helper.md')));
     assert.deepEqual(p.config().models, {});
-    // confirm
-    await ctl.applyEffects([{ type: 'adopt_plan', id }]);
+    // confirm: a click on the row presses ENTER there (the plan opens with the cursor on the row), then ENTER adopts
+    const st = ctl.state(VP);
+    const row = st.rows.find((r) => r.lines[0].text.includes(`${id} (not adopted)`))!;
+    await ctl.handle({ kind: 'click', x: 5, y: st.bodyTop + 1 + row.screenRow - st.scroll }, VP);
+    assert.equal(ctl.ui().adoptConfirm?.id, id, 'the click opened the confirm');
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     assert.equal(existsSync(join(p.dir, '.opencode/agents/team/helper.md')), false, `the original moved: ${ctl.ui().notice}`);
-    assert.equal(p.read('agent-sources/custom-team-helper.md'), text);
+    assert.equal(p.read('agent-sources/custom-team-helper.md'), text.replace('---\n', '---\nsterling-origin: opencode\n'), 'the original plus its origin line');
     assert.deepEqual(p.config().models['custom-team-helper'], {}, 'no fabricated model or effort');
     for (const rel of ['.claude/agents/team-helper.md', '.opencode/agents/team-helper.md', '.agents/agents/team-helper/agent.md']) assert.ok(existsSync(join(p.dir, rel)), rel);
     assert.match(ctl.ui().notice ?? '', /Adopted opencode:team\/helper as custom-team-helper/);
@@ -213,4 +216,62 @@ test('an adopt row is a cursor stop: ENTER on it emits adopt_plan and nothing el
   assert.equal(adopt.cursorable, true);
   const r = press(roster, tab({ cursor: 1 }), ['ENTER']); // 0 = the worker row, 1 = the adopt row
   assert.deepEqual(r.effects, [{ type: 'adopt_plan', id: 'claude:helper' }]);
+});
+
+// ── review fixes: the full render is checked before anything moves; the confirm belongs to its row ──
+
+test('adoption is refused before anything moves when an installed host would refuse, with the per-host reason', async () => {
+  const text = `---\nname: team-helper\ndescription: Scouts\n---\nLook.\n`;
+  // a folder sits where the Claude copy would go
+  const p = project({}, { '.opencode/agents/team/helper.md': text, '.claude/agents/team-helper.md/keep': 'mine\n' });
+  const ctl = await openTab(p.storePath);
+  try {
+    await ctl.applyEffects([{ type: 'adopt_run', id: 'opencode:team/helper' }]);
+    assert.match(ctl.ui().notice ?? '', /Adopt opencode:team\/helper failed — claude: .*exists and is not a file/);
+    assert.equal(p.read('.opencode/agents/team/helper.md'), text, 'the original is where it was');
+    for (const rel of ['.opencode/agents/team-helper.md', '.agents/agents/team-helper/agent.md']) assert.equal(existsSync(join(p.dir, rel)), false, `no output left behind: ${rel}`);
+    assert.equal(existsSync(join(p.dir, 'agent-sources')), false, 'no source written');
+    assert.deepEqual(p.config().models, {});
+    assert.equal(p.read('.claude/agents/team-helper.md/keep'), 'mine\n');
+  } finally {
+    ctl.close();
+    p.cleanup();
+  }
+});
+
+test('an open adoption confirm is dropped by a click on another row and by a tab switch; it never adopts from there', async () => {
+  const text = `---\nname: team-helper\ndescription: Scouts\n---\nLook.\n`;
+  const p = project({}, { '.opencode/agents/team/helper.md': text });
+  const ctl = await openTab(p.storePath);
+  const id = 'opencode:team/helper';
+  try {
+    await ctl.applyEffects([{ type: 'adopt_plan', id }]);
+    assert.equal(ctl.ui().adoptConfirm?.ok, true);
+    const st = ctl.state(VP);
+    const tdd = st.rows.find((r) => r.id === 'sys:tdd_enabled')!;
+    await ctl.handle({ kind: 'click', x: 5, y: st.bodyTop + 1 + tdd.screenRow - st.scroll }, VP);
+    assert.ok(existsSync(join(p.dir, '.opencode/agents/team/helper.md')), `a click on TDD did not adopt: ${ctl.ui().notice}`);
+    assert.equal(ctl.ui().adoptConfirm, undefined, 'the confirm is gone');
+    // tab away and back, then ENTER on whatever the cursor is on: no adoption
+    await ctl.applyEffects([{ type: 'adopt_plan', id }]);
+    await ctl.handle({ kind: 'tab', index: 0 }, VP);
+    assert.equal(ctl.ui().adoptConfirm, undefined, 'a tab switch drops the confirm');
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    assert.ok(existsSync(join(p.dir, '.opencode/agents/team/helper.md')), 'ENTER after the tab switch did not adopt');
+    assert.deepEqual(p.config().models, {});
+  } finally {
+    ctl.close();
+    p.cleanup();
+  }
+});
+
+test('ENTER confirms only while the cursor is on the adoption row it was opened from', () => {
+  const roster = customOnly({ customAgents: [{ name: 'helper', source: 'claude', model: 'claude-haiku-5', file: '.claude/agents/helper.md' }] });
+  const confirm = { id: 'claude:helper', ok: true, lines: ['ENTER adopts, ESC cancels'] };
+  const elsewhere = press(roster, tab({ cursor: 0, adoptConfirm: confirm }), ['ENTER']);
+  assert.equal(elsewhere.effects.some((e) => e.type === 'adopt_run'), false);
+  assert.equal(elsewhere.ui.adoptConfirm, undefined);
+  const same = press(roster, tab({ cursor: 1, adoptConfirm: confirm }), ['ENTER']);
+  assert.deepEqual(same.effects, [{ type: 'adopt_run', id: 'claude:helper' }]);
 });
