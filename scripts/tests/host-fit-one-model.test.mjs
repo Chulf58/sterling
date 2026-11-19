@@ -321,3 +321,28 @@ test('maintenance worker: models["maintenance-worker"] is its one model; unset k
   assert.deepEqual(args({}).slice(0, 5), ['-p', '--model', 'claude-sonnet-5-5', '--effort', 'medium']);
   assert.deepEqual(args({ model: 'claude-haiku-5-5' }).slice(0, 4), ['-p', '--model', 'claude-haiku-5-5', '--agents'], 'an unset effort is not sent');
 });
+
+test('Claude conductor: models.conductor pins its model and effort; a model Claude Code cannot run removes the unedited copy; none set renders the template as it is (item-G review finding 5)', () => {
+  const dir = scratch('host-fit-conductor-');
+  try {
+    const templatesDir = join(dir, 'agent-templates');
+    mkdirSync(templatesDir, { recursive: true });
+    writeFileSync(join(templatesDir, 'conductor.md'), `---\nname: conductor\ndescription: Conducts.\n---\n\nConductor body.\n`);
+    const registryPath = join(templatesDir, 'registry.json');
+    writeFileSync(registryPath, JSON.stringify({ version: 1, agents: [{ name: 'conductor', file: 'conductor.md' }] }));
+    const targetAgentsDir = join(dir, '.claude', 'agents');
+    const run = (models) => syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: '2026-01-01T00:00:00.000Z', config: { models } });
+    const file = join(targetAgentsDir, 'conductor.md');
+    run({});
+    assert.doesNotMatch(readFileSync(file, 'utf8'), /^(model|effort):/m, 'no models.conductor: no pin');
+    rmSync(file);
+    run({ conductor: { model: 'anthropic/claude-opus-5-5', effort: 'high' } });
+    assert.match(readFileSync(file, 'utf8'), /^---\nname: conductor\ndescription: Conducts\.\nmodel: claude-opus-5-5\neffort: high\n---\n/);
+    const { report } = run({ conductor: { model: 'openai/gpt-6.1-sol', effort: 'high' } });
+    assert.equal(existsSync(file), false, 'Sol on the conductor leaves no Claude copy');
+    assert.deepEqual(report.find((r) => r.name === 'conductor'), { name: 'conductor', status: 'unsupported_removed', detail: 'config.models.conductor is openai/gpt-6.1-sol, which Claude Code cannot run (it runs anthropic models only)' });
+    assert.equal(run({ conductor: { model: 'overpass/agentic-conductor' } }).report.find((r) => r.name === 'conductor').status, 'unsupported', 'a tier is not a Claude model either');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

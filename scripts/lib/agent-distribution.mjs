@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE, canonicalModelsSchema, hostRunsModel, toCanonicalConfig } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE, CONDUCTOR_MODEL_KEY, canonicalModelsSchema, hostRunsModel, toCanonicalConfig } from '@sterling/schemas';
 import { MCP_PREFIXES } from './checks.mjs';
 import { renderClaudeText } from './agent-fences.mjs';
 import { writeFileAtomicIfChanged } from './atomic-write.mjs';
@@ -116,7 +116,7 @@ export const HEADER_RE =
 // copy is neither changed nor removed meanwhile. An unset effort stays unset: the
 // template's effort line is dropped (EFFORT null).
 function resolveModelVars(templateContent, label, config) {
-  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return {};
+  if (!/\{\{MODEL\}\}|\{\{EFFORT\}\}/.test(templateContent)) return conductorModelVars(templateContent, label, config);
   const { name } = parseTemplate(templateContent, label);
   const key = AGENT_MODEL_KEY[name];
   if (!key) {
@@ -139,6 +139,29 @@ function resolveModelVars(templateContent, label, config) {
   }
   if (!hostRunsModel(entry.model, 'claude')) return { unsupported: `config.models.${key} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
   return { MODEL: entry.model.slice(entry.model.indexOf('/') + 1), EFFORT: entry.effort ?? null };
+}
+
+// The conductor's template carries no {{MODEL}}/{{EFFORT}} tokens: with no models.conductor the
+// main session runs on the model the user picks, and the template renders as it is. With one, the
+// same rules as every other agent apply: a model Claude Code cannot run gives { unsupported } (no
+// Claude copy, the unedited one removed), and an anthropic model gives { conductorPin }, the
+// model and effort lines renderInstalledAgent adds to the frontmatter (an unset effort adds none).
+function conductorModelVars(templateContent, label, config) {
+  if (!config?.models || typeof config.models !== 'object') return {};
+  const { name } = parseTemplate(templateContent, label);
+  if (name !== CONDUCTOR_MODEL_KEY) return {};
+  const { config: canon, conflicts } = toCanonicalConfig(config);
+  const conflict = conflicts.find((c) => c.role === CONDUCTOR_MODEL_KEY);
+  const raw = conflict ? conflict.claude : canon.models?.[CONDUCTOR_MODEL_KEY];
+  if (raw === undefined) return {};
+  const parsed = canonicalModelsSchema.safeParse({ [CONDUCTOR_MODEL_KEY]: raw });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`model resolution failed for ${label}: config.models.${[CONDUCTOR_MODEL_KEY, ...issue.path.slice(1)].join('.')}: ${issue.message} (P5)`);
+  }
+  const entry = parsed.data[CONDUCTOR_MODEL_KEY];
+  if (!hostRunsModel(entry.model, 'claude')) return { unsupported: `config.models.${CONDUCTOR_MODEL_KEY} is ${entry.model}, which Claude Code cannot run (it runs anthropic models only)` };
+  return { conductorPin: { model: entry.model.slice(entry.model.indexOf('/') + 1), effort: entry.effort ?? null } };
 }
 
 /** Why Claude Code gets no copy of this template under `config` (its model is one it cannot run), or null. */
@@ -204,7 +227,7 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   // tokens that install bakes to machine-detected forward-slash paths (§6
   // emission rule — the backslash check below guards the substituted result) and
   // {{MODEL}}/{{EFFORT}} tokens resolved per agent from config.models (98064d77).
-  const modelVars = resolveModelVars(templateContent, label, config);
+  const { conductorPin, ...modelVars } = resolveModelVars(templateContent, label, config);
   if (modelVars.unsupported) throw new Error(`${label}: ${modelVars.unsupported}, so no Claude Code copy is rendered (P5)`);
   const allVars = { ...vars, ...modelVars };
   // Fences (agent-fences.mjs): the Claude render keeps sterling-only content and
@@ -222,7 +245,12 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   }
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
-  const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config);
+  let pinned = parsed.frontmatter;
+  if (conductorPin) {
+    if (/^(model|effort):/m.test(pinned)) throw new Error(`${label}: the conductor template already has a model or effort line, so config.models.${CONDUCTOR_MODEL_KEY} cannot be applied (P5)`);
+    pinned = `${pinned}\nmodel: ${conductorPin.model}${conductorPin.effort ? `\neffort: ${conductorPin.effort}` : ''}`;
+  }
+  const frontmatter = appendExtraTools(pinned, name, label, config);
   // WHOLE rendered template, not just the frontmatter: a substitution token in
   // the BODY would otherwise ship silently as a literal '{{TOKEN}}' in an
   // installed agent's prose, i.e. an instruction the agent cannot run. Same P5
