@@ -1572,7 +1572,11 @@ for (const mode of ['hobby', 'work']) {
         setHandoff(dir, on);
         const r = init(dir);
         assert.equal(r.code, 0, r.stdout + r.stderr);
-        assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, mode, 'the mode is kept');
+        // Changed with the cutover: init migrates the legacy mode into config.workflow (work = pull request),
+        // and the written config carries no mode any more.
+        const written = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+        assert.equal(written.workflow.merge, mode === 'work' ? 'pr' : 'direct', 'the mode is carried into the merge path');
+        assert.equal(written.mode, undefined, 'the written config has no mode');
         assert.doesNotMatch(r.stdout, /hand-edited|differs.*config\.json/i, 'a toggled handoff setting is a recorded declaration, not a hand edit');
         if (on) {
           assert.doesNotMatch(r.stdout, HANDOFF_OFF_ROW);
@@ -1591,7 +1595,7 @@ for (const mode of ['hobby', 'work']) {
 // CHANGED: this pinned an invalid MODE as the refused handoff row. Init's handoff
 // step no longer reads the mode; the refused row belongs to a handoff value that is
 // not a boolean, and an invalid mode leaves the handoff step alone.
-test('handoff setting: a non-boolean value is a refused row naming the value — the rest of init completes, nothing handoff-related is written; an invalid mode does not refuse the handoff step', () => {
+test('handoff setting: a non-boolean value is a refused row naming the value — the rest of init completes, nothing handoff-related is written; an invalid mode refuses init by name', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-init-invalid-'));
   try {
     assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
@@ -1605,8 +1609,11 @@ test('handoff setting: a non-boolean value is a refused row naming the value —
     setHandoff(dir, true);
     setMode(dir, 'Work');
     const m = init(dir);
-    assert.doesNotMatch(m.stdout, /handoff projection\s+refused\s+config\.mode/m, m.stdout + m.stderr);
-    for (const f of HANDOFF_SET) assert.ok(existsSync(join(dir, f)), `${f} written although the mode is invalid`);
+    // Changed with the cutover (item G): an invalid legacy mode cannot be carried into config.workflow, so the
+    // config does not validate and init refuses it by name before it writes anything (P5). It used to complete,
+    // because parseConfig kept the invalid mode raw; the canonical reader has no meaning to give it.
+    assert.equal(m.code, 2, m.stdout + m.stderr);
+    assert.match(m.stdout + m.stderr, /mode/, 'the refusal names the mode');
     assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'Work', 'the raw mode is left for the user to fix');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
