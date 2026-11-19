@@ -460,6 +460,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "When Astra is unavailable or capped, say so and put the same brief (the problem, your own proposal, your own objections) to a Fable model instead: the `sparring` agent with `model: \"fable\"` pinned at the call (user-ruled 2026-10-01 through the question form, 'Fallback only'; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22). Astra stays the default because it keeps the sparring cross-family; Fable is the fallback, never the first call. With neither available, say so and proceed.",
     after: "When Astra is unavailable or capped, say so and put the same brief (the problem, your own proposal, your own objections) to Sol through the `codex` MCP tool (`gpt-5.6-sol`, the model this route reaches, decision `claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4`). When the openai provider is unavailable, put it to Opus 5.5 instead: the `sparring` agent with `model: \"claude-opus-5-5\"` pinned at the call. The order is Astra, then Sol, then Opus 5.5 (user-ruled 2026-11-18 through the question form, \"Astra → Sol → Opus 5.5 (Recommended)\", replacing the Fable fallback of 2026-10-01; decision `sparring-steps-down-astra-sol-opus-5-5-replaces-fable`; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22). Astra stays the default because it keeps the sparring cross-family; Sol and Opus 5.5 are step-downs, never the first call. With none available, say so and proceed.",
   },
+  {
+    commit: 'GitHub #319',
+    date: '2026-11-19',
+    reason: "durable rules go in AGENTS.md alone; CLAUDE.md holds only Sterling's generated layer (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer, user-ruled 2026-11-19)",
+    before: "**Durable rules go in `AGENTS.md`/`CLAUDE.md` or this file",
+    after: "**Durable rules go in `AGENTS.md` or this file",
+  },
+  {
+    commit: 'GitHub #319',
+    date: '2026-11-19',
+    reason: "same ruling: the repo-facts pointer names AGENTS.md and says what CLAUDE.md holds",
+    before: "Repo facts and conventions → `AGENTS.md`/`CLAUDE.md`; working posture → here",
+    after: "Repo facts, conventions and every rule a project adds → `AGENTS.md` (`CLAUDE.md` holds only Sterling's generated layer; decision `project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer`); working posture → here",
+  },
+  {
+    commit: 'GitHub #320',
+    date: '2026-11-19',
+    reason: "the turn-end loophole 'unless you name it' is replaced by four exits, wording only with no H10 stop block (decision turn-end-contract-is-wording-only-no-h10-stop-block-for-idle-ready-items, user-ruled 2026-11-19)",
+    before: 'A turn may not end with ready work idle unless you name it — "no parallel work" is a complete answer.',
+    after: 'A turn ends only one of four ways: (1) lanes are still running and will notify you, (2) a question was put through the question form, (3) a rotation note was written at a clean boundary, or (4) nothing on the board is READY (the READY and READY FOR RESEARCH groups, tasks you filed yourself this session included). Ready work left idle fits none of them, and naming it is not an exit. No hook enforces this, so it is yours to keep (decision `turn-end-contract-is-wording-only-no-h10-stop-block-for-idle-ready-items`, user-ruled 2026-11-19, wording only).',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

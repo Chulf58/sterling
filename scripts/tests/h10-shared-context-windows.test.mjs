@@ -88,6 +88,29 @@ test('the shipped shared table maps the models the old per-project seed carried,
   assert.equal(SHARED.windows['claude-haiku-5-5'], 1_000_000);
 });
 
+test('the shared table maps every Gemini 4 Neon id to 512000 (GitHub #315)', () => {
+  for (const id of ['gemini-4-neon-low', 'gemini-4-neon-medium', 'gemini-4-neon-high', 'gemini-4-neon-xhigh', 'gemini-pro-orchestrator-neon']) {
+    assert.equal(SHARED.windows[id], 512_000, id);
+  }
+});
+
+test('a Neon conductor on an agy PLANNER_RESPONSE transcript is measured against 512000, not the 1M default', () => {
+  const { dir, cleanup } = makeProject({ default: 1_000_000 });
+  try {
+    const p = join(dir, 't', 's1.jsonl');
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ type: 'PLANNER_RESPONSE', model: 'gemini-4-neon-high', input_tokens: 256_000, cache_read_tokens: 0 }) + '\n');
+    const r = runStop(dir);
+    assert.equal(r.code, 0, r.stderr);
+    const s = pressureSample(dir);
+    assert.equal(s.window, 512_000);
+    assert.equal(s.window_source, 'shared');
+    assert.ok(Math.abs(s.fill_pct - 50) < 0.01, `fill 50%, got ${s.fill_pct}`);
+  } finally {
+    cleanup();
+  }
+});
+
 test('templates/default-config.json no longer seeds per-model windows into new projects, and keeps the real default', () => {
   const windows = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')).context_watch.windows;
   assert.deepEqual(windows, { default: 1_000_000 });

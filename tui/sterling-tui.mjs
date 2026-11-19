@@ -60186,6 +60186,15 @@ function latestUsage(path) {
     } catch {
       continue;
     }
+    if (entry.type === "PLANNER_RESPONSE") {
+      sawAssistant = true;
+      if (typeof entry.input_tokens === "number") {
+        const usage2 = { input_tokens: entry.input_tokens };
+        if (typeof entry.cache_read_tokens === "number") usage2.cache_read_input_tokens = entry.cache_read_tokens;
+        return { usage: usage2, model: entry.model, reason: null };
+      }
+      continue;
+    }
     if (entry.type !== "assistant") continue;
     sawAssistant = true;
     const usage = entry.message?.usage;
