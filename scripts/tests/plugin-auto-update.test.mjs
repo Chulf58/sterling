@@ -5,7 +5,7 @@
 // `opencode plugin update` or touches the real ~/.cache.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -254,32 +254,93 @@ test('a clone-backed plugin root never runs the update from the plugin', async (
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const receiptOf = (m) => JSON.parse(readFileSync(autoUpdatePaths(m.env, m.home).receipt, 'utf8'));
 
-test('runOpenCode: at the deadline it settles at once and kills the tree, even when a descendant holds the pipes after the child exits', async () => {
-  const dir = tmp('sterling-pau-runner-');
-  const pidFile = join(dir, 'descendant.pid');
-  // A harmless Node launcher: it starts a descendant that inherits stdout/stderr and sleeps 10 s, then exits itself.
-  const launcher = [
-    "const { spawn } = require('node:child_process');",
-    "const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
-    "require('node:fs').writeFileSync(process.argv[1], String(c.pid));",
-    "process.stdout.write('launched\\n');",
-  ].join('\n');
+/** Polls until `pid` is gone (a killed orphan is reaped by init shortly after). */
+async function goneSoon(pid, polls = 40) {
+  for (let i = 0; pidIsAlive(pid) && i < polls; i += 1) await sleep(50);
+  return !pidIsAlive(pid);
+}
+
+// A harmless Node launcher: it starts a descendant that inherits stdout/stderr and sleeps 10 s,
+// writes the descendant's pid to argv[1], then either stays alive (argv[2] 'stay') or exits at once.
+const LAUNCHER = [
+  "const { spawn } = require('node:child_process');",
+  "const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+  "require('node:fs').writeFileSync(process.argv[1], String(c.pid));",
+  "process.stdout.write('launched\\n');",
+  "if (process.argv[2] === 'stay') setTimeout(() => {}, 10000);",
+  "else c.unref();",
+].join('\n');
+
+test('runOpenCode: a launcher still running at the deadline is killed with its whole process group, and the result settles at once', async () => {
+  const pidFile = join(tmp('sterling-pau-runner-'), 'descendant.pid');
   const t0 = Date.now();
-  const r = await runOpenCode(['-e', launcher, pidFile], { command: process.execPath, timeoutMs: 400 });
+  const r = await runOpenCode(['-e', LAUNCHER, pidFile, 'stay'], { command: process.execPath, timeoutMs: 400 });
   const elapsed = Date.now() - t0;
   assert.equal(r.timedOut, true);
   assert.equal(r.status, null);
   assert.ok(elapsed < 3000, `settled ${elapsed} ms after a 400 ms deadline (the descendant sleeps 10 s)`);
   assert.match(r.stdout, /launched/);
-  if (process.platform !== 'win32') {
-    const pid = Number(readFileSync(pidFile, 'utf8'));
-    let alive = pidIsAlive(pid);
-    for (let i = 0; alive && i < 40; i += 1) {
-      await sleep(50);
-      alive = pidIsAlive(pid);
+  if (process.platform !== 'win32') assert.equal(await goneSoon(Number(readFileSync(pidFile, 'utf8'))), true, 'the descendant was killed with the group');
+});
+
+test('runOpenCode: after the launcher has exited, a descendant holding the pipes cannot hold the result back, and no process group is signalled', async () => {
+  const pidFile = join(tmp('sterling-pau-runner-'), 'descendant.pid');
+  const kills = [];
+  const t0 = Date.now();
+  const r = await runOpenCode(['-e', LAUNCHER, pidFile], { command: process.execPath, timeoutMs: 600, kill: (pid, signal) => void kills.push([pid, signal]) });
+  const elapsed = Date.now() - t0;
+  const descendant = Number(readFileSync(pidFile, 'utf8'));
+  try {
+    assert.equal(r.timedOut, true);
+    assert.ok(elapsed < 3000, `settled ${elapsed} ms after a 600 ms deadline (the descendant sleeps 10 s)`);
+    assert.match(r.stdout, /launched/);
+    assert.deepEqual(kills, [], 'the launcher\'s group id may be reused once it has exited, so no group signal is sent');
+    assert.equal(await goneSoon(descendant, 8), false, 'nothing else signalled the group either: the descendant is left running, with its pipes closed');
+  } finally {
+    try {
+      process.kill(descendant, 'SIGKILL');
+    } catch (e) {
+      if (e.code !== 'ESRCH') throw e;
     }
-    assert.equal(alive, false, 'the descendant was killed with its process group');
   }
+});
+
+test('a lock-timeout problem stamp that lands after another process finished today\'s attempt never touches the receipt: no second update that day', async () => {
+  const m = makeMachine();
+  const paths = autoUpdatePaths(m.env, m.home);
+  mkdirSync(paths.dir, { recursive: true });
+  const old = { at: new Date(DAY0 - 2 * DAY_MS).toISOString(), spec: STERLING_GIT_SPEC, outcome: 'unchanged' };
+  writeFileSync(paths.receipt, JSON.stringify(old));
+  const fresh = { at: new Date(DAY0).toISOString(), spec: STERLING_GIT_SPEC, outcome: 'updated', from: '1.0.0', to: '1.1.0' };
+  const oc = fakeOpenCode(m.home, [{}]);
+  const release = await takeFileLock(paths.lock);
+  // The holder finishes today's update and releases the lock in the instant before the
+  // waiter's (delayed) problem stamp is written.
+  const fs = {
+    writeFile: (path, content) => {
+      writeFileSync(paths.receipt, JSON.stringify(fresh));
+      release();
+      writeFileSync(path, content);
+    },
+  };
+  const r = await checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0, runCommand: oc.run, lockWaitMs: 100, fs });
+  assert.equal(r.status, 'error');
+  assert.equal(r.kind, 'lock');
+  assert.deepEqual(receiptOf(m), fresh, 'the waiter that never held the lock wrote nothing to the receipt');
+  assert.ok(existsSync(paths.problems), 'the stamp went to the problems file');
+  const again = await checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0 + 1000, runCommand: oc.run });
+  assert.equal(again.status, 'not-due');
+  assert.equal(oc.calls.length, 0, 'no second update the same day');
+});
+
+test('a receipt write whose replacement fails leaves no .tmp-* file and runs no command', async () => {
+  const m = makeMachine();
+  const oc = fakeOpenCode(m.home, [{}]);
+  const fs = { rename: () => { throw Object.assign(new Error('EACCES: injected'), { code: 'EACCES' }); } };
+  await assert.rejects(checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0, runCommand: oc.run, fs }), /injected/);
+  const dir = autoUpdatePaths(m.env, m.home).dir;
+  assert.deepEqual(readdirSync(dir).filter((n) => n.includes('.tmp-')), []);
+  assert.equal(oc.calls.length, 0, 'no command runs before the attempt is on record');
 });
 
 test('the attempt is on record before the command runs, then finalized with its outcome', async () => {
@@ -335,7 +396,7 @@ test('an unreadable OpenCode config is an error, not a skip: notify once a day, 
   assert.equal(a.kind, 'config');
   assert.match(a.reason, /opencode\.json is unreadable/);
   assert.equal(a.notify, true);
-  assert.equal(receiptOf(m).at, undefined, 'a config failure is no attempt');
+  assert.equal(existsSync(autoUpdatePaths(m.env, m.home).receipt), false, 'a config failure is no attempt, and the receipt is untouched');
   t += DAY_MS / 24 + 1000;
   const b = await checkPluginUpdate(opts);
   assert.equal(b.status, 'error');
@@ -355,7 +416,7 @@ test('a lock that stays taken is an error naming the lock, never not-due, and re
     assert.equal(r.kind, 'lock');
     assert.match(r.reason, /stayed taken.*no attempt was recorded/);
     assert.equal(r.notify, true);
-    assert.equal(receiptOf(m).at, undefined, 'no attempt receipt exists');
+    assert.equal(existsSync(autoUpdatePaths(m.env, m.home).receipt), false, 'no attempt receipt exists');
     const again = await checkPluginUpdate({ pluginRoot: m.root, env: m.env, home: m.home, nowMs: () => DAY0 + 1000, runCommand: oc.run, lockWaitMs: 100 });
     assert.equal(again.notify, false);
   } finally {

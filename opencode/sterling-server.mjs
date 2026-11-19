@@ -28631,11 +28631,11 @@ ${HEAD} the map proposes adding ${names} to this project's mounts. Nothing was a
 }
 
 // scripts/lib/plugin-auto-update.mjs
+init_atomic_write();
 import { spawn as spawn4 } from "node:child_process";
-import { mkdirSync as mkdirSync25, readFileSync as readFileSync34, renameSync as renameSync14, writeFileSync as writeFileSync19 } from "node:fs";
+import { mkdirSync as mkdirSync25, readFileSync as readFileSync34 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { join as join53, resolve as resolve18, sep as sep4 } from "node:path";
-import { randomUUID as randomUUID15 } from "node:crypto";
 
 // scripts/lib/file-lock.mjs
 import { linkSync as linkSync3, mkdirSync as mkdirSync24, readFileSync as readFileSync33, rmSync as rmSync16, statSync as statSync12, writeFileSync as writeFileSync18 } from "node:fs";
@@ -28767,7 +28767,7 @@ function cacheDir(env, home) {
 }
 function autoUpdatePaths(env = process.env, home = homedir10()) {
   const dir = cacheDir(env, home);
-  return { dir, receipt: join53(dir, "plugin-auto-update.json"), lock: join53(dir, "plugin-auto-update.lock") };
+  return { dir, receipt: join53(dir, "plugin-auto-update.json"), lock: join53(dir, "plugin-auto-update.lock"), problems: join53(dir, "plugin-auto-update-problems.json") };
 }
 function readReceipt(path) {
   let r;
@@ -28780,25 +28780,20 @@ function readReceipt(path) {
   const at = Date.parse(r.at);
   return { ...r, atMs: Number.isNaN(at) ? null : at };
 }
-function writeReceipt(paths, { atMs, ...fields }) {
+function writeReceipt(paths, { atMs, ...fields }, fs) {
   mkdirSync25(paths.dir, { recursive: true });
-  const tmp = `${paths.receipt}.tmp-${randomUUID15()}`;
-  writeFileSync19(tmp, `${JSON.stringify(fields)}
-`);
-  renameSync14(tmp, paths.receipt);
+  writeFileAtomic(paths.receipt, `${JSON.stringify(fields)}
+`, fs);
 }
-function killTree(child, group, note) {
-  if (group && child.pid) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch (e) {
-      if (e?.code !== "ESRCH") note(`killing process group ${child.pid} failed (${e?.code ?? e?.message})`);
-    }
+function readProblems(path) {
+  try {
+    const p = JSON.parse(readFileSync34(path, "utf8"));
+    return p && typeof p === "object" && !Array.isArray(p) ? p : {};
+  } catch {
+    return {};
   }
-  child.kill("SIGKILL");
 }
-function runOpenCode(args, { timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, command = "opencode" } = {}) {
+function runOpenCode(args, { timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, command = "opencode", kill = (pid, signal) => process.kill(pid, signal) } = {}) {
   return new Promise((done) => {
     let stdout = "";
     let stderr = "";
@@ -28820,10 +28815,18 @@ function runOpenCode(args, { timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, command 
     }
     timer = setTimeout(() => {
       timedOut = true;
-      killTree(child, group, (text) => {
-        stderr += `
-[${text}]`;
-      });
+      const running = child.exitCode === null && child.signalCode === null;
+      if (running && group && child.pid) {
+        try {
+          kill(-child.pid, "SIGKILL");
+        } catch (e) {
+          stderr += `
+[killing process group ${child.pid} failed (${e?.code ?? e?.message})]`;
+          child.kill("SIGKILL");
+        }
+      } else if (running) {
+        child.kill("SIGKILL");
+      }
       child.stdout.destroy();
       child.stderr.destroy();
       finish({ status: null });
@@ -28847,17 +28850,20 @@ function failureReason(r, timeoutMs2) {
 function under(dir, path) {
   return resolve18(path).startsWith(resolve18(dir) + sep4);
 }
-async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir10(), nowMs = Date.now, runCommand = runOpenCode, timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, lockWaitMs = timeoutMs2 + 1e4 } = {}) {
+async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir10(), nowMs = Date.now, runCommand = runOpenCode, timeoutMs: timeoutMs2 = UPDATE_TIMEOUT_MS, lockWaitMs = timeoutMs2 + 1e4, fs } = {}) {
   const paths = autoUpdatePaths(env, home);
   const iso = () => new Date(nowMs()).toISOString();
   const fresh = (r) => r.atMs !== null && nowMs() - r.atMs < DAY_MS2 && r.atMs - nowMs() <= DAY_MS2;
   const firstReport = (kind) => {
-    const r = readReceipt(paths.receipt);
-    const last = Date.parse(r.problems?.[kind]);
+    const problems = readProblems(paths.problems);
+    const last = Date.parse(problems[kind]);
     if (!Number.isNaN(last) && nowMs() - last < DAY_MS2 && last - nowMs() <= DAY_MS2) return false;
-    writeReceipt(paths, { ...r, problems: { ...r.problems, [kind]: iso() } });
+    mkdirSync25(paths.dir, { recursive: true });
+    writeFileAtomic(paths.problems, `${JSON.stringify({ ...problems, [kind]: iso() })}
+`, fs);
     return true;
   };
+  const write2 = (fields) => writeReceipt(paths, fields, fs);
   const pre = readReceipt(paths.receipt);
   if (fresh(pre) && pre.outcome) return { status: "not-due" };
   if (!pluginRoot || !isInstalledCopy(pluginRoot, { env, home })) return { status: "skipped", reason: "the plugin root is a clone, not an installed copy" };
@@ -28873,7 +28879,7 @@ async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir
     const r = readReceipt(paths.receipt);
     if (fresh(r) && r.outcome) return { status: "not-due" };
     if (fresh(r)) {
-      writeReceipt(paths, { ...r, outcome: "interrupted", reason: "the attempt recorded no outcome; the process running it ended first" });
+      write2({ ...r, outcome: "interrupted", reason: "the attempt recorded no outcome; the process running it ended first" });
       return { status: "interrupted", at: r.at };
     }
     const interrupted = r.atMs !== null && !r.outcome ? r.at : void 0;
@@ -28883,24 +28889,24 @@ async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir
     }
     const copy = loaded2.copies.find((c) => c.root && under(c.dir, pluginRoot));
     if (!copy) return { status: "skipped", reason: "no configured Sterling plugin spec installed this plugin root" };
-    const attempt = { at: iso(), spec: copy.spec, ...r.problems ? { problems: r.problems } : {} };
-    writeReceipt(paths, attempt);
+    const attempt = { at: iso(), spec: copy.spec };
+    write2(attempt);
     const before = copy;
     const result = await runCommand(["plugin", "update", copy.spec], { timeoutMs: timeoutMs2 });
     const extra = interrupted ? { interrupted } : {};
     if (result.timedOut || result.error || result.status !== 0) {
       const reason = failureReason(result, timeoutMs2);
-      writeReceipt(paths, { ...attempt, outcome: "failed", reason });
+      write2({ ...attempt, outcome: "failed", reason });
       return { status: "failed", reason, ...extra };
     }
     const after = openCodeLoadedSterling(env, home).copies?.find((c) => c.spec === copy.spec);
     const from = before.version ?? null;
     const to = after?.version ?? null;
     if (after?.root && to && (from === null || compareVersions(to, from) === 1 || compareVersions(to, from) === null && to !== from)) {
-      writeReceipt(paths, { ...attempt, outcome: "updated", from, to });
+      write2({ ...attempt, outcome: "updated", from, to });
       return { status: "updated", from, to, root: after.root, ...extra };
     }
-    writeReceipt(paths, { ...attempt, outcome: "unchanged", from, to });
+    write2({ ...attempt, outcome: "unchanged", from, to });
     return { status: "unchanged", from, to, ...extra };
   } finally {
     release();

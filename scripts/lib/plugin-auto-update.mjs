@@ -6,7 +6,7 @@
 // funnels the new root through postUpdateSync (scripts/lib/post-update-sync.mjs).
 //
 // THE RECEIPT is the machine's daily network-attempt record, <cache>/sterling/
-// plugin-auto-update.json ({ at, spec, outcome?, reason?, from?, to?, problems? }), kept
+// plugin-auto-update.json ({ at, spec, outcome?, reason?, from?, to? }), kept
 // apart from each project's sync marker. The attempt is written BEFORE the command runs
 // (`at` and `spec`, no `outcome`) and finalized with its outcome after, so a process that
 // dies mid-update still stamps the day: a successor that finds an attempt with no outcome
@@ -16,20 +16,22 @@
 // inside the cross-process lock (<cache>/sterling/plugin-auto-update.lock), so two
 // OpenCode processes produce one update.
 //
+// EVERY receipt write happens while this process holds the lock: a process that could not
+// take the lock never writes attempt state, so it can never put back an older attempt.
+//
 // The update applies only to the configured spec whose cache directory holds the running
 // plugin root: a clone-backed plugin root (isInstalledCopy false) or one that no
 // configured spec installed is 'skipped' (an intended exclusion, nothing said). An
 // operational failure is 'error' instead: an unreadable OpenCode config, or a lock that
-// stayed taken. Its notice is deduplicated to once a day through the receipt's
-// `problems` map, which never counts as an attempt.
-// NOT guaranteed: the lock-timeout notice stamp is written without the lock (the lock is
-// what timed out), so a holder that finalizes in the same instant can lose its outcome,
-// which the next reader then reports as an interrupted attempt.
+// stayed taken. Its notice is deduplicated to once a day through a separate problems file,
+// <cache>/sterling/plugin-auto-update-problems.json ({ <kind>: <at> }), which never counts as
+// an attempt and is written without the lock. NOT guaranteed: two processes stamping it at
+// once can lose one stamp, which at worst repeats that notice.
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { writeFileAtomic } from './atomic-write.mjs';
 import { LockTimeout, takeFileLock } from './file-lock.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { compareVersions, readPluginVersion, samePath } from './post-update-sync.mjs';
@@ -46,11 +48,11 @@ function cacheDir(env, home) {
 /** Paths of the machine receipt and lock. */
 export function autoUpdatePaths(env = process.env, home = homedir()) {
   const dir = cacheDir(env, home);
-  return { dir, receipt: join(dir, 'plugin-auto-update.json'), lock: join(dir, 'plugin-auto-update.lock') };
+  return { dir, receipt: join(dir, 'plugin-auto-update.json'), lock: join(dir, 'plugin-auto-update.lock'), problems: join(dir, 'plugin-auto-update-problems.json') };
 }
 
 // The receipt's fields plus atMs (null when no attempt is on record). An absent or
-// unreadable receipt is no attempt and no problems on record.
+// unreadable receipt is no attempt on record.
 function readReceipt(path) {
   let r;
   try {
@@ -63,34 +65,34 @@ function readReceipt(path) {
   return { ...r, atMs: Number.isNaN(at) ? null : at };
 }
 
-function writeReceipt(paths, { atMs, ...fields }) {
+// Callers hold the lock. fs is writeFileAtomic's seam (tests).
+function writeReceipt(paths, { atMs, ...fields }, fs) {
   mkdirSync(paths.dir, { recursive: true });
-  const tmp = `${paths.receipt}.tmp-${randomUUID()}`;
-  writeFileSync(tmp, `${JSON.stringify(fields)}\n`);
-  renameSync(tmp, paths.receipt);
+  writeFileAtomic(paths.receipt, `${JSON.stringify(fields)}\n`, fs);
 }
 
-// POSIX: the child was spawned as its own process-group leader, so the whole tree dies with it.
-function killTree(child, group, note) {
-  if (group && child.pid) {
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-      return;
-    } catch (e) {
-      // ESRCH: the group is already gone; anything else is said in the result.
-      if (e?.code !== 'ESRCH') note(`killing process group ${child.pid} failed (${e?.code ?? e?.message})`);
-    }
+// Which problem kinds were reported when ({ <kind>: <at> }); absent or unreadable is none.
+function readProblems(path) {
+  try {
+    const p = JSON.parse(readFileSync(path, 'utf8'));
+    return p && typeof p === 'object' && !Array.isArray(p) ? p : {};
+  } catch {
+    return {};
   }
-  child.kill('SIGKILL');
 }
 
 /**
  * Runs `<command> <args>` with a timeout: { status, stdout, stderr, timedOut, error }. Never
- * rejects. At the deadline it kills the process tree (the process group on POSIX, the child
- * on Windows), destroys the pipes and settles at once: a descendant that keeps stdout or
- * stderr open cannot hold the result back.
+ * rejects. At the deadline it destroys the pipes and settles at once, so a descendant that
+ * keeps stdout or stderr open cannot hold the result back. On POSIX the child leads its own
+ * process group, and the group is sent SIGKILL at the deadline only while the child has not
+ * exited: until Node reaps it, the child's pid is its group id and cannot be reused, so the
+ * signal reaches only processes this run started (anti-pattern 8e603e23). On Windows only the
+ * child is killed. NOT guaranteed: once the child has exited, its descendants are left running
+ * (their group id may already belong to someone else); only their pipes are closed.
+ * kill(pid, signal) is process.kill's seam (tests).
  */
-export function runOpenCode(args, { timeoutMs = UPDATE_TIMEOUT_MS, command = 'opencode' } = {}) {
+export function runOpenCode(args, { timeoutMs = UPDATE_TIMEOUT_MS, command = 'opencode', kill = (pid, signal) => process.kill(pid, signal) } = {}) {
   return new Promise((done) => {
     let stdout = '';
     let stderr = '';
@@ -112,7 +114,19 @@ export function runOpenCode(args, { timeoutMs = UPDATE_TIMEOUT_MS, command = 'op
     }
     timer = setTimeout(() => {
       timedOut = true;
-      killTree(child, group, (text) => { stderr += `\n[${text}]`; });
+      // exitCode and signalCode are set in the same callback that reaps the child, so null here
+      // means the child is unreaped and still owns its pid and group id.
+      const running = child.exitCode === null && child.signalCode === null;
+      if (running && group && child.pid) {
+        try {
+          kill(-child.pid, 'SIGKILL');
+        } catch (e) {
+          stderr += `\n[killing process group ${child.pid} failed (${e?.code ?? e?.message})]`;
+          child.kill('SIGKILL');
+        }
+      } else if (running) {
+        child.kill('SIGKILL');
+      }
       child.stdout.destroy();
       child.stderr.destroy();
       finish({ status: null });
@@ -152,20 +166,24 @@ function under(dir, path) {
  * 'unchanged', 'updated' and 'failed' carry `interrupted` (the earlier attempt's `at`) when the
  * attempt before them never recorded an outcome.
  * deps: pluginRoot (the running plugin root, required), env, home, nowMs() (ms), runCommand(args,
- * {timeoutMs}) (default: the real opencode), timeoutMs, lockWaitMs (default timeoutMs + 10 s).
+ * {timeoutMs}) (default: the real opencode), timeoutMs, lockWaitMs (default timeoutMs + 10 s),
+ * fs ({ writeFile, rename }: writeFileAtomic's seam for the receipt and problems writes; tests).
  */
-export async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir(), nowMs = Date.now, runCommand = runOpenCode, timeoutMs = UPDATE_TIMEOUT_MS, lockWaitMs = timeoutMs + 10_000 } = {}) {
+export async function checkPluginUpdate({ pluginRoot, env = process.env, home = homedir(), nowMs = Date.now, runCommand = runOpenCode, timeoutMs = UPDATE_TIMEOUT_MS, lockWaitMs = timeoutMs + 10_000, fs } = {}) {
   const paths = autoUpdatePaths(env, home);
   const iso = () => new Date(nowMs()).toISOString();
   const fresh = (r) => r.atMs !== null && nowMs() - r.atMs < DAY_MS && r.atMs - nowMs() <= DAY_MS;
-  // True when this kind of problem was not reported in the last 24 h; the report is stamped.
+  // True when this kind of problem was not reported in the last 24 h; the report is stamped in
+  // the problems file, never in the receipt.
   const firstReport = (kind) => {
-    const r = readReceipt(paths.receipt);
-    const last = Date.parse(r.problems?.[kind]);
+    const problems = readProblems(paths.problems);
+    const last = Date.parse(problems[kind]);
     if (!Number.isNaN(last) && nowMs() - last < DAY_MS && last - nowMs() <= DAY_MS) return false;
-    writeReceipt(paths, { ...r, problems: { ...r.problems, [kind]: iso() } });
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileAtomic(paths.problems, `${JSON.stringify({ ...problems, [kind]: iso() })}\n`, fs);
     return true;
   };
+  const write = (fields) => writeReceipt(paths, fields, fs);
 
   const pre = readReceipt(paths.receipt);
   if (fresh(pre) && pre.outcome) return { status: 'not-due' };
@@ -184,7 +202,7 @@ export async function checkPluginUpdate({ pluginRoot, env = process.env, home = 
     if (fresh(r) && r.outcome) return { status: 'not-due' };
     if (fresh(r)) {
       // The lock is ours, so no live process is running this attempt: it was interrupted.
-      writeReceipt(paths, { ...r, outcome: 'interrupted', reason: 'the attempt recorded no outcome; the process running it ended first' });
+      write({ ...r, outcome: 'interrupted', reason: 'the attempt recorded no outcome; the process running it ended first' });
       return { status: 'interrupted', at: r.at };
     }
     const interrupted = r.atMs !== null && !r.outcome ? r.at : undefined;
@@ -195,24 +213,24 @@ export async function checkPluginUpdate({ pluginRoot, env = process.env, home = 
     const copy = loaded.copies.find((c) => c.root && under(c.dir, pluginRoot));
     if (!copy) return { status: 'skipped', reason: 'no configured Sterling plugin spec installed this plugin root' };
 
-    const attempt = { at: iso(), spec: copy.spec, ...(r.problems ? { problems: r.problems } : {}) };
-    writeReceipt(paths, attempt);
+    const attempt = { at: iso(), spec: copy.spec };
+    write(attempt);
     const before = copy;
     const result = await runCommand(['plugin', 'update', copy.spec], { timeoutMs });
     const extra = interrupted ? { interrupted } : {};
     if (result.timedOut || result.error || result.status !== 0) {
       const reason = failureReason(result, timeoutMs);
-      writeReceipt(paths, { ...attempt, outcome: 'failed', reason });
+      write({ ...attempt, outcome: 'failed', reason });
       return { status: 'failed', reason, ...extra };
     }
     const after = openCodeLoadedSterling(env, home).copies?.find((c) => c.spec === copy.spec);
     const from = before.version ?? null;
     const to = after?.version ?? null;
     if (after?.root && to && (from === null || compareVersions(to, from) === 1 || (compareVersions(to, from) === null && to !== from))) {
-      writeReceipt(paths, { ...attempt, outcome: 'updated', from, to });
+      write({ ...attempt, outcome: 'updated', from, to });
       return { status: 'updated', from, to, root: after.root, ...extra };
     }
-    writeReceipt(paths, { ...attempt, outcome: 'unchanged', from, to });
+    write({ ...attempt, outcome: 'unchanged', from, to });
     return { status: 'unchanged', from, to, ...extra };
   } finally {
     release();
