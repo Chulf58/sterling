@@ -455,7 +455,8 @@ function stampedOutputs(root) {
   const out = [];
   const scan = (host, rel) => {
     const dir = join(root, rel);
-    if (!existsSync(dir) || symlinkIn(root, rel)) return;
+    // a regular file where the folder belongs holds no stamped copy; the portable-agent sync reports it as its own refusal
+    if (!existsSync(dir) || symlinkIn(root, rel) || !lstatSync(dir).isDirectory()) return;
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       if (host === 'agy' ? !e.isDirectory() : !(e.isFile() && e.name.endsWith('.md'))) continue;
       const fileRel = host === 'agy' ? `${rel}/${e.name}/agent.md` : `${rel}/${e.name}`;

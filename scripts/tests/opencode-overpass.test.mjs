@@ -196,9 +196,10 @@ test('dispatch: with no agent on a tier the call is not routed through Overpass,
   }
 });
 
-test('dispatch: the Claude Code host never shows the legacy Overpass line as in effect (session line)', () => {
+test('dispatch: the Claude Code host never shows an Overpass-tier agent as in effect (session line)', () => {
+  // Changed with the cutover: Overpass is no setting, so the line names the agents whose one model is an overpass/<tier>.
   const line = opState.overpassLine({ config: { mode: 'work', overpass: { enabled: true } }, configUnreadable: false, host: 'claude' });
-  assert.match(line, /NOT IN EFFECT — overpass applies on OpenCode only; the host is 'claude'/);
+  assert.match(line, /^Overpass: NOT IN EFFECT — .*overpass\/agentic-auto.*only OpenCode can run/);
 });
 
 // A config whose model settings cannot be carried refuses the dispatch (a throw out of
@@ -780,36 +781,20 @@ test('overlay: the plugin converges it at setup and each turn, following a confi
 
 // ── session line ──────────────────────────────────────────────────────────────
 
-test('session line: ON, bypass, not in effect, off, invalid and unknown', () => {
+test('session line: ON, not in effect, silent, invalid and unknown', () => {
+  // Changed with the cutover (item G, decisions overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi and
+  // settings-that-replace-project-mode-merge-path-reviewer-count): Overpass is no toggle. An agent is routed when its one model is an
+  // overpass/<tier>, which a legacy work-mode config with Overpass on migrates to (the migration's effectiveness rule is pinned in
+  // canonical-config.test.ts), so the line lists the routed agents and the old ON/BYPASS/OFF wording is gone.
   const line = (config, host = 'opencode', configUnreadable = false) => opState.overpassLine({ config, configUnreadable, host });
-  // Changed because the ruled per-role defaults (2026-10-22, "Yes, as stated") made the old
-  // "every subagent lane ... run on overpass/agentic-high" false: implementor runs on
-  // agentic-premium and sparring on agentic-premium-max.
-  // Changed again 2026-10-23 (user-ruled, "the regular implementer should run angentic-auto"):
-  // the implementor defaults to agentic-auto and implementor-hard to agentic-premium.
-  // Changed again 2026-10-23 (user-ruled, 'Defaults + reset + bypass ON'): scout, librarian, preflight and the
-  // maintenance worker default to agentic-auto, and the conductor is bypassed unless conductor_bypass is false.
-  // Changed again 2026-10-24 (decision overpass-default-effort-per-role-high-for-agentic-auto-roles): the line
-  // names each role's default effort, which the plugin now sends (the worker's too, through its child's
-  // environment); reviewer and researcher have none.
-  assert.match(line(LEGACY_ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto at effort medium \(implementor\), overpass\/agentic-premium at effort xhigh \(implementor-hard\), overpass\/agentic-high \(researcher, reviewer\), overpass\/agentic-auto at effort high \(scout, librarian, preflight\), overpass\/agentic-premium-max at effort xhigh \(sparring\); the maintenance worker runs on overpass\/agentic-auto at effort high; other agents and the Plan agent run on overpass\/agentic-high\./);
-  // An explicit override: a role tier moves that role to its own group, an effort adds "at effort" to the group.
-  // implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) keeps its own default
-  // tier when the implementor's is overridden, so it is a group of its own here.
-  const overridden = line({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' }, implementor: { tier: 'agentic-high' } } } });
-  // Changed 2026-10-24: the implementor keeps its default effort when only its tier is overridden, so it no longer
-  // shares a group with the researcher (no default effort); the other defaults show as 'at effort'.
-  assert.match(overridden, /subagent roles run on overpass\/agentic-high at effort medium \(implementor\), overpass\/agentic-premium at effort xhigh \(implementor-hard\), overpass\/agentic-high \(researcher\), overpass\/agentic-auto at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-auto at effort high \(librarian, preflight\), overpass\/agentic-premium-max at effort xhigh \(sparring\); the maintenance worker runs on overpass\/agentic-auto at effort high; other agents and the Plan agent run on overpass\/agentic-high\./);
-  assert.doesNotMatch(overridden, /agentic-premium \((?:[^)]*, )?implementor[,)]/, 'the implementor override replaces its default');
-  assert.match(line({ mode: 'work', overpass: { enabled: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin/, 'an absent conductor_bypass reads as true');
-  assert.match(line({ mode: 'work', overpass: { enabled: true, conductor_bypass: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin; .* run on overpass-agentic\/agentic-high/);
-  assert.match(line({ mode: 'hobby', overpass: { enabled: true } }), /^Overpass: CONFIGURED BUT NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/);
-  assert.match(line({ overpass: { enabled: true } }), /NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/, 'absent mode is hobby');
-  assert.match(line({ mode: 'work' }), /^Overpass: OFF \(config\.overpass\.enabled/);
-  assert.equal(line({ mode: 'hobby' }), '', 'not offered in hobby mode: silent');
-  assert.equal(line(null), '', 'absent config is the hobby default');
+  assert.match(line(LEGACY_ON), /^Overpass: ON \(provider 'overpass', config\.models — TUI System tab\) — overpass\/agentic-auto at effort medium \(implementor\), overpass\/agentic-premium at effort xhigh \(implementor-hard\)/);
+  assert.match(line({ mode: 'work', overpass: { enabled: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'/);
+  assert.match(line({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' } } } }), /overpass\/agentic-max at effort xhigh \(reviewer\)/, 'an explicit role tier and effort are carried');
+  assert.equal(line({ mode: 'hobby', overpass: { enabled: true } }), '', 'a legacy hobby project with Overpass on was not effective: it migrates to no tiers, so the line is silent');
+  assert.equal(line({ mode: 'work' }), '', 'no agent on a tier: silent');
+  assert.equal(line(null), '', 'absent config: silent');
   assert.equal(line({ mode: 'work' }, 'claude'), '', 'not offered on Claude Code');
-  assert.match(line({ mode: 'work', overpass: 'on' }), /^Overpass: INVALID — config\.overpass is "on"/);
+  assert.match(line({ mode: 'work', overpass: 'on' }), /^Overpass: INVALID — .*config\.overpass is "on"/);
   assert.match(line(null, 'opencode', true), /^Overpass: UNKNOWN — .*NOT the off default/);
 });
 
