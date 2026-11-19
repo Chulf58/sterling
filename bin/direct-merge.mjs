@@ -15422,6 +15422,16 @@ Free the branch, then run the merge from the main checkout:
   );
 }
 stage("open-project");
+if (workflowError) {
+  let readsAsJson = false;
+  try {
+    JSON.parse(readFileSync14(join21(storeRoot, CONFIG_REL4), "utf8"));
+    readsAsJson = true;
+  } catch {
+    readsAsJson = false;
+  }
+  if (readsAsJson) fail2(`direct-merge: ${workflowError?.message ?? workflowError} \u2014 refusing; nothing was run.`, 2);
+}
 openProject(storeRoot).store.close();
 if (workflowError) fail2(`direct-merge: ${workflowError?.message ?? workflowError} \u2014 refusing; nothing was run.`, 2);
 var workRepo;
