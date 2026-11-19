@@ -26,7 +26,7 @@ A short shape for an ambiguous new ask. It is the same interview, scaled down:
 ## 1. Stage before asking
 
 - `knowledge_preflight` and `knowledge_query` on the subject **in the store's vocabulary** (its titles' words, sibling slugs); re-ask once in that vocabulary after an `ungoverned` verdict on a subject you expect to be governed.
-- **Facts go to lanes, never to the user.** Anything the code, the store or the web can answer goes to a lane: the code, the store or a web fact to a scout or researcher (only the researcher has web tools); a question of judgement to an Astra consult. Only decisions go to the user.
+- **Facts go to lanes, never to the user.** Anything the code, the store or the web can answer goes to a lane: the code, the store or a web fact to a scout or researcher (only the researcher has web tools); a question of judgement to a sparring consult. Only decisions go to the user.
 - **A settled ruling is not a question.** Never re-ask it. Show it only where it explains a recommendation, cited by slug.
 
 ## 2. The tree
@@ -58,13 +58,7 @@ Each question is its own `AskUserQuestion` call:
 
 ## 5. Before closure
 
-<!-- claude-only -->
-- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`, `approval-policy: never`, `config: {model_reasoning_effort: "high", features: {view_image: false}}` (the `view_image` override keeps an image result from pushing one MCP message past Claude Code's 16 MB stdio limit, GitHub issue #90). It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
-<!-- /claude-only -->
-<!-- opencode-only -->
-On OpenCode, the Astra sparring bullet reads as follows.
-- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections to the `sterling/sparring` agent through the `subagent` tool with `model` set to `openai/gpt-6-astra#high` (when Overpass is ON for the project, omit `model`: the plugin sets the tier), and say in the prompt not to modify the worktree. The `codex` MCP tool is the Claude Code route only and is not used here. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
-<!-- /opencode-only -->
+- **Sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections to the `sparring` agent (on OpenCode `sterling/sparring`, with no `model`), and say in the prompt not to modify the worktree. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
 - **Close** when each consequential branch is resolved or **explicitly deferred** (named, with why). Never close with a "done?" or "is this ready?" form.
 - **Ending the interview does not authorize building.** Building is its own ask unless the user already asked for it.
 - **Clear `needs: grill` at the end.** When the grill was for a board item marked `needs: grill`, clear the mark with `board_update {needs: ""}` once the interview closes (or set `needs: user` if a ruling is still owed), so the item leaves WAITING ON YOU and can start (decision `board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start`).

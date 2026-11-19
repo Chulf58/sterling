@@ -46,7 +46,6 @@ import { prepareConfigMigration, commitConfigMigration } from './lib/config-migr
 import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED } from './lib/project-identity.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
-import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
 import { ensureLaunchers, launcherHistoryLoader, launcherHost, launcherTools, removeRetiredLaunchers, LAUNCHER_GITIGNORE_ENTRIES } from './lib/launchers.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
@@ -68,7 +67,7 @@ const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // every OTHER pluginRoot-derived path (templates, hooks) still resolves to the REAL
 // plugin root. Init writes nothing into the plugin directory (slice S2), so this
 // seam is about branch selection, not containment. Unset in every real run.
-// '' must behave as unset too (matches STERLING_CODEX_PROBE's falsy convention) —
+// '' must behave as unset too (falsy convention) —
 // ?? alone would let '' survive and silently disable the plugin-repo branch.
 const pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
@@ -190,8 +189,8 @@ for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claud
 }
 
 // CLAUDE CODE PROBE
-// (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly): the launchers, .claude/agents, the conductor activation and the ~/.claude.json
-// Codex check are Claude-only, so on a machine without `claude` they are not written (one
+// (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly): the launchers, .claude/agents, and the conductor activation
+// are Claude-only, so on a machine without `claude` they are not written (one
 // loud line, below, names them). STERLING_CLAUDE_PROBE is the test-isolation seam, honored
 // at THIS call site: unset/'' -> the real probe; 'ok' -> force present; 'absent' -> force
 // absent. Any other value fails loud (P5), validated before any write.
@@ -460,7 +459,7 @@ if (!recorded) {
 const items = []; // { item, status: created|matches|differs|exists|refused|refreshed|stale|skipped|failed, detail }
 const warns = [];
 if (!claudeHost) {
-  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: claude-code.bat (claude-code.sh on Linux), .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
+  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: claude-code.bat (claude-code.sh on Linux), .claude/agents/, .claude/settings.json. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
 }
 
 // directories: a present directory is simply `exists` (a dir cannot be hand-edited)
@@ -1199,41 +1198,6 @@ const readMcp = () => {
     return undefined;
   }
 };
-
-// CODEX MCP LIVES AT USER SCOPE
-// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 2; finding
-// codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install): the codex server is
-// machine truth, so it is registered in the user-level Claude config, never in the
-// plugin's committed file. Init only CHECKS for it and, when it is missing, prints ONE
-// loud line carrying the exact `claude mcp add --scope user ...` command — never
-// blocking the rest of init (P5 degraded-loud). The probe (binary on PATH, the
-// `codex mcp-server --help` capability check, `codex login status`) only chooses WHICH
-// line to print, so it runs solely when the server is missing: an unrelated init
-// never spawns `codex` on a machine that is already wired.
-// STERLING_CODEX_PROBE: test-isolation seam — honored at THIS call site (not inside
-// probeCodex). unset/'' -> real probe; 'ok' -> force success; 'absent' -> force
-// binary-absent; 'not-logged-in' -> force not-logged-in. Any other value fails loud
-// (unknown signals halt, P5) — validated EAGERLY, even on a run that will not probe.
-const codexProbeOverride = process.env.STERLING_CODEX_PROBE;
-const forcedCodexProbe = !codexProbeOverride
-  ? undefined
-  : codexProbeOverride === 'ok'
-    ? { ok: true }
-    : codexProbeOverride === 'absent'
-      ? { ok: false, reason: 'binary-absent' }
-      : codexProbeOverride === 'not-logged-in'
-        ? { ok: false, reason: 'not-logged-in' }
-        : fail(`STERLING_CODEX_PROBE must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeOverride}')`, 2);
-if (claudeHost) {
-  const codexUserScope = userScopeCodexServer();
-  if (codexUserScope.found) {
-    items.push({ item: 'codex MCP (user scope)', status: 'matches', detail: `a codex server is registered in ${fwd(codexUserScope.path)}` });
-  } else {
-    const codexProbe = forcedCodexProbe ?? probeCodex();
-    warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd(dirname(process.execPath)), unreadable: codexUserScope.unreadable }));
-    items.push({ item: 'codex MCP (user scope)', status: 'skipped', detail: 'no codex server in the user-level Claude config — see the codex mcp line below for the command' });
-  }
-}
 
 // PLUGIN AUTO-UPDATE (S6,
 // decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers, ruling point 3, overturned 2026-10-06 by the user through the question form:

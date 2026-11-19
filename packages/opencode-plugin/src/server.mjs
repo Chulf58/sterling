@@ -14,8 +14,8 @@
 //      delivery appended to the tool result; on shell, H19's Bash pointers for
 //      the paths the command names; after a completed webfetch or websearch, a
 //      research_tool event in the session-event register, as H16 records; on
-//      the subagent, question and codex tools, H20's mechanism-axis delivery
-//      (and the codex model pin); on the subagent tool, H22's dispatch register
+//      the subagent and question tools, H20's mechanism-axis delivery;
+//      on the subagent tool, H22's dispatch register
 //      arms and H16's agent_dispatch event; after read and shell, H23's
 //      output-axis pointer; last, on a completed read, edit, write, patch or
 //      shell result, the session context lines that changed since that session

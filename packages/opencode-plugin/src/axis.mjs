@@ -1,13 +1,10 @@
 // The mechanism axis (H20) and the output axis (H23) on OpenCode 2.
 //
-// H20: on the subagent, question and codex tools, the store is matched against
-// the outgoing text (the brief, the question form, the consult prompt) with H20's
+// H20: on the subagent and question tools, the store is matched against
+// the outgoing text (the brief, the question form) with H20's
 // three floors, and the carriage built in execute.before is appended to the
 // tool result in execute.after. That is the same timing as Claude Code, where
-// PreToolUse additionalContext reaches the model with the tool result. On a codex
-// opener the configured config.sparring_partner.model is written into the call's
-// arguments when the call names none: execute.before's input is the live object
-// (finding opencode-2-plugin-spike-hooks-and-sidebar-october-2026, supplement 2).
+// PreToolUse additionalContext reaches the model with the tool result.
 // On a subagent call that names no model, the agent's one model from config.models is
 // written into the call (dispatch-model.mjs; finding
 // opencode-2-0-23-how-session-and-subagent-models-are-chosen-and-overridden: the
@@ -24,19 +21,15 @@
 // remainder count is appended. A read of territory an article owns is skipped (H19
 // delivers it), as are VCS and listing commands.
 //
-// The composition (the floors, the headers, the blocks, the H23 pointer block and
-// the codex model pin) is scripts/hooks/lib/axis-compose.mjs, the one copy the
+// The composition (the floors, the headers, the blocks, and the H23 pointer block) is scripts/hooks/lib/axis-compose.mjs, the one copy the
 // two hooks call too; this file keeps only the OpenCode plumbing.
 //
 // Tool names: subagent {agent, description, prompt, ...} and question {questions}
-// were read from ctx.tool.list and the OpenCode 2.0.21 binary. The codex MCP tool's
-// name inside execute.before is unmeasured: permission keys are `<server>_<tool>`
-// (finding opencode-2-0-21-mcp-permission-key-is-server-underscore-tool) and the
-// displayed name is `<server>.<tool>`, so both spellings are accepted.
+// were read from ctx.tool.list and the OpenCode 2.0.21 binary.
 import { isAbsolute, resolve } from 'node:path';
 import { repoRel } from '../../../scripts/hooks/lib/common.mjs';
 import { recordAdvisoryFire } from '../../../scripts/hooks/lib/advisory-counter.mjs';
-import { codexModelPin, composeMechanismAxis, composeOutputAxis, outputAxisReadGated } from '../../../scripts/hooks/lib/axis-compose.mjs';
+import { composeMechanismAxis, composeOutputAxis, outputAxisReadGated } from '../../../scripts/hooks/lib/axis-compose.mjs';
 import { dispatchOverlapNotice } from '../../../scripts/hooks/lib/dispatch-overlap.mjs';
 import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
@@ -48,8 +41,6 @@ import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
 
-const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
-const CODEX_TOOL = /^codex[._]/;
 const PENDING_CAP = 200;
 // How long a dispatch waits for OpenCode's model list before the variant guard gives up
 // (checkVariant then marks the variant "not checked"), so a list that never settles
@@ -76,7 +67,6 @@ export async function boundedModelList(listModels, ms) {
 export function axisSurface(tool) {
   if (tool === 'subagent') return 'dispatch';
   if (tool === 'question') return 'question';
-  if (typeof tool === 'string' && CODEX_TOOL.test(tool)) return 'consult';
   return null;
 }
 
@@ -126,7 +116,7 @@ function reportOverpass(root, message) {
 }
 
 /**
- * The axis handlers: onBefore (H20, including the codex model pin), onAfter
+ * The axis handlers: onBefore (H20), onAfter
  * (appends the H20 carriage built before), outputOf and onOutput (H23). Take
  * outputOf(input) before any handler appends to the result, so only the tool's
  * own output is matched, and call onOutput(input, output) after the file
@@ -147,21 +137,13 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
     if (!root) return;
     const args = input.input && typeof input.input === 'object' ? input.input : {};
     let pinLine = null;
-    if (surface === 'consult') {
-      // The pin is applied before the carriage is built, so a carriage failure cannot cost the call its model.
-      await fenced('axis', root, () => {
-        const pin = codexModelPin(root, { opener: CODEX_OPENERS.has(input.tool), toolInput: args });
-        if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
-        pinLine = pin.line;
-      });
-    }
     if (surface === 'dispatch') {
       // The model step (dispatch-model.mjs): a config whose model settings cannot be carried
       // (an invalid overpass block or legacy value) is never guessed at: the call is REFUSED
       // by a throw out of execute.before, outside the fence (OpenCode's documented way for a
       // plugin to block a tool call). A whole config that cannot be read or parsed does not
       // refuse: the call goes ahead on its own model and carries a loud UNKNOWN line.
-      // Applied before the carriage, like the codex pin.
+      // Applied before the carriage.
       let read;
       try {
         read = dispatchOverpass(root);

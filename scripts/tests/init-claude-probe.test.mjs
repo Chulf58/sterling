@@ -154,7 +154,8 @@ test('(b) claude present: every Claude file is written and no skip line is print
   assert.match(r.stdout, /^\.mcp\.json\s+matches\b/m, '.mcp.json is reported as matching with Claude Code present');
   assert.match(r.stdout, /^hooks \(§6 set\)\s+matches\b/m, 'the hooks are reported as matching with Claude Code present');
   assert.match(r.stdout, /RESTART REQUIRED/);
-  assert.match(r.stdout, /codex/i, 'the codex user-scope check ran');
+  // Codex is removed (decision decommission-the-codex-model-setting-codex-is-no-longer-used): init runs no codex user-scope check.
+  assert.doesNotMatch(r.stdout, /codex/i, 'no codex check ran');
 });
 
 test('(b) a later init with claude present adds the Claude files a claude-less init skipped', () => {

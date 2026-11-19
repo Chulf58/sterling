@@ -12,11 +12,7 @@
 // Everything else renders byte-for-byte the same on both hosts.
 //
 // The comments below moved here with the code from the two hook files.
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { MAX_RANK_TERMS, allocateShares } from '@sterling/store';
-import { loadConfig } from './common.mjs';
 import { retiredTermNotice } from './retired-terms.mjs';
 import { ownsHere } from './working-tree.mjs';
 import {
@@ -30,7 +26,6 @@ import {
   hasRecordCentralityHit,
   recordCentralityHits,
   isKnownDelivered,
-  isSubstanceDelivered,
   hazardParts,
   cappedHazards,
   HAZARD_CAP,
@@ -124,350 +119,6 @@ function isQuestionShapedPrompt(text) {
   return t.includes('?') && QUESTION_WORDS_RE.test(t);
 }
 
-/**
- * The model-pin decision for a codex call in the Sterling project at `root`:
- * `{ line, model? }`, where `model` is the configured model to write into a call
- * that named none. `opener` is true for the tool that opens a thread (it takes a
- * model); a reply tool takes none. The caller decides first that this is a codex
- * call in a Sterling project, and how the model reaches the call (H20: an
- * updatedInput; OpenCode: the live call arguments).
- * NEVER THROWS: a broken config is a disclosure, not an exception.
- *
- * Everything this block needs lives INSIDE this function (the label included):
- * a top-level initialized const is a fail-closed-boundary finding in a hook
- * classified 'blocking' (scripts/check-failclosed-boundary), and this change
- * has no business adding new baseline debt to H20's existing set.
- */
-export function codexModelPin(root, { opener, toolInput }) {
-  const PIN = 'STERLING CODEX MODEL PIN (H20)';
-  // EVERY UNTRUSTED VALUE THAT REACHES THE DISCLOSURE GOES THROUGH THIS
-  // (reviewer-security, 2026-09-05). .sterling/config.json is agent-writable, so
-  // sparring_partner.model — and the JSON.parse error text, which quotes the
-  // file's own bytes — are attacker-influenced strings landing verbatim in the
-  // conductor's context. JSON.stringify is the fix that matters: it escapes
-  // embedded NEWLINES and quotes, so a planted value can no longer break out of
-  // its line and fabricate a Sterling-voiced sentence beneath the pin; the clip
-  // bounds a value planted to flood the payload.
-  // SCOPE, deliberately: this escapes what is DISPLAYED, never what is INJECTED
-  // — updatedInput.model still crosses byte-for-byte, which frozen pin M-8
-  // requires and decision foreign_8b329d57 rules ("free non-empty string verbatim, no
-  // validation" — there is no shell/TOML boundary on this route and codex
-  // validates ids server-side with a loud 400).
-  const show = (v) => {
-    const s = JSON.stringify(String(v ?? ''));
-    return s.length <= 120 ? s : `${s.slice(0, 120)}…`;
-  };
-  if (!opener) {
-    // codex-reply and any future sibling: disclose, never touch the input.
-    return {
-      line:
-        `STERLING CODEX MODEL (H20) — this tool takes no model argument, so the thread keeps the model its opener started with. ` +
-        `Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`,
-    };
-  }
-
-  let config = null;
-  let unreadable = null;
-  try {
-    config = loadConfig(root);
-  } catch (e) {
-    unreadable = (e && e.message) || String(e);
-  }
-  const sp = config && typeof config.sparring_partner === 'object' && config.sparring_partner ? config.sparring_partner : null;
-  const lines = [];
-  if (sp && sp.enabled === false) {
-    lines.push(
-      `${PIN} — the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). ` +
-        `That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. ` +
-        `Turn it back on in the TUI System tab if the OFF state is stale.`
-    );
-  }
-  // The call's OWN model wins, always — the pin only fills an OMITTED value.
-  const callModel = typeof toolInput?.model === 'string' && toolInput.model !== '' ? toolInput.model : null;
-  // An EMPTY configured value is the TUI's clear-to-unset signal, not a model id
-  // (main.ts applySparringModel deletes the key on an empty commit) — the two
-  // are one state, and codex would 400 on ''.
-  // This reads the RAW file, not parseConfig, so the old key's conversion to
-  // sparring_partner.models.openai is done here too: the new key wins, the old
-  // key is the fallback.
-  const pinned = sp && sp.models && typeof sp.models === 'object' ? sp.models.openai?.model : undefined;
-  const chosen = typeof pinned === 'string' ? pinned : sp ? sp.model : undefined;
-  const configured = typeof chosen === 'string' && chosen !== '' ? chosen : null;
-
-  if (callModel !== null) {
-    lines.push(
-      `${PIN} — this call names model ${show(callModel)} EXPLICITLY, so the call-site value wins and Sterling leaves the input untouched` +
-        `${configured ? ` (config.sparring_partner.model is ${show(configured)} and was not applied)` : ''}.`
-    );
-    return { line: lines.join('\n') };
-  }
-  if (unreadable) {
-    lines.push(
-      `${PIN} — .sterling/config.json could not be parsed (${show(unreadable)}), so NO model was applied and the Codex CLI default is in force. ` +
-        `Fix the config file; a consult is never denied over this.`
-    );
-    return { line: lines.join('\n') };
-  }
-  if (!configured) {
-    lines.push(
-      `${PIN} — no model is set in config.sparring_partner.model` +
-        `${config ? '' : ' (no .sterling/config.json to read)'}, so this consult takes the Codex CLI default. ` +
-        `Set one on the TUI System tab row 'Default Codex model'.`
-    );
-    return { line: lines.join('\n') };
-  }
-  lines.push(
-    `${PIN} — model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. ` +
-      `A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
-  );
-  return { line: lines.join('\n'), model: configured };
-}
-
-class TomlSyntaxError extends Error {}
-
-const TOML_BARE_KEY = /[A-Za-z0-9_-]/;
-const TOML_SCALAR = /[A-Za-z0-9_+\-.:]/;
-const TOML_ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', e: '\x1b', '"': '"', '\\': '\\' };
-
-/**
- * The keys of the root `mcp_servers` table in a TOML document, from a small
- * lexer rather than a header regex: comments, basic and literal strings (one-line
- * and multiline, with escapes and up to two extra closing quotes), arrays, inline
- * tables, table headers, array-of-table headers and dotted keys are all read, so
- * nothing inside a string or comment is mistaken for a key. A name is the second
- * segment of any absolute key path that starts with `mcp_servers`
- * ([mcp_servers.x.env], `mcp_servers.x.command = …`, [mcp_servers] then `x = {…}`),
- * or a key of an inline table assigned to `mcp_servers` itself. Values are skipped,
- * not validated. Throws TomlSyntaxError when the text is not TOML it can read.
- */
-function tomlMcpServerNames(src) {
-  const n = src.length;
-  let i = src.charCodeAt(0) === 0xfeff ? 1 : 0;
-  const names = new Set();
-  const fail = (what) => {
-    throw new TomlSyntaxError(`not valid TOML at line ${src.slice(0, i).split('\n').length}: ${what}`);
-  };
-  const ws = () => {
-    while (src[i] === ' ' || src[i] === '\t') i++;
-  };
-  const newline = () => {
-    if (src[i] === '\n') i += 1;
-    else if (src[i] === '\r' && src[i + 1] === '\n') i += 2;
-    else return false;
-    return true;
-  };
-  const comment = () => {
-    if (src[i] === '#') while (i < n && src[i] !== '\n' && !(src[i] === '\r' && src[i + 1] === '\n')) i++;
-  };
-  // Blank space, comments and newlines, as allowed between array and inline-table items.
-  const gap = () => {
-    for (;;) {
-      ws();
-      comment();
-      if (!newline()) return;
-    }
-  };
-  const endOfLine = () => {
-    ws();
-    comment();
-    if (i < n && !newline()) fail('expected the end of the line');
-  };
-  const escape = () => {
-    const c = src[i + 1];
-    if (c !== undefined && Object.hasOwn(TOML_ESCAPES, c)) {
-      i += 2;
-      return TOML_ESCAPES[c];
-    }
-    const len = c === 'u' ? 4 : c === 'U' ? 8 : c === 'x' ? 2 : 0;
-    const hex = src.slice(i + 2, i + 2 + len);
-    const code = len && hex.length === len && /^[0-9A-Fa-f]+$/.test(hex) ? parseInt(hex, 16) : -1;
-    if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) fail('an invalid escape in a string');
-    i += 2 + len;
-    return String.fromCodePoint(code);
-  };
-  const basic = () => {
-    let s = '';
-    for (i++; ; ) {
-      const c = src[i];
-      if (c === undefined || c === '\n' || c === '\r') fail('an unterminated string');
-      if (c === '"') {
-        i++;
-        return s;
-      }
-      if (c === '\\') s += escape();
-      else {
-        s += c;
-        i++;
-      }
-    }
-  };
-  const literal = () => {
-    const start = ++i;
-    while (i < n && src[i] !== "'" && src[i] !== '\n') i++;
-    if (src[i] !== "'") fail('an unterminated string');
-    return src.slice(start, i++);
-  };
-  const multiline = (q) => {
-    for (i += 3; ; ) {
-      if (i >= n) fail('an unterminated multiline string');
-      if (q === '"' && src[i] === '\\') i += 2;
-      else if (src[i] === q && src[i + 1] === q && src[i + 2] === q) {
-        let run = 3;
-        while (src[i + run] === q) run++;
-        if (run > 5) fail('too many quotes closing a multiline string');
-        i += run;
-        return;
-      } else i++;
-    }
-  };
-  const key = () => {
-    const parts = [];
-    for (;;) {
-      ws();
-      const c = src[i];
-      if (c === '"' || c === "'") {
-        if (src[i + 1] === c && src[i + 2] === c) fail('a multiline string used as a key');
-        parts.push(c === '"' ? basic() : literal());
-      } else {
-        const start = i;
-        while (i < n && TOML_BARE_KEY.test(src[i])) i++;
-        if (i === start) fail('expected a key');
-        parts.push(src.slice(start, i));
-      }
-      ws();
-      if (src[i] !== '.') return parts;
-      i++;
-    }
-  };
-  // Skips one value; for an inline table, returns the first segment of each of its keys.
-  const value = () => {
-    const c = src[i];
-    if (c === '"' || c === "'") {
-      if (src[i + 1] === c && src[i + 2] === c) multiline(c);
-      else if (c === '"') basic();
-      else literal();
-      return null;
-    }
-    if (c === '[') {
-      for (i++; ; ) {
-        gap();
-        if (src[i] === ']') break;
-        value();
-        gap();
-        if (src[i] === ',') i++;
-        else if (src[i] !== ']') fail('expected , or ] in an array');
-      }
-      i++;
-      return null;
-    }
-    if (c === '{') {
-      const keys = [];
-      for (i++; ; ) {
-        gap();
-        if (src[i] === '}') break;
-        keys.push(key()[0]);
-        if (src[i] !== '=') fail('expected = in an inline table');
-        i++;
-        ws();
-        value();
-        gap();
-        if (src[i] === ',') i++;
-        else if (src[i] !== '}') fail('expected , or } in an inline table');
-      }
-      i++;
-      return keys;
-    }
-    const start = i;
-    while (i < n && TOML_SCALAR.test(src[i])) i++;
-    if (i === start) fail('expected a value');
-    // A date-time may separate its date and time with one space.
-    if (/^\d{4}-\d{2}-\d{2}$/.test(src.slice(start, i)) && src[i] === ' ' && /\d/.test(src[i + 1] ?? '')) {
-      for (i++; i < n && TOML_SCALAR.test(src[i]); ) i++;
-    }
-    return null;
-  };
-
-  let table = [];
-  // Under [[mcp_servers]] the keys belong to an array element, not to a server map.
-  let inServerArray = false;
-  while (i < n) {
-    ws();
-    if (newline()) continue;
-    if (i >= n || src[i] === '#') {
-      endOfLine();
-      continue;
-    }
-    if (src[i] === '[') {
-      const array = src[i + 1] === '[';
-      i += array ? 2 : 1;
-      table = key();
-      if (src[i] !== ']' || (array && src[i + 1] !== ']')) fail('expected ] closing a table header');
-      i += array ? 2 : 1;
-      inServerArray = array && table.length === 1 && table[0] === 'mcp_servers';
-      if (table[0] === 'mcp_servers' && table.length >= 2) names.add(table[1]);
-      endOfLine();
-      continue;
-    }
-    const path = [...table, ...key()];
-    if (src[i] !== '=') fail('expected = after a key');
-    i++;
-    ws();
-    const inline = value();
-    if (path[0] === 'mcp_servers' && !inServerArray) {
-      if (path.length >= 2) names.add(path[1]);
-      else if (inline) for (const k of inline) names.add(k);
-    }
-    endOfLine();
-  }
-  return [...names];
-}
-
-/**
- * The user's own Codex MCP servers (GitHub #262): the keys of the root
- * mcp_servers table in $CODEX_HOME/config.toml (default ~/.codex), read by
- * tomlMcpServerNames. An absent file is `{ names: [] }`; any other read failure,
- * or a file that is not valid TOML, is `{ names: [], error }` so the caller can
- * disclose it. Never throws for either.
- */
-export function codexUserMcpServers(env = process.env) {
-  const file = join(env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml');
-  let text;
-  try {
-    text = readFileSync(file, 'utf8');
-  } catch (e) {
-    return e && e.code === 'ENOENT' ? { names: [] } : { names: [], error: `${file}: ${(e && e.message) || e}` };
-  }
-  try {
-    return { names: tomlMcpServerNames(text) };
-  } catch (e) {
-    if (e instanceof TomlSyntaxError) return { names: [], error: `${file}: ${e.message}` };
-    throw e;
-  }
-}
-
-/**
- * The per-call config for an opener consult with every user-level Codex MCP
- * server disabled, so a Sol review or Astra consult starts none of them. The
- * caller's own `config` is kept and a caller-set mcp_servers entry wins.
- * Returns `{ config?, line? }`; `config` is absent when nothing is to be added.
- */
-export function codexMcpDisable(toolInput, env = process.env) {
-  const { names, error } = codexUserMcpServers(env);
-  if (error) {
-    return { line: `STERLING CODEX MCP SERVERS (H20) — the Codex config could not be read (${JSON.stringify(error).slice(0, 200)}), so no user MCP server was disabled on this call.` };
-  }
-  const base = toolInput && typeof toolInput.config === 'object' && toolInput.config !== null && !Array.isArray(toolInput.config) ? toolInput.config : {};
-  const callerServers = base.mcp_servers && typeof base.mcp_servers === 'object' && !Array.isArray(base.mcp_servers) ? base.mcp_servers : {};
-  const added = names.filter((n) => !Object.hasOwn(callerServers, n));
-  if (added.length === 0) return {};
-  const mcp_servers = { ...callerServers };
-  for (const n of added) mcp_servers[n] = { enabled: false };
-  return {
-    config: { ...base, mcp_servers },
-    line: `STERLING CODEX MCP SERVERS (H20) — disabled ${added.length} user MCP server(s) from the Codex config on this call (${added.map((n) => JSON.stringify(n)).join(', ').slice(0, 200)}); a review or consult uses none of them.`,
-  };
-}
-
 /** True when the outgoing brief already cites this record by full id, id8 or
  *  slug. On the dispatch surface such a hazard is dropped before selection
  *  and spends no mark (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 1): the brief already carries it.
@@ -486,11 +137,11 @@ function citedInBrief(record, text) {
  * Returns { assembled, guard }: the caller emits assembled.text and, only after
  * it reached the model, marks assembled.emittedSubstance/emittedDiscovery on
  * `guard` and writes it.
- *   surface     'dispatch' | 'question' | 'consult'
+ *   surface     'dispatch' | 'question'
  *   outgoing    outgoingProposalText(toolInput), non-empty
  *   toolInput   the call's arguments (prompt, or questions[])
  *   guardFor    () => the session guard; called only once a match survives
- *   pinLine     the codex model pin line, folded in as a leading pinned part
+ *   pinLine     the dispatch model line (OpenCode), folded in as a leading pinned part
  *   overlap     the dispatch-overlap block, appended pinned
  *   host        'claude' | 'opencode' (HOST_TEXT)
  */
@@ -498,7 +149,7 @@ export function composeMechanismAxis(store, opts) {
   if (!Object.hasOwn(HOST_TEXT, opts.host)) throw new Error(`composeMechanismAxis: unknown host '${opts.host}'`);
   // RETIRED TERMS (GitHub #188): independent of the subject match, so it is
   // read first and rides as pinned chrome — on the subject payload when there
-  // is one, alone (with the model pin) when the subject stages stay silent.
+  // is one, alone (with the model line) when the subject stages stay silent.
   const retiredLine = retiredTermNotice(store, opts.outgoing);
   const composed = composeSubjectAxis(store, opts, retiredLine);
   if (composed || !retiredLine) return composed;
@@ -512,7 +163,6 @@ export function composeMechanismAxis(store, opts) {
 
 function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }, retiredLine) {
   const isQuestion = surface === 'question';
-  const isConsult = surface === 'consult';
   const isDispatch = surface === 'dispatch';
   const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) return null; // too little vocabulary to match on
@@ -624,10 +274,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   // holds: an owner shown here as a mere article POINTER is untouched by
   // this check's effect on H19, which guards SUBSTANCE independently).
   //
-  // EXCEPTION, the CONSULT surface only: an anti_pattern there is judged by
-  // `isSubstanceDelivered` alone, because a consult still renders hazards
-  // whole and a pointer shown elsewhere must not suppress that (fix round on
-  // the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store)). The DISPATCH surface judges hazards by
+  // The dispatch surface judges hazards by
   // `isKnownDelivered` (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 4): ranks 2-3 go out as
   // one-line pointers credited as discovery, and the substance ledger alone
   // would re-show them on every dispatch. Accepted cost, stated in that
@@ -639,7 +286,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const fresh = scored.filter((x) => {
     if (x.record.type !== 'anti_pattern') return !isKnownDelivered(guard, x.record);
     if (isDispatch && citedInBrief(x.record, briefText)) return false;
-    return isConsult ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    return !isKnownDelivered(guard, x.record);
   });
   if (!fresh.length) return null;
 
@@ -708,10 +355,6 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
       `Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them ` +
       `already decides the question, the pick just manufactured a contradiction with a settled ruling — ` +
       `disclose the record to the user and re-affirm before acting on the answer.`
-    : isConsult
-    ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to CONSULT the sparring partner (codex). ` +
-      `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
-      `Path-scoped delivery cannot find these. Check them BEFORE the consult goes out — a bad premise sent to an external model is still a bad premise.`
     : // PreToolUse context arrives WITH the dispatch (timing note at the top
       // of this file), so the brief has already gone out: the act this
       // prompts is a correction (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 5).
@@ -774,8 +417,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
     return `${head} — REFUTED TRAIL${q} — rejected: ${clip(r.rejected_answer, 100)}`;
   };
   const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
-  // Hazards render WHOLE on the consult surface — a whole hazard IS
-  // substance there (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) item 4). On the dispatch surface the
+  // On the dispatch surface the
   // rank-1 hazard is whole and ranks 2-3 are one-line trigger pointers
   // ('lead' mode, the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) — the third narrowing). On the
   // AskUserQuestion surface only, they
@@ -900,12 +542,9 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery — decision
   // the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER): hazards are complete unbudgeted substance;
   // header, decisions, prior answers and article pointers are ordinary and
-  // degrade under the cap. The codex model pin (if this is a consult) is
-  // folded in as a LEADING, PINNED-but-CHARGED chrome part (item 6) so it
-  // is charged on the FINAL composed context exactly like every other
-  // caller, rather than prepended after capping the way `envelopeFor`
-  // does for every OTHER call site in this file (none of which combine a
-  // pin with a capped carriage the way this one does).
+  // degrade under the cap. The dispatch model line (if any) is folded in as a
+  // LEADING, PINNED-but-CHARGED chrome part, so it is charged on the final
+  // composed context like every other part.
   const pinPart = pinLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: pinLine }] : [];
   const blocks = [
     // PINNED (P5): the header attributes the whole block to H20. Unpinned it

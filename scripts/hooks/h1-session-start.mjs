@@ -7,10 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
 import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError } from './lib/common.mjs';
-import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
 import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 import { planLockSection } from './lib/plan-lock-section.mjs';
 import { probeDirtyPaths, formatResidueLine, fileEntriesOf } from './lib/dispatch-residue.mjs';
@@ -571,20 +570,6 @@ try {
 }
 const issueReportsLine = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: issueReportsRoot });
 if (issueReportsLine) issueReportsContext = `\n\n${issueReportsLine}`;
-
-// CODEX REGISTRATION (decision codex-route-stays-the-pinned-0-153-4-mcp-server): one line
-// when the user-level Claude config registers no `codex` MCP server. It reads
-// <CLAUDE_CONFIG_DIR or home>/.claude.json and never spawns codex (anti_pattern
-// codex-mcp-probe-by-exit-status). userScopeCodexServer reports an unreadable config as
-// `unreadable`, which the line states. A throw from the check itself still prints one line
-// naming the error code, so the section never costs the rest of H1 and never goes silent.
-let codexContext = '';
-try {
-  const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname(process.execPath) });
-  if (codexLine) codexContext = `\n\n${codexLine}`;
-} catch (err) {
-  codexContext = `\n\nCodex MCP: the Codex registration could not be checked (${err?.code ?? 'unknown error'})`;
-}
 
 // CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
@@ -1491,7 +1476,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + domainsContext + issueReportsContext + codexContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

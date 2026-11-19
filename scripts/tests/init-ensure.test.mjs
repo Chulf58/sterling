@@ -1193,101 +1193,13 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 
 // =============================================================================
 // =============================================================================
-// Part C — CODEX MCP AT USER SCOPE, AND NOTHING WRITTEN INTO THE PLUGIN DIRECTORY
-// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
-// slice S2 and ruling point 2;
-// finding codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install). This Part replaces the former "sparring-partner" cases that pinned
-// init GENERATING .claude-plugin/sterling-mcp.json (a per-machine file with absolute
-// paths and a probed codex entry, refreshed in place): that file is now one COMMITTED,
-// machine-independent file, and the codex server lives in the user-level Claude config.
-// Init only CHECKS for it and prints one loud line naming the exact remedy.
-//
-// Seams: CLAUDE_CONFIG_DIR (Claude Code's own variable — the directory holding the
-// user-level .claude.json; the helper defaults it to an empty scratch dir so a run never
-// reads the developer's real config) and STERLING_CODEX_PROBE (which remedy line).
+// Part C — NOTHING WRITTEN INTO THE PLUGIN DIRECTORY
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, slice S2).
+// The five "codex user scope" cases that sat here pinned init's codex registration check and the
+// STERLING_CODEX_PROBE seam. Both are removed with Codex (decision
+// decommission-the-codex-model-setting-codex-is-no-longer-used), so those cases covered removed behaviour
+// and were deleted.
 // =============================================================================
-
-const ADD_COMMAND = 'claude mcp add --scope user codex -- codex mcp-server';
-const codexLine = (r) => (r.stdout + r.stderr).match(/^codex mcp: .+/m)?.[0];
-const codexRow = (r) => statusLineFor(r.stdout, 'codex MCP (user scope)');
-const userConfigDir = (body) => {
-  const d = mkdtempSync(join(tmpdir(), 'sterling-userscope-'));
-  scratchPluginRoots.add(d);
-  if (body !== undefined) writeFileSync(join(d, '.claude.json'), body);
-  return d;
-};
-
-test('codex user scope case 1: no codex server in the user-level config + a working `codex mcp-server` ⇒ one loud line carrying the exact `claude mcp add --scope user` command; init completes', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
-  try {
-    const r = init(dir, FRESH_FLAGS, { STERLING_CODEX_PROBE: 'ok', CLAUDE_CONFIG_DIR: userConfigDir(JSON.stringify({ mcpServers: { other: { command: 'x' } } })) });
-    assert.equal(r.code, 0, r.stderr);
-    const line = codexLine(r);
-    assert.ok(line, 'a codex line is printed');
-    assert.ok(line.includes(ADD_COMMAND), `the line carries the exact add command — got: ${line}`);
-    assert.match(codexRow(r) ?? '', /\bskipped\b/, 'the report row says skipped, never created/matches');
-    assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init still completes its other artifacts');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('codex user scope case 2: probe failures keep their distinguishable skip reasons (binary absent vs not logged in)', () => {
-  const dirAbsent = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
-  const dirLogin = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
-  try {
-    const rAbsent = init(dirAbsent, FRESH_FLAGS, { STERLING_CODEX_PROBE: 'absent' });
-    const rLogin = init(dirLogin, FRESH_FLAGS, { STERLING_CODEX_PROBE: 'not-logged-in' });
-    assert.equal(rAbsent.code, 0, rAbsent.stderr);
-    assert.equal(rLogin.code, 0, rLogin.stderr);
-    const lineAbsent = codexLine(rAbsent);
-    const lineLogin = codexLine(rLogin);
-    assert.match(lineAbsent ?? '', /^codex mcp: skipped — .{10,}/, 'binary-absent reports an actionable skip line');
-    assert.match(lineLogin ?? '', /^codex mcp: skipped — .{10,}/, 'not-logged-in reports an actionable skip line');
-    assert.notEqual(lineAbsent, lineLogin, 'the two failure reasons produce distinguishable lines');
-    assert.ok(!lineAbsent.includes(ADD_COMMAND), 'no add command is offered when `codex mcp-server` cannot work (it would register a dead server)');
-  } finally {
-    rmSync(dirAbsent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    rmSync(dirLogin, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('codex user scope case 3: a codex server already registered at user scope ⇒ row matches, NO codex line, and no probe ran', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
-  try {
-    // CONTROL: the probe is forced to a failing outcome, so a probe that ran would print a
-    // skip line. Its absence below proves the registered case never probes.
-    const r = init(dir, FRESH_FLAGS, { STERLING_CODEX_PROBE: 'absent', CLAUDE_CONFIG_DIR: userConfigDir(JSON.stringify({ mcpServers: { codex: { command: 'codex', args: ['mcp-server'] } } })) });
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(codexRow(r) ?? '', /\bmatches\b/, 'the registered server is reported as matching');
-    assert.equal(codexLine(r), undefined, 'no codex line: nothing is missing, and the probe did not run');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('codex user scope case 4: an unparseable user-level config is reported as unreadable, never read as "registered"', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
-  try {
-    const r = init(dir, FRESH_FLAGS, { STERLING_CODEX_PROBE: 'ok', CLAUDE_CONFIG_DIR: userConfigDir('{ not json') });
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(codexLine(r) ?? '', /could not be read/, 'the line says the config could not be read');
-    assert.match(codexRow(r) ?? '', /\bskipped\b/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('sparring-partner case 5: an unrecognized STERLING_CODEX_PROBE value fails init loud, never silently proceeding', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-codex-'));
-  try {
-    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE: 'garbage' });
-    assert.notEqual(r.code, 0, 'an unrecognized probe override value must fail init (nonzero exit), never proceed as if unset');
-    assert.ok((r.stderr ?? '').length > 0, 'the loud failure is accompanied by a diagnostic on stderr, not a silent nonzero');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
 
 test('init writes NOTHING into the plugin directory: a consuming init leaves the plugin root empty, and a clone-target init creates no sterling-mcp.json and ignores only the retired win config', () => {
   const plainDir = mkdtempSync(join(tmpdir(), 'sterling-nowrite-plain-'));

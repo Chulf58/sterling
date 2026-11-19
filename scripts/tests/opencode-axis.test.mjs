@@ -252,29 +252,6 @@ test('H20 on the question tool: a ruling match is a post-answer audit and never 
   }
 });
 
-test('H20 on the codex tool: the configured model is pinned into the call, a call-site model wins, and the consult carriage rides the result', async () => {
-  const p = makeProject({ config: { sparring_partner: { enabled: true, model: 'gpt-test-model' } } });
-  try {
-    const { ctx, cleanup } = await setup(p.dir);
-    const { before, after } = await call(ctx, { tool: 'codex_codex', input: { prompt: `Review this: ${MATCHING}`, sandbox: 'read-only' } });
-    assert.equal(before.input.model, 'gpt-test-model', 'an omitted model is filled from config.sparring_partner.model');
-    const text = appended(after);
-    assert.match(text, /STERLING CODEX MODEL PIN \(H20\) — model "gpt-test-model" injected/);
-    assert.match(text, /you are about to CONSULT the sparring partner/);
-
-    const explicit = await call(ctx, { tool: 'codex_codex', sessionID: 'ses_2', input: { prompt: UNRELATED, model: 'gpt-call-site' } });
-    assert.equal(explicit.before.input.model, 'gpt-call-site', 'the call-site model is never replaced');
-    assert.match(appended(explicit.after), /names model "gpt-call-site" EXPLICITLY/);
-
-    const reply = await call(ctx, { tool: 'codex_codex-reply', sessionID: 'ses_3', input: { prompt: UNRELATED, threadId: 't1' } });
-    assert.equal(reply.before.input.model, undefined, 'codex-reply takes no model argument');
-    assert.match(appended(reply.after), /this tool takes no model argument/);
-    await cleanup?.();
-  } finally {
-    p.cleanup();
-  }
-});
-
 test('H20 delivers nothing on a failed call and keeps the record eligible', async () => {
   const p = makeProject();
   try {

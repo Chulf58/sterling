@@ -24,7 +24,7 @@ import {
 } from '../lib/opencode-agents.mjs';
 import { lintAgentFences } from '../lib/checks.mjs';
 import { isSterlingClone } from '../lib/handoff-projection.mjs';
-import { applyConductorWordingEdits, applyImplementorWordingEdits, applyLibrarianWordingEdits } from './conductor-wording-edits.mjs';
+import { applyConductorWordingEdits, applyImplementorWordingEdits, applyLibrarianWordingEdits, applyReviewerWordingEdits } from './conductor-wording-edits.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const templatesDir = join(root, 'agent-templates');
@@ -193,6 +193,7 @@ for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
     const baselineText = entry.file === 'conductor.md' ? applyConductorWordingEdits(shown.stdout)
       : entry.file === 'implementor.md' ? applyImplementorWordingEdits(shown.stdout)
       : entry.file === 'librarian.md' ? applyLibrarianWordingEdits(shown.stdout)
+      : entry.file === 'reviewer.md' ? applyReviewerWordingEdits(shown.stdout)
       : shown.stdout;
     const before = renderInstalledAgent(baselineText, entry.file, renderOpts).installedContent;
     const after = renderInstalledAgent(template(entry.name), entry.file, renderOpts).installedContent;
