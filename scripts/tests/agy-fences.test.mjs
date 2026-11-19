@@ -157,7 +157,7 @@ test('GEMINI.md: the agy render of the target template fits agy\'s 24,000-byte c
 test('agy render of the conductor names the agy tools and states the measured limits', () => {
   const rel = 'agent-templates/conductor.md';
   const out = renderAgyText(readFileSync(join(repoRoot, rel), 'utf8'), rel, ALL);
-  for (const needle of ['agy --agent conductor', 'call_mcp_tool', 'invoke_subagent', 'send_message', 'ask_question', 'run_command', '`sterling-ro` server, started with `--read-only`', 'No Stop block']) {
+  for (const needle of ['agy --agent conductor', 'call_mcp_tool', 'invoke_subagent', 'send_message', 'ask_question', 'run_command', '`sterling-ro` server, started with `--read-only`', 'A Stop block fires once per turn']) {
     assert.ok(out.includes(needle), `conductor agy render lacks ${needle}`);
   }
   assert.ok(!out.includes('not in place yet'), 'the conductor no longer says the read-only guard is missing');

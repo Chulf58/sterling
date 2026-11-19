@@ -72,7 +72,10 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // Moved 2026-11-18 (from 43ad4242…): the sparring fallback is Sol, then Opus 5.5, replacing Fable, in the
 // two bullets that named it (user-ruled 2026-11-18, GitHub issue #309; decision
 // sparring-steps-down-astra-sol-opus-5-5-replaces-fable).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '54e6d2156ad4f6ea00973551682298104e4202938e178fe86dcd66fea4e15a39';
+// Moved 2026-11-19 (from 54e6d215…): the instruction-file proposal bullet always targets AGENTS.md, since
+// CLAUDE.md and GEMINI.md hold only Sterling's generated layer (user-ruled 2026-11-19, decision
+// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer; GitHub issue #319).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'c26bc2bb4043f8271e381d6be88f3ffb0fe8afb017df0606c2de60eb83ab8849';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);

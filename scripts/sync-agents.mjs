@@ -23,6 +23,7 @@ import { ContainmentError } from './lib/contained-fs.mjs';
 import { workIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 import { storeRootFor } from './lib/worktree-root.mjs';
+import { foreignClaudeMdBullets, foreignBulletWarning } from './lib/claude-md-extras.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -242,4 +243,7 @@ if (claudeHost) {
 }
 // An explicit non-false autoMemoryEnabled is a NOTICE (printed above), never a refusal:
 // counting it would fail every /sterling:update on the machine for one project's choice.
+// Project rules belong in AGENTS.md (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer):
+// name every CLAUDE.md bullet that is not Sterling's own, never edit the file.
+for (const b of foreignClaudeMdBullets(pluginRoot, targetDir)) console.log(foreignBulletWarning(b));
 process.exit(refused > 0 ? 2 : 0);
