@@ -10,9 +10,9 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { parseConfig, resolveOverpass, isCustomAgentKey, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_ROLES } from '@sterling/schemas';
-import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type AgyModelEffect, type CustomAgentModelEffect, type AdoptPlanEffect, type AdoptRunEffect, type AdoptedAgentView, type CustomModelView, type WorkerModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
-import { ConfigChangedError, replaceConfigFile, writeConfigKey, type ConfigWriteSeams, applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassRole, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { parseConfig, parseCanonicalConfig, toCanonicalConfig, isCustomAgentKey, type AgentHost, type CanonicalConfig } from '@sterling/schemas';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type CatalogStatusView, type AgentModelEffect, type AgentModelView, type AdoptPlanEffect, type AdoptRunEffect, type AdoptedAgentView, type WorkflowEffect, type WorkflowView, type TddToggleEffect, type HandoffToggleEffect, type OverpassProviderEffect } from './state.js';
+import { ConfigChangedError, replaceConfigFile, writeConfigKey, type ConfigWriteSeams, applyAgentModel, applyHandoffToggle, applyOverpassProvider, applyTddToggle, applyWorkflow } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
@@ -34,7 +34,7 @@ import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mj
  *  shown when the effect is dropped; null drops it without a notice (for an
  *  effect that fires on every card activation, where a notice would be noise
  *  and the host labels the state instead). */
-export type DisableableEffect = 'model_swap' | 'opencode_model' | 'select';
+export type DisableableEffect = 'agent_model' | 'select';
 
 export interface DashboardOptions {
   /** The git checkout the dashboard serves, when it is a linked worktree of the
@@ -366,46 +366,6 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // new values reflect it.
   let roster: AgentRosterSnapshot | undefined;
 
-  /** Read a governed agent's INSTALLED model:/effort: from its frontmatter (the
-   *  copy that governs dispatch). Missing/unparsable → blanks (surfaces as drift). */
-  function readInstalledModelEffort(name: string): { model: string; effort: string } {
-    try {
-      const content = readFileSync(join(agentsDir, `${name}.md`), 'utf8');
-      const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
-      const block = fm ? fm[1] : '';
-      return {
-        model: block.match(/^model:\s*(\S+)/m)?.[1] ?? '',
-        effort: block.match(/^effort:\s*(\S+)/m)?.[1] ?? '',
-      };
-    } catch {
-      return { model: '', effort: '' };
-    }
-  }
-
-  // Sparring partner (board a0714d0b): the codex MCP server is registered at
-  // USER scope, in <CLAUDE_CONFIG_DIR or home>/.claude.json. init's own check
-  // (scripts/lib/codex-mcp.mjs userScopeCodexServer) is the one reader; a
-  // missing or unreadable file reads as "not wired" — never a thrown probe that
-  // would crash tab activation (P5: the row marker itself is the visible state).
-  function probeCodexWired(): boolean {
-    return userScopeCodexServer().found;
-  }
-
-  /** config.mode as written on disk (decision project-mode-hobby-work-toggle-decides-flow).
-   *  Read RAW, not through parseConfig: the schema refuses an invalid mode, and
-   *  the row must show that value as INVALID rather than lose it. Absent →
-   *  undefined (hobby); an unreadable config → null, which the row shows as
-   *  UNKNOWN (never the hobby default) with the read error as a notice. */
-  function readRawMode(): string | null | undefined {
-    try {
-      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { mode?: unknown };
-      return raw.mode === undefined ? undefined : typeof raw.mode === 'string' ? raw.mode : JSON.stringify(raw.mode);
-    } catch (err) {
-      ui = { ...ui, notice: `project mode unknown — config unreadable: ${(err as Error).message}` };
-      return null;
-    }
-  }
-
   /** config.storage, RAW and read-only (board 6ca1a3c5). Absent → undefined
    *  (SQLite, the routing default); a config that cannot be read, or parses to
    *  something that is not an object, → null (the row shows UNKNOWN, never the
@@ -451,153 +411,38 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
-  /** config.pr_review.auto_merge_on_clean (decision
-   *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean), read from the RAW
-   *  config by the judge the PR review loop uses (autoMergeOnCleanOf), so the
-   *  row shows what a clean settle will act on. A value the judge refuses comes
-   *  back as its JSON text (INVALID); an unreadable config is null (UNKNOWN,
-   *  never the on default). */
-  function readAutoMergeOnClean(): boolean | string | null {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(configPath, 'utf8'));
-    } catch {
-      return null;
-    }
-    try {
-      return autoMergeOnCleanOf(raw);
-    } catch (err) {
-      if (!(err instanceof AutoMergeSettingError)) throw err;
-      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return JSON.stringify(raw);
-      const block = (raw as { pr_review?: unknown }).pr_review;
-      return JSON.stringify(block !== null && typeof block === 'object' && !Array.isArray(block) ? (block as { auto_merge_on_clean?: unknown }).auto_merge_on_clean : block);
-    }
-  }
-
-  /** config.overpass for the System tab's Overpass rows, read from the RAW
-   *  config. Each field is the boolean, or its JSON text when it is not one
-   *  (INVALID); an unreadable config is null (UNKNOWN, never the default).
-   *  `effective` is resolveOverpass's verdict for this host, false when the
-   *  resolver refuses the config. A present `overpass` that is not an object
-   *  sets `invalid`, so every row reads INVALID instead of the tab throwing. */
-  function readOverpass(): OverpassView {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(configPath, 'utf8'));
-    } catch {
-      return { enabled: null, provider: null, conductorBypass: null, effective: false };
-    }
-    const root = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { overpass?: unknown }) : {};
-    const block = root.overpass;
-    let effective = false;
-    let roles: OverpassView['roles'];
-    try {
-      const resolved = resolveOverpass(raw, { host: options.host ?? 'terminal' });
-      effective = resolved.effective;
-      // the tier is the model reference after '<provider>/' (a provider id holds no '/');
-      // the effort is only the one config.overpass.roles sets (the resolver accepted it), so a
-      // role's default effort (DEFAULT_OVERPASS_ROLE_EFFORTS) is shown as the default and never
-      // carried into a tier edit's write
-      const rawRoles = (root.overpass as { roles?: Record<string, { effort?: unknown }> } | undefined)?.roles;
-      if (effective) {
-        roles = Object.fromEntries(
-          Object.entries(resolved.roles).map(([role, route]) => {
-            const explicit = rawRoles?.[role]?.effort;
-            return [role, { tier: route.model.slice(route.model.indexOf('/') + 1), ...(typeof explicit === 'string' ? { effort: explicit } : {}) }];
-          }),
-        );
-      }
-    } catch {
-      // a config the resolver refuses is not effective; the rows say which field is invalid
-    }
-    if (block !== undefined && (block === null || typeof block !== 'object' || Array.isArray(block))) {
-      return { enabled: false, provider: null, conductorBypass: false, effective, invalid: JSON.stringify(block) };
-    }
-    const fields = (block ?? {}) as { enabled?: unknown; provider?: unknown; conductor_bypass?: unknown };
-    const flag = (v: unknown, whenAbsent = false): boolean | string => (v === undefined ? whenAbsent : typeof v === 'boolean' ? v : JSON.stringify(v));
-    const base = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass, true), effective, ...(roles ? { roles } : {}) };
-    if (fields.provider !== undefined && typeof fields.provider !== 'string') return { ...base, provider: null, providerInvalid: JSON.stringify(fields.provider) };
-    return { ...base, provider: fields.provider ?? 'overpass' };
-  }
-
-  /** Set by refuseOverpassModelEdit; applyEffects clears it before the model writers run. */
-  let overpassRefusedEdit = false;
-
-  /** Whether Overpass is effective in `raw`, the parsed bytes a model edit is built from
-   *  (false when the resolver refuses the config, as readOverpass reads it). */
-  function overpassEffectiveIn(raw: unknown): boolean {
-    try {
-      return resolveOverpass(raw, { host: options.host ?? 'terminal' }).effective;
-    } catch {
-      return false;
-    }
-  }
-
-  /** True, with the refusal notice set and the refusal recorded for applyEffects, when
-   *  `key` is an Overpass role and Overpass is effective in `raw`: its saved model and
-   *  OpenCode override are not editable then. */
-  function refuseOverpassModelEdit(key: string, raw: unknown): boolean {
-    const roleKeys: readonly string[] = OVERPASS_ROLES;
-    if (!roleKeys.includes(key) || !overpassEffectiveIn(raw)) return false;
-    overpassRefusedEdit = true;
-    ui = { ...ui, notice: 'Overpass is on — the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written.' };
-    return true;
-  }
-
-  /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
-   *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
-   *  a deduped refresh when the catalog is stale (decision foreign_98064d77). */
+  /** Build the AgentRosterSnapshot at tab activation: the canonical config (parseCanonicalConfig, never
+   *  parseConfig, so the tab does not depend on parseConfig's shape) plus the catalog and its precomputed
+   *  status. Enqueues a deduped refresh when the catalog is stale (decision foreign_98064d77). A config that
+   *  cannot be read as canonical sets `configError`: the agent and workflow rows then say so. */
   function loadRoster(): AgentRosterSnapshot {
     const nowISO = new Date().toISOString();
-    let config: unknown;
+    let raw: unknown;
+    let canonical: CanonicalConfig | undefined;
+    let configError: string | undefined;
+    let twoModels: string[] | undefined;
     try {
-      config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
-    } catch {
-      config = { models: {}, models_catalog: { staleness_days: 45 } };
+      raw = JSON.parse(readFileSync(configPath, 'utf8'));
+      canonical = parseCanonicalConfig(raw);
+      twoModels = toCanonicalConfig(raw).conflicts.map((c) => c.role);
+    } catch (err) {
+      configError = (err as Error).message.split('\n')[0];
+      ui = { ...ui, notice: `config unreadable as canonical — ${configError}` };
     }
-    const cfg = config as {
-      models?: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }>;
-      models_catalog?: { staleness_days?: number };
-      sparring_partner?: { enabled?: boolean; models?: { openai?: { model?: string } } };
-      tdd?: { enabled?: boolean };
-    };
-    const configModels: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }> = {};
-    const customModels: Record<string, CustomModelView> = {};
-    for (const [k, v] of Object.entries((cfg.models ?? {}) as Record<string, { model?: string; effort?: string; opencode_model?: string; agy_model?: string }>)) {
-      if (isCustomAgentKey(k)) {
-        customModels[k] = { ...v };
-        // placeholders: the picker flow reads configModels, and an adopted agent may name no model or effort
-        configModels[k] = { model: v.model ?? '', effort: v.effort ?? '', ...(v.opencode_model ? { opencode_model: v.opencode_model } : {}), ...(v.agy_model ? { agy_model: v.agy_model } : {}) };
-      } else configModels[k] = v as { model: string; effort: string };
-    }
-    // parseConfig converts the old sparring_partner.model into models.openai.
-    const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.models?.openai?.model };
-    const tdd = { enabled: cfg.tdd?.enabled ?? true };
-    const mode = readRawMode();
+    const models: Record<string, AgentModelView> = {};
+    for (const [k, v] of Object.entries(canonical?.models ?? {})) models[k] = { ...(v as AgentModelView) };
     const handoff = readHandoff();
-    const codexWired = probeCodexWired();
-    const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
-      .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
-      .map((name) => {
-        const v = readInstalledModelEffort(name);
-        return { name, installedModel: v.model, installedEffort: v.effort };
-      });
-
-    // governed roles installed in the OpenCode or agy folders count as installed too, and
-    // the custom agents of every host folder are listed read-only (issue #307); discovery
-    // never throws, so a bad agent file cannot fail the tab
-    const installedAt = installedGovernedAgents(projectRoot);
-    const hostInstalled = [...new Set([...installedAt.opencode, ...installedAt.agy])].filter((name) => !agents.some((a) => a.name === name));
     const customAgents = discoverCustomAgents(projectRoot).map((a) => ({ ...a, file: customAgentFile(a) }));
+    const hosts: AgentHost[] = ['claude', 'opencode', ...(probeAgy({ env: process.env, home: homedir() }).installed ? (['agy'] as AgentHost[]) : [])];
     // Adopted custom agents: config.models.custom-* with its agent-sources/<key>.md, the hosts it is rendered
     // into, and what the render refuses for it (a dry run: nothing is written here).
     const adoptedAgents: AdoptedAgentView[] = [];
-    const adoptedKeys = Object.keys(customModels).filter((k) => existsSync(join(projectRoot, sourcePathOf(k))));
-    if (adoptedKeys.length > 0) {
-      const hosts = customHosts();
+    const adoptedKeys = Object.keys(models).filter((k) => isCustomAgentKey(k) && existsSync(join(projectRoot, sourcePathOf(k))));
+    if (adoptedKeys.length > 0 && canonical) {
+      const renderHosts = customHosts();
       let refused: Array<{ key: string; host: string; reason: string }> = [];
       try {
-        refused = syncCustomAgents(projectRoot, config as { models?: Record<string, object> }, { hosts, dryRun: true }).refused;
+        refused = syncCustomAgents(projectRoot, canonical as { models?: Record<string, object> }, { hosts: renderHosts, dryRun: true }).refused;
       } catch (err) {
         refused = adoptedKeys.map((key) => ({ key, host: '*', reason: `the render plan failed: ${(err as Error).message}` }));
       }
@@ -609,16 +454,16 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         } catch {
           // an unreadable source shows under its key; the render plan reports the problem on the row
         }
-        adoptedAgents.push({ key, name, hosts, refusals: refused.filter((r) => r.key === key).map((r) => ({ host: r.host, reason: r.reason })) });
+        adoptedAgents.push({ key, name, hosts: renderHosts, refusals: refused.filter((r) => r.key === key).map((r) => ({ host: r.host, reason: r.reason })) });
       }
     }
 
     let catalog: CatalogStatusView = { present: false, stale: false, staleDate: null, entries: [] };
     try {
-      store.bootstrapCatalogIfAbsent(config, nowISO);
-      store.ensureCatalogPinnedModels(config);
+      store.bootstrapCatalogIfAbsent(canonical ?? {}, nowISO);
+      store.ensureCatalogPinnedModels(canonical ?? {});
       const rec = store.query({ types: ['reference_material'], cap: 200 }).find((r) => (r as { catalog?: unknown }).catalog);
-      const days = cfg.models_catalog?.staleness_days ?? 45;
+      const days = (canonical as { models_catalog?: { staleness_days?: number } } | undefined)?.models_catalog?.staleness_days ?? 45;
       const status = catalogStatus(rec ?? null, nowISO, days);
       if (status.stale) store.enqueueRefreshReferenceOnce(nowISO);
       catalog = {
@@ -632,344 +477,19 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, hostInstalled, opencodeInstalled: installedAt.opencode, agyInstalled: installedAt.agy, customAgents, adoptedAgents, customModels, configModels, agy: probeAgy({ env: process.env, home: homedir() }).installed, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
-  }
-
-  /** maintenance_worker.opencode_model for the Maintenance worker row, from the RAW
-   *  config. Three states stay apart (anti-pattern
-   *  config-derived-posture-line-collapses-absent-into-unusable): the string, or null when
-   *  it is absent or null (unset, as the worker's reader treats it); `invalid` (the JSON
-   *  text) when it is present but not a usable string, a blank one included, because the
-   *  worker refuses it; and `unreadable` (the reason) when the config cannot be read, is
-   *  not a JSON object, or carries a maintenance_worker that is not an object, so the row
-   *  never says "not set" about a config nobody could read. */
-  function readMaintenanceWorker(): NonNullable<AgentRosterSnapshot['maintenanceWorker']> {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(configPath, 'utf8'));
-    } catch (err) {
-      return { opencodeModel: null, unreadable: `${(err as Error).message.split('\n')[0]}` };
-    }
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return { opencodeModel: null, unreadable: `config.json holds ${JSON.stringify(raw)}, not an object` };
-    const block = (raw as { maintenance_worker?: unknown }).maintenance_worker;
-    if (block === undefined) return { opencodeModel: null };
-    if (block === null || typeof block !== 'object' || Array.isArray(block)) return { opencodeModel: null, unreadable: `maintenance_worker is ${JSON.stringify(block)}, not an object` };
-    const value = (block as { opencode_model?: unknown }).opencode_model;
-    if (value === undefined || value === null) return { opencodeModel: null };
-    if (typeof value !== 'string' || value.trim() === '') return { opencodeModel: null, invalid: JSON.stringify(value) };
-    return { opencodeModel: value };
-  }
-
-  /** Execute a worker_model effect: set or clear config.maintenance_worker.opencode_model
-   *  and write nothing else. Refused while Overpass is effective in the bytes the write
-   *  is built from: the worker then runs on its tier and the saved model is not applied. */
-  function applyWorkerModel(e: WorkerModelEffect): void {
-    try {
-      if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      writeConfigKey(configPath, 'maintenance_worker', (old, raw) => {
-        if (overpassEffectiveIn(raw)) throw new Error('Overpass is on, so the worker runs on its tier and the saved model is not applied; turn Overpass off to edit it. Nothing was written');
-        const { opencode_model: _previous, ...rest } = old !== null && typeof old === 'object' && !Array.isArray(old) ? (old as Record<string, unknown>) : {};
-        return e.to === undefined ? rest : { ...rest, opencode_model: e.to };
-      }, options.configWriteFs);
-    } catch (err) {
-      ui = { ...ui, notice: `Maintenance worker model not changed — ${(err as Error).message}` };
-    }
-  }
-
-  /** Execute a sparring_model effect: config.sparring_partner.models.openai
-   *  write (the old sparring_partner.model is dropped, so a new key cannot be
-   *  shadowed by a stale one). An empty committed value CLEARS the model
-   *  (unset = Codex CLI default) by removing the pin; a set keeps the effort. */
-  function applySparringModel(e: SparringModelEffect): void {
-    try {
-      type Pin = { model?: string; effort?: string };
-      writeConfigKey(configPath, 'sparring_partner', (old) => {
-        const { model: _legacy, ...sp } = { ...(old as { enabled?: boolean; model?: string; models?: { openai?: Pin } } | undefined) };
-        const { model: _previous, ...rest } = { ...sp.models?.openai };
-        const models = { ...sp.models };
-        if (e.model) models.openai = { ...rest, model: e.model };
-        else delete models.openai;
-        return { ...sp, models };
-      }, options.configWriteFs);
-    } catch (err) {
-      ui = { ...ui, notice: `sparring partner model update failed — ${(err as Error).message}` };
-    }
-  }
-
-  /** Execute a model_swap effect: config.models write (authoritative) →
-   *  surgical setInstalledModelEffort on each governed installed file (machine
-   *  vars untouched, d53dc92c) → a durable swap decision (AC5). A partial
-   *  projection is not silent — it surfaces as the next activation's drift
-   *  marker (P5). */
-  async function applySwap(e: ModelSwapEffect): Promise<void> {
-    const nowISO = new Date().toISOString();
-    try {
-      // 1. config.models write — the authoritative per-project declaration
-      // The entry's other fields (hard_task, the OpenCode override) are kept.
-      // The write is atomic and refuses a config.json that changed since this read;
-      // every agent file below is touched only after it succeeded.
-      const original = readFileSync(configPath);
-      const raw = JSON.parse(original.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
-      if (refuseOverpassModelEdit(e.key, raw)) return;
-      raw.models = raw.models ?? {};
-      const prev = raw.models[e.key] ?? {};
-      raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
-      try {
-        replaceConfigFile(configPath, JSON.stringify(raw, null, 2) + '\n', original, options.configWriteFs);
-      } catch (err) {
-        if (err instanceof ConfigChangedError) {
-          ui = { ...ui, notice: `model swap for '${e.key}' not changed — ${err.message}; config.json and the agent files are as they were` };
-          return;
-        }
-        throw err;
-      }
-      const opencodeModel = typeof prev.opencode_model === 'string' ? prev.opencode_model : undefined;
-
-      // 2. surgical installed-frontmatter projection on each governed agent file
-      for (const name of e.agents) {
-        const p = join(agentsDir, `${name}.md`);
-        if (!existsSync(p)) continue;
-        const content = readFileSync(p, 'utf8');
-        const hdr = parseInstalledHeader(content);
-        writeFileSync(
-          p,
-          setInstalledModelEffort(content, {
-            model: e.to.model,
-            effort: e.to.effort,
-            pluginVersion: hdr?.pluginVersion ?? '0.0.0',
-            now: nowISO,
-          })
-        );
-      }
-
-      // 2b. the Sterling-full OpenCode conductor and roster, re-rendered with the
-      // matching OpenCode model (the former ruling 'sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin' (not in the current store), DASHBOARD FUNCTIONS (a)). A
-      // project that never installed them is skipped; a refused file is said.
-      // Its own try: an OpenCode failure is reported, and the decision below
-      // is still written for the Claude swap that already happened.
-      try {
-        // A role with an OpenCode override keeps it: only its Claude model changed.
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model, opencodeModel });
-        const refused = (oc.rows ?? []).filter((r) => r.status === 'refused');
-        if (refused.length) ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated — ${refused.map((r) => r.detail).join('; ')}` };
-      } catch (ocErr) {
-        ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed — ${(ocErr as Error).message}` };
-      }
-
-      // 3. durable swap decision (AC5) — reuse the decision type (decision foreign_98064d77)
-      store.create({
-        id: randomUUID(),
-        type: 'decision',
-        created_at: nowISO,
-        updated_at: nowISO,
-        author: 'conductor',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        title: e.decisionTitle,
-        statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
-        rationale:
-          'Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL↔Windows machine boundary, d53dc92c).',
-        alternatives_rejected: [],
-      }, { operation_id: randomUUID() });
-    } catch (err) {
-      // P5: never silent. The next activation's drift marker still backstops a
-      // partial write.
-      ui = { ...ui, notice: `model swap for '${e.key}' failed partway — ${(err as Error).message}` };
-    }
-  }
-
-  /** Execute an opencode_model effect (decision
-   *  opencode-only-model-override-per-role-for-openai-picks): set or clear
-   *  config.models[key].opencode_model and re-render the key's Sterling-full
-   *  OpenCode agents, all or nothing. Every agent render and refusal check runs
-   *  first, with nothing written; then config.json is replaced (atomically, refused
-   *  when it changed since it was read) and only then the agent files are written; a
-   *  failed agent write puts the agent files and config.json back. The decision is recorded only once both have converged.
-   *  The Claude agent files under .claude/agents are never written here. */
-  function applyOpenCodeModel(e: OpenCodeModelEffect): void {
-    const nowISO = new Date().toISOString();
-    const fail = (msg: string) => { ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed — ${msg}; config.json and the OpenCode agents are as they were` }; };
-    let configBefore: Buffer;
-    let configAfter: string;
-    let claudeModel: string;
-    try {
-      if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync(configPath);
-      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
-      if (refuseOverpassModelEdit(e.key, raw)) return;
-      raw.models = raw.models ?? {};
-      // a key the file does not carry yet takes its current (default) Claude values
-      const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
-      raw.models[e.key] = e.to === undefined ? rest : { ...rest, opencode_model: e.to };
-      configAfter = JSON.stringify(raw, null, 2) + '\n';
-      claudeModel = typeof rest.model === 'string' ? rest.model : e.model;
-    } catch (err) {
-      fail((err as Error).message);
-      return;
-    }
-    // 1. stage: render every target agent; a refusal stops the change before any write
-    let writes: StagedWrite[];
-    try {
-      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
-      const refused = (staged.rows ?? []).filter((r) => r.status === 'refused');
-      if (refused.length) {
-        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join('; ')}`);
-        return;
-      }
-      writes = staged.writes ?? [];
-    } catch (err) {
-      fail(`the OpenCode agent render failed: ${(err as Error).message}`);
-      return;
-    }
-    // 2. commit config.json first, atomically and only if it still holds the bytes
-    // this change was built from (a concurrent change refuses it); the agent files
-    // are written only after it succeeded, so a refused or failed config write
-    // leaves them untouched
-    try {
-      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
-    } catch (err) {
-      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
-      return;
-    }
-    // 3. the agent files; a failure puts them back (writeFullAgentFiles) and the
-    // config.json write is undone, but only if the file still holds what this change wrote
-    try {
-      writeFullAgentFiles(writes);
-    } catch (err) {
-      try {
-        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
-      } catch (restoreErr) {
-        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing the OpenCode agents failed (${(err as Error).message}) and config.json was not restored: ${(restoreErr as Error).message}` };
-        return;
-      }
-      fail(`writing the OpenCode agents failed: ${(err as Error).message}`);
-      return;
-    }
-    // 4. converged: record the change
-    const shown = (v?: string) => v ?? `anthropic/${claudeModel}`;
-    try {
-      store.create({
-        id: randomUUID(),
-        type: 'decision',
-        created_at: nowISO,
-        updated_at: nowISO,
-        author: 'conductor',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        title: `OpenCode model: ${e.key} ${shown(e.from)}→${shown(e.to)} (System tab)`,
-        statement: `config.models['${e.key}'].opencode_model ${e.to === undefined ? 'cleared' : `set to ${e.to}`} (was ${e.from ?? 'unset'}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
-        rationale:
-          'OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).',
-        alternatives_rejected: [],
-      }, { operation_id: randomUUID() });
-    } catch (err) {
-      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed — ${(err as Error).message}` };
-      return;
-    }
-    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
-  }
-
-  /** Execute an agy_model effect (issue #306): set or clear config.models[key].agy_model
-   *  and re-render the agy agent files. config.json is replaced atomically (refused when
-   *  it changed since it was read); a failed agy render puts config.json back. The Claude
-   *  and OpenCode agent files are not touched. */
-  function applyAgyModel(e: AgyModelEffect): void {
-    const fail = (msg: string) => { ui = { ...ui, notice: `Antigravity model for '${e.key}' not changed — ${msg}; config.json and the agy agent files are as they were` }; };
-    let configBefore: Buffer;
-    let configAfter: string;
-    try {
-      if (e.to !== undefined && !(AGY_MODEL_IDS as readonly string[]).includes(e.to)) throw new Error(`'${e.to}' is not a known agy model id`);
-      configBefore = readFileSync(configPath);
-      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
-      if (refuseOverpassModelEdit(e.key, raw)) return;
-      raw.models = raw.models ?? {};
-      const { agy_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
-      raw.models[e.key] = e.to === undefined ? rest : { ...rest, agy_model: e.to };
-      configAfter = JSON.stringify(raw, null, 2) + '\n';
-    } catch (err) {
-      fail((err as Error).message);
-      return;
-    }
-    // setupAgy writes the agent files one by one and reports a refused one as a row, so a refusal
-    // leaves the files before it rewritten: snapshot every file the render may touch BEFORE anything is
-    // written, and put them back with config.json when the render does not converge. A path that is not
-    // a plain file (a symlink, a directory) or cannot be read refuses the change up front, so nothing
-    // is written and restoring never replaces a link with a regular file.
-    const agentsBefore: Array<{ path: string; bytes: Buffer | null; mode: number }> = [];
-    try {
-      for (const name of AGY_ROSTER) {
-        const path = join(projectRoot, ...AGY_AGENTS_DIR.split('/'), name, 'agent.md');
-        let st: ReturnType<typeof lstatSync> | undefined;
-        try {
-          st = lstatSync(path);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
-        if (st === undefined) agentsBefore.push({ path, bytes: null, mode: 0o644 });
-        else if (st.isSymbolicLink()) throw new Error(`${path} is a symlink, and the agy render would replace it with a plain file`);
-        else if (!st.isFile()) throw new Error(`${path} is not a regular file`);
-        else agentsBefore.push({ path, bytes: readFileSync(path), mode: Number(st.mode) & 0o777 });
-      }
-    } catch (err) {
-      fail(`cannot snapshot the agy agent files: ${(err as Error).message}`);
-      return;
-    }
-    const restoreAgents = (): void => {
-      for (const { path, bytes, mode } of agentsBefore) {
-        if (bytes === null) rmSync(path, { force: true });
-        else if (!existsSync(path) || !readFileSync(path).equals(bytes)) {
-          writeFileAtomic(path, bytes as unknown as string, { writeFile: (tmp: string, content: unknown) => { writeFileSync(tmp, content as Buffer, { mode }); chmodSync(tmp, mode); } });
-        }
-      }
+    return {
+      models,
+      hosts,
+      ...(twoModels?.length ? { twoModels } : {}),
+      ...(configError !== undefined ? { configError } : {}),
+      customAgents,
+      adoptedAgents,
+      catalog,
+      ...(canonical ? { workflow: canonical.workflow as WorkflowView, overpassProvider: canonical.overpass.provider, tdd: { enabled: (canonical as { tdd?: { enabled?: boolean } }).tdd?.enabled ?? true } } : {}),
+      storage: readRawStorage(),
+      host: options.host,
+      ...handoff,
     };
-    try {
-      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
-    } catch (err) {
-      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
-      return;
-    }
-    let outcome: string;
-    try {
-      const r = (options.agySetup ?? setupAgy)({ projectDir: projectRoot, pluginRoot: sterlingRootFrom() }) as { skipped?: string; rows?: Array<{ refused?: boolean; detail?: string }> };
-      const refused = (r.rows ?? []).filter((x) => x.refused);
-      if (refused.length) throw new Error(`agy agent file(s) refused: ${refused.map((x) => x.detail).join('; ')}`);
-      outcome = r.skipped ?? 'the agy agent files were re-rendered';
-    } catch (err) {
-      try {
-        restoreAgents();
-      } catch (agentErr) {
-        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${(err as Error).message}) and the agy agent files were not restored: ${(agentErr as Error).message}; config.json was left as written` };
-        return;
-      }
-      try {
-        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
-      } catch (restoreErr) {
-        ui = { ...ui, notice: `Antigravity model for '${e.key}': the agy render failed (${(err as Error).message}) and config.json was not restored: ${(restoreErr as Error).message}` };
-        return;
-      }
-      fail((err as Error).message);
-      return;
-    }
-    const nowISO = new Date().toISOString();
-    try {
-      store.create({
-        id: randomUUID(), type: 'decision', created_at: nowISO, updated_at: nowISO, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
-        title: `Antigravity model: ${e.key} ${e.from ?? 'inherit'}→${e.to ?? 'inherit'} (System tab)`,
-        statement: `config.models['${e.key}'].agy_model ${e.to === undefined ? 'cleared' : `set to ${e.to}`} (was ${e.from ?? 'unset'}); the agy agents for this role now run ${e.to ?? 'inherit'}, and Claude Code keeps ${e.model}.`,
-        rationale: 'Antigravity model override changed from the TUI System tab (GitHub issue #306, mirroring decision openai-models-in-the-system-tab-each-role-gets-an-optional-opencode-only-model-override: only the agy agent files are re-rendered).',
-        alternatives_rejected: [],
-      }, { operation_id: randomUUID() });
-    } catch (err) {
-      ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? 'inherit'}, but recording the decision failed — ${(err as Error).message}` };
-      return;
-    }
-    ui = { ...ui, notice: `Antigravity model for '${e.key}' set to ${e.to ?? 'inherit'} (${outcome}); Claude Code keeps ${e.model}.` };
   }
 
   /** The hosts adopted custom agents are rendered into. */
@@ -977,65 +497,28 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     return options.customAgentHosts ?? (detectInstalledHosts(projectRoot) as Array<'claude' | 'opencode' | 'agy'>);
   }
 
-  /** Execute a custom_agent_model effect: set or remove fields of config.models.<key> of an adopted agent,
-   *  validate the whole config strictly, check the render would not be refused (a dry run, nothing written),
-   *  replace config.json, then render every installed host's file. syncCustomAgents rolls its own files back
-   *  when a write fails; config.json is put back here. */
-  function applyCustomAgentModel(e: CustomAgentModelEffect): void {
-    const fail = (msg: string) => { ui = { ...ui, notice: `Custom agent '${e.key}' not changed — ${msg}; config.json and the agent files are as they were` }; };
-    let configBefore: Buffer;
-    let configAfter: string;
-    let parsed: ReturnType<typeof parseConfig>;
-    try {
-      configBefore = readFileSync(configPath);
-      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
-      const entry = raw.models?.[e.key];
-      if (!entry || typeof entry !== 'object') throw new Error(`config.models has no ${e.key} entry`);
-      const next: Record<string, unknown> = { ...entry };
-      for (const [field, value] of Object.entries(e.set)) {
-        if (value === null) delete next[field];
-        else if (value !== undefined) next[field] = value;
-      }
-      // loading strips an agy_model outside agy's four values, so a value written now is checked strictly here
-      if (typeof next.agy_model === 'string' && !(AGY_MODEL_IDS as readonly string[]).includes(next.agy_model)) throw new Error(`agy_model must be one of ${AGY_MODEL_IDS.join(', ')}, got '${next.agy_model}'`);
-      raw.models = { ...raw.models, [e.key]: next };
-      parsed = parseConfig(raw);
-      configAfter = JSON.stringify(raw, null, 2) + '\n';
-    } catch (err) {
-      fail((err as Error).message);
+  /** Execute an agent_model effect: write config.models.<key> (canonical, validated: applyAgentModel), then,
+   *  for an adopted custom agent, render every installed host's file from the new config. The agent files of
+   *  a governed role follow the config on the next sync (/sterling:update or sync-agents). A host that cannot
+   *  run the model is not hidden: the row's hosts cell says so. */
+  function applyAgentModelEffect(e: AgentModelEffect): void {
+    let failure: string | undefined;
+    if (!applyAgentModel(e, (msg) => { failure = msg; }, configPath)) {
+      ui = { ...ui, notice: failure ?? `model change for '${e.key}' failed` };
       return;
     }
-    const hosts = customHosts();
-    try {
-      const dry = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts, dryRun: true });
-      const mine = dry.refused.filter((r) => r.key === e.key);
-      if (mine.length) {
-        fail(mine.map((r) => `${r.host}: ${r.reason}`).join('; '));
-        return;
-      }
-    } catch (err) {
-      fail(`the render plan failed: ${(err as Error).message}`);
+    const what = e.model === null ? 'on its host default' : `${e.model}${e.effort ? ` at ${e.effort}` : ''}`;
+    if (!isCustomAgentKey(e.key)) {
+      ui = { ...ui, notice: `'${e.key}' set to ${what}; its agent files follow on the next sync (/sterling:update).` };
       return;
     }
     try {
-      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
-    } catch (err) {
-      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
-      return;
-    }
-    try {
-      // requireClean: a refusal found now (the files changed since the dry run) throws before any write
-      const report = syncCustomAgents(projectRoot, parsed as { models?: Record<string, object> }, { hosts, requireClean: [e.key] });
+      const canonical = parseCanonicalConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+      const report = syncCustomAgents(projectRoot, canonical as { models?: Record<string, object> }, { hosts: customHosts() });
       const wrote = [...new Set([...report.written, ...report.unchanged].filter((w) => w.key === e.key).map((w) => w.host))];
-      ui = { ...ui, notice: `Custom agent '${e.key}' updated; rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
+      ui = { ...ui, notice: `Custom agent '${e.key}' set to ${what}; rendered for ${wrote.length ? wrote.join(', ') : 'no host'}.` };
     } catch (err) {
-      try {
-        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
-      } catch (restoreErr) {
-        ui = { ...ui, notice: `Custom agent '${e.key}': the render failed (${(err as Error).message}) and config.json was not restored: ${(restoreErr as Error).message}` };
-        return;
-      }
-      fail((err as Error).message);
+      ui = { ...ui, notice: `Custom agent '${e.key}' set to ${what} in config.json, but the render failed — ${(err as Error).message}` };
     }
   }
 
@@ -1166,102 +649,49 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   async function applyEffects(all: Effect[]): Promise<boolean> {
     // the host's effect switch: a declined effect never reaches its writer
     const effects = all.filter((e) => {
-      if (e.type !== 'model_swap' && e.type !== 'opencode_model' && e.type !== 'select') return true;
+      if (e.type !== 'agent_model' && e.type !== 'select') return true;
       const off = disabled[e.type];
       if (off === undefined) return true;
       if (off !== null) ui = { ...ui, notice: off };
       return false;
     });
     const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
-    // Overpass is judged from the config on disk when the write is built, not from the
-    // roster the picker opened on: Overpass may have been switched on since (config_set,
-    // another session). While it is effective an Overpass role's saved model and OpenCode
-    // override are not editable (decision
-    // system-tab-agent-catalog-with-overpass-on-each-row-shows-the), so those effects
-    // are refused and the roster is refreshed to show the tier rows.
-    const swaps = effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
-    const overrides = effects.filter((e): e is OpenCodeModelEffect => e.type === 'opencode_model');
-    // each writer resolves Overpass from the very bytes it builds its write from and
-    // replaceConfigFile compares them again at the rename, so no change can slip between
-    overpassRefusedEdit = false;
-    for (const e of swaps) await applySwap(e);
-    for (const e of overrides) applyOpenCodeModel(e);
-    for (const e of effects) if (e.type === 'agy_model') applyAgyModel(e);
-    const customEffects = effects.filter((e) => e.type === 'custom_agent_model' || e.type === 'adopt_plan' || e.type === 'adopt_run');
+    const agentModels = effects.filter((e): e is AgentModelEffect => e.type === 'agent_model');
+    for (const e of agentModels) applyAgentModelEffect(e);
+    const customEffects = effects.filter((e) => e.type === 'adopt_plan' || e.type === 'adopt_run');
     for (const e of effects) {
-      if (e.type === 'custom_agent_model') applyCustomAgentModel(e);
-      else if (e.type === 'adopt_plan') applyAdoptPlan(e);
+      if (e.type === 'adopt_plan') applyAdoptPlan(e);
       else if (e.type === 'adopt_run') applyAdoptRun(e);
     }
-    const workerModels = effects.filter((e): e is WorkerModelEffect => e.type === 'worker_model');
-    for (const e of workerModels) applyWorkerModel(e);
-    const refused = overpassRefusedEdit;
-    const sparringModels = effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
-    for (const e of sparringModels) applySparringModel(e);
-    // sparring/tdd/mode/handoff toggle writes (board a0714d0b, decision foreign_752caf98):
-    // run every applier, then compose ONE notice from their {ok} outcomes — a
-    // failure wins over a success (review fix, board 09f05fca half 2), so a
-    // later success in this same batch can never clobber an earlier failure.
-    const sparringToggles = effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
+    // config writes: run every applier, then compose ONE notice from their outcomes — a failure wins over a
+    // success, so a later success in this same batch can never clobber an earlier failure
+    const workflows = effects.filter((e): e is WorkflowEffect => e.type === 'workflow_set');
     const tddToggles = effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
-    const modeToggles = effects.filter((e): e is ModeToggleEffect => e.type === 'mode_toggle');
     const handoffToggles = effects.filter((e): e is HandoffToggleEffect => e.type === 'handoff_toggle');
-    const autoMergeToggles = effects.filter((e): e is AutoMergeToggleEffect => e.type === 'auto_merge_toggle');
-    const overpassToggles = effects.filter((e): e is OverpassToggleEffect => e.type === 'overpass_toggle');
     const overpassProviders = effects.filter((e): e is OverpassProviderEffect => e.type === 'overpass_provider');
-    const overpassBypasses = effects.filter((e): e is OverpassBypassEffect => e.type === 'overpass_bypass_toggle');
-    const overpassRoles = effects.filter((e): e is OverpassRoleEffect => e.type === 'overpass_role');
     let toggleWrote = false;
     let toggleFailure: string | undefined;
     const collectFailure = (msg: string) => { toggleFailure = msg; };
-    for (const e of sparringToggles) { if (applySparringToggle(e, collectFailure, configPath)) toggleWrote = true; }
     for (const e of tddToggles) { if (applyTddToggle(e, collectFailure, configPath)) toggleWrote = true; }
-    let modeWritten: ModeToggleEffect['mode'] | undefined;
-    for (const e of modeToggles) { if (applyModeToggle(e, collectFailure, configPath)) { toggleWrote = true; modeWritten = e.mode; } }
+    let workflowNotice: string | undefined;
+    for (const e of workflows) {
+      if (applyWorkflow(e, collectFailure, configPath)) {
+        toggleWrote = true;
+        workflowNotice = `workflow.${e.field} set to ${String(e.value)}.`;
+      }
+    }
     let handoffWritten: boolean | undefined;
     for (const e of handoffToggles) { if (applyHandoffToggle(e, collectFailure, configPath)) { toggleWrote = true; handoffWritten = e.enabled; } }
-    let autoMergeWritten: boolean | undefined;
-    for (const e of autoMergeToggles) { if (applyAutoMergeToggle(e, collectFailure, configPath)) { toggleWrote = true; autoMergeWritten = e.enabled; } }
-    let overpassNotice: string | undefined;
-    for (const e of overpassToggles) {
-      if (applyOverpassToggle(e, collectFailure, configPath)) {
-        toggleWrote = true;
-        overpassNotice = e.enabled
-          ? "Overpass turned on — the plugin routes the conductor and every lane through the provider's tiers from its next turn; per-role OpenCode models are kept but not applied while it is on."
-          : 'Overpass turned off — the conductor and the lanes return to their normal model pins from the next turn.';
-      }
-    }
+    let providerNotice: string | undefined;
     for (const e of overpassProviders) {
-      if (applyOverpassProvider(e, collectFailure, configPath)) { toggleWrote = true; overpassNotice = `Overpass provider set to '${e.provider}' — it applies from the next turn while Overpass is on.`; }
-    }
-    for (const e of overpassBypasses) {
-      if (applyOverpassBypass(e, collectFailure, configPath)) {
-        toggleWrote = true;
-        overpassNotice = e.enabled
-          ? 'conductor bypass turned on — while Overpass is on, the conductor keeps its normal model pin and every other lane is routed.'
-          : 'conductor bypass turned off — while Overpass is on, the conductor is routed through the tier too.';
-      }
-    }
-    for (const e of overpassRoles) {
-      if (applyOverpassRole(e, collectFailure, configPath)) {
-        toggleWrote = true;
-        overpassNotice = `Overpass tier for '${e.role}' set to ${e.tier}${e.effort ? ` at ${e.effort} effort` : ' with no effort override'} — it applies from the next turn; the saved model is unchanged.`;
-      }
+      if (applyOverpassProvider(e, collectFailure, configPath)) { toggleWrote = true; providerNotice = `Overpass provider set to '${e.provider}' — overpass/<tier> models run through it from the next turn.`; }
     }
     if (toggleFailure !== undefined) {
       notice(toggleFailure);
-    } else if (overpassNotice !== undefined) {
-      notice(overpassNotice);
-    } else if (autoMergeWritten !== undefined) {
-      // what the switch changes, said at the moment it is made
-      notice(autoMergeWritten
-        ? 'auto-merge turned on — in work mode, a PR whose Copilot review loop ends clean and that GitHub reports mergeable is squash-merged by the conductor and its branch deleted.'
-        : 'auto-merge turned off — in work mode, a human merges every PR, a clean one included.');
-    } else if (modeWritten !== undefined) {
-      // what the switch changes, said at the moment it is made: only how work ships
-      notice(modeWritten === 'work'
-        ? 'project mode set to work — /sterling:merge now opens a pull request and the review loop follows; nothing is merged directly.'
-        : 'project mode set to hobby — /sterling:merge now merges directly into the base branch.');
+    } else if (providerNotice !== undefined) {
+      notice(providerNotice);
+    } else if (workflowNotice !== undefined) {
+      notice(workflowNotice);
     } else if (handoffWritten !== undefined) {
       // what the switch does to the files, said at the moment it is made
       notice(handoffWritten
@@ -1273,7 +703,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session (Claude Code) or run opencode reload (OpenCode) to reload the MCP server.');
     }
-    if (refused || customEffects.length || swaps.length || overrides.length || workerModels.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
+    if (customEffects.length || agentModels.length || workflows.length || tddToggles.length || handoffToggles.length || overpassProviders.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);

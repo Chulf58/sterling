@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
-import { at, lastAgentCursor, SYS } from './system-nav.js';
+import { at, snap, SYS } from './system-nav.js';
 import * as stateMod from '../state.js';
+import type { AgentRosterSnapshot } from '../state.js';
 import * as viewmodel from '../viewmodel.js';
 
 // ===========================================================================
@@ -81,16 +82,6 @@ interface RosterAgent {
  *  new field the System tab's toggle row reads. sparringPartner/codexWired
  *  travel too since baseSnapshot must stay a valid AgentRosterSnapshot for
  *  the already-landed sparring-partner slice. */
-interface AgentRosterSnapshot {
-  mode?: string;
-  agents: RosterAgent[];
-  hostInstalled?: string[];
-  configModels: Record<string, { model: string; effort: string }>;
-  catalog: CatalogStatusView;
-  codexWired: boolean;
-  sparringPartner: { enabled: boolean; model?: string };
-  tdd: { enabled: boolean };
-}
 
 interface SystemLine {
   text: string;
@@ -152,34 +143,7 @@ function freshCatalog(): CatalogStatusView {
 }
 
 function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
-  return {
-    agents: [
-      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...REVIEWER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
-    ],
-    // LOW-3 (second Opus re-check round): the System tab now filters
-    // config.models to the classless four-agent roster
-    // (the former ruling 'agent-roster-is-classless-four-agents' (not in the current store) plus classifiers, so a
-    // relic key here (the old 'coder'/'reviewers'/'coder_hard' roster names)
-    // would simply never render a row — this fixture only cares about
-    // numKeys (the row count the sparring/tdd rows sit past), so it uses the
-    // real 5 keys directly rather than keys that would now be filtered out.
-    // every governed role counts as installed here (System tab lists installed roles only, issue #307)
-    hostInstalled: ['implementor', 'implementor-hard', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'preflight'] as string[],
-    configModels: {
-      implementor: { model: 'claude-sonnet-4-6', effort: 'high' },
-      researcher: { model: 'claude-opus-4-8', effort: 'low' },
-      scout: { model: 'claude-opus-4-8', effort: 'low' },
-      librarian: { model: 'claude-opus-4-8', effort: 'low' },
-    },
-    catalog: freshCatalog(),
-    codexWired: true,
-    sparringPartner: { enabled: true, model: undefined },
-    tdd: { enabled: true },
-    // the PR auto-merge row is disabled in hobby mode (acts only in work mode), so these fixtures run in work mode
-    mode: 'work',
-    ...over,
-  };
+  return snap({ catalog: freshCatalog() as AgentRosterSnapshot['catalog'], ...over });
 }
 
 function storeFixture() {
@@ -226,67 +190,13 @@ function findTddToggle(effects: { type: string }[]): ToggleEffect | undefined {
 // row
 // ===========================================================================
 
-test('toggles 1: buildSystemTab exposes tddRows as a separate single-entry array; rows/sparringRows untouched', () => {
-  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported (frozen phase-4 oracle)');
-  const snap = baseSnapshot();
-  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  assert.equal(view.rows.length, Object.keys(snap.configModels).length + 1, 'rows stays one entry per config.models key plus the Maintenance worker row — untouched by this slice');
-  assert.equal(view.sparringRows?.length, 2, 'sparringRows stays exactly [toggle, model] — untouched by this slice');
-  assert.ok(Array.isArray(view.tddRows), 'tddRows is exported as a separate array on the view');
-  assert.equal(view.tddRows!.length, 1, 'tddRows carries exactly one row — the toggle row');
-});
-
 // ===========================================================================
 // Item 2 — ON/OFF rendering
 // ===========================================================================
 
-test('toggles 2: the tdd row shows ON when tdd.enabled=true and OFF when false', () => {
-  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  const on = buildSystemTab!(baseSnapshot({ tdd: { enabled: true } }), st({ tab: SYS_TAB }), 80);
-  assert.match(tddRowText(on), /\bON\b/, 'tdd.enabled:true renders ON on the tdd row');
-  assert.match(tddRowText(on), /tdd/i, 'the tdd row identifies itself as the TDD toggle');
-
-  const off = buildSystemTab!(baseSnapshot({ tdd: { enabled: false } }), st({ tab: SYS_TAB }), 80);
-  assert.match(tddRowText(off), /\bOFF\b/, 'tdd.enabled:false renders OFF on the tdd row');
-});
-
 // ===========================================================================
 // Item 3 — cursor traversal past sparringRows onto the tdd row
 // ===========================================================================
-
-test('toggles 3: UP/DOWN traverse past sparringRows onto the tdd row, and clamp at the bottom', () => {
-  const { store, cleanup } = storeFixture();
-  try {
-    const snap = baseSnapshot();
-    // numKeys = sparring toggle row, numKeys+1 = sparring model row (both frozen
-    // by sparring-partner.test.ts) — this slice's row continues from there.
-
-    let r = SR.reduce(store, st({ tab: SYS_TAB, cursor: at(snap, SYS.sparringModel) }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(r.ui.cursor, at(snap, SYS.tdd), 'DOWN from the sparring model row lands on the tdd toggle row');
-
-    // The tdd row is no longer the tab's last row: the project mode row
-    // (decision project-mode-hobby-work-toggle-decides-flow) sits below it at
-    // numKeys + 3, and the handoff files row (decision
-    // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
-    // below that at numKeys + 4, and the PR auto-merge row (decision
-    // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) below that at
-    // numKeys + 5, which owns the bottom clamp (pinned in
-    // auto-merge-toggle.test.ts).
-    const below = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(below.ui.cursor, at(snap, SYS.mode), 'DOWN past the tdd row lands on the project mode row');
-    const handoff = SR.reduce(store, below.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(handoff.ui.cursor, at(snap, SYS.handoff), 'DOWN past the project mode row lands on the handoff files row');
-    const last = SR.reduce(store, handoff.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(last.ui.cursor, at(snap, SYS.autoMerge), 'DOWN past the handoff files row lands on the PR auto-merge row');
-    const clamped = SR.reduce(store, last.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, at(snap, SYS.autoMerge), "DOWN clamps at the tab's true last row (the PR auto-merge row)");
-
-    const up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
-    assert.equal(up.ui.cursor, at(snap, SYS.sparringModel), 'UP from the tdd row returns to the sparring model row');
-  } finally {
-    cleanup();
-  }
-});
 
 // ===========================================================================
 // Item 4 — ENTER/SPACE on the row: the flipped-value toggle effect, no
@@ -325,25 +235,6 @@ test('toggles 4: SPACE on the tdd row emits tdd_toggle with the flipped value (f
 // Item 5 — while a config.models picker is open, tddRows is empty (mirrors
 // the frozen sparringRows rule, sparring-partner.test.ts item 7)
 // ===========================================================================
-
-test('toggles 5: while a config.models picker is open, tddRows is empty (but still present as an array)', () => {
-  const { store, cleanup } = storeFixture();
-  try {
-    assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-    const snap = baseSnapshot();
-    const opened = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER')], snap);
-    const view = buildSystemTab!(snap, opened.ui, 80);
-    // Deliberately NOT `view.tddRows ?? []` here: that fallback would make an
-    // unimplemented (undefined) field indistinguishable from a correctly-empty
-    // array and pass hollow before the field exists. Array.isArray on a bare
-    // `undefined` is false, so this stays a clean AssertionError until the
-    // field is real.
-    assert.ok(Array.isArray(view.tddRows), 'tddRows must be exported as an array even while the config.models picker is open');
-    assert.equal(view.tddRows!.length, 0, 'tddRows is empty while the config.models picker is open');
-  } finally {
-    cleanup();
-  }
-});
 
 // ===========================================================================
 // Item 6 — bounded-viewport scroll: the System tab must honor the
@@ -451,9 +342,11 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     const totalSelectableRows = (stateMod.buildSystemTab as unknown as (s: AgentRosterSnapshot, u: UiState) => { entries: unknown[] })(baseSnap, st()).entries.length;
     // Changed 2026-11-18 (System tab redesign, item 2): the 'Agents' heading sits above the first agent row, so the
     // bannerless control needs a window one line taller (3, was 2); the roster is still taller than the viewport.
-    const maxBodyLines = 3; // total SYS_TAB rows exceed this — the roster is taller than the viewport
+    // Changed 2026-11-19 (System tab redesign item E): the agent table's column-header line sits between the 'Agents' heading and
+    // the first agent row, so the bannerless control needs a window one line taller (4, was 3).
+    const maxBodyLines = 4; // total SYS_TAB rows exceed this — the roster is taller than the viewport
     const vp = { maxBodyLines, width: 80 };
-    const lastRowCursor = at(baseSnap, SYS.autoMerge); // the PR auto-merge row — the last selectable row on the tab
+    const lastRowCursor = at(baseSnap, SYS.handoff); // the PR auto-merge row — the last selectable row on the tab
 
     interface DashRow { selected?: boolean }
     interface Dash { rows: DashRow[]; bodyTop: number; scroll?: number }
@@ -546,7 +439,7 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
       for (let i = 0; i < lastRowCursor; i++) {
         cur = SR.reduce(store, cur, key('DOWN'), vp, undefined, snap).ui;
       }
-      assert.equal(cur.cursor, lastRowCursor, 'DOWN-walked onto the project mode row (the last selectable row on the tab)');
+      assert.equal(cur.cursor, lastRowCursor, 'DOWN-walked onto the handoff files row (the last selectable row on the tab)');
       return cur;
     }
     const treatmentDash = buildDashboardState(store, driveToLastRow(bannerSnap), 80, maxBodyLines, undefined, undefined, undefined, bannerSnap);

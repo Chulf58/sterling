@@ -1,5 +1,5 @@
-// Config write-back for the System-tab sparring/TDD toggles (decision
-// foreign_752caf98, tdd-and-mutation-toggles-in-system-tab; the sibling
+// Config write-back for the System tab (decisions foreign_752caf98 and
+// system-tab-layout-one-screen-with-three-sections-agents-one; the sibling
 // mutation-verification toggle this module used to also write back was
 // REMOVED entirely — decision
 // cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
@@ -27,10 +27,10 @@
 // — board 09f05fca half 2, review fix.
 import { chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { OVERPASS_PROVIDER_RE, resolveOverpass } from '@sterling/schemas';
+import { MODEL_REF_RE, OVERPASS_PROVIDER_RE, canonicalConfigSchema, toCanonicalConfig } from '@sterling/schemas';
 // Static, so esbuild inlines it into the bundles (as controller.ts does for the other scripts/lib modules).
 import { writeFileAtomic } from '../../../scripts/lib/atomic-write.mjs';
-import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, OverpassBypassEffect, OverpassProviderEffect, OverpassRoleEffect, OverpassToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
+import type { AgentModelEffect, HandoffToggleEffect, OverpassProviderEffect, TddToggleEffect, WorkflowEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -117,49 +117,17 @@ export function writeConfigKey(target: string, key: string, update: (old: unknow
   replaceConfigFile(target, JSON.stringify(raw, null, 2) + '\n', original, seams);
 }
 
-/** Execute a sparring_toggle effect: config.sparring_partner.enabled write
- *  only (advisory-only surface, article interaction a — never gates, so
- *  there is no downstream projection or decision record the way a model swap
- *  has). Preserves the model field untouched. Optional trailing `path`
- *  overrides the cwd-derived default (delta review finding: the TUI's own
- *  read/write path is argv-derived, not cwd-derived, so a foreign launch cwd
- *  must never split the two). */
-export function applySparringToggle(e: SparringToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
-  try {
-    writeConfigKey(configPath(path), 'sparring_partner', (old) => ({ ...(old as { enabled?: boolean; model?: string } | undefined), enabled: e.enabled }));
-    return true;
-  } catch (err) {
-    onError?.(`sparring partner toggle failed — ${(err as Error).message}`);
-    return false;
-  }
-}
-
 /** Execute a tdd_toggle effect: config.tdd.enabled write only (decision
- *  752caf98) — mirrors applySparringToggle exactly. OFF silences the
+ *  752caf98) — mirrors the other toggles. OFF silences the
  *  automatic default TDD posture only; H5/H18 test protection is untouched.
  *  Optional trailing `path` overrides the cwd-derived default (see
- *  applySparringToggle). */
+ *  applyTddToggle). */
 export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
     writeConfigKey(configPath(path), 'tdd', (old) => ({ ...(old as { enabled?: boolean } | undefined), enabled: e.enabled }));
     return true;
   } catch (err) {
     onError?.(`tdd toggle failed — ${(err as Error).message}`);
-    return false;
-  }
-}
-
-/** Execute a mode_toggle effect: config.mode write only (decision
- *  project-mode-hobby-work-toggle-decides-flow) — mirrors applyTddToggle. The
- *  mode decides only how work ships (a direct merge, or a pull request with
- *  the review loop); it writes and deletes no files. Optional trailing `path`
- *  overrides the cwd-derived default (see applySparringToggle). */
-export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
-  try {
-    writeConfigKey(configPath(path), 'mode', () => e.mode);
-    return true;
-  } catch (err) {
-    onError?.(`mode toggle failed — ${(err as Error).message}`);
     return false;
   }
 }
@@ -171,7 +139,7 @@ export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => 
  *  being maintained); turning it on is provisioned by the next init or
  *  /sterling:update. A recorded `handoff` that is not an object is replaced,
  *  never spread. Optional trailing `path` overrides the cwd-derived default
- *  (see applySparringToggle). */
+ *  (see applyTddToggle). */
 export function applyHandoffToggle(e: HandoffToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
     writeConfigKey(configPath(path), 'handoff', (old) => {
@@ -185,96 +153,71 @@ export function applyHandoffToggle(e: HandoffToggleEffect, onError?: (msg: strin
   }
 }
 
-/** Execute an auto_merge_toggle effect: config.pr_review.auto_merge_on_clean
- *  write only (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean) —
- *  mirrors applyHandoffToggle. Every other pr_review key (copilot_logins, the
- *  pinned Copilot identity) is kept. A recorded `pr_review` that is not an
- *  object is replaced, never spread. Optional trailing `path` overrides the
- *  cwd-derived default (see applySparringToggle). */
-export function applyAutoMergeToggle(e: AutoMergeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
-  try {
-    writeConfigKey(configPath(path), 'pr_review', (old) => {
-      const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? old : {};
-      return { ...block, auto_merge_on_clean: e.enabled };
-    });
-    return true;
-  } catch (err) {
-    onError?.(`auto-merge toggle failed — ${(err as Error).message}`);
-    return false;
+/** Throw unless the whole proposed document passes canonicalConfigSchema (after the one legacy
+ *  transform, which is where a legacy document is tolerated): a write a reader would refuse is never persisted. */
+function assertCanonical(proposed: Record<string, unknown>): void {
+  const checked = canonicalConfigSchema.safeParse(toCanonicalConfig(proposed).config);
+  if (!checked.success) {
+    throw new Error(`the result is not a valid canonical config (${checked.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}). Nothing was written.`);
   }
 }
 
-/** Write one key of config.overpass (decision
- *  overpass-toggle-work-mode-only-routes-every-lane-through-tiers). Every other
- *  overpass key is kept; a recorded `overpass` that is not an object is replaced,
- *  never spread. Nothing else is written: the plugin applies the routing on its
- *  next turn. */
-function writeOverpassKey(field: 'enabled' | 'provider' | 'conductor_bypass', value: boolean | string, path?: string): void {
-  writeConfigKey(configPath(path), 'overpass', (old) => {
-    const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? old : {};
-    return { ...block, [field]: value };
-  });
-}
+const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Execute an overpass_role effect: config.overpass.roles.<role> becomes the picked
- *  tier and optional effort. Every other overpass key and every other role is kept;
- *  a recorded `overpass` or `roles` that is not an object is replaced, never spread.
- *  The whole proposed overpass block goes through resolveOverpass before anything is
- *  written, so a caller that skips the reducer can never persist a role, tier or effort
- *  the resolver would throw on (including a non-string tier). config.models and the
- *  agent files are not touched. */
-export function applyOverpassRole(e: OverpassRoleEffect, onError?: (msg: string) => void, path?: string): boolean {
+/** Execute an agent_model effect: config.models.<key> becomes {model, effort?}, replacing the entry whole so
+ *  no per-host field survives; a null model leaves an empty entry (a custom agent on its host's default). The
+ *  document is validated with canonicalConfigSchema before the write. */
+export function applyAgentModel(e: AgentModelEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    const entry = e.effort === undefined ? { tier: e.tier } : { tier: e.tier, effort: e.effort };
-    writeConfigKey(configPath(path), 'overpass', (old) => {
-      const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? (old as Record<string, unknown>) : {};
-      const roles = block.roles !== null && typeof block.roles === 'object' && !Array.isArray(block.roles) ? (block.roles as Record<string, unknown>) : {};
-      const proposed = { ...block, roles: { ...roles, [e.role]: entry } };
-      // the canonical resolver judges the whole proposed block, so a value it would
-      // throw on is never persisted (a throw there blocks every dispatch)
-      resolveOverpass({ mode: 'work', overpass: proposed }, { host: 'opencode' });
+    // the legacy transform reads a bare Claude id as anthropic/<id>, so a bare id would pass the document check
+    // below and be written bare: a write names its model as <provider>/<id> itself
+    if (e.model !== null && !MODEL_REF_RE.test(e.model)) throw new Error(`'${e.model}' is not a canonical model (<provider>/<id>). Nothing was written.`);
+    writeConfigKey(configPath(path), 'models', (old, raw) => {
+      const models = isObj(old) ? old : {};
+      const entry = e.model === null ? {} : { model: e.model, ...(e.effort === undefined ? {} : { effort: e.effort }) };
+      const proposed = { ...models, [e.key]: entry };
+      assertCanonical({ ...raw, models: proposed });
       return proposed;
     });
     return true;
   } catch (err) {
-    onError?.(`Overpass role update failed — ${(err as Error).message}`);
+    onError?.(`model change for '${e.key}' failed — ${(err as Error).message}`);
     return false;
   }
 }
 
-/** Execute an overpass_toggle effect: config.overpass.enabled. Optional trailing
- *  `path` overrides the cwd-derived default (see applySparringToggle). */
-export function applyOverpassToggle(e: OverpassToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
+/** Execute a workflow_set effect: one field of config.workflow. The block is built from the workflow the
+ *  canonical transform reads (a legacy mode becomes its merge path and reviewer defaults), so writing one
+ *  field of a project that still carries `mode` records the other three as they read now. Validated with
+ *  canonicalConfigSchema (reviewers 1-5, merge direct or pr, booleans) before the write. */
+export function applyWorkflow(e: WorkflowEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    writeOverpassKey('enabled', e.enabled, path);
+    writeConfigKey(configPath(path), 'workflow', (_old, raw) => {
+      const current = (toCanonicalConfig(raw).config as { workflow?: unknown }).workflow;
+      const proposed = { ...(isObj(current) ? current : {}), [e.field]: e.value };
+      assertCanonical({ ...raw, workflow: proposed });
+      return proposed;
+    });
     return true;
   } catch (err) {
-    onError?.(`Overpass toggle failed — ${(err as Error).message}`);
+    onError?.(`workflow update failed — ${(err as Error).message}`);
     return false;
   }
 }
 
-/** Execute an overpass_provider effect: config.overpass.provider. The provider id
- *  was validated by the reducer; it is checked again here, so a caller that skips
- *  the reducer can never write an id the resolver would refuse. */
+/** Execute an overpass_provider effect: config.overpass.provider. Every other overpass key is kept; the
+ *  document is validated with canonicalConfigSchema, so a provider id the schema refuses is never written. */
 export function applyOverpassProvider(e: OverpassProviderEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
     if (!OVERPASS_PROVIDER_RE.test(e.provider)) throw new Error(`'${e.provider}' is not a provider id`);
-    writeOverpassKey('provider', e.provider, path);
+    writeConfigKey(configPath(path), 'overpass', (old, raw) => {
+      const proposed = { ...(isObj(old) ? old : {}), provider: e.provider };
+      assertCanonical({ ...raw, overpass: proposed });
+      return proposed;
+    });
     return true;
   } catch (err) {
     onError?.(`Overpass provider update failed — ${(err as Error).message}`);
-    return false;
-  }
-}
-
-/** Execute an overpass_bypass_toggle effect: config.overpass.conductor_bypass. */
-export function applyOverpassBypass(e: OverpassBypassEffect, onError?: (msg: string) => void, path?: string): boolean {
-  try {
-    writeOverpassKey('conductor_bypass', e.enabled, path);
-    return true;
-  } catch (err) {
-    onError?.(`Overpass conductor bypass toggle failed — ${(err as Error).message}`);
     return false;
   }
 }

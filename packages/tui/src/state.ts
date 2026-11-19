@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, isCustomAgentKey, resolveHostSettings, type AgentHost, DEFAULT_OVERPASS_ROLE_EFFORTS, DEFAULT_OVERPASS_ROLE_TIERS, MAINTENANCE_WORKER_ROLE, OPENCODE_MODEL_REF_RE, AGY_MODEL_IDS, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_TIERS } from '@sterling/schemas';
+import { isCustomAgentKey, type AgentHost, MAINTENANCE_WORKER_ROLE, AGY_MODEL_IDS, AGY_MODEL_NAMESPACE, CLAUDE_PROVIDER, CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, MIN_REVIEWERS, MAX_REVIEWERS, OVERPASS_EFFORTS, OVERPASS_MODEL_NAMESPACE, OVERPASS_PROVIDER_RE, OVERPASS_TIERS, twoModelsReason, unsupportedAgents } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -98,17 +98,11 @@ export interface UiState {
    *  swap or a catalog/roster failure is VISIBLE (not lost to the alternate
    *  screen). Cleared on the next navigation / tab switch / selector open. */
   notice?: string;
-  /** System tab, sparring-partner model row (board a0714d0b, slice 2): free-text
-   *  edit-in-progress buffer for sparring_partner.model. Absent → the plain
-   *  value is shown; present (even '') → every printable key/BACKSPACE feeds
-   *  it, ENTER commits (empty commits as "unset"), ESCAPE cancels. Mirrors the
-   *  Knowledge tab's always-visible-field idiom, scoped to one row. */
-  sparringModelEdit?: string;
   /** System tab, adoption confirm: the plan the controller computed for the not-yet-adopted agent `id`,
    *  its lines, and whether it can go ahead. ENTER confirms an ok plan, ESCAPE or any move cancels. */
   adoptConfirm?: { id: string; ok: boolean; lines: string[] };
   /** System tab, Overpass provider row: the edit buffer for config.overpass.provider,
-   *  the same always-capture idiom as sparringModelEdit. ENTER commits only a
+   *  the same always-capture idiom as the board edit. ENTER commits only a
    *  valid provider id (OVERPASS_PROVIDER_RE) and otherwise keeps the buffer open
    *  with a notice; ESCAPE cancels. */
   overpassProviderEdit?: string;
@@ -117,7 +111,7 @@ export interface UiState {
    *  present → 'e' has opened the selected todo's text for editing — every
    *  printable key/BACKSPACE feeds `text`, ENTER commits (through the same
    *  store write path board_update uses), ESCAPE cancels. Mirrors
-   *  sparringModelEdit's always-capture idiom, scoped to one card.
+   *  the always-capture idiom, scoped to one card.
    *  `version` (fix round, Opus review of 71c1f41) is the record's version
    *  as read the moment 'e' was pressed — read fresh via store.get, never
    *  from the projected Card, which carries no version field. ENTER re-reads
@@ -133,18 +127,14 @@ export interface UiState {
   quitConfirm?: boolean;
 }
 
-/** The System-tab inline selector (run r-f9a7). `key` is the config.models key
- *  under edit; the machine walks model → effort → commit; `highlight` is the
- *  current option index; `model` holds the model confirmed at the model stage. */
+/** The System-tab picker (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude): `key` is the
+ *  config.models key under edit; step 1 picks the model, step 2 its effort or variant; `highlight` is the
+ *  current option index; `model` holds the model confirmed at step 1. */
 export interface SystemSelector {
   key: string;
-  /** 'model' and 'effort' edit config.models; 'tier' and 'role_effort' edit
-   *  config.overpass.roles.<role> and open only while Overpass is effective. */
-  stage: 'model' | 'effort' | 'tier' | 'role_effort';
+  stage: 'model' | 'effort';
   highlight: number;
   model?: string;
-  /** The tier confirmed at the 'tier' stage, carried to the 'role_effort' stage. */
-  tier?: string;
 }
 
 export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '', scroll: 0 };
@@ -158,12 +148,6 @@ export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery
 // call happens in main.ts so buildSystemTab stays pure/deterministic).
 // ---------------------------------------------------------------------------
 
-/** One installed agent, as read from its .claude/agents/<name>.md frontmatter. */
-export interface RosterAgent {
-  name: string;
-  installedModel: string;
-  installedEffort: string;
-}
 /** A custom agent found in a project agent folder and not adopted yet: shown with its host-qualified
  *  identity and an Adopt action (GitHub #312). */
 export interface CustomAgentView {
@@ -184,13 +168,6 @@ export interface AdoptedAgentView {
   /** what planCustomAgents refused for it: a host and the reason, shown on the row */
   refusals: Array<{ host: string; reason: string }>;
 }
-/** config.models.<key> of an adopted agent: every field may be absent (the host's own default). */
-export interface CustomModelView {
-  model?: string;
-  effort?: string;
-  opencode_model?: string;
-  agy_model?: string;
-}
 /** A models-catalog entry (reference_material.catalog.entries[]). */
 export interface CatalogEntry {
   id: string;
@@ -198,192 +175,80 @@ export interface CatalogEntry {
   tier: string;
   status: string;
   /** 'anthropic', 'openai', ... Absent on a catalog written before vendors
-   *  existed; such an entry takes the Claude path like an 'anthropic' one. */
+   *  existed; such an entry is an anthropic one. */
   vendor?: string;
 }
-
-/** True for a catalog entry Claude Code cannot run (any vendor but anthropic):
- *  the picker offers it only as the role's OpenCode-only override (decision
- *  opencode-only-model-override-per-role-for-openai-picks). */
-export function isOpenCodeOnlyEntry(entry: CatalogEntry): boolean {
-  return entry.vendor !== undefined && entry.vendor !== 'anthropic';
-}
 /** The catalog-status view computed at activation (present/stale/staleDate) plus
- *  the entries the selector offers. Precomputed so the projection has no clock. */
+ *  the entries the picker offers. Precomputed so the projection has no clock. */
 export interface CatalogStatusView {
   present: boolean;
   stale: boolean;
   staleDate: string | null;
   entries: CatalogEntry[];
 }
-/** Sparring-partner config (board a0714d0b, article sparring-partner interaction
- *  h/i): the TUI-editable slice of config.sparring_partner. model absent/empty
- *  = Codex CLI default. */
-export interface SparringPartnerView {
-  enabled: boolean;
+/** One agent's canonical entry (config.models.<key>): its one model as <provider>/<id>, and its effort. */
+export interface AgentModelView {
   model?: string;
+  effort?: string;
 }
+/** The workflow settings as the System tab reads them (config.workflow, through the canonical transform). */
+export interface WorkflowView {
+  merge: 'direct' | 'pr';
+  reviewers: number;
+  copilot_loop: boolean;
+  auto_merge_on_clean: boolean;
+}
+/** The System tab's view of the project, read at tab activation (never the 1 Hz loop, decision
+ *  foreign_98064d77) through parseCanonicalConfig, so it never depends on parseConfig's shape. */
 export interface AgentRosterSnapshot {
-  agents: RosterAgent[];
-  /** opencode_model is the role's OpenCode-only override (<provider>/<model>). */
-  configModels: Record<string, { model: string; effort: string; opencode_model?: string; agy_model?: string }>;
-  /** Governed agent names installed in the OpenCode or agy folders but not the Claude one
-   *  (a governed role is listed when installed in any host folder). */
-  hostInstalled?: string[];
-  /** Governed agent names installed in the OpenCode folder (.opencode/agents/sterling): an OpenCode
-   *  override is accepted only for a role in this list. */
-  opencodeInstalled?: string[];
-  /** Governed agent names installed in agy's folder: an agy override is accepted only for a role in this list. */
-  agyInstalled?: string[];
+  /** config.models, canonical: one model per agent key. */
+  models: Record<string, AgentModelView>;
+  /** The hosts the hosts column judges: Claude Code and OpenCode always, agy when it is installed. */
+  hosts: AgentHost[];
+  /** Roles whose legacy entry still names two models (the transform's conflicts): their hosts cell says to run /sterling:update. */
+  twoModels?: string[];
+  /** Set when the config cannot be read as canonical: the agent and workflow rows then say so, never a default. */
+  configError?: string;
   /** Custom agents from the project's agent folders that are not adopted yet: an Adopt row each. */
   customAgents?: CustomAgentView[];
   /** Adopted custom agents (config.models.custom-*): full editable rows. */
   adoptedAgents?: AdoptedAgentView[];
-  /** Their config.models entries (model and effort may be absent; configModels carries '' placeholders). */
-  customModels?: Record<string, CustomModelView>;
-  /** Antigravity CLI is installed: the model picker then offers the agy-only ids. */
-  agy?: boolean;
   catalog: CatalogStatusView;
-  /** config.sparring_partner, read at the same activation-only cadence as the
-   *  rest of the snapshot. Additive-optional (decision foreign_34d61f60's idiom, as
-   *  cited for the roster? param itself): absent → defaults applied where
-   *  rendered, so the phase-4 fixtures that predate this field keep compiling
-   *  and passing unchanged. */
-  sparringPartner?: SparringPartnerView;
-  /** Machine-probe fact (article interaction h, P5): whether THIS machine's
-   *  plugin manifest (.claude-plugin/sterling-mcp.json) carries a codex mcp
-   *  server entry. Presence = wired. Computed once at activation, never the
-   *  1 Hz loop — a probe, not a live poll. Distinct from sparringPartner.enabled
-   *  (a deliberate per-project choice): this is a per-machine capability fact
-   *  that flipping the toggle must never hide. Additive-optional, same reason
-   *  as sparringPartner above. */
-  codexWired?: boolean;
-  /** config.tdd (decision foreign_752caf98, tdd-and-mutation-toggles-in-system-tab):
-   *  the TDD-by-default posture toggle. Additive-optional, same idiom as
-   *  sparringPartner — absent → the buildSystemTab default below applies. */
+  /** config.workflow; absent → the schema defaults (direct, 1 reviewer, no loop, auto-merge on). */
+  workflow?: WorkflowView;
+  /** config.overpass.provider (the logical overpass/<tier> models run through it); absent → 'overpass'. */
+  overpassProvider?: string;
+  /** config.tdd: absent → on. */
   tdd?: { enabled: boolean };
-  /** config.mode (decision project-mode-hobby-work-toggle-decides-flow): the RAW
-   *  config value, never the parsed one, so an invalid value renders INVALID
-   *  instead of vanishing into a failed parse. Absent → hobby (the schema default);
-   *  null → the config could not be read (UNKNOWN, never the default). */
-  mode?: string | null;
   /** The handoff setting (decision
    *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-   *  true or false is the EFFECTIVE setting as the writers read it
-   *  (readHandoffEnabled: config.handoff.enabled, or on when the key is absent
-   *  and handoff files are tracked in git). A string is a raw value that is
-   *  not a boolean (INVALID). Absent → off; null → the setting could not be
-   *  determined (UNKNOWN, never the default): the config could not be read, or
-   *  the key is absent and git could not say what is tracked. */
+   *  true or false is the EFFECTIVE setting as the writers read it. A string is a raw value that is
+   *  not a boolean (INVALID). Absent → off; null → the setting could not be determined (UNKNOWN). */
   handoff?: boolean | string | null;
-  /** Why the handoff row reads as it does, shown in brackets after the value:
-   *  'not set' for an absent key, the tracked-files note for ON without a key,
-   *  and the git error for UNKNOWN. Absent for an explicit key; an UNKNOWN
-   *  without it is an unreadable config. */
+  /** Why the handoff row reads as it does, shown in brackets after the value. */
   handoffDetail?: string;
-  /** config.storage (decision storage-backend-is-its-own-config-key-written-only-by-store-move),
-   *  read-only: the RAW config value, so an unrecognized value shows as such instead
-   *  of vanishing. Absent → SQLite (the routing default); null → the config could
-   *  not be read (UNKNOWN, never the default). Only 'sqlite' and 'postgres' are
-   *  recognized; any other value comes back as its JSON text. */
+  /** config.storage, read-only: the RAW config value. Absent → SQLite; null → the config could not be read. */
   storage?: string | null;
-  /** config.pr_review.auto_merge_on_clean (decision
-   *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean), as its strict judge
-   *  autoMergeOnCleanOf reads it: true or false, absent → on. A string is a raw
-   *  value the judge refuses (INVALID); null → the config could not be read
-   *  (UNKNOWN, never the default). */
-  autoMergeOnClean?: boolean | string | null;
-  /** Which host opened the dashboard ('opencode' for the OpenCode host). The
-   *  Overpass rows show only on 'opencode' (decision
-   *  overpass-toggle-work-mode-only-routes-every-lane-through-tiers). Absent →
-   *  not OpenCode. */
+  /** Which host opened the dashboard. */
   host?: string;
-  /** config.overpass as the System tab reads it (the controller fills it from the
-   *  raw config; absent → the schema defaults, off). */
-  overpass?: OverpassView;
-  /** maintenance_worker.opencode_model as the Maintenance worker row shows it (the
-   *  controller fills it from the raw config): opencodeModel is null when unset, and
-   *  `invalid` carries the JSON text of a value that is not a usable string, and `unreadable`
-   *  the reason when the config cannot be read or is not an object. Absent → unset. */
-  maintenanceWorker?: { opencodeModel: string | null; invalid?: string; unreadable?: string };
 }
-
-/** The Overpass settings the three System-tab rows show. A boolean field is
- *  true/false, a string is a raw value that is not a boolean (INVALID), and null
- *  means the config could not be read (UNKNOWN, never the default). */
-export interface OverpassView {
-  enabled: boolean | string | null;
-  provider: string | null;
-  conductorBypass: boolean | string | null;
-  /** resolveOverpass's verdict for this host: enabled, work mode, OpenCode, and
-   *  the config valid. False when the resolver refuses the config. */
-  effective: boolean;
-  /** Set when config.overpass is present but not an object: every row reads INVALID. */
-  invalid?: string;
-  /** The JSON text of a provider that is not a string (INVALID); provider is then null. */
-  providerInvalid?: string;
-  /** Each role's resolved tier and optional effort (resolveOverpass: config.overpass.roles
-   *  over the per-role default tiers), filled while the config resolves. Absent → the
-   *  default tier of each role with no effort. */
-  roles?: Record<string, { tier: string; effort?: string }>;
-}
-
-const DEFAULT_OVERPASS_VIEW: OverpassView = { enabled: false, provider: 'overpass', conductorBypass: true, effective: false };
-
-type OverpassRole = (typeof OVERPASS_ROLES)[number];
-const isOverpassRole = (key: string): key is OverpassRole => (OVERPASS_ROLES as readonly string[]).includes(key);
-
-/** The tier and effort a role runs on while Overpass is effective. */
-function overpassRoute(view: OverpassView, role: OverpassRole): { tier: string; effort?: string } {
-  return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
-}
-
-/** The effort text of a role's Overpass title: the config's effort, else the role's default
- *  effort marked '(default)', else nothing (no effort is sent). */
-function overpassEffortText(view: OverpassView, role: OverpassRole): string {
-  const set = overpassRoute(view, role).effort;
-  if (set) return ` ${set}`;
-  const fallback = DEFAULT_OVERPASS_ROLE_EFFORTS[role];
-  return fallback ? ` ${fallback} (default)` : '';
-}
-
-/** The tier picker's options: the Overpass tiers the user listed (OVERPASS_TIERS, in that
- *  order; the schema accepts any `agentic-*` name, so this is not a closed set), plus the
- *  role's current tier when it is a custom one. */
-function overpassTierOptions(view: OverpassView, role: OverpassRole): string[] {
-  const known: string[] = [...OVERPASS_TIERS];
-  const current = overpassRoute(view, role).tier;
-  return known.includes(current) ? known : [...known, current];
-}
-
-/** The effort picker's options: 'default' clears the role's effort. */
-const OVERPASS_EFFORT_OPTIONS: readonly string[] = ['default', ...OVERPASS_EFFORTS];
-
-/** The Overpass rows are offered only in work mode on the OpenCode host; hidden
- *  elsewhere, and the cursor clamp follows. */
-function overpassOffered(snap: AgentRosterSnapshot): boolean {
-  return snap.host === 'opencode' && snap.mode === 'work';
-}
-
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
 export interface SystemLine {
   text: string;
   kind?: string;
   selected?: boolean;
 }
-/** A System-tab row — one per config.models KEY (id 'sys:<key>'). */
+/** A System-tab row — one per agent key (id 'sys:<key>') or setting. */
 export interface SystemRow {
   id: string;
   key?: string;
-  drift?: boolean;
   agents?: string[];
   lines: SystemLine[];
 }
-/** Which block of the tab an entry belongs to: the agent roster (governed roles, the maintenance
- *  worker, custom agents) or the settings (toggles, the sparring model, Overpass, storage). */
-export type SystemSection = 'agents' | 'settings';
+/** Which block of the tab an entry belongs to (decision system-tab-layout-one-screen-with-three-sections-agents-one). */
+export type SystemSection = 'agents' | 'workflow' | 'project';
 /** What ENTER or SPACE does on an entry, as data (no callbacks, no IO): the reducer applies it.
- *  agent: the role's model/effort/tier picker state machine; toggle: push `effect`;
+ *  agent: the role's two-step model and effort picker; toggle: push `effect`;
  *  edit: open a text field by patching the UI state. */
 export type SystemAction =
   | { kind: 'agent'; key: string }
@@ -398,7 +263,7 @@ export interface SystemEntry {
   id: string;
   section: SystemSection;
   cursorable: boolean;
-  /** the rendered lines (and the row's key, drift and agents, for agent rows) */
+  /** the rendered lines (and the row's key, for agent rows) */
   row: SystemRow;
   /** ENTER/SPACE; absent on a read-only entry */
   action?: SystemAction;
@@ -406,121 +271,97 @@ export interface SystemEntry {
    *  holds no cursor index and emits no effect. */
   disabled?: string;
 }
-/** The ids the older parallel lists carried, so a consumer can still ask for "the tdd row". */
-const LEGACY_VIEW_LISTS = {
-  sparringRows: ['sys:sparring_enabled', 'sys:sparring_model'],
-  tddRows: ['sys:tdd_enabled'],
-  modeRows: ['sys:project_mode'],
-  handoffRows: ['sys:handoff_files'],
-  autoMergeRows: ['sys:pr_auto_merge'],
-  overpassRows: ['sys:overpass', 'sys:overpass_provider', 'sys:overpass_bypass'],
-  storageRows: ['sys:storage'],
-} as const;
 export interface SystemTabView {
   /** every visible entry, in draw and cursor order */
   entries: SystemEntry[];
   banner: string[];
-  /** The groupings below are derived from `entries` by id (never maintained apart from it), kept so
-   *  existing consumers keep their shape: `rows` is the agent rows of the roster (one per config.models
-   *  key, then the Maintenance worker), the others hold the settings rows of that name. */
+  /** The agent rows, derived from `entries` (never maintained apart from it). */
   rows: SystemRow[];
-  sparringRows: SystemRow[];
-  tddRows: SystemRow[];
-  modeRows: SystemRow[];
-  handoffRows: SystemRow[];
-  autoMergeRows: SystemRow[];
-  overpassRows: SystemRow[];
-  storageRows: SystemRow[];
-  /** read-only custom-agent rows (issue #307) */
+  workflowRows: SystemRow[];
+  projectRows: SystemRow[];
+  /** the not-yet-adopted custom agents (Adopt rows) */
   customRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
-  agents: [],
-  configModels: {},
+  models: {},
+  hosts: ['claude', 'opencode'],
   catalog: { present: false, stale: false, staleDate: null, entries: [] },
-  sparringPartner: { enabled: true },
-  codexWired: false,
   tdd: { enabled: true },
-  mode: 'hobby',
   handoff: false,
   storage: undefined,
-  autoMergeOnClean: true,
 };
 
-/** Pure scalar drift check: true iff the installed value differs from config. */
-export function driftOf(installed: string, config: string): boolean {
-  return installed !== config;
+/** The agents the table always lists, in order; adopted custom agents follow. */
+export const SYSTEM_AGENT_KEYS = [CONDUCTOR_MODEL_KEY, PLAN_MODEL_KEY, 'implementor', 'implementor-hard', 'reviewer', 'sparring', 'researcher', 'scout', 'librarian', 'preflight', MAINTENANCE_WORKER_ROLE] as const;
+
+const HOST_NAME: Record<AgentHost, string> = { claude: 'Claude Code', opencode: 'OpenCode', agy: 'agy' };
+const DEFAULT_WORKFLOW: WorkflowView = { merge: 'direct', reviewers: MIN_REVIEWERS, copilot_loop: false, auto_merge_on_clean: true };
+
+/** The provider of a canonical model reference (<provider>/<id>). */
+const providerOf = (ref: string): string => ref.slice(0, ref.indexOf('/'));
+
+/** The effort options of step 2 for a model (decision
+ *  one-model-per-agent-an-agent-has-a-single-model-not-a-claude, two-step picker). 'unset' removes the
+ *  effort. An agy model carries its variant in its id (agy/flash, agy/pro), so it has only 'unset'; 'max'
+ *  is allowed only on an Overpass tier (canonicalModelsSchema), and no other model offers xhigh or max. */
+export function effortOptions(model: string | undefined): string[] {
+  if (model === undefined) return ['unset'];
+  const provider = providerOf(model);
+  if (provider === AGY_MODEL_NAMESPACE) return ['unset'];
+  if (provider === OVERPASS_MODEL_NAMESPACE) return ['unset', ...OVERPASS_EFFORTS];
+  return ['unset', 'low', 'medium', 'high'];
 }
 
-/** System tab, LOW-3 (second Opus re-check round, feat/gap-hunt-round-1
- *  22e20f9): the ONLY config.models keys the System tab may render/edit —
- *  every governed agent key from AGENT_MODEL_KEY (the classless four-agent
- *  roster, the former ruling 'agent-roster-is-classless-four-agents' (not in the current store)).
- *  There is no config-only key any more: 'classifiers' belonged to the retired
- *  Haiku noise-gate and was removed (user-ruled 2026-10-23, "Remove it"). A
- *  relic/legacy key such as 'coder_hard' or 'classifiers' — no agent has
- *  EVER read it, and update/init now flag it as unread — is filtered out
- *  here rather than trusted from whatever `configModels` the caller hands
- *  in: a defensive floor, not just a fixture cleanup, since an old
- *  project's config.json can carry a stray key forever. */
-const SYSTEM_TAB_MODEL_KEYS = new Set<string>(Object.values(AGENT_MODEL_KEY));
+/** One line of the open picker; `option` is the index the highlight and a click address, absent on a group header. */
+export interface PickerSpec {
+  text: string;
+  option?: number;
+}
+/** What a model-step option commits: a canonical model reference, or (custom agents only) no model. */
+export type ModelChoice = { ref: string } | { inherit: true };
 
-/** §7.2 effort rule as data: no System-tab key ever offers xhigh or max. The
- *  one-time exception (coder_hard) was itself a config-only key no agent
- *  ever read, and it is no longer a renderable row at all (LOW-3 above) —
- *  so there is no longer a key this function needs to special-case. */
-export function effortOptions(key: string): string[] {
-  return ['low', 'medium', 'high'];
+/** The model step's options and their group headers, in draw order: anthropic and the other catalog
+ *  vendors, then agy's own ids, then overpass/<tier>; an adopted custom agent also offers inherit. A model the
+ *  agent already holds that no list carries is added under its own provider, so the picker never hides it. */
+export function modelChoices(snap: AgentRosterSnapshot, key: string): Array<{ group: string; choice: ModelChoice; label: string }> {
+  const out: Array<{ group: string; choice: ModelChoice; label: string }> = [];
+  const seen = new Set<string>();
+  const add = (group: string, ref: string, label: string): void => {
+    if (seen.has(ref)) return;
+    seen.add(ref);
+    out.push({ group, choice: { ref }, label });
+  };
+  if (isCustomAgentKey(key)) out.push({ group: 'default', choice: { inherit: true }, label: "inherit: the host's own model and effort" });
+  const vendors: string[] = [CLAUDE_PROVIDER];
+  for (const e of snap.catalog.entries) if (!vendors.includes(e.vendor ?? CLAUDE_PROVIDER)) vendors.push(e.vendor ?? CLAUDE_PROVIDER);
+  for (const v of vendors) for (const e of snap.catalog.entries) if ((e.vendor ?? CLAUDE_PROVIDER) === v) add(v, `${v}/${e.id}`, e.label);
+  for (const id of AGY_MODEL_IDS) add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, '');
+  for (const tier of OVERPASS_TIERS) add(OVERPASS_MODEL_NAMESPACE, `${OVERPASS_MODEL_NAMESPACE}/${tier}`, '');
+  const current = snap.models[key]?.model;
+  if (current !== undefined) add(providerOf(current), current, '(current)');
+  // keep the provider groups together once a current model was appended
+  const order: string[] = [];
+  for (const o of out) if (!order.includes(o.group)) order.push(o.group);
+  return order.flatMap((g) => out.filter((o) => o.group === g));
 }
 
-/** The model-value floor (decision foreign_98064d77): a committed swap model must be a
- *  claude-* id or the commit is refused. */
-export const MODEL_VALUE_RE = /^claude-/;
-
-/** The model picker's options for one key: every catalog entry, then, when the
- *  key carries an OpenCode override, one option that clears it. */
-type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' } | { kind: 'agy'; id: string } | { kind: 'agy_clear' } | { kind: 'inherit' };
-function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string; agy_model?: string } | undefined, agy = false, inheritable = false): ModelOption[] {
-  const opts: ModelOption[] = entries.map((entry) => ({ kind: 'entry', entry }));
-  if (config?.opencode_model) opts.push({ kind: 'clear' });
-  // every agy id is offered as the role's Antigravity-only override (issue #306) once
-  // agy is installed (snapshot.agy) or the role already carries one
-  if (agy || config?.agy_model) for (const id of AGY_MODEL_IDS) opts.push({ kind: 'agy', id });
-  if (config?.agy_model) opts.push({ kind: 'agy_clear' });
-  // an adopted custom agent may drop its model and effort: the host's own default (inherit)
-  if (inheritable) opts.push({ kind: 'inherit' });
-  return opts;
+/** The picker's lines for the open selector: the model step (grouped by provider) or the effort step. */
+export function pickerSpecs(snap: AgentRosterSnapshot, sel: SystemSelector): PickerSpec[] {
+  if (sel.stage === 'effort') return effortOptions(sel.model).map((eff, i) => ({ text: `effort ${eff}`, option: i }));
+  const specs: PickerSpec[] = [];
+  let group: string | undefined;
+  let index = 0;
+  for (const o of modelChoices(snap, sel.key)) {
+    if (o.group !== group) {
+      group = o.group;
+      specs.push({ text: `${o.group}` });
+    }
+    specs.push({ text: `${'ref' in o.choice ? o.choice.ref : 'inherit'}${o.label ? `  ${o.label}` : ''}`, option: index++ });
+  }
+  return specs;
 }
-
-/** The System tab's roster keys: the config.models keys it may show, then the
- *  maintenance worker. The worker is no config.models key (its model is
- *  maintenance_worker.opencode_model and its Overpass tier is a role of its own), so it
- *  is appended here and every cursor index below the roster counts it. */
-function systemKeys(snap: AgentRosterSnapshot): string[] {
-  // a governed role with no installed agent file in any host folder is not listed
-  // (user ruling 2026-11-18, GitHub issue #307)
-  const installed = new Set([...snap.agents.map((a) => a.name), ...(snap.hostInstalled ?? []), ...(snap.opencodeInstalled ?? []), ...(snap.agyInstalled ?? [])]);
-  const isInstalled = (k: string): boolean => [...installed].some((n) => AGENT_MODEL_KEY[n] === k);
-  const adopted = (snap.adoptedAgents ?? []).map((a) => a.key).filter((k) => snap.configModels[k] !== undefined);
-  return [...Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k) && isInstalled(k)), ...adopted, MAINTENANCE_WORKER_ROLE];
-}
-
-/** The model picker's options for one System-tab key (an adopted custom agent also offers inherit). */
-function optionsFor(snap: AgentRosterSnapshot, key: string): ModelOption[] {
-  const custom = isCustomAgentKey(key) ? snap.customModels?.[key] : undefined;
-  return modelOptions(snap.catalog.entries, snap.configModels[key], snap.agy, custom?.model !== undefined);
-}
-
-/** The worker row's model picker (Overpass off): every catalog entry as the OpenCode
- *  <vendor>/<id> reference the worker runs through, then, when one is set, an option
- *  that clears it. */
-type WorkerModelOption = { kind: 'entry'; ref: string; label: string } | { kind: 'clear' };
-function workerModelOptions(entries: CatalogEntry[], current: string | null | undefined): WorkerModelOption[] {
-  const opts: WorkerModelOption[] = entries.map((e) => ({ kind: 'entry', ref: `${e.vendor ?? 'anthropic'}/${e.id}`, label: e.label }));
-  if (current) opts.push({ kind: 'clear' });
-  return opts;
-}
+const pickerCount = (snap: AgentRosterSnapshot, sel: SystemSelector): number => pickerSpecs(snap, sel).filter((s) => s.option !== undefined).length;
 
 export interface RowLine {
   text: string;
@@ -656,54 +497,21 @@ export interface QuitEffect {
 export interface GithubRefreshEffect {
   type: 'github_refresh';
 }
-/** The System-tab commit effect (run r-f9a7): a VALUE the impure main.ts loop
- *  executes (config.models write → setInstalledModelEffort projection → swap
- *  decision record). from = the CURRENT config value being replaced. */
-export interface ModelSwapEffect {
-  type: 'model_swap';
+/** System tab agent row, step 2 committed: writes config.models.<key> as the one model (<provider>/<id>)
+ *  and its effort. `model` null (a custom agent's inherit) removes both. The entry is replaced whole, so no
+ *  per-host field survives (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude). */
+export interface AgentModelEffect {
+  type: 'agent_model';
   key: string;
-  from: { model: string; effort: string };
-  to: { model: string; effort: string };
-  agents: string[];
-  decisionTitle: string;
+  model: string | null;
+  effort?: string;
 }
-/** The System-tab OpenCode override commit (decision
- *  opencode-only-model-override-per-role-for-openai-picks): sets (`to`) or
- *  clears (`to` absent) config.models[key].opencode_model and re-renders the
- *  key's Sterling-full OpenCode agents. The Claude agent files are not touched.
- *  model/effort are the key's current Claude values, for writing an entry the
- *  config file does not yet carry. */
-export interface OpenCodeModelEffect {
-  type: 'opencode_model';
-  key: string;
-  from?: string;
-  to?: string;
-  model: string;
-  effort: string;
-  agents: string[];
-}
-/** The System-tab Antigravity override commit (issue #306): sets (`to`) or clears
- *  (`to` absent) config.models[key].agy_model and re-renders the agy agent files. */
-export interface AgyModelEffect {
-  type: 'agy_model';
-  key: string;
-  from?: string;
-  to?: string;
-  model: string;
-  effort: string;
-}
-/** System tab, sparring-partner toggle row (board a0714d0b): flips
- *  config.sparring_partner.enabled. Advisory-only (article interaction a) — the
- *  toggle only silences the automatic consult moments, it never gates. */
-export interface SparringToggleEffect {
-  type: 'sparring_toggle';
-  enabled: boolean;
-}
-/** System tab, sparring-partner model row: commits the free-text edit. An empty
- *  value clears the field back to unset (CLI default). */
-export interface SparringModelEffect {
-  type: 'sparring_model';
-  model: string;
+/** System tab, Workflow rows: writes one field of config.workflow (decision
+ *  settings-that-replace-project-mode-merge-path-reviewer-count). Carries the NEW value. */
+export interface WorkflowEffect {
+  type: 'workflow_set';
+  field: 'merge' | 'reviewers' | 'copilot_loop' | 'auto_merge_on_clean';
+  value: string | number | boolean;
 }
 /** System tab, tdd toggle row (decision foreign_752caf98): flips config.tdd.enabled.
  *  OFF silences the automatic default posture only — H5/H18 test protection
@@ -712,12 +520,6 @@ export interface TddToggleEffect {
   type: 'tdd_toggle';
   enabled: boolean;
 }
-/** System tab, project mode row (decision project-mode-hobby-work-toggle-decides-flow):
- *  writes config.mode. Carries the NEW mode. */
-export interface ModeToggleEffect {
-  type: 'mode_toggle';
-  mode: 'hobby' | 'work';
-}
 /** System tab, handoff files row (decision
  *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
  *  writes config.handoff.enabled. Carries the NEW value. */
@@ -725,39 +527,10 @@ export interface HandoffToggleEffect {
   type: 'handoff_toggle';
   enabled: boolean;
 }
-/** System tab, PR auto-merge row (decision
- *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean): writes
- *  config.pr_review.auto_merge_on_clean. Carries the NEW value. */
-export interface AutoMergeToggleEffect {
-  type: 'auto_merge_toggle';
-  enabled: boolean;
-}
-/** System tab, Overpass rows (decision
- *  overpass-toggle-work-mode-only-routes-every-lane-through-tiers): each writes one
- *  key of config.overpass and nothing else. The plugin applies the routing on its
- *  next turn; the TUI re-renders no agents for it. */
-export interface OverpassToggleEffect {
-  type: 'overpass_toggle';
-  enabled: boolean;
-}
+/** System tab, Overpass provider row: writes config.overpass.provider and nothing else. */
 export interface OverpassProviderEffect {
   type: 'overpass_provider';
   provider: string;
-}
-export interface OverpassBypassEffect {
-  type: 'overpass_bypass_toggle';
-  enabled: boolean;
-}
-/** System tab agent row while Overpass is effective (decision
- *  system-tab-agent-catalog-with-overpass-on-each-row-shows-the): sets
- *  config.overpass.roles.<role> to the picked tier and effort (absent = no effort
- *  override) and writes nothing else; config.models and the agent files are never
- *  touched. */
-export interface OverpassRoleEffect {
-  type: 'overpass_role';
-  role: string;
-  tier: string;
-  effort?: string;
 }
 /** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
  *  lane J): the TUI's second write surface after the System tab. Carries the
@@ -779,20 +552,6 @@ export interface BoardEditEffect {
   version: number;
   measuredAtHead?: string;
 }
-/** System tab, Maintenance worker row with Overpass off (board c97ddc97): sets (`to`) or
- *  clears (`to` absent) config.maintenance_worker.opencode_model and writes nothing else. */
-export interface WorkerModelEffect {
-  type: 'worker_model';
-  from?: string;
-  to?: string;
-}
-/** Write config.models.<key> of an adopted custom agent: a field in `set` is written, null removes it, and
- *  the controller re-renders every installed host's file. */
-export interface CustomAgentModelEffect {
-  type: 'custom_agent_model';
-  key: string;
-  set: { model?: string | null; effort?: string | null; opencode_model?: string | null; agy_model?: string | null };
-}
 /** Compute the adoption plan for a not-yet-adopted agent (the controller does the IO and sets ui.adoptConfirm). */
 export interface AdoptPlanEffect {
   type: 'adopt_plan';
@@ -804,25 +563,15 @@ export interface AdoptRunEffect {
   id: string;
 }
 export type Effect =
-  | CustomAgentModelEffect
   | AdoptPlanEffect
   | AdoptRunEffect
-  | WorkerModelEffect
   | SelectEffect
   | QuitEffect
-  | ModelSwapEffect
-  | OpenCodeModelEffect
-  | AgyModelEffect
-  | SparringToggleEffect
-  | SparringModelEffect
+  | AgentModelEffect
+  | WorkflowEffect
   | TddToggleEffect
-  | ModeToggleEffect
   | HandoffToggleEffect
-  | AutoMergeToggleEffect
-  | OverpassToggleEffect
   | OverpassProviderEffect
-  | OverpassBypassEffect
-  | OverpassRoleEffect
   | BoardEditEffect
   | GithubRefreshEffect;
 
@@ -1108,190 +857,64 @@ export function wrapText(text: string, width: number): string[] {
 export const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
-/**
- * Pure System-tab projection (run r-f9a7): one row per LIVE config.models
- * KEY (SYSTEM_TAB_MODEL_KEYS — LOW-3, second Opus re-check round: a relic
- * key like 'coder_hard' is filtered out here regardless of what the caller's
- * snapshot carries), in insertion order, id 'sys:<key>'. Governed agents
- * (AGENT_MODEL_KEY) render the INSTALLED frontmatter value
- * (the copy that governs dispatch), and a key whose installed value
- * disagrees with config is flagged drift with a visible marker (AC4; the P5
- * backstop for a partial projection). The Maintenance worker row follows the
- * config.models rows (systemKeys). When ui.selector is open
- * on a key, that row also renders the inline picker options (catalog
- * entries at the model stage; effort options at the effort stage). Every
- * line is clipped to `width` so the 33-col floor holds.
- */
-const HOST_LABEL: Record<AgentHost, string> = { claude: 'Claude', opencode: 'OpenCode', agy: 'agy' };
-/** One line for the host column: each host with its effective model and effort (resolveHostSettings), and
- *  'effort unsupported' where the host has no effort control. */
-function hostSummary(entry: { model?: string; effort?: string; opencode_model?: string; agy_model?: string }, hosts: AgentHost[]): string {
-  return hosts
-    .map((h) => {
-      const r = resolveHostSettings(entry, h);
-      const effort = r.effort ? ` ${r.effort}` : '';
-      const note = r.effortSupported ? '' : entry.effort ? ' (effort unsupported)' : '';
-      return `${HOST_LABEL[h]} ${r.model}${effort}${note}`;
-    })
-    .join(' · ');
+const clipTo = (s: string, width: number): string => clipEllipsis(s, width);
+/** The hosts cell of an agent row: which hosts cannot run its one model ("can't run on Claude Code"), from
+ *  unsupportedAgents (decision one-model-per-agent-an-agent-has-a-single-model-not-a-claude, point 5: no
+ *  silent copy where a host cannot run the model). */
+function hostsCell(snap: AgentRosterSnapshot, key: string): string {
+  if ((snap.twoModels ?? []).includes(key)) return `⚠ ${twoModelsReason(key)}`;
+  const entry = snap.models[key];
+  if (entry?.model === undefined) return 'host default';
+  const cannot = unsupportedAgents({ models: { [key]: { model: entry.model } } }, snap.hosts)
+    .filter((u) => u.agent === key && u.host !== '*')
+    .map((u) => HOST_NAME[u.host as AgentHost]);
+  return cannot.length === 0 ? 'all hosts' : `can't run on ${cannot.join(', ')}`;
 }
+
+const COL_AGENT = 20;
+const COL_MODEL = 30;
+const COL_EFFORT = 8;
+const cell = (s: string, w: number): string => (s.length >= w ? `${s.slice(0, w - 1)}…` : s.padEnd(w));
 
 function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number): { entries: SystemEntry[]; banner: string[] } {
   const snap = snapshot ?? EMPTY_ROSTER;
-  const keys = systemKeys(snap);
   const selector = ui.selector;
-  const clip = (s: string): string => clipEllipsis(s, width);
-  const overpassView = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
-  const overpassEffective = overpassOffered(snap) && overpassView.effective;
-  // The tier and effort pickers, shared by every Overpass role row, the worker's included.
-  const overpassPickerLines = (key: string): SystemLine[] => {
-    const out: SystemLine[] = [];
-    if (!selector || selector.key !== key) return out;
-    if (selector.stage === 'tier' && isOverpassRole(key)) {
-      overpassTierOptions(overpassView, key).forEach((tier, oi) => {
-        const m = oi === selector.highlight ? '› ' : '  ';
-        out.push({ text: clip(`  ${m}tier ${tier}`), kind: 'option', selected: oi === selector.highlight });
-      });
-    } else if (selector.stage === 'role_effort') {
-      // 'default' clears the config's effort; the role's default effort, when it has one, applies then
-      const fallback = isOverpassRole(key) ? DEFAULT_OVERPASS_ROLE_EFFORTS[key] : undefined;
-      OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
-        const m = oi === selector.highlight ? '› ' : '  ';
-        const shown = eff === 'default' ? `default (${fallback ?? 'none sent'})` : eff;
-        out.push({ text: clip(`  ${m}effort ${shown}`), kind: 'option', selected: oi === selector.highlight });
-      });
-    }
-    return out;
-  };
-
-  const rows: SystemRow[] = keys.map((key, i) => {
-    if (key === MAINTENANCE_WORKER_ROLE) {
-      // The Maintenance worker row (board c97ddc97): its model is
-      // maintenance_worker.opencode_model, not a config.models entry.
-      const worker = snap.maintenanceWorker ?? { opencodeModel: null };
-      const marker = i === ui.cursor ? '› ' : '  ';
-      const saved = worker.invalid !== undefined ? `invalid ${worker.invalid}` : worker.opencodeModel;
-      const lines: SystemLine[] = [];
-      if (overpassEffective) {
-        const route = overpassRoute(overpassView, MAINTENANCE_WORKER_ROLE);
-        lines.push({ text: clip(`${marker}Maintenance worker: ${route.tier} (Overpass)${overpassEffortText(overpassView, MAINTENANCE_WORKER_ROLE)}`), kind: 'title', selected: i === ui.cursor });
-        if (worker.unreadable !== undefined) lines.push({ text: clip(`    maintenance_worker unreadable: ${worker.unreadable}`), kind: 'meta' });
-        else if (saved) lines.push({ text: clip(`    saved OpenCode: ${saved}`), kind: 'meta' });
-      } else if (worker.unreadable !== undefined) {
-        // an unreadable config is not "not set": say what is wrong and claim nothing about the model
-        lines.push({ text: clip(`${marker}Maintenance worker: config unreadable: ${worker.unreadable}`), kind: 'title', selected: i === ui.cursor });
-      } else {
-        lines.push({ text: clip(`${marker}Maintenance worker: ${saved ?? 'not set: worker will not start'}`), kind: 'title', selected: i === ui.cursor });
-      }
-      if (selector && selector.key === key) {
-        if (selector.stage === 'model') {
-          workerModelOptions(snap.catalog.entries, worker.opencodeModel).forEach((o, oi) => {
-            const m = oi === selector.highlight ? '› ' : '  ';
-            lines.push({ text: clip(`  ${m}${o.kind === 'clear' ? 'OpenCode: clear the model' : `${o.ref} ${o.label}`}`), kind: 'option', selected: oi === selector.highlight });
-          });
-        } else {
-          lines.push(...overpassPickerLines(key));
-        }
-      }
-      return { id: `sys:${key}`, key, drift: false, agents: [], lines };
-    }
-    const config = snap.configModels[key];
-    const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
-    const agentNames = governed.map((a) => a.name);
-    // the INSTALLED governing copy for a governed key; config for a config-only key
-    const adopted = isCustomAgentKey(key) ? (snap.adoptedAgents ?? []).find((a) => a.key === key) : undefined;
-    const customEntry = adopted ? (snap.customModels?.[key] ?? {}) : undefined;
-    const shownModel = customEntry ? (customEntry.model ?? 'inherit') : governed.length ? governed[0].installedModel : config.model;
-    const shownEffort = customEntry ? (customEntry.effort ?? '') : governed.length ? governed[0].installedEffort : config.effort;
-    // row drift = ANY governed agent whose installed model/effort disagrees with
-    // config (a partial projection leaves one agent stale → the AC4 P5 backstop)
-    const drift = governed.some(
-      (a) => driftOf(a.installedModel, config.model) || driftOf(a.installedEffort, config.effort)
-    );
-    const selected = i === ui.cursor;
-    const marker = selected ? '› ' : '  ';
-    // Title-cased label: the leading letter is capitalized so a config-only key
-    // like classifiers never surfaces the substring an agent name would match —
-    // the roster lists each agent in exactly one row (AC1).
-    const label = adopted ? `${adopted.name} (custom)` : key.charAt(0).toUpperCase() + key.slice(1);
-    // While Overpass is effective an agent role runs on its Overpass tier, so that is
-    // the row's value; the user's own model stays visible, dimmed, as 'saved'
-    // (decision system-tab-agent-catalog-with-overpass-on-each-row-shows-the).
-    const route = overpassEffective && isOverpassRole(key) ? overpassRoute(overpassView, key) : undefined;
-    const lines: SystemLine[] = route
-      ? [
-          { text: clip(`${marker}${label}: ${route.tier} (Overpass)${overpassEffortText(overpassView, key as OverpassRole)}`), kind: 'title', selected },
-          // 'saved' is the user's config.models pair (decision
-          // system-tab-agent-catalog-with-overpass-on-each-row-shows-the); the
-          // installed-frontmatter drift check stays a separate marker
-          { text: clip(`    saved: ${config.model} ${config.effort}${drift ? '  drift' : ''}`), kind: 'meta' },
-        ]
-      : [{ text: clip(`${marker}${label}: ${shownModel}${customEntry && !shownEffort ? '' : ` ${shownEffort}`}${drift ? '  drift' : ''}`), kind: 'title', selected }];
-    // The agent-name line is dropped when it only repeats the header (AGENT_MODEL_KEY is an
-    // identity map now); a name that differs from the key stays listed (board 4e7a6bfc).
-    if (!agentNames.every((name) => name === key)) for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
-    // While Overpass is effective the saved override is kept but not applied: it is shown
-    // dimmed like the saved model, and plain 'OpenCode:' while it governs the role.
-    if (config.agy_model) lines.push({ text: clip(`    Antigravity: ${config.agy_model}`), kind: 'body' });
-    if (config.opencode_model) {
-      lines.push(overpassEffective
-        ? { text: clip(`    saved OpenCode: ${config.opencode_model}`), kind: 'meta' }
-        : { text: clip(`    OpenCode: ${config.opencode_model}`), kind: 'body' });
-    }
-
-    // The host column: where this agent is installed, with each host's effective model and which controls the
-    // host lacks. A governed role shows it once it is on two hosts; an adopted custom agent always.
-    const rowHosts: AgentHost[] = adopted
-      ? adopted.hosts
-      : ([
-          governed.length > 0 ? 'claude' : undefined,
-          (snap.opencodeInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === key) ? 'opencode' : undefined,
-          (snap.agyInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === key) ? 'agy' : undefined,
-        ].filter((h): h is AgentHost => h !== undefined));
-    if (rowHosts.length >= (adopted ? 1 : 2) && !route) {
-      lines.push({ text: clip(`    on: ${hostSummary(customEntry ?? config, rowHosts)}`), kind: 'meta' });
-    }
-    for (const r of adopted?.refusals ?? []) lines.push({ text: clip(`    ⚠ ${r.host}: ${r.reason}`), kind: 'meta' });
-    if (selector && selector.key === key) {
-      if (selector.stage === 'tier' || selector.stage === 'role_effort') {
-        lines.push(...overpassPickerLines(key));
-      } else if (selector.stage === 'model') {
-        // a non-anthropic entry is offered as the OpenCode override only, and
-        // says so; a set override adds a last option that clears it
-        optionsFor(snap, key).forEach((o, oi) => {
-          const m = oi === selector.highlight ? '› ' : '  ';
-          const text = o.kind === 'clear'
-            ? 'OpenCode: use the Claude model'
-            : o.kind === 'agy_clear' ? 'Antigravity: inherit'
-            : o.kind === 'inherit' ? 'inherit: the host\'s own model and effort'
-            : o.kind === 'agy' ? `${o.id} (Antigravity only)`
-            : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
-          lines.push({ text: clip(`  ${m}${text}`), kind: 'option', selected: oi === selector.highlight });
-        });
-      } else {
-        effortOptions(key).forEach((eff, oi) => {
-          const m = oi === selector.highlight ? '› ' : '  ';
-          lines.push({ text: clip(`  ${m}effort ${eff}`), kind: 'option', selected: oi === selector.highlight });
-        });
-      }
-    }
-    return { id: `sys:${key}`, key, drift, agents: agentNames, lines };
-  });
-
-  // transient notice as a ⚠ banner line (audit findings 24/43, 41/43): a refusal
-  // or a catalog/roster failure is visible above the roster, not lost.
-  const catBanner = catalogBanner(snap.catalog, width);
-  const banner = ui.notice ? [clip(`⚠ ${ui.notice}`), ...catBanner] : catBanner;
-  // THE ordered list. Cursor indexes go, in list order, to the cursorable entries only: the agent
-  // rows, then the live settings. Headings, group labels, the read-only rows and the disabled
-  // settings hold none.
+  const clip = (s: string): string => clipTo(s, width);
   const entries: SystemEntry[] = [];
   const next = (): number => entries.filter((e) => e.cursorable).length;
   const label = (id: string, section: SystemSection, text: string, kind: 'title' | 'meta'): void => {
     entries.push({ id, section, cursorable: false, row: { id, lines: [{ text: clip(text), kind }] } });
   };
+  const catBanner = catalogBanner(snap.catalog, width);
+  const banner = ui.notice ? [clip(`⚠ ${ui.notice}`), ...catBanner] : catBanner;
+
+  // ── AGENTS: one row per agent, agent | model | effort | hosts that can run it
   label('sys:heading:agents', 'agents', 'Agents', 'title');
-  for (const row of rows) entries.push({ id: row.id, section: 'agents', cursorable: true, row, action: { kind: 'agent', key: row.key! } });
+  label('sys:agents:columns', 'agents', `  ${cell('agent', COL_AGENT)}${cell('model', COL_MODEL)}${cell('effort', COL_EFFORT)}hosts`, 'meta');
+  const adopted = (snap.adoptedAgents ?? []).filter((a) => snap.models[a.key] !== undefined);
+  const agentKeys: string[] = [...SYSTEM_AGENT_KEYS, ...adopted.map((a) => a.key)];
+  for (const key of agentKeys) {
+    const cursor = next();
+    const selected = cursor === ui.cursor;
+    const adoptedView = adopted.find((a) => a.key === key);
+    const entry = snap.models[key];
+    const name = adoptedView ? `${adoptedView.name} (custom)` : key;
+    const unreadable = snap.configError !== undefined;
+    const model = unreadable ? 'UNKNOWN' : (entry?.model ?? '(unset)');
+    const effort = unreadable ? '-' : (entry?.effort ?? '-');
+    const hosts = unreadable ? `config unreadable: ${snap.configError}` : hostsCell(snap, key);
+    const lines: SystemLine[] = [{ text: clip(`${selected ? '› ' : '  '}${cell(name, COL_AGENT)}${cell(model, COL_MODEL)}${cell(effort, COL_EFFORT)}${hosts}`), kind: 'title', selected }];
+    for (const r of adoptedView?.refusals ?? []) lines.push({ text: clip(`    ⚠ ${r.host}: ${r.reason}`), kind: 'meta' });
+    if (selector && selector.key === key) {
+      lines.push({ text: clip(selector.stage === 'model' ? `  step 1 of 2: model` : `  step 2 of 2: effort for ${selector.model ?? 'no model'}`), kind: 'meta' });
+      for (const spec of pickerSpecs(snap, selector)) {
+        const on = spec.option !== undefined && spec.option === selector.highlight;
+        lines.push(spec.option === undefined ? { text: clip(`    ${spec.text}`), kind: 'meta' } : { text: clip(`  ${on ? '› ' : '  '}  ${spec.text}`), kind: 'option', selected: on });
+      }
+    }
+    const row: SystemRow = { id: `sys:${key}`, key, agents: [key], lines };
+    entries.push(unreadable ? { id: row.id, section: 'agents', cursorable: false, row, disabled: 'config unreadable' } : { id: row.id, section: 'agents', cursorable: true, row, action: { kind: 'agent', key } });
+  }
   // Custom agents that are not adopted yet: host-qualified identity and the file's own model, with an Adopt
   // action; one the file could not be read for stays read-only with its error.
   (snap.customAgents ?? []).forEach((a, i) => {
@@ -1302,47 +925,55 @@ function systemEntries(snapshot: AgentRosterSnapshot, ui: UiState, width: number
     const text = ok ? `${selected ? '› ' : '  '}${adoptId} (not adopted): ${a.model ?? 'inherit/default'} — ENTER to adopt` : `  ${adoptId}: ⚠ ${a.error} (read-only)`;
     const lines: SystemLine[] = [{ text: clip(text), kind: ok ? 'title' : 'meta', ...(ok ? { selected } : {}) }];
     if (ui.adoptConfirm?.id === adoptId) for (const l of ui.adoptConfirm.lines) lines.push({ text: clip(`    ${l}`), kind: 'body' });
-    const row: SystemRow = { id, key: `custom:${a.source}:${a.name}`, drift: false, agents: [a.name], lines };
+    const row: SystemRow = { id, key: `custom:${a.source}:${a.name}`, agents: [a.name], lines };
     entries.push({ id, section: 'agents', cursorable: ok, row, ...(ok ? { action: { kind: 'adopt', id: adoptId } as SystemAction } : {}) });
   });
-  label('sys:heading:settings', 'settings', 'Settings', 'title');
-  const setting = (row: SystemRow, action: SystemAction): void => {
-    entries.push({ id: row.id, section: 'settings', cursorable: true, row, action });
-  };
+
   // A setting that does not apply now stays on screen: dimmed, with the reason, no cursor index, no effect.
-  const disabled = (row: SystemRow, reason: string): void => {
-    const lines = row.lines.map((l) => ({ text: clip(`${l.text.replace(/^(› | {2})/, '  ')}  (${reason})`), kind: 'meta' }));
-    entries.push({ id: row.id, section: 'settings', cursorable: false, row: { ...row, lines }, disabled: reason });
+  const setting = (section: SystemSection, id: string, text: (marker: string) => string, action: SystemAction): void => {
+    const selected = ui.cursor === next();
+    entries.push({ id, section, cursorable: true, row: { id, lines: [{ text: clip(text(selected ? '› ' : '  ')), kind: 'title', selected }] }, action });
   };
-  label('sys:group:sparring', 'settings', '  ── Sparring', 'meta');
-  const sparring = sparringPartnerRows(snap, ui, width, next());
-  setting(sparring[0], { kind: 'toggle', effect: { type: 'sparring_toggle', enabled: flipTo(snap.sparringPartner?.enabled, true) } });
-  setting(sparring[1], { kind: 'edit', uiPatch: { sparringModelEdit: snap.sparringPartner?.model ?? '' } });
-  label('sys:group:workflow', 'settings', '  ── Workflow', 'meta');
-  setting(tddToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'tdd_toggle', enabled: flipTo(snap.tdd?.enabled, true) } });
-  // project mode: hobby goes to work; work, an invalid value and an unreadable config go to hobby, the default flow
-  setting(modeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'mode_toggle', mode: (snap.mode === undefined ? 'hobby' : snap.mode) === 'hobby' ? 'work' : 'hobby' } });
-  setting(handoffToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'handoff_toggle', enabled: flipTo(snap.handoff, false) } });
-  if ((snap.mode === undefined ? 'hobby' : snap.mode) === 'hobby') disabled(autoMergeToggleRow(snap, ui, width, Number.NaN), 'acts only in work mode');
-  else setting(autoMergeToggleRow(snap, ui, width, next()), { kind: 'toggle', effect: { type: 'auto_merge_toggle', enabled: flipTo(snap.autoMergeOnClean, true) } });
-  label('sys:group:overpass', 'settings', '  ── Overpass', 'meta');
-  if (overpassOffered(snap)) {
-    const [op, provider, bypass] = overpassToggleRows(snap, ui, width, next());
-    const current = overpassView.provider !== null && OVERPASS_PROVIDER_RE.test(overpassView.provider) ? overpassView.provider : '';
-    setting(op, { kind: 'toggle', effect: { type: 'overpass_toggle', enabled: flipTo(overpassView.enabled, false) } });
-    setting(provider, { kind: 'edit', uiPatch: { overpassProviderEdit: current } });
-    setting(bypass, { kind: 'toggle', effect: { type: 'overpass_bypass_toggle', enabled: flipTo(overpassView.conductorBypass, false) } });
+  const disabled = (section: SystemSection, id: string, text: string, reason: string): void => {
+    entries.push({ id, section, cursorable: false, row: { id, lines: [{ text: clip(`  ${text}  (${reason})`), kind: 'meta' }] }, disabled: reason });
+  };
+
+  // ── WORKFLOW: merge path, reviewers, Copilot loop, auto-merge, TDD
+  label('sys:heading:workflow', 'workflow', 'Workflow', 'title');
+  const wf = snap.workflow;
+  if (snap.configError !== undefined) {
+    for (const [id, name] of [['sys:merge_path', 'Merge path'], ['sys:reviewers', 'Reviewers'], ['sys:copilot_loop', 'Copilot loop'], ['sys:pr_auto_merge', 'Auto-merge']] as const) {
+      disabled('workflow', id, `${name}: UNKNOWN`, `config unreadable: ${snap.configError}`);
+    }
   } else {
-    for (const row of overpassToggleRows(snap, ui, width, Number.NaN)) disabled(row, 'work mode on OpenCode only');
+    const w = wf ?? DEFAULT_WORKFLOW;
+    const onOff = (b: boolean): string => (b ? 'ON' : 'OFF');
+    setting('workflow', 'sys:merge_path', (m) => `${m}Merge path: ${w.merge === 'pr' ? 'pull request' : 'direct'}`, { kind: 'toggle', effect: { type: 'workflow_set', field: 'merge', value: w.merge === 'pr' ? 'direct' : 'pr' } });
+    setting('workflow', 'sys:reviewers', (m) => `${m}Reviewers: ${w.reviewers}  (${MIN_REVIEWERS}-${MAX_REVIEWERS}; ENTER steps up, past ${MAX_REVIEWERS} back to ${MIN_REVIEWERS})`, {
+      kind: 'toggle',
+      effect: { type: 'workflow_set', field: 'reviewers', value: w.reviewers >= MAX_REVIEWERS || w.reviewers < MIN_REVIEWERS ? MIN_REVIEWERS : w.reviewers + 1 },
+    });
+    const noPr = 'needs the pull-request merge path';
+    if (w.merge !== 'pr') disabled('workflow', 'sys:copilot_loop', `Copilot loop: ${onOff(w.copilot_loop)}`, noPr);
+    else setting('workflow', 'sys:copilot_loop', (m) => `${m}Copilot loop: ${onOff(w.copilot_loop)}`, { kind: 'toggle', effect: { type: 'workflow_set', field: 'copilot_loop', value: !w.copilot_loop } });
+    if (w.merge !== 'pr') disabled('workflow', 'sys:pr_auto_merge', `Auto-merge: ${onOff(w.auto_merge_on_clean)}`, noPr);
+    else if (!w.copilot_loop) disabled('workflow', 'sys:pr_auto_merge', `Auto-merge: ${onOff(w.auto_merge_on_clean)}`, 'needs the Copilot loop on');
+    else setting('workflow', 'sys:pr_auto_merge', (m) => `${m}Auto-merge: ${onOff(w.auto_merge_on_clean)}`, { kind: 'toggle', effect: { type: 'workflow_set', field: 'auto_merge_on_clean', value: !w.auto_merge_on_clean } });
   }
-  label('sys:group:storage', 'settings', '  ── Storage', 'meta');
-  entries.push({ id: 'sys:storage', section: 'settings', cursorable: false, row: storageRow(snap, width) });
+  setting('workflow', 'sys:tdd_enabled', (m) => `${m}TDD: ${(snap.tdd ?? { enabled: true }).enabled ? 'ON' : 'OFF'}`, { kind: 'toggle', effect: { type: 'tdd_toggle', enabled: flipTo(snap.tdd?.enabled, true) } });
+
+  // ── PROJECT: Overpass provider, handoff files, storage (read-only)
+  label('sys:heading:project', 'project', 'Project', 'title');
+  const provider = snap.overpassProvider ?? 'overpass';
+  const editing = ui.overpassProviderEdit !== undefined;
+  setting('project', 'sys:overpass_provider', (m) => `${m}Overpass provider: ${editing && m === '› ' ? `${ui.overpassProviderEdit}▌` : provider}`, { kind: 'edit', uiPatch: { overpassProviderEdit: provider } });
+  setting('project', 'sys:handoff_files', (m) => handoffText(snap, m), { kind: 'toggle', effect: { type: 'handoff_toggle', enabled: flipTo(snap.handoff, false) } });
+  entries.push({ id: 'sys:storage', section: 'project', cursorable: false, row: storageRow(snap, width) });
   return { entries, banner };
 }
 
 /** The one rule for an on/off setting: unset flips from the setting's default; exactly ON turns OFF;
- *  exactly OFF turns ON; anything else (an invalid value, an unreadable config) turns OFF, never ON on a
- *  guess. The project mode follows the same rule with hobby as its OFF side. */
+ *  exactly OFF turns ON; anything else (an invalid value, an unreadable config) turns OFF, never ON on a guess. */
 function flipTo(value: unknown, defaultOn: boolean): boolean {
   if (value === undefined) return !defaultOn;
   return value === false;
@@ -1361,37 +992,18 @@ export function systemCursorOf(snapshot: AgentRosterSnapshot, ui: UiState, id: s
 export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
   const { entries: all, banner } = systemEntries(snapshot, ui, width);
   const selector = ui.selector;
-  // While a selector is open the view FOCUSES on the key under edit — the other rows (and their
-  // config values) are hidden so the open picker's offered set is the only model/effort text on screen.
+  // While a picker is open the view FOCUSES on the key under edit: the other rows are hidden so the
+  // picker's options are the only model text on screen.
   const entries = selector ? all.filter((e) => e.action?.kind === 'agent' && e.row.key === selector.key) : all;
-  // the older lists hold the live (cursorable) rows only; a disabled setting is in `entries`
-  const byIds = (ids: readonly string[]): SystemRow[] => entries.filter((e) => e.cursorable && ids.includes(e.id)).map((e) => e.row);
+  const inSection = (s: SystemSection): SystemRow[] => entries.filter((e) => e.section === s && e.id.startsWith('sys:') && !e.id.startsWith('sys:heading:')).map((e) => e.row);
   return {
     entries,
     banner,
     rows: entries.filter((e) => e.action?.kind === 'agent').map((e) => e.row),
-    sparringRows: byIds(LEGACY_VIEW_LISTS.sparringRows),
-    tddRows: byIds(LEGACY_VIEW_LISTS.tddRows),
-    modeRows: byIds(LEGACY_VIEW_LISTS.modeRows),
-    handoffRows: byIds(LEGACY_VIEW_LISTS.handoffRows),
-    autoMergeRows: byIds(LEGACY_VIEW_LISTS.autoMergeRows),
-    overpassRows: byIds(LEGACY_VIEW_LISTS.overpassRows),
-    storageRows: entries.filter((e) => e.id === 'sys:storage').map((e) => e.row),
+    workflowRows: inSection('workflow'),
+    projectRows: inSection('project'),
     customRows: entries.filter((e) => e.id.startsWith('sys:custom:')).map((e) => e.row),
   };
-}
-
-/** Read-only rows for the project's custom agents: name, host folder and the model from the
- *  file's own frontmatter ('inherit/default' when it names none), or the error marker when
- *  the file could not be read. They write nothing and take no cursor index. */
-function customAgentRows(snap: AgentRosterSnapshot, width: number): SystemRow[] {
-  return (snap.customAgents ?? []).map((a, i) => ({
-    id: `sys:custom:${a.source}:${i}`,
-    key: `custom:${a.source}:${a.name}`,
-    drift: false,
-    agents: [a.name],
-    lines: [{ text: clipEllipsis(`  ${a.name} (${a.source}): ${a.error !== undefined ? `⚠ ${a.error}` : (a.model ?? 'inherit/default')}  read-only`, width), kind: 'meta' as const }],
-  }));
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -1402,153 +1014,20 @@ function catalogBanner(catalog: CatalogStatusView, width: number): string[] {
   return [clip('catalog: current')];
 }
 
-/**
- * Sparring-partner rows (board a0714d0b, slice 2 — article sparring-partner
- * interactions h/i): two rows appended after the config.models roster —
- * `cursorBase` is the toggle row's cursor index (cursorBase+1 = the model
- * row), so cursor addressing composes with the one ordered entry list
- * (systemEntries) without touching it.
- *
- * TOGGLE ROW: shows ON/OFF from sparringPartner.enabled. When codexWired is
- * false, ALWAYS appends '(not wired on this machine)' — a machine-capability
- * fact distinct from the deliberate per-project enabled/disabled choice
- * (article interaction h, P5): flipping the toggle changes ON/OFF but never
- * hides this marker, so a machine missing Codex never reads as a silently
- * successful "on".
- *
- * MODEL ROW: shows sparringPartner.model, or '(CLI default)' when unset. While
- * ui.sparringModelEdit is defined AND this row is under the cursor, the row
- * shows the live edit buffer with a caret instead of the committed value.
- *
- * The label says DEFAULT (board 7423f7a2 slice 5, decision foreign_8b329d57 as
- * corrected forward): since H20's PreToolUse arm fills this value into a codex
- * consult that names no model, the value is exactly a DEFAULT — a model named
- * on the call itself still wins, and a running codex-reply thread keeps its
- * opener's model because that tool's schema has no model field. A bare 'Model'
- * label promised more than the mechanism delivers, which is how "it just says
- * default and doesnt work" was reported.
- */
-function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorBase: number): SystemRow[] {
-  const clip = (s: string): string => clipEllipsis(s, width);
-  const sparringPartner = snap.sparringPartner ?? { enabled: true };
-  const codexWired = snap.codexWired ?? false;
-  const toggleSelected = ui.cursor === cursorBase;
-  const modelSelected = ui.cursor === cursorBase + 1;
-  const toggleMarker = toggleSelected ? '› ' : '  ';
-  const modelMarker = modelSelected ? '› ' : '  ';
-  const onOff = sparringPartner.enabled ? 'ON' : 'OFF';
-  const wiredSuffix = codexWired ? '' : '  (not wired on this machine)';
-  const toggleRow: SystemRow = {
-    id: 'sys:sparring_enabled',
-    lines: [{ text: clip(`${toggleMarker}Sparring partner: ${onOff}${wiredSuffix}`), kind: 'title', selected: toggleSelected }],
-  };
-  const editing = ui.sparringModelEdit !== undefined && modelSelected;
-  const modelText = editing
-    ? `${ui.sparringModelEdit}▌`
-    : sparringPartner.model && sparringPartner.model.length
-      ? sparringPartner.model
-      : '(CLI default)';
-  const modelRow: SystemRow = {
-    id: 'sys:sparring_model',
-    lines: [{ text: clip(`${modelMarker}Default Codex model: ${modelText}`), kind: 'title', selected: modelSelected }],
-  };
-  return [toggleRow, modelRow];
-}
-
-/** tdd toggle row (decision foreign_752caf98): ON/OFF from tdd.enabled, one row, no
- *  model sibling. Mirrors sparringPartnerRows' toggle-row shape exactly. */
-function tddToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
-  const clip = (s: string): string => clipEllipsis(s, width);
-  const tdd = snap.tdd ?? { enabled: true };
-  const selected = ui.cursor === cursorIndex;
-  const marker = selected ? '› ' : '  ';
-  const onOff = tdd.enabled ? 'ON' : 'OFF';
-  return { id: 'sys:tdd_enabled', lines: [{ text: clip(`${marker}TDD: ${onOff}`), kind: 'title', selected }] };
-}
-
-/** project mode row (decision project-mode-hobby-work-toggle-decides-flow): HOBBY or
- *  WORK from the raw config.mode (absent → HOBBY), UNKNOWN for an unreadable
- *  config, and INVALID for any other value — never shown as either flow.
- *  Mirrors tddToggleRow's shape. */
-function modeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
-  const clip = (s: string): string => clipEllipsis(s, width);
-  const mode = snap.mode === undefined ? 'hobby' : snap.mode;
-  const selected = ui.cursor === cursorIndex;
-  const marker = selected ? '› ' : '  ';
-  const shown = mode === null ? 'UNKNOWN (config unreadable)' : mode === 'hobby' || mode === 'work' ? mode.toUpperCase() : `INVALID ('${mode}')`;
-  return { id: 'sys:project_mode', lines: [{ text: clip(`${marker}Project mode: ${shown}`), kind: 'title', selected }] };
-}
-
 /** handoff files row (decision
  *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting): ON or
  *  OFF from the effective setting (absent → OFF), UNKNOWN for an unreadable
- *  config or a git failure, and INVALID for a raw value that is not a boolean —
- *  never shown as on or off. handoffDetail follows the value in brackets, so an
- *  absent key reads OFF (not set) and an explicit false reads OFF. Mirrors
- *  modeToggleRow's shape. */
-function handoffToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
-  const clip = (s: string): string => clipEllipsis(s, width);
+ *  config or a git failure, and INVALID for a raw value that is not a boolean. */
+function handoffText(snap: AgentRosterSnapshot, marker: string): string {
   const handoff = snap.handoff === undefined ? false : snap.handoff;
-  const selected = ui.cursor === cursorIndex;
-  const marker = selected ? '› ' : '  ';
   const why = snap.handoffDetail === undefined ? '' : ` (${snap.handoffDetail})`;
   const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? 'config unreadable'})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
-  return { id: 'sys:handoff_files', lines: [{ text: clip(`${marker}Handoff files: ${shown}`), kind: 'title', selected }] };
-}
-
-/** PR auto-merge row (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean):
- *  ON or OFF from config.pr_review.auto_merge_on_clean (absent → ON), UNKNOWN for
- *  an unreadable config, and INVALID for a raw value its judge refuses — never
- *  shown as on or off. It acts only in work mode, where the PR review loop runs.
- *  Mirrors handoffToggleRow's shape. */
-function autoMergeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
-  const clip = (s: string): string => clipEllipsis(s, width);
-  const value = snap.autoMergeOnClean === undefined ? true : snap.autoMergeOnClean;
-  const selected = ui.cursor === cursorIndex;
-  const marker = selected ? '› ' : '  ';
-  const shown = value === null ? 'UNKNOWN (config unreadable)' : value === true ? 'ON' : value === false ? 'OFF' : `INVALID (${value})`;
-  return { id: 'sys:pr_auto_merge', lines: [{ text: clip(`${marker}Auto-merge clean PRs (work mode): ${shown}`), kind: 'title', selected }] };
-}
-
-/** Overpass rows (decision overpass-toggle-work-mode-only-routes-every-lane-through-tiers):
- *  the on/off toggle, the provider id (edit text) and the conductor bypass toggle,
- *  at cursorBase .. cursorBase + 2. A value the resolver refuses reads INVALID
- *  with the raw value, an unreadable config reads UNKNOWN, and a present but
- *  non-object block reads INVALID on every row; none is ever shown as a valid
- *  setting. While ui.overpassProviderEdit is open the provider row shows the
- *  buffer with a caret. */
-function overpassToggleRows(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorBase: number): SystemRow[] {
-  const clip = (s: string): string => clipEllipsis(s, width);
-  const view = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
-  const marker = (i: number): string => (ui.cursor === cursorBase + i ? '› ' : '  ');
-  const selected = (i: number): boolean => ui.cursor === cursorBase + i;
-  const flag = (v: boolean | string | null): string =>
-    view.invalid !== undefined ? `INVALID (${view.invalid})` : v === null ? 'UNKNOWN (config unreadable)' : v === true ? 'ON' : v === false ? 'OFF' : `INVALID (${v})`;
-  const provider = (): string =>
-    view.invalid !== undefined
-      ? `INVALID (${view.invalid})`
-      : view.providerInvalid !== undefined
-        ? `INVALID (${view.providerInvalid})`
-        : view.provider === null
-        ? 'UNKNOWN (config unreadable)'
-        : OVERPASS_PROVIDER_RE.test(view.provider)
-          ? view.provider
-          : `INVALID (${JSON.stringify(view.provider)})`;
-  const editing = ui.overpassProviderEdit !== undefined && selected(1);
-  return [
-    { id: 'sys:overpass', lines: [{ text: clip(`${marker(0)}Overpass: ${flag(view.enabled)}`), kind: 'title', selected: selected(0) }] },
-    {
-      id: 'sys:overpass_provider',
-      lines: [{ text: clip(`${marker(1)}Overpass provider: ${editing ? `${ui.overpassProviderEdit}▌` : provider()}`), kind: 'title', selected: selected(1) }],
-    },
-    { id: 'sys:overpass_bypass', lines: [{ text: clip(`${marker(2)}Conductor bypass: ${flag(view.conductorBypass)}`), kind: 'title', selected: selected(2) }] },
-  ];
+  return `${marker}Handoff files: ${shown}`;
 }
 
 /** storage row (board 6ca1a3c5), READ-ONLY and never selected: SERVED POSTGRES for
- *  'postgres', SQLITE for 'sqlite' or an absent key (told apart by the bracket),
- *  UNKNOWN for an unreadable config, and UNRECOGNIZED with the raw value for
- *  anything else, never shown as SQLite. Store routing's rule: absent means SQLite. */
+ *  'postgres', SQLITE for 'sqlite' or an absent key, UNKNOWN for an unreadable config,
+ *  and UNRECOGNIZED with the raw value for anything else. */
 function storageRow(snap: AgentRosterSnapshot, width: number): SystemRow {
   const clip = (s: string): string => clipEllipsis(s, width);
   const storage = snap.storage;
@@ -2270,7 +1749,7 @@ function reduceNodes(
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, overpassProviderEdit: undefined, boardEdit: undefined, adoptConfirm: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, overpassProviderEdit: undefined, boardEdit: undefined, adoptConfirm: undefined });
 
   // the tabs this host can reach, in bar order: a digit picks the n-th, left/right step through them
   const reachable = visibleTabs(viewport.agents, viewport.github);
@@ -2314,14 +1793,8 @@ function reduceNodes(
   };
   const moveCursor = (delta: number): UiState => revealAt(clamp(ui.cursor + delta));
 
-  /** How many option lines the open System picker draws: the model stage
-   *  lists the catalog plus the OpenCode override's clear option when one is set. */
-  const pickerOptions = (sel: NonNullable<UiState['selector']>): number =>
-    sel.stage === 'tier' ? overpassTierOptions(roster!.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key as OverpassRole).length
-    : sel.stage === 'role_effort' ? OVERPASS_EFFORT_OPTIONS.length
-    : sel.stage === 'model' && sel.key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster!.catalog.entries, roster!.maintenanceWorker?.opencodeModel).length
-    : sel.stage === 'model' ? optionsFor(roster!, sel.key).length
-    : effortOptions(sel.key).length;
+  /** The open picker's lines (group headers included) and how many of them are options. */
+  const pickerOptions = (sel: NonNullable<UiState['selector']>): number => pickerCount(roster!, sel);
 
   /** The open System picker with its highlight scrolled into view: the
    *  highlighted option line, and the row's title too when both fit. */
@@ -2331,8 +1804,8 @@ function reduceNodes(
     const st = buildSelf(next);
     const row = st.rows.find((r) => r.id === `sys:${sel.key}`);
     if (!row) return next;
-    const options = pickerOptions(sel);
-    const line = row.screenRow + row.lines.length - options + sel.highlight;
+    const specs = pickerSpecs(roster, sel);
+    const line = row.screenRow + row.lines.length - specs.length + Math.max(0, specs.findIndex((x) => x.option === sel.highlight));
     let scroll = st.scroll;
     if (line < scroll) scroll = line + 1 - row.screenRow <= maxBodyLines ? row.screenRow : line;
     else if (line + 1 > scroll + maxBodyLines) scroll = line + 1 - maxBodyLines;
@@ -2368,13 +1841,14 @@ function reduceNodes(
       const confirmRow = clickable.find((e) => e.action?.kind === 'adopt' && e.action.id === ui.adoptConfirm!.id)?.id;
       if (row.id !== confirmRow) return { ui: { ...ui, adoptConfirm: undefined }, effects };
     }
-    if (row.type !== 'system' || !clickable.some((e) => e.id === row.id) || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
+    if (row.type !== 'system' || !clickable.some((e) => e.id === row.id) || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
     const enter: UiEvent = { kind: 'key', name: 'ENTER' };
     const sel = ui.selector;
     if (sel) {
-      const options = pickerOptions(sel);
-      const k = line1 - 1 - state.bodyTop + state.scroll - row.screenRow - (row.lines.length - options);
-      if (row.id !== `sys:${sel.key}` || k < 0 || k >= options) return { ui, effects };
+      const specs = pickerSpecs(roster, sel);
+      const at = line1 - 1 - state.bodyTop + state.scroll - row.screenRow - (row.lines.length - specs.length);
+      const k = specs[at]?.option;
+      if (row.id !== `sys:${sel.key}` || k === undefined) return { ui, effects };
       return reduceNodes(store, { ...ui, selector: { ...sel, highlight: k } }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
     }
     const cursor = clickable.findIndex((e) => e.id === row.id);
@@ -2512,11 +1986,10 @@ function reduceNodes(
         // The cursor addresses the cursorable entries of the one ordered list buildSystemTab draws
         // (systemEntries), so draw, cursor and clamp cannot drift apart.
         const sysEntries = cursorEntries(roster, ui);
-        const overpassOn = roster !== undefined && overpassOffered(roster);
         const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysEntries.length - 1)));
         const sel = ui.selector;
         const providerEditing = ui.overpassProviderEdit !== undefined;
-        const editing = ui.sparringModelEdit !== undefined || providerEditing;
+        const editing = providerEditing;
         switch (event.name) {
           case 'UP':
           case 'DOWN':
@@ -2544,13 +2017,11 @@ function reduceNodes(
           }
           case 'ESCAPE':
             if (ui.adoptConfirm) return { ui: { ...ui, adoptConfirm: undefined }, effects };
-            if (sel) return { ui: { ...ui, selector: undefined, ...(sel.stage === 'tier' || sel.stage === 'role_effort' ? { notice: undefined } : {}) }, effects };
+            if (sel) return { ui: { ...ui, selector: undefined }, effects };
             if (providerEditing) return { ui: { ...ui, overpassProviderEdit: undefined, notice: undefined }, effects };
-            if (editing) return { ui: { ...ui, sparringModelEdit: undefined }, effects };
             return { ui, effects };
           case 'BACKSPACE':
             if (providerEditing) return { ui: { ...ui, overpassProviderEdit: (ui.overpassProviderEdit ?? '').slice(0, -1) }, effects };
-            if (editing) return { ui: { ...ui, sparringModelEdit: (ui.sparringModelEdit ?? '').slice(0, -1) }, effects };
             return { ui, effects };
           case 'ENTER':
           case 'SPACE': {
@@ -2564,24 +2035,6 @@ function reduceNodes(
               }
               effects.push({ type: 'overpass_provider', provider });
               return { ui: { ...ui, overpassProviderEdit: undefined, notice: undefined }, effects };
-            }
-            if (editing) {
-              // commit the free-text model edit — empty clears back to unset
-              // (CLI default). No ^claude- floor here: the model is a FREE
-              // string, codex validates server-side with a loud 400.
-              const committedModel = (ui.sparringModelEdit ?? '').trim();
-              effects.push({ type: 'sparring_model', model: committedModel });
-              // WHAT THE VALUE ACTUALLY GOVERNS, said at the moment it is set
-              // (board 7423f7a2 slice 5): H20 injects it only into a consult
-              // that names NO model, so an explicit call-site model overrides
-              // it, and codex-reply carries no model field at all — an
-              // already-open thread keeps its opener's model however this row
-              // is changed. Stating both limits here is the repair for "it
-              // just says default and doesnt work".
-              const sparringNotice = committedModel
-                ? `Default Codex model set to '${committedModel}' — a model named on the call itself overrides it, and existing Codex threads keep their opener's model until a new consult starts.`
-                : `Default Codex model cleared — consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
-              return { ui: { ...ui, sparringModelEdit: undefined, notice: sparringNotice }, effects };
             }
             const entry = sysEntries[cursor];
             if (ui.adoptConfirm) {
@@ -2602,151 +2055,34 @@ function reduceNodes(
             }
             const key = entry?.action?.kind === 'agent' ? entry.action.key : undefined;
             if (!key) return { ui, effects };
-            // While Overpass is effective an agent role runs on its tier, so the
-            // saved Claude model and OpenCode override are not editable: a model
-            // picker is never opened, and one already open is refused (decision
-            // system-tab-agent-catalog-with-overpass-on-each-row-shows-the).
-            const overpassView = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
-            const roleKey = sel ? sel.key : key;
-            const overpassRoleEdit = overpassOn && overpassView.effective && isOverpassRole(roleKey);
-            if (overpassRoleEdit && sel && (sel.stage === 'model' || sel.stage === 'effort')) {
-              return { ui: { ...ui, selector: undefined, notice: 'Overpass is on — the saved model and OpenCode override cannot be changed; turn Overpass off to edit them' }, effects };
-            }
-            if (overpassRoleEdit && !sel) {
-              const tiers = overpassTierOptions(overpassView, roleKey);
-              const highlight = Math.max(0, tiers.indexOf(overpassRoute(overpassView, roleKey).tier));
-              return {
-                ui: revealPicker({ ...ui, cursor, selector: { key: roleKey, stage: 'tier', highlight }, notice: 'Overpass is on — pick the role\'s tier and effort here; the saved model stays as it is and cannot be edited until Overpass is off' }),
-                effects,
-              };
-            }
-            if (overpassRoleEdit && sel && sel.stage === 'tier') {
-              const tier = overpassTierOptions(overpassView, roleKey)[sel.highlight];
-              if (tier === undefined) return { ui: { ...ui, selector: undefined }, effects };
-              const effort = overpassRoute(overpassView, roleKey).effort;
-              const highlight = Math.max(0, effort === undefined ? 0 : OVERPASS_EFFORT_OPTIONS.indexOf(effort));
-              return { ui: revealPicker({ ...ui, selector: { key: roleKey, stage: 'role_effort', highlight, tier } }), effects };
-            }
-            if (overpassRoleEdit && sel && sel.stage === 'role_effort') {
-              const effort = OVERPASS_EFFORT_OPTIONS[sel.highlight];
-              if (sel.tier === undefined || effort === undefined) return { ui: { ...ui, selector: undefined }, effects };
-              effects.push({ type: 'overpass_role', role: roleKey, tier: sel.tier, ...(effort === 'default' ? {} : { effort }) });
-              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-            }
-            if (sel && sel.stage === 'model' && sel.key === MAINTENANCE_WORKER_ROLE) {
-              // the worker's model commits at once: the picked <vendor>/<id>, or its removal
-              const current = roster.maintenanceWorker?.opencodeModel ?? undefined;
-              const option = workerModelOptions(roster.catalog.entries, current)[sel.highlight];
-              if (!option) return { ui: { ...ui, selector: undefined }, effects };
-              const to = option.kind === 'clear' ? undefined : option.ref;
-              if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
-                return { ui: { ...ui, selector: undefined, notice: `Maintenance worker model refused: '${to}' is not a <provider>/<model> id` }, effects };
-              }
-              effects.push({ type: 'worker_model', from: current, to });
-              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-            }
-            if (!sel && key === MAINTENANCE_WORKER_ROLE && roster.maintenanceWorker?.unreadable !== undefined) {
-              return { ui: { ...ui, cursor, notice: `Maintenance worker model not editable: config unreadable: ${roster.maintenanceWorker.unreadable}` }, effects };
-            }
             if (!sel) {
-              // do NOT open a picker on an empty/invalid catalog (audit finding
-              // 24/43): the selector would show zero rows and every commit would
-              // be silently refused — surface a notice instead. The worker may
-              // still clear a model it has, so only its entry-less, model-less
-              // picker is empty.
-              if (key === MAINTENANCE_WORKER_ROLE ? workerModelOptions(roster.catalog.entries, roster.maintenanceWorker?.opencodeModel).length === 0 : optionsFor(roster, key).length === 0) {
-                return { ui: { ...ui, cursor, notice: 'model catalog empty or invalid — nothing to pick; refresh the catalog first' }, effects };
-              }
-              // open the MODEL picker on the key under the cursor (highlight 0)
-              return { ui: revealPicker({ ...ui, cursor, selector: { key, stage: 'model', highlight: 0 }, notice: undefined }), effects };
+              // step 1: open the model picker on the key under the cursor, the highlight on its current model
+              const open: SystemSelector = { key, stage: 'model', highlight: 0 };
+              const current = roster.models[key]?.model;
+              const at = pickerSpecs(roster, open).find((x) => x.option !== undefined && x.text.split(/\s/)[0] === current)?.option;
+              return { ui: revealPicker({ ...ui, cursor, selector: { ...open, highlight: at ?? 0 }, notice: undefined }), effects };
             }
+            const specs = pickerSpecs(roster, sel).filter((x) => x.option !== undefined);
             if (sel.stage === 'model') {
-              const keyConfig = roster.configModels[sel.key];
-              const option = optionsFor(roster, sel.key)[sel.highlight];
-              // an OpenCode-only pick or the clear option commits at once: the
-              // OpenCode agent file carries no effort, and the Claude model and
-              // effort are left as they are (decision
-              // opencode-only-model-override-per-role-for-openai-picks)
-              // an Antigravity pick or its clear option commits at once as well: agy
-              // carries the effort in the id, and the Claude pin is left as it is
-              const adoptedHosts = isCustomAgentKey(sel.key) ? (roster.adoptedAgents ?? []).find((a) => a.key === sel.key)?.hosts : undefined;
-              if (option?.kind === 'inherit') {
+              const choice = modelChoices(roster, sel.key)[sel.highlight]?.choice;
+              if (!choice) return { ui: { ...ui, selector: undefined }, effects };
+              if ('inherit' in choice) {
                 // an adopted custom agent drops its model and effort: the host's own default
-                effects.push({ type: 'custom_agent_model', key: sel.key, set: { model: null, effort: null } });
+                effects.push({ type: 'agent_model', key: sel.key, model: null });
                 return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
               }
-              if (option?.kind === 'agy' || option?.kind === 'agy_clear') {
-                if (!keyConfig) return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no config entry` }, effects };
-                if (adoptedHosts) {
-                  // an adopted custom agent: the override is written to config.models.<key> and rendered
-                  if (option.kind === 'agy' && !adoptedHosts.includes('agy')) {
-                    return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' is not rendered for agy (agy is not installed here)` }, effects };
-                  }
-                  effects.push({ type: 'custom_agent_model', key: sel.key, set: { agy_model: option.kind === 'agy' ? option.id : null } });
-                  return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-                }
-                if (option.kind === 'agy' && !(roster.agyInstalled ?? []).some((n) => AGENT_MODEL_KEY[n] === sel.key)) {
-                  return { ui: { ...ui, selector: undefined, notice: `Antigravity model refused: '${sel.key}' has no agy agent installed, so an Antigravity model would govern nothing` }, effects };
-                }
-                effects.push({ type: 'agy_model', key: sel.key, from: keyConfig.agy_model, to: option.kind === 'agy' ? option.id : undefined, model: keyConfig.model, effort: keyConfig.effort });
-                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-              }
-              if (option && keyConfig && adoptedHosts && (option.kind === 'clear' || (option.kind === 'entry' && isOpenCodeOnlyEntry(option.entry)))) {
-                const to = option.kind === 'clear' ? undefined : `${option.entry.vendor}/${option.entry.id}`;
-                if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
-                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
-                }
-                if (to !== undefined && !adoptedHosts.includes('opencode')) {
-                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${sel.key}' is not rendered for OpenCode (OpenCode is not installed here)` }, effects };
-                }
-                effects.push({ type: 'custom_agent_model', key: sel.key, set: { opencode_model: to ?? null } });
-                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-              }
-              if (option && keyConfig && (option.kind === 'clear' || isOpenCodeOnlyEntry(option.entry))) {
-                // the OpenCode agent files this role governs: the ones installed in the OpenCode folder
-                const agents = (roster.opencodeInstalled ?? []).filter((n) => AGENT_MODEL_KEY[n] === sel.key);
-                const to = option.kind === 'clear' ? undefined : `${option.entry.vendor}/${option.entry.id}`;
-                if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
-                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
-                }
-                if (to !== undefined && agents.length === 0) {
-                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${sel.key}' has no OpenCode agent installed, so an OpenCode model would govern nothing` }, effects };
-                }
-                effects.push({ type: 'opencode_model', key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
-                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-              }
-              // confirm the highlighted model → advance to the EFFORT picker
-              const entry = option?.kind === 'entry' ? option.entry : undefined;
-              return { ui: revealPicker({ ...ui, selector: { key: sel.key, stage: 'effort', highlight: 0, model: entry ? entry.id : '' } }), effects };
+              // step 2: the effort or variant of the chosen model
+              const held = roster.models[sel.key];
+              const options = effortOptions(choice.ref);
+              const at = held?.model === choice.ref && held.effort !== undefined ? options.indexOf(held.effort) : -1;
+              return { ui: revealPicker({ ...ui, selector: { key: sel.key, stage: 'effort', highlight: Math.max(0, at), model: choice.ref } }), effects };
             }
-            // effort stage → COMMIT: validate the model floor, then emit the swap
-            const efforts = effortOptions(sel.key);
+            // step 2 → commit the model and its effort ('unset' writes none)
+            const efforts = effortOptions(sel.model);
             const effort = efforts[sel.highlight] ?? efforts[0];
-            const model = sel.model ?? '';
-            const config = roster.configModels[sel.key];
-            if (config && isCustomAgentKey(sel.key) && MODEL_VALUE_RE.test(model)) {
-              // an adopted custom agent: config.models.<key> gets the model and effort and every host's file is re-rendered
-              effects.push({ type: 'custom_agent_model', key: sel.key, set: { model, effort } });
-              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-            }
-            if (config && MODEL_VALUE_RE.test(model)) {
-              const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
-              effects.push({
-                type: 'model_swap',
-                key: sel.key,
-                from: { model: config.model, effort: config.effort },
-                to: { model, effort },
-                agents,
-                decisionTitle: `Model swap: ${sel.key} ${config.model}→${model} (System tab)`,
-              });
-              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
-            }
-            // a non-claude model is REFUSED — surface it (audit finding 24/43); a
-            // silent close was indistinguishable from a successful swap.
-            return {
-              ui: { ...ui, selector: undefined, notice: `model swap refused: '${model || '(none)'}' is not a valid claude-* model id` },
-              effects,
-            };
+            if (sel.model === undefined || specs.length === 0) return { ui: { ...ui, selector: undefined }, effects };
+            effects.push({ type: 'agent_model', key: sel.key, model: sel.model, ...(effort === 'unset' ? {} : { effort }) });
+            return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
           }
         }
       }
@@ -2801,13 +2137,6 @@ function reduceNodes(
     case 'char': {
       const ch = event.ch;
       if (ch.length !== 1) return { ui, effects };
-      // System tab, sparring-partner model row: while the free-text edit is
-      // open EVERY printable key (space, digits, 'q' included) feeds the
-      // buffer — mirrors the Knowledge tab's always-visible search field.
-      // Checked FIRST so the space→ENTER routing below never fires mid-edit.
-      if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== undefined) {
-        return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
-      }
       // the Overpass provider row's edit buffer takes the same always-capture path
       if (ui.tab === SYSTEM_TAB && ui.overpassProviderEdit !== undefined) {
         return { ui: { ...ui, overpassProviderEdit: ui.overpassProviderEdit + ch }, effects };

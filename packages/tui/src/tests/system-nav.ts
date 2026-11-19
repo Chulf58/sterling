@@ -1,28 +1,44 @@
 // Id-based navigation for System-tab tests: a cursor index is looked up from the entry list the tab
-// draws (systemCursorOf), never counted by hand from the number of config.models keys.
+// draws (systemCursorOf), never counted by hand. `snap` builds a canonical roster snapshot.
 import { initialUi, systemCursorOf, type AgentRosterSnapshot, type UiState } from '../state.js';
 
-/** The ids of the settings entries, in the order the tab lists them after the agent rows. */
 export const SYS = {
-  sparringEnabled: 'sys:sparring_enabled',
-  sparringModel: 'sys:sparring_model',
-  tdd: 'sys:tdd_enabled',
-  mode: 'sys:project_mode',
-  handoff: 'sys:handoff_files',
+  mergePath: 'sys:merge_path',
+  reviewers: 'sys:reviewers',
+  copilotLoop: 'sys:copilot_loop',
   autoMerge: 'sys:pr_auto_merge',
-  overpass: 'sys:overpass',
+  tdd: 'sys:tdd_enabled',
   overpassProvider: 'sys:overpass_provider',
-  overpassBypass: 'sys:overpass_bypass',
+  handoff: 'sys:handoff_files',
 } as const;
 
-/** The cursor index of the cursorable entry with this id. Throws when the snapshot draws no such entry. */
-export function at(snap: AgentRosterSnapshot, id: string, ui: UiState = initialUi): number {
-  const i = systemCursorOf(snap, ui, id);
-  if (i < 0) throw new Error(`the System tab draws no cursorable entry '${id}' for this snapshot`);
-  return i;
+export function snap(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
+  return {
+    models: {
+      implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'medium' },
+      reviewer: { model: 'anthropic/claude-opus-5-5', effort: 'high' },
+    },
+    hosts: ['claude', 'opencode'],
+    catalog: {
+      present: true,
+      stale: false,
+      staleDate: null,
+      entries: [
+        { id: 'claude-opus-5-5', label: 'Opus 5.5', tier: 'opus', status: 'active' },
+        { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', tier: 'sonnet', status: 'active' },
+        { id: 'gpt-5.6-sol', label: 'Sol', tier: 'sol', status: 'active', vendor: 'openai' },
+      ],
+    },
+    workflow: { merge: 'direct', reviewers: 1, copilot_loop: false, auto_merge_on_clean: true },
+    tdd: { enabled: true },
+    handoff: false,
+    ...over,
+  };
 }
 
-/** The cursor index of the last agent row (the one just before the first setting). */
-export function lastAgentCursor(snap: AgentRosterSnapshot, ui: UiState = initialUi): number {
-  return at(snap, SYS.sparringEnabled, ui) - 1;
+/** The cursor index of the cursorable entry with this id. Throws when the snapshot draws no such entry. */
+export function at(s: AgentRosterSnapshot, id: string, ui: UiState = initialUi): number {
+  const i = systemCursorOf(s, ui, id);
+  if (i < 0) throw new Error(`the System tab draws no cursorable entry '${id}' for this snapshot`);
+  return i;
 }
