@@ -5097,7 +5097,7 @@ var init_project = __esm({
 function isCustomAgentKey(key) {
   return CUSTOM_AGENT_KEY_RE.test(key);
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, AGY_MODEL_IDS, agentModelEntry, CUSTOM_AGENT_KEY_RE, customAgentEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_EFFORTS, OVERPASS_TIER_RE, isPlainObject, MODEL_REF_RE, OVERPASS_MODEL_NAMESPACE, MERGE_PATHS, MIN_REVIEWERS, MAX_REVIEWERS, canonicalModelEntry, canonicalModelsSchema, workflowSchema, canonicalOverpassSchema, canonicalConfigObject, CANONICAL_RETIRED_KEYS, canonicalConfigSchema;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5667,6 +5667,72 @@ var init_config = __esm({
       // Written by sync and init only.
       applied_config_migrations: external_exports.array(external_exports.string()).optional()
     });
+    DEFAULT_OVERPASS_PROVIDER = "overpass";
+    OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+    OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+    OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
+    isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+    MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+    OVERPASS_MODEL_NAMESPACE = "overpass";
+    MERGE_PATHS = ["direct", "pr"];
+    MIN_REVIEWERS = 1;
+    MAX_REVIEWERS = 5;
+    canonicalModelEntry = external_exports.object({
+      model: external_exports.string().regex(MODEL_REF_RE, "model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto"),
+      effort: external_exports.enum(OVERPASS_EFFORTS).optional()
+    }).strict();
+    canonicalModelsSchema = external_exports.object({
+      implementor: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+      "implementor-hard": canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+      researcher: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+      scout: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" }),
+      librarian: canonicalModelEntry.default({ model: "anthropic/claude-haiku-5-5", effort: "low" }),
+      reviewer: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+      sparring: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+      preflight: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" })
+    }).catchall(canonicalModelEntry.partial()).superRefine((models, ctx) => {
+      for (const [key, entry] of Object.entries(models)) {
+        const e = entry;
+        if (e.model === void 0) {
+          if (!isCustomAgentKey(key))
+            ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: "Required" });
+          continue;
+        }
+        const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+        if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+        }
+        if (e.effort === "max" && overpassTier === null) {
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+        }
+      }
+    }).default({});
+    workflowSchema = external_exports.object({
+      merge: external_exports.enum(MERGE_PATHS).default("direct"),
+      reviewers: external_exports.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+      copilot_loop: external_exports.boolean().default(false),
+      auto_merge_on_clean: external_exports.boolean().default(true)
+    }).strict().default({});
+    canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
+    canonicalConfigObject = configSchema.omit({ mode: true, sparring_partner: true, models: true, overpass: true, pr_review: true }).extend({
+      models: canonicalModelsSchema,
+      workflow: workflowSchema,
+      overpass: canonicalOverpassSchema,
+      // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+      pr_review: external_exports.unknown().default({ copilot_logins: [] })
+    });
+    CANONICAL_RETIRED_KEYS = ["mode", "sparring_partner"];
+    canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) => {
+      if (!isPlainObject(raw))
+        return;
+      for (const key of CANONICAL_RETIRED_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(raw, key))
+          ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key], message: `${key} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+      }
+      if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, "auto_merge_on_clean")) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
+      }
+    }).pipe(canonicalConfigObject);
   }
 });
 
@@ -5821,6 +5887,7 @@ var init_dist = __esm({
     init_records();
     init_transient();
     init_transient();
+    init_config();
     init_config();
     init_config();
     init_custom_agents();

@@ -5013,11 +5013,25 @@ function judgeProjectMode(mode, where) {
   }
   return mode;
 }
+function modeOfConfig(parsed, where) {
+  if (parsed.mode !== void 0 || parsed.workflow === void 0)
+    return judgeProjectMode(parsed.mode, where);
+  const workflow = parsed.workflow;
+  if (workflow === null || typeof workflow !== "object" || Array.isArray(workflow)) {
+    throw new ProjectModeError(`config.workflow is ${JSON.stringify(workflow)} in ${where} \u2014 it must be an object; fix it in the TUI System tab or the file`);
+  }
+  const merge = workflow.merge;
+  if (merge === void 0 || merge === "direct")
+    return "hobby";
+  if (merge === "pr")
+    return "work";
+  throw new ProjectModeError(`config.workflow.merge is ${JSON.stringify(merge)} in ${where} \u2014 it must be 'direct' or 'pr'; fix it in the TUI System tab or the file`);
+}
 function readProjectMode(root) {
   const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
   if (parsed === void 0)
     return "hobby";
-  return judgeProjectMode(parsed.mode, where);
+  return modeOfConfig(parsed, where);
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -5599,6 +5613,10 @@ var configSchema = external_exports.object({
   // Written by sync and init only.
   applied_config_migrations: external_exports.array(external_exports.string()).optional()
 });
+var DEFAULT_OVERPASS_PROVIDER = "overpass";
+var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -5778,6 +5796,67 @@ var CONFIG_KEY_RENAMES = {
   "models.coder": "models.implementor",
   "models.explorer": "models.scout"
 };
+var MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+var OVERPASS_MODEL_NAMESPACE = "overpass";
+var MERGE_PATHS = ["direct", "pr"];
+var MIN_REVIEWERS = 1;
+var MAX_REVIEWERS = 5;
+var canonicalModelEntry = external_exports.object({
+  model: external_exports.string().regex(MODEL_REF_RE, "model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto"),
+  effort: external_exports.enum(OVERPASS_EFFORTS).optional()
+}).strict();
+var canonicalModelsSchema = external_exports.object({
+  implementor: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  "implementor-hard": canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  researcher: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "medium" }),
+  scout: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" }),
+  librarian: canonicalModelEntry.default({ model: "anthropic/claude-haiku-5-5", effort: "low" }),
+  reviewer: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  sparring: canonicalModelEntry.default({ model: "anthropic/claude-opus-5-5", effort: "high" }),
+  preflight: canonicalModelEntry.default({ model: "anthropic/claude-sonnet-5-5", effort: "low" })
+}).catchall(canonicalModelEntry.partial()).superRefine((models, ctx) => {
+  for (const [key2, entry] of Object.entries(models)) {
+    const e = entry;
+    if (e.model === void 0) {
+      if (!isCustomAgentKey(key2))
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "model"], message: "Required" });
+      continue;
+    }
+    const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+    if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "model"], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+    }
+    if (e.effort === "max" && overpassTier === null) {
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2, "effort"], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+    }
+  }
+}).default({});
+var workflowSchema = external_exports.object({
+  merge: external_exports.enum(MERGE_PATHS).default("direct"),
+  reviewers: external_exports.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+  copilot_loop: external_exports.boolean().default(false),
+  auto_merge_on_clean: external_exports.boolean().default(true)
+}).strict().default({});
+var canonicalOverpassSchema = external_exports.object({ provider: external_exports.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) }).strict().default({});
+var canonicalConfigObject = configSchema.omit({ mode: true, sparring_partner: true, models: true, overpass: true, pr_review: true }).extend({
+  models: canonicalModelsSchema,
+  workflow: workflowSchema,
+  overpass: canonicalOverpassSchema,
+  // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+});
+var CANONICAL_RETIRED_KEYS = ["mode", "sparring_partner"];
+var canonicalConfigSchema = external_exports.unknown().superRefine((raw, ctx) => {
+  if (!isPlainObject(raw))
+    return;
+  for (const key2 of CANONICAL_RETIRED_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(raw, key2))
+      ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: [key2], message: `${key2} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+  }
+  if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, "auto_merge_on_clean")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["pr_review", "auto_merge_on_clean"], message: "auto_merge_on_clean moved to workflow.auto_merge_on_clean" });
+  }
+}).pipe(canonicalConfigObject);
 
 // packages/schemas/dist/custom-agents.js
 function customAgentSlug(name) {
@@ -6874,6 +6953,17 @@ function describeOverpassReset(reset) {
 }
 var ConcurrentChange = class extends Error {
 };
+function rewritable(projectDir, configPath2, refuse) {
+  try {
+    containedPath(projectDir, ".sterling", "dir");
+  } catch (err) {
+    if (err instanceof ContainmentError) return { refused: refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`) };
+    throw err;
+  }
+  const stat = lstatSync5(configPath2);
+  if (stat.isSymbolicLink()) return { refused: refuse("is a symlink, which the rewrite would replace") };
+  return { stat };
+}
 var oneLine = (err) => err.message.replace(/\s+/g, " ");
 function prepareConfigMigration(projectDir) {
   const configPath2 = join6(projectDir, ".sterling", "config.json");
@@ -6895,14 +6985,9 @@ function prepareConfigMigration(projectDir) {
   const o = resetOverpassDefaults(h.config);
   if (o.refusal) return refuse(o.refusal);
   if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: "unchanged", lines: [] };
-  try {
-    containedPath(projectDir, ".sterling", "dir");
-  } catch (err) {
-    if (err instanceof ContainmentError) return refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`);
-    throw err;
-  }
-  const stat = lstatSync5(configPath2);
-  if (stat.isSymbolicLink()) return refuse("is a symlink, which the rewrite would replace");
+  const placed = rewritable(projectDir, configPath2, refuse);
+  if (placed.refused) return placed.refused;
+  const { stat } = placed;
   try {
     parseConfig(o.config);
   } catch (err) {

@@ -1284,3 +1284,316 @@ export function describeUnreadConfigKeys(keys: readonly UnreadConfigKey[]): stri
   const names = keys.map((k) => (k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path));
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(', ')} — ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
+
+// ── Canonical config: the settings-redesign shape and the legacy transform ──
+// Decision settings-redesign-build-shape-one-legacy-to-canonical-config (conductor-adopted
+// 2026-11-19), implementing remove-hobby-work-project-mode-config-mode-is-replaced-by-in,
+// settings-that-replace-project-mode-merge-path-reviewer-count,
+// one-model-per-agent-an-agent-has-a-single-model-not-a-claude,
+// decommission-the-codex-model-setting-codex-is-no-longer-used and
+// overpass-tiers-are-ordinary-model-choices-in-each-agent-s-pi. The canonical shape:
+//   - models.<agent> = {model: '<provider>/<id>', effort?}: one model per agent. No
+//     opencode_model, agy_model or hard_task. Effort is optional (unset stays unset); 'max'
+//     is allowed only on an Overpass tier, the one place a role's effort could be max before.
+//     'overpass/<tier>' is a logical namespace: consumers map it through overpass.provider.
+//   - workflow = {merge, reviewers, copilot_loop, auto_merge_on_clean}, replacing config.mode;
+//     auto_merge_on_clean moves here from pr_review.
+//   - overpass = {provider} only: no enabled, roles or conductor_bypass.
+//   - no mode and no sparring_partner.
+// Legacy tolerance lives ONLY in toCanonicalConfig (anti_pattern
+// config-load-tolerance-for-stale-values-silently-accepts-new-bad-writes): canonicalConfigSchema
+// is the strict write check and refuses every legacy key, and a reader takes a legacy document
+// through the transform first, never through a looser schema.
+
+/** A canonical model reference: <provider>/<id>, with an optional context suffix such as [1m]. */
+export const MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+/** The provider every Claude model id moves under when a legacy entry is converted. */
+export const CLAUDE_PROVIDER = 'anthropic';
+/** The logical provider of an Overpass tier, overpass/<tier>, whatever config.overpass.provider is. */
+export const OVERPASS_MODEL_NAMESPACE = 'overpass';
+/** The models keys of the two agents that are not subagents: the conductor and OpenCode's Plan agent. */
+export const CONDUCTOR_MODEL_KEY = 'conductor';
+export const PLAN_MODEL_KEY = 'plan';
+export const MERGE_PATHS = ['direct', 'pr'] as const;
+export type MergePath = (typeof MERGE_PATHS)[number];
+export const MIN_REVIEWERS = 1;
+export const MAX_REVIEWERS = 5;
+
+const canonicalModelEntry = z
+  .object({
+    model: z.string().regex(MODEL_REF_RE, 'model must be <provider>/<id>, for example anthropic/claude-sonnet-5-5 or overpass/agentic-auto'),
+    effort: z.enum(OVERPASS_EFFORTS).optional(),
+  })
+  .strict();
+
+// The shipped models, one per agent. Each is the Claude model the legacy schema default
+// carried; the legacy reviewer and sparring defaults also carried an OpenCode model, and
+// which of the two a project keeps is the per-conflict question the migration asks.
+export const canonicalModelsSchema = z
+  .object({
+    implementor: canonicalModelEntry.default({ model: 'anthropic/claude-sonnet-5-5', effort: 'medium' }),
+    'implementor-hard': canonicalModelEntry.default({ model: 'anthropic/claude-opus-5-5', effort: 'high' }),
+    researcher: canonicalModelEntry.default({ model: 'anthropic/claude-sonnet-5-5', effort: 'medium' }),
+    scout: canonicalModelEntry.default({ model: 'anthropic/claude-sonnet-5-5', effort: 'low' }),
+    librarian: canonicalModelEntry.default({ model: 'anthropic/claude-haiku-5-5', effort: 'low' }),
+    reviewer: canonicalModelEntry.default({ model: 'anthropic/claude-opus-5-5', effort: 'high' }),
+    sparring: canonicalModelEntry.default({ model: 'anthropic/claude-opus-5-5', effort: 'high' }),
+    preflight: canonicalModelEntry.default({ model: 'anthropic/claude-sonnet-5-5', effort: 'low' }),
+  })
+  // Any agent's name is a key. A custom agent (custom-<slug>) may omit its model (the host's
+  // own default); every other key needs one.
+  .catchall(canonicalModelEntry.partial())
+  .superRefine((models, ctx) => {
+    for (const [key, entry] of Object.entries(models)) {
+      const e = entry as { model?: string; effort?: string };
+      if (e.model === undefined) {
+        if (!isCustomAgentKey(key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'model'], message: 'Required' });
+        continue;
+      }
+      const overpassTier = e.model.startsWith(`${OVERPASS_MODEL_NAMESPACE}/`) ? e.model.slice(OVERPASS_MODEL_NAMESPACE.length + 1) : null;
+      if (overpassTier !== null && !OVERPASS_TIER_RE.test(overpassTier)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'model'], message: `${JSON.stringify(e.model)} is not an Overpass tier: after overpass/ it must be agentic- then lowercase letters, digits and '-'` });
+      }
+      if (e.effort === 'max' && overpassTier === null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'effort'], message: "effort 'max' is allowed only on an Overpass tier (overpass/<tier>)" });
+      }
+    }
+  })
+  .default({});
+
+export const workflowSchema = z
+  .object({
+    merge: z.enum(MERGE_PATHS).default('direct'),
+    reviewers: z.number().int().min(MIN_REVIEWERS).max(MAX_REVIEWERS).default(MIN_REVIEWERS),
+    copilot_loop: z.boolean().default(false),
+    auto_merge_on_clean: z.boolean().default(true),
+  })
+  .strict()
+  .default({});
+
+const canonicalOverpassSchema = z
+  .object({ provider: z.string().regex(OVERPASS_PROVIDER_RE, "provider must be letters, digits, '-', '_' and '.', with no '/' or '#'").default(DEFAULT_OVERPASS_PROVIDER) })
+  .strict()
+  .default({});
+
+const canonicalConfigObject = configSchema.omit({ mode: true, sparring_partner: true, models: true, overpass: true, pr_review: true }).extend({
+  models: canonicalModelsSchema,
+  workflow: workflowSchema,
+  overpass: canonicalOverpassSchema,
+  // Still permissive (its strict judge is scripts/pr-review-wait.mjs); only auto_merge_on_clean left it.
+  pr_review: z.unknown().default({ copilot_logins: [] }),
+});
+
+/** The legacy keys a canonical document may not carry. */
+export const CANONICAL_RETIRED_KEYS: readonly string[] = ['mode', 'sparring_partner'];
+
+/** The strict check for a canonical document, the one a new write must pass. A legacy key is
+ *  refused by name, never stripped: the transform, not this schema, is where legacy is tolerated. */
+export const canonicalConfigSchema = z
+  .unknown()
+  .superRefine((raw, ctx) => {
+    if (!isPlainObject(raw)) return;
+    for (const key of CANONICAL_RETIRED_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(raw, key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `${key} is retired; the settings that replace it live elsewhere (decision settings-redesign-build-shape-one-legacy-to-canonical-config)` });
+    }
+    if (isPlainObject(raw.pr_review) && Object.prototype.hasOwnProperty.call(raw.pr_review, 'auto_merge_on_clean')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pr_review', 'auto_merge_on_clean'], message: 'auto_merge_on_clean moved to workflow.auto_merge_on_clean' });
+    }
+  })
+  .pipe(canonicalConfigObject);
+
+export type CanonicalConfig = z.infer<typeof canonicalConfigObject>;
+
+/** A role whose legacy entry named two different models, a Claude model and an OpenCode model.
+ *  The transform does not choose: it reports the pair and puts the OpenCode value in the config
+ *  only as the default proposal (decision settings-redesign-build-shape-one-legacy-to-canonical-config,
+ *  "Update asks per conflict"). */
+export interface ModelConflict {
+  role: string;
+  /** The Claude Code entry, as a canonical reference (anthropic/<id>). */
+  claude: { model: string; effort?: string };
+  /** The OpenCode entry. */
+  opencode: { model: string; effort?: string };
+  /** The value the transform's config holds until the user rules: always the OpenCode one. */
+  proposal: 'opencode';
+}
+
+/** One value the transform moved or removed, for the migration's report. `now` absent = removed. */
+export interface CanonicalChange {
+  path: string;
+  was: unknown;
+  now?: unknown;
+}
+
+export interface CanonicalConfigResult {
+  /** The canonical document (still raw: defaults are not materialized), or the input itself when it is not a plain object. */
+  config: unknown;
+  conflicts: ModelConflict[];
+  changes: CanonicalChange[];
+}
+
+/** The user's answer to a conflict, keyed by role. */
+export type ConflictResolutions = Readonly<Record<string, 'claude' | 'opencode'>>;
+
+/** Thrown when a legacy value cannot be carried at all (an invalid mode, auto_merge_on_clean or
+ *  Overpass block): the transform never guesses, and the caller leaves the file as it is. */
+export class LegacyConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LegacyConfigError';
+  }
+}
+
+const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+const LEGACY_OVERPASS_KEYS = ['enabled', 'roles', 'conductor_bypass'] as const;
+
+/**
+ * The one legacy-to-canonical transform. Pure; the caller's object is never mutated. A canonical
+ * document comes back equal, with no conflicts and no changes. Migration rules:
+ *   - mode work becomes workflow {merge: 'pr', reviewers: 3, copilot_loop: true}; hobby or absent
+ *     becomes {merge: 'direct', reviewers: 1, copilot_loop: false}. auto_merge_on_clean keeps its
+ *     pr_review value (absent = true). A document that already has workflow keeps it.
+ *   - Overpass that was effective (enabled in a work project) gives every Overpass role its
+ *     RESOLVED tier and effort (resolveOverpass), the Plan agent the lane tier, and the conductor
+ *     agentic-conductor when conductor_bypass was off. Overpass that was not effective gives no
+ *     role a tier. overpass keeps only provider.
+ *   - models.<role>: the Claude model becomes anthropic/<id>; agy_model and hard_task are dropped
+ *     (one model per agent; the planner moves implementor.hard_task to implementor-hard first).
+ *     A role whose opencode_model differs from its Claude model is a conflict (see ModelConflict),
+ *     unless `resolutions` answers it.
+ *   - sparring_partner is dropped (decision decommission-the-codex-model-setting-codex-is-no-longer-used).
+ * Throws LegacyConfigError (or the resolveOverpass / judgeProjectMode error) for a legacy value it
+ * cannot carry, and for a resolution naming a role that has no conflict.
+ */
+export function toCanonicalConfig(legacy: unknown, opts: { resolutions?: ConflictResolutions } = {}): CanonicalConfigResult {
+  if (!isPlainObject(legacy)) return { config: legacy, conflicts: [], changes: [] };
+  const raw = normalizeRawConfig(legacy) as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...raw };
+  const changes: CanonicalChange[] = [];
+  const conflicts: ModelConflict[] = [];
+  const resolutions = opts.resolutions ?? {};
+
+  // workflow, from mode and pr_review.auto_merge_on_clean
+  const mode = judgeProjectMode(raw.mode, 'the config');
+  let autoMerge: unknown;
+  if (raw.pr_review !== undefined) {
+    if (!isPlainObject(raw.pr_review)) throw new LegacyConfigError(`config.pr_review is ${JSON.stringify(raw.pr_review)} — it must be an object`);
+    if (has(raw.pr_review, 'auto_merge_on_clean')) {
+      const { auto_merge_on_clean, ...rest } = raw.pr_review;
+      if (typeof auto_merge_on_clean !== 'boolean') throw new LegacyConfigError(`config.pr_review.auto_merge_on_clean is ${JSON.stringify(auto_merge_on_clean)} — it must be true or false`);
+      autoMerge = auto_merge_on_clean;
+      out.pr_review = rest;
+    }
+  }
+  if (raw.workflow === undefined) {
+    const derived = mode === 'work' ? { merge: 'pr', reviewers: 3, copilot_loop: true } : { merge: 'direct', reviewers: 1, copilot_loop: false };
+    out.workflow = { ...derived, auto_merge_on_clean: autoMerge ?? true };
+    changes.push({ path: 'workflow', was: undefined, now: out.workflow });
+  } else if (autoMerge !== undefined && isPlainObject(raw.workflow) && !has(raw.workflow, 'auto_merge_on_clean')) {
+    out.workflow = { ...raw.workflow, auto_merge_on_clean: autoMerge };
+    changes.push({ path: 'workflow.auto_merge_on_clean', was: undefined, now: autoMerge });
+  }
+  if (autoMerge !== undefined) changes.push({ path: 'pr_review.auto_merge_on_clean', was: autoMerge });
+  if (has(raw, 'mode')) {
+    delete out.mode;
+    changes.push({ path: 'mode', was: raw.mode });
+  }
+
+  // Overpass: judged strictly before its legacy keys go
+  let overpass: OverpassResolution | null = null;
+  if (raw.overpass !== undefined) {
+    if (!isPlainObject(raw.overpass)) throw new LegacyConfigError(`config.overpass is ${JSON.stringify(raw.overpass)} — it must be an object`);
+    const block = raw.overpass;
+    if (LEGACY_OVERPASS_KEYS.some((k) => has(block, k))) {
+      overpass = resolveOverpass({ mode: raw.mode, overpass: block }, { host: 'opencode' });
+      const kept: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(block)) {
+        if ((LEGACY_OVERPASS_KEYS as readonly string[]).includes(k)) changes.push({ path: `overpass.${k}`, was: v });
+        else kept[k] = v;
+      }
+      out.overpass = kept;
+    }
+  }
+  const effective = overpass?.effective === true;
+
+  // models
+  const tierOf = (routeModel: string): string => `${OVERPASS_MODEL_NAMESPACE}/${routeModel.slice(overpass!.provider.length + 1)}`;
+  if (raw.models !== undefined && !isPlainObject(raw.models)) return { config: out, conflicts, changes };
+  const models: Record<string, unknown> = { ...((raw.models as Record<string, unknown> | undefined) ?? {}) };
+  let modelsChanged = false;
+  for (const [role, entry] of Object.entries(models)) {
+    if (!isPlainObject(entry)) continue;
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(entry)) {
+      if (k === 'model' || k === 'effort' || k === 'opencode_model') continue;
+      if (k === 'agy_model' || k === 'hard_task') {
+        changes.push({ path: `models.${role}.${k}`, was: v });
+        continue;
+      }
+      next[k] = v; // an unknown field stays, for the strict schema to refuse
+    }
+    const claude = typeof entry.model === 'string' && !entry.model.includes('/') ? `${CLAUDE_PROVIDER}/${entry.model}` : entry.model;
+    if (claude !== entry.model) changes.push({ path: `models.${role}.model`, was: entry.model, now: claude });
+    const opencode = entry.opencode_model;
+    let model = claude;
+    if (opencode !== undefined) {
+      changes.push({ path: `models.${role}.opencode_model`, was: opencode });
+      if (claude === undefined || opencode === claude) {
+        model = opencode;
+      } else if (resolutions[role] !== undefined) {
+        model = resolutions[role] === 'claude' ? claude : opencode;
+      } else if (!(effective && (OVERPASS_ROLES as readonly string[]).includes(role))) {
+        // An effective Overpass role takes its tier below, so its two legacy models never ran.
+        const effort = typeof entry.effort === 'string' ? { effort: entry.effort } : {};
+        conflicts.push({ role, claude: { model: String(claude), ...effort }, opencode: { model: String(opencode), ...effort }, proposal: 'opencode' });
+        model = opencode;
+      }
+    }
+    if (model !== undefined) next.model = model;
+    if (entry.effort !== undefined) next.effort = entry.effort;
+    if (JSON.stringify(next) !== JSON.stringify(entry)) {
+      models[role] = next;
+      modelsChanged = true;
+    }
+  }
+  for (const role of Object.keys(resolutions)) {
+    const entry = isPlainObject(raw.models) ? raw.models[role] : undefined;
+    const claude = isPlainObject(entry) && typeof entry.model === 'string' && !entry.model.includes('/') ? `${CLAUDE_PROVIDER}/${entry.model}` : isPlainObject(entry) ? entry.model : undefined;
+    const answered = isPlainObject(entry) && entry.opencode_model !== undefined && claude !== undefined && entry.opencode_model !== claude;
+    if (!answered) throw new LegacyConfigError(`a model choice was given for ${JSON.stringify(role)}, which has no Claude/OpenCode conflict to answer`);
+  }
+  if (effective && overpass) {
+    for (const role of OVERPASS_ROLES) {
+      const route = overpass.roles[role];
+      const entry = { model: tierOf(route.model), ...(route.effort === undefined ? {} : { effort: route.effort }) };
+      changes.push({ path: `models.${role}`, was: models[role], now: entry });
+      models[role] = entry;
+    }
+    models[PLAN_MODEL_KEY] = { model: tierOf(overpass.laneModel) };
+    changes.push({ path: `models.${PLAN_MODEL_KEY}`, was: undefined, now: models[PLAN_MODEL_KEY] });
+    if (overpass.conductorRouted) {
+      models[CONDUCTOR_MODEL_KEY] = { model: tierOf(overpass.conductorModel) };
+      changes.push({ path: `models.${CONDUCTOR_MODEL_KEY}`, was: undefined, now: models[CONDUCTOR_MODEL_KEY] });
+    }
+    modelsChanged = true;
+  }
+  if (modelsChanged) out.models = models;
+
+  if (has(raw, 'sparring_partner')) {
+    delete out.sparring_partner;
+    changes.push({ path: 'sparring_partner', was: raw.sparring_partner });
+  }
+  return { config: out, conflicts, changes };
+}
+
+/** Parse any config, legacy or canonical, into the canonical shape: the transform, then the strict
+ *  check. A conflict is read as its proposal (the OpenCode model) until the migration asks. */
+export function parseCanonicalConfig(raw: unknown): CanonicalConfig {
+  return canonicalConfigSchema.parse(toCanonicalConfig(raw).config);
+}
+
+/** The partial reader of config.models: the same transform, then only the models slice. */
+export function parseCanonicalModels(raw: unknown): z.infer<typeof canonicalModelsSchema> {
+  const config = toCanonicalConfig(raw).config;
+  return canonicalModelsSchema.parse(isPlainObject(config) ? config.models : undefined);
+}

@@ -103,10 +103,26 @@ export function judgeProjectMode(mode: unknown, where: string): ProjectMode {
   return mode as ProjectMode;
 }
 
+// The mode a config document stands for. A canonical config (decision
+// settings-redesign-build-shape-one-legacy-to-canonical-config) has no mode, only
+// workflow.merge: until the mode's readers move to workflow, 'pr' reads as work and
+// 'direct' (or no merge) as hobby. A document with a mode is judged by its mode.
+export function modeOfConfig(parsed: Record<string, unknown>, where: string): ProjectMode {
+  if (parsed.mode !== undefined || parsed.workflow === undefined) return judgeProjectMode(parsed.mode, where);
+  const workflow = parsed.workflow;
+  if (workflow === null || typeof workflow !== 'object' || Array.isArray(workflow)) {
+    throw new ProjectModeError(`config.workflow is ${JSON.stringify(workflow)} in ${where} — it must be an object; fix it in the TUI System tab or the file`);
+  }
+  const merge = (workflow as Record<string, unknown>).merge;
+  if (merge === undefined || merge === 'direct') return 'hobby';
+  if (merge === 'pr') return 'work';
+  throw new ProjectModeError(`config.workflow.merge is ${JSON.stringify(merge)} in ${where} — it must be 'direct' or 'pr'; fix it in the TUI System tab or the file`);
+}
+
 export function readProjectMode(root: string): ProjectMode {
   const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, 'the project mode');
   if (parsed === undefined) return 'hobby';
-  return judgeProjectMode(parsed.mode, where);
+  return modeOfConfig(parsed, where);
 }
 
 // The project's durable identity: `{ project_id }` from .sterling/project.json,

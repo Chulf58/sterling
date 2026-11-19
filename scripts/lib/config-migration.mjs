@@ -19,11 +19,13 @@
 //                           bundled bin cannot import the MCP server), keeping the
 //                           file's mode. A concurrent change is refused, never lost.
 // A config that does not parse is never touched, and a migrated config that would
-// not parse is never written. The output stays the raw document minus the retired
+// not parse is never written.
+// prepareCanonicalConfigMigration (below) is the settings-redesign rewrite into the canonical shape
+// (toCanonicalConfig); it commits through the same commitConfigMigration. The output stays the raw document minus the retired
 // keys plus the added defaults: parseConfig is a gate only, never serialized (it would materialize defaults).
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, parseConfig, resetOverpassDefaults } from '@sterling/schemas';
+import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, addModelDefaults, canonicalConfigSchema, migrateRetiredModelKeys, migrateStaleAgyModels, moveImplementorHardTask, parseConfig, resetOverpassDefaults, toCanonicalConfig } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -77,6 +79,20 @@ export function describeOverpassReset(reset) {
 
 class ConcurrentChange extends Error {}
 
+/** The file's lstat when the rewrite would stay inside the project, else `{refused}`.
+ *  A linked .sterling would send the rewrite to a config outside the project. */
+function rewritable(projectDir, configPath, refuse) {
+  try {
+    containedPath(projectDir, '.sterling', 'dir');
+  } catch (err) {
+    if (err instanceof ContainmentError) return { refused: refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`) };
+    throw err;
+  }
+  const stat = lstatSync(configPath);
+  if (stat.isSymbolicLink()) return { refused: refuse('is a symlink, which the rewrite would replace') };
+  return { stat };
+}
+
 const oneLine = (err) => err.message.replace(/\s+/g, ' ');
 
 /** Plan the migration of `<projectDir>/.sterling/config.json` and write nothing.
@@ -102,15 +118,9 @@ export function prepareConfigMigration(projectDir) {
   const o = resetOverpassDefaults(h.config);
   if (o.refusal) return refuse(o.refusal);
   if (!m.changed && !a.changed && !d.changed && !h.changed && !o.changed) return { status: 'unchanged', lines: [] };
-  // A linked .sterling would send the rewrite to a config outside the project.
-  try {
-    containedPath(projectDir, '.sterling', 'dir');
-  } catch (err) {
-    if (err instanceof ContainmentError) return refuse(`sits under a .sterling that is not a plain directory inside the project (${oneLine(err)}), so the rewrite could land outside it`);
-    throw err;
-  }
-  const stat = lstatSync(configPath);
-  if (stat.isSymbolicLink()) return refuse('is a symlink, which the rewrite would replace');
+  const placed = rewritable(projectDir, configPath, refuse);
+  if (placed.refused) return placed.refused;
+  const { stat } = placed;
   try {
     parseConfig(o.config);
   } catch (err) {
@@ -180,6 +190,100 @@ export function commitConfigMigration(plan, { beforeRename } = {}) {
     return { status: 'refused', lines: [`config migration refused: ${plan.shown} could not be rewritten (${err.code ?? oneLine(err)}); left untouched`] };
   }
   return { ...plan, status: 'migrated' };
+}
+
+// ── The canonical migration (decision settings-redesign-build-shape-one-legacy-to-canonical-config) ──
+// Rewrites a legacy config into the canonical shape (toCanonicalConfig in packages/schemas) through the
+// same compare-and-swap commit. Unlike prepareConfigMigration it does NOT validate the file against the
+// legacy schema first: the transform is the tolerant reader, and a value it cannot carry is a refusal.
+// The legacy one-time steps above run first, once per file, so a file that missed them gets them as a
+// sync would have given them; a file that records CANONICAL_CONFIG_MIGRATION_ID skips them (they
+// would put legacy fields back). The result must pass canonicalConfigSchema, the strict write check.
+// A role with two models (a Claude model and a different OpenCode model) is never decided here: the
+// plan's status is 'conflicts' and it cannot be committed until the caller passes a resolution for
+// every conflicting role (the update asks the user, OpenCode preselected).
+export const CANONICAL_CONFIG_MIGRATION_ID = 'canonical-config-2026-11-19';
+
+/** True when the transform would change nothing: a canonical document that does not yet record the id. */
+function isCanonicalAlready(raw) {
+  try {
+    const r = toCanonicalConfig(raw);
+    return r.changes.length === 0 && r.conflicts.length === 0;
+  } catch {
+    return false; // not canonical; the transform below throws again and the plan is refused with the cause
+  }
+}
+
+const describeValue = (v) => (v === undefined ? 'unset' : show(v));
+
+/** One report line per transform change. */
+export function describeCanonicalChanges(changes) {
+  return changes.map((c) =>
+    Object.prototype.hasOwnProperty.call(c, 'now')
+      ? `${CONFIG_MIGRATION_LINE_PREFIX}${c.path} set to ${show(c.now)} (was ${describeValue(c.was)})`
+      : `${CONFIG_MIGRATION_LINE_PREFIX}${c.path} removed (value was ${show(c.was)})`
+  );
+}
+
+/** One line per unresolved conflict. */
+export function describeConflicts(conflicts) {
+  return conflicts.map((c) => `${CONFIG_MIGRATION_LINE_PREFIX}models.${c.role} has two models: Claude Code runs ${show(c.claude.model)}, OpenCode runs ${show(c.opencode.model)}; an agent has one model, so choose one (OpenCode preselected)`);
+}
+
+/** Plan the canonical rewrite of `<projectDir>/.sterling/config.json`; writes nothing.
+ *  status: absent, unchanged, ready, conflicts (`conflicts` lists the roles to ask about) or refused. */
+export function prepareCanonicalConfigMigration(projectDir, { resolutions } = {}) {
+  const configPath = join(projectDir, '.sterling', 'config.json');
+  if (!existsSync(configPath)) return { status: 'absent', lines: [] };
+  const shown = configPath.replace(/\\/g, '/');
+  const refuse = (why) => ({ status: 'refused', lines: [`config migration refused: ${shown} ${why}; left untouched`] });
+  const originalBytes = readFileSync(configPath);
+  let raw;
+  try {
+    raw = JSON.parse(originalBytes.toString('utf8'));
+  } catch (err) {
+    return refuse(`is not valid JSON (${oneLine(err)})`);
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return refuse('is not a JSON object');
+  const applied = Array.isArray(raw.applied_config_migrations) ? raw.applied_config_migrations : [];
+  let legacy = raw;
+  const legacyLines = [];
+  if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID) && !isCanonicalAlready(raw)) {
+    const m = migrateRetiredModelKeys(legacy);
+    const a = migrateStaleAgyModels(m.config);
+    const d = addModelDefaults(a.config);
+    const h = moveImplementorHardTask(d.config);
+    const o = resetOverpassDefaults(h.config);
+    if (o.refusal) return refuse(o.refusal);
+    legacy = o.config;
+    legacyLines.push(...describeMigration(m.dropped), ...describeStaleAgy(a.dropped), ...describeAdded(d.added), ...describeHardMove(h.move), ...describeOverpassReset(o));
+  }
+  let result;
+  try {
+    result = toCanonicalConfig(legacy, { resolutions });
+  } catch (err) {
+    return refuse(`cannot be carried to the canonical shape (${oneLine(err)})`);
+  }
+  const config = result.config;
+  if (!applied.includes(CANONICAL_CONFIG_MIGRATION_ID)) config.applied_config_migrations = [...(Array.isArray(config.applied_config_migrations) ? config.applied_config_migrations : []), CANONICAL_CONFIG_MIGRATION_ID];
+  if (result.conflicts.length) return { status: 'conflicts', conflicts: result.conflicts, lines: describeConflicts(result.conflicts) };
+  if (JSON.stringify(config) === JSON.stringify(raw)) return { status: 'unchanged', lines: [] };
+  const placed = rewritable(projectDir, configPath, refuse);
+  if (placed.refused) return placed.refused;
+  const checked = canonicalConfigSchema.safeParse(config);
+  if (!checked.success) return refuse(`would not validate after the migration (${oneLine(checked.error)})`);
+  const text = originalBytes.toString('utf8');
+  return {
+    status: 'ready',
+    configPath,
+    shown,
+    originalBytes,
+    mode: placed.stat.mode & 0o777,
+    next: JSON.stringify(config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
+    config,
+    changes: result.changes,
+    lines: [...legacyLines, ...describeCanonicalChanges(result.changes)],
+  };
 }
 
 /** prepare and commit in one go (sync-agents). */
