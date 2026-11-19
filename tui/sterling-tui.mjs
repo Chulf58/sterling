@@ -58253,10 +58253,17 @@ var CONDUCTOR_ROLE = "conductor";
 
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
+var PROJECT_CONFIG_REL = ".opencode/opencode.json";
 var ROSTER = ["conductor", "implementor", "implementor-hard", "researcher", "scout", "reviewer", "sparring", "librarian", "preflight"];
+var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
+var LEGACY_SHELL_DENIES = ["*sterling.db*", "*.sterling/sterling.db*"];
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
+function projectConfigText(config) {
+  return `${JSON.stringify(config, null, 2)}
+`;
+}
 function probeOpenCode({ env = process.env, home = homedir7() } = {}) {
   let r = spawnSync3("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   const homeBin = join20(home, ".opencode", "bin", "opencode");
@@ -58298,6 +58305,49 @@ function git(projectDir, args) {
   return r;
 }
 var EDIT_FAMILY = ["edit", "write", "patch"];
+var SHELL_FAMILY = ["shell", "bash"];
+function withGuard(value, patterns) {
+  if (typeof value === "string") value = { "*": value };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out = Object.fromEntries(Object.entries(value).filter(([k]) => !patterns.includes(k)));
+  for (const p of patterns) out[p] = "deny";
+  return out;
+}
+function withoutLegacyShellDenies(rules) {
+  return Object.fromEntries(Object.entries(rules).filter(([k, v]) => !(LEGACY_SHELL_DENIES.includes(k) && v === "deny")));
+}
+function guardPermission(permission) {
+  let perm = permission ?? {};
+  if (typeof perm === "string") perm = { "*": perm };
+  if (typeof perm !== "object" || perm === null || Array.isArray(perm)) return { bad: "" };
+  const out = {};
+  let removedShellDeny = false;
+  const strip = (rules) => {
+    const kept = withoutLegacyShellDenies(rules);
+    if (Object.keys(kept).length !== Object.keys(rules).length) removedShellDeny = true;
+    return kept;
+  };
+  for (const [key, value] of Object.entries(perm)) {
+    if (SHELL_FAMILY.includes(key)) {
+      if (typeof value === "string") out[key] = value;
+      else if (typeof value !== "object" || value === null || Array.isArray(value)) return { bad: key };
+      else {
+        const kept = strip(value);
+        if (Object.keys(kept).length || !Object.keys(value).length) out[key] = kept;
+      }
+      continue;
+    }
+    if (key !== "*" && !EDIT_FAMILY.includes(key)) {
+      out[key] = value;
+      continue;
+    }
+    const guarded = withGuard(value, STORE_GUARD_PATTERNS);
+    if (guarded === null) return { bad: key };
+    out[key] = key === "*" ? strip(guarded) : guarded;
+  }
+  if (out.edit === void 0) out.edit = withGuard({}, STORE_GUARD_PATTERNS);
+  return { value: out, removedShellDeny };
+}
 var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY]);
 var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
 var FULL_PERMISSIONS = {
@@ -58348,6 +58398,10 @@ function configuredFullAgentModels(projectDir) {
       continue;
     }
     models[name] = opencodeModelRef(entry.model, parsed.overpass.provider);
+  }
+  for (const [name, key] of [[CONDUCTOR_ROLE, CONDUCTOR_MODEL_KEY], ["plan", PLAN_MODEL_KEY]]) {
+    const model = parsed.models[key]?.model;
+    if (typeof model === "string" && !hostRunsModel(model, "opencode")) unsupported[name] = `config.models.${key} is ${model}, which OpenCode cannot run`;
   }
   return { models, unsupported };
 }
@@ -58495,7 +58549,43 @@ function refreshFullAgentModels({ projectDir, pluginRoot }) {
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   const staged = stageFullAgents({ projectDir, pluginRoot, tracked, models: configured.models, unsupported: configured.unsupported });
   writeFullAgentFiles(staged.writes);
-  return { rows: staged.rows };
+  const gone = staged.rows.filter((r) => r.status === "removed" && r.item.startsWith(`${STERLING_AGENTS_SUBDIR}/`)).map((r) => r.item.slice(".opencode/agents/".length, -".md".length));
+  const configRow = dropGuardOnlyAgentEntries(projectDir, gone);
+  return { rows: configRow ? [...staged.rows, configRow] : staged.rows };
+}
+function dropGuardOnlyAgentEntries(projectDir, names) {
+  if (!names.length) return null;
+  const path = join20(projectDir, PROJECT_CONFIG_REL);
+  if (!existsSync12(path)) return null;
+  const before = normalize3(readFileSync13(path, "utf8"));
+  let config;
+  try {
+    config = JSON.parse(before);
+  } catch (err) {
+    return { item: PROJECT_CONFIG_REL, status: "skipped", detail: `not valid JSON (${err.message}), so the guard entries of ${names.join(", ")} were NOT removed and OpenCode may still define those agents; fix it, then rerun /sterling:update` };
+  }
+  const agents = config?.agent;
+  if (agents === null || typeof agents !== "object" || Array.isArray(agents)) return null;
+  const guardOnly = JSON.stringify({ permission: guardPermission(void 0).value });
+  const legacyDeny = { [LEGACY_SHELL_DENIES[0]]: "deny" };
+  const legacyGuardOnly = JSON.stringify({ permission: { ...guardPermission(void 0).value, shell: legacyDeny, bash: legacyDeny } });
+  const removed = [];
+  const kept = [];
+  for (const name of names) {
+    if (!Object.hasOwn(agents, name)) continue;
+    const text = JSON.stringify(agents[name]);
+    if (text === guardOnly || text === legacyGuardOnly) {
+      delete agents[name];
+      removed.push(name);
+    } else kept.push(name);
+  }
+  if (!Object.keys(agents).length) delete config.agent;
+  const parts = [];
+  if (removed.length) parts.push(`removed the guard-only agent entries of ${removed.join(", ")}, whose agent files were removed`);
+  if (kept.length) parts.push(`KEPT agent entries ${kept.join(", ")}: they are not Sterling's guard-only entries, so they are yours, and OpenCode still defines those agents from them; remove them by hand if the agent should be gone`);
+  if (!parts.length) return null;
+  if (removed.length) writeFileAtomic(path, projectConfigText(config));
+  return { item: PROJECT_CONFIG_REL, status: removed.length ? "refreshed" : "skipped", detail: parts.join("; ") };
 }
 function writeFullAgentFiles(writes, fs = {}) {
   const done = [];

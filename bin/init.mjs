@@ -16044,6 +16044,7 @@ function syncAgents({ templatesDir, registryPath: registryPath2, targetAgentsDir
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 var CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = /* @__PURE__ */ new Set(["installed", "up_to_date", "refreshed", "header_repaired"]);
+var CONDUCTOR_UNSUPPORTED_STATUSES = /* @__PURE__ */ new Set(["unsupported", "unsupported_removed", "unsupported_but_modified"]);
 function ensureConductorActivation(targetDir, agentResults) {
   const settingsPath = join16(targetDir, ".claude", "settings.json");
   let parsed;
@@ -16071,7 +16072,11 @@ function ensureConductorActivation(targetDir, agentResults) {
   }
   const result = {};
   const conductorResult = (agentResults ?? []).find((r) => r.name === "conductor");
-  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
+  if (conductorResult && CONDUCTOR_UNSUPPORTED_STATUSES.has(conductorResult.status) && parsed.agent === "conductor") {
+    result.activation = "refused";
+    result.reason = `${conductorResult.detail ?? "the conductor has no Claude Code copy"}, but ${settingsPath} still sets "agent": "conductor", so Claude Code starts without Sterling's conductor; pick an anthropic model for models.conductor in the System tab, or remove "agent" from ${settingsPath} by hand`;
+    console.error(`REFUSED: ${result.reason}`);
+  } else if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
     result.activation = "skipped";
     result.reason = conductorResult ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired` : "no 'conductor' entry in the agent install/sync report";
   } else if (!("agent" in parsed)) {
@@ -19893,6 +19898,10 @@ function configuredFullAgentModels(projectDir) {
       continue;
     }
     models[name4] = opencodeModelRef(entry.model, parsed.overpass.provider);
+  }
+  for (const [name4, key] of [[CONDUCTOR_ROLE, CONDUCTOR_MODEL_KEY], ["plan", PLAN_MODEL_KEY]]) {
+    const model = parsed.models[key]?.model;
+    if (typeof model === "string" && !hostRunsModel(model, "opencode")) unsupported[name4] = `config.models.${key} is ${model}, which OpenCode cannot run`;
   }
   return { models, unsupported };
 }

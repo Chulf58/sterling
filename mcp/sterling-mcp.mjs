@@ -33466,21 +33466,21 @@ var StorageTransitionRequiredError = class extends Error {
 function unreadKeyWarnings(path, keys) {
   return keys.filter((k) => k.path === path || path.startsWith(`${k.path}.`)).map((k) => k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`);
 }
-function legacyWriteIssues(raw, mutated, path) {
-  const fmt = (i) => `${i.path.join(".") || "(root)"}: ${i.message}`;
+function valueAtPath(doc, path) {
+  let cur = doc;
+  for (const seg of typeof path === "string" ? path.split(".") : path) {
+    if (cur === null || typeof cur !== "object")
+      return void 0;
+    cur = cur[seg];
+  }
+  return cur;
+}
+function legacyWriteIssues(raw, mutated) {
   let before;
   try {
-    before = toCanonicalConfig(raw);
+    before = toCanonicalConfig(raw).config;
   } catch {
-    before = null;
-  }
-  if (before === null) {
-    try {
-      parseConfig(mutated);
-      return void 0;
-    } catch (e) {
-      return e instanceof ZodError2 ? e.issues.map(fmt).join("; ") : e.message;
-    }
+    before = raw;
   }
   let after;
   try {
@@ -33488,21 +33488,18 @@ function legacyWriteIssues(raw, mutated, path) {
   } catch (e) {
     return e.message;
   }
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const hasNow = (c) => Object.prototype.hasOwnProperty.call(c, "now");
-  const key = (c) => `${c.path}\0${JSON.stringify(c.was)}\0${hasNow(c) ? JSON.stringify(c.now) : "-"}`;
-  const known = new Set(before.changes.map(key));
-  const touches = (p) => p === path || p.startsWith(`${path}.`) || path.startsWith(`${p}.`);
-  const fresh = after.changes.filter((c) => !known.has(key(c)) && (!hasNow(c) || touches(c.path)));
+  const fresh = after.changes.filter((c) => !same(valueAtPath(raw, c.path), valueAtPath(mutated, c.path)));
   if (fresh.length) {
     return fresh.map((c) => hasNow(c) ? `${c.path}: ${JSON.stringify(c.was)} is a legacy form the canonical config stores as ${JSON.stringify(c.now)}; write that instead` : `${c.path}: a retired field the canonical config does not carry (value ${JSON.stringify(c.was)}); the migration would drop it, so the write is refused (decision settings-redesign-build-shape-one-legacy-to-canonical-config)`).join("; ");
   }
-  const issues = (doc) => {
-    const v = canonicalConfigSchema.safeParse(normalizeRawConfig(doc));
-    return v.success ? [] : v.error.issues.map(fmt);
-  };
-  const had = new Set(issues(before.config));
-  const added = issues(after.config).filter((i) => !had.has(i));
-  return added.length ? added.join("; ") : void 0;
+  const checked = canonicalConfigSchema.safeParse(normalizeRawConfig(after.config));
+  if (checked.success)
+    return void 0;
+  const judged = (i) => valueAtPath(after.config, i.path) === void 0 ? i.path.slice(0, -1) : i.path;
+  const added = checked.error.issues.filter((i) => i.path.length === 0 || !same(valueAtPath(after.config, judged(i)), valueAtPath(before, judged(i))));
+  return added.length ? added.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ") : void 0;
 }
 function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (!repoRoot) {
@@ -33628,7 +33625,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!validation.success)
       validationIssues = validation.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
   } else {
-    validationIssues = legacyWriteIssues(raw, mutated, path);
+    validationIssues = legacyWriteIssues(raw, mutated);
   }
   if (validationIssues !== void 0) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${validationIssues}. Nothing was written.`);

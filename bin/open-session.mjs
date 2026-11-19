@@ -9320,6 +9320,10 @@ function configuredFullAgentModels(projectDir) {
     }
     models[name] = opencodeModelRef(entry.model, parsed.overpass.provider);
   }
+  for (const [name, key] of [[CONDUCTOR_ROLE, CONDUCTOR_MODEL_KEY], ["plan", PLAN_MODEL_KEY]]) {
+    const model = parsed.models[key]?.model;
+    if (typeof model === "string" && !hostRunsModel(model, "opencode")) unsupported[name] = `config.models.${key} is ${model}, which OpenCode cannot run`;
+  }
   return { models, unsupported };
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {

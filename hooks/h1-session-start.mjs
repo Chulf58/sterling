@@ -16945,6 +16945,7 @@ function unsupportedAgentsLine({ config: config2, configUnreadable: configUnread
   const conflicts = rows.filter((r) => r.host === "*");
   const noCopy = rows.filter((r) => r.host !== "*");
   const parts = [];
+  if (host === "claude" && noCopy.some((r) => r.agent === "conductor")) parts.push(`the conductor (${noCopy.find((r) => r.agent === "conductor").model}) has no Claude Code copy, so this session does NOT run as Sterling's conductor even if .claude/settings.json names it; pick an anthropic model for the conductor in the TUI System tab`);
   if (noCopy.length) parts.push(`no ${host === "claude" ? "Claude Code" : host === "opencode" ? "OpenCode" : "agy"} copy of ${noCopy.map(named).join(", ")}: ${host} cannot run their model, so a dispatch to them fails loudly; change the agent's model in the TUI System tab`);
   if (conflicts.length) parts.push(`${conflicts.map(named).join(", ")}: dispatch refuses until you choose`);
   return `Agents on this host: ${parts.join("; ")}.`;
