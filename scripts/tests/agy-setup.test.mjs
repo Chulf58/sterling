@@ -358,7 +358,7 @@ test('sync-agents: agy absent prints one skip line and writes nothing for agy; a
 test('init: agy absent leaves the project as before (no .agents/, no GEMINI.md, one skipped row); agy present adds them', () => {
   const run = (probe) => {
     const dir = gitProject();
-    const r = spawnSync(process.execPath, [join(repo, 'scripts', 'init.mjs'), '--target', dir, '--project-name', 'agyinit', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'hobby'], {
+    const r = spawnSync(process.execPath, [join(repo, 'scripts', 'init.mjs'), '--target', dir, '--project-name', 'agyinit', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'], { // --mode is retired (settings redesign item C)
       encoding: 'utf8',
       cwd: dir,
       timeout: 180_000,

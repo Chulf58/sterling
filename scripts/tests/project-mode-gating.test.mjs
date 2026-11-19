@@ -170,7 +170,9 @@ test('sync-agents: an invalid mode refuses the whole sync (exit 2), naming the v
   try {
     const r = syncAgents(dir);
     assert.equal(r.status, 2, r.stdout + r.stderr);
-    assert.match(r.stdout, /^refused_project_mode: .*"both".*nothing synced/m);
+    // CHANGED with the settings redesign (item C): the mode is read as part of the
+    // workflow settings, so the refusal is named after them.
+    assert.match(r.stdout, /^refused_project_workflow: .*"both".*nothing synced/m);
     assert.deepEqual(opencodeFiles(dir), []);
   } finally {
     cleanup(dir);
@@ -301,14 +303,14 @@ test('update fan-out: an invalid mode is its own refusal; the marker is stamped;
   try {
     const full = await update({ behind: 2, projects: [bad], cwd });
     assert.equal(full.report.exit, 2, full.log);
-    assert.match(full.log, /✗ .*REFUSED — project mode: config\.mode is "WORK"/);
+    assert.match(full.log, /✗ .*REFUSED — workflow settings: config\.mode is "WORK"/);
     assert.doesNotMatch(full.log, /locally modified agent/);
     assert.equal(full.syncCalls.length + full.handoffCalls.length, 0, 'nothing is synced for a project whose mode is invalid');
     assert.equal(markerOf(cwd).sha, HEAD_B, 'the core update is stamped complete');
 
     const still = await update({ behind: 0, projects: [bad], cwd });
     assert.equal(still.report.exit, 2, still.log);
-    assert.match(still.log, /✗ .*REFUSED — project mode: config\.mode is "WORK"/);
+    assert.match(still.log, /✗ .*REFUSED — workflow settings: config\.mode is "WORK"/);
     assert.equal(still.calls.filter((c) => c.startsWith('npm ')).length, 0, 'the core sequence is not repeated');
     assert.equal(still.syncCalls.length + still.handoffCalls.length, 0, 'still nothing synced while the mode is invalid');
     assert.doesNotMatch(still.log, /Already current — nothing to do/, 'a refused project never reads as "nothing to do"');
@@ -333,7 +335,7 @@ test('update, HEAD unchanged: a mode made invalid after a full update exits non-
     writeConfig(dir, { mode: 'Work', handoff: true });
     const r = await update({ behind: 0, projects: [dir], cwd });
     assert.equal(r.report.exit, 2, r.log);
-    assert.match(r.log, /✗ .*REFUSED — project mode: config\.mode is "Work"/);
+    assert.match(r.log, /✗ .*REFUSED — workflow settings: config\.mode is "Work"/);
   } finally {
     [cwd, dir].forEach(cleanup);
   }
@@ -627,13 +629,13 @@ test('update: an unreadable project .sterling/ is a per-project refusal; the oth
     chmodSync(cfg, 0o000);
     const full = await update({ behind: 2, projects: [locked, fine], cwd });
     assert.equal(full.report.exit, 2, full.log);
-    assert.match(full.log, /✗ .*REFUSED — project mode: .*EACCES/);
+    assert.match(full.log, /✗ .*REFUSED — workflow settings: .*EACCES/);
     assert.deepEqual(opencodeFiles(fine), PORTABLE.map((n) => `${n}.md`), 'the other project is provisioned');
     assert.deepEqual(handoffFiles(fine), HANDOFF_FILES);
 
     const again = await update({ behind: 0, projects: [locked, fine], cwd });
     assert.equal(again.report.exit, 2, again.log);
-    assert.match(again.log, /✗ .*REFUSED — project mode: .*EACCES/, 'still refused, still visible');
+    assert.match(again.log, /✗ .*REFUSED — workflow settings: .*EACCES/, 'still refused, still visible');
 
     chmodSync(cfg, 0o755);
     const fixed = await update({ behind: 0, projects: [locked, fine], cwd });

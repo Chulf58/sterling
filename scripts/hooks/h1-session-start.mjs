@@ -18,7 +18,6 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
-import { noOriginRemote } from '../lib/work-pr.mjs';
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, storageLine, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { SUPPORTED_SCHEMA_VERSION, registryPath, resolveSentHandoffs } from '@sterling/store';
@@ -532,7 +531,7 @@ try {
 
 let modeContext = '';
 try {
-  modeContext = `\n\n${projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(input.cwd) })}`;
+  modeContext = `\n\n${projectModeLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }

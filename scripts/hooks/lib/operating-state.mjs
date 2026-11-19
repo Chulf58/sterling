@@ -1,5 +1,5 @@
 // The host-neutral operating-state lines H1 states at SessionStart: the project
-// config read with its three states, MACHINE ROLE, TDD posture, Project mode,
+// config read with its three states, MACHINE ROLE, TDD posture, Workflow,
 // Handoff files and the pending Sterling issue-report count, and the mounted domain lines.
 // Extracted from h1-session-start.mjs so the OpenCode context hook
 // (packages/opencode-plugin/src/context.mjs) renders the SAME text from the SAME
@@ -9,10 +9,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { storeRootFor } from '../../lib/worktree-root.mjs';
-import { MAINTENANCE_WORKER_ROLE, resolveOverpass } from '@sterling/schemas';
+import { MAINTENANCE_WORKER_ROLE, ProjectWorkflowError, resolveOverpass, workflowOfConfig } from '@sterling/schemas';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../lib/handoff-projection.mjs';
+import { noOriginRemote } from '../../lib/work-pr.mjs';
 import { describeMountedDomains } from './subject-fan.mjs';
 
 /**
@@ -109,38 +110,46 @@ export function tddPostureLine({ config, configUnreadable }) {
 }
 
 /**
- * PROJECT MODE (decision project-mode-hobby-work-toggle-decides-flow, slice S1):
- * informational only. Same three states as the TDD line: an absent key IS the
- * schema default (hobby); an unreadable config is UNKNOWN, never the default; a
- * value outside hobby/work reads INVALID, never as either flow.
- * `noOrigin` (work mode in a git repo with no 'origin' remote, GitHub issue #39) says the
- * merge is local, because there is no PR path.
- * The line says only how work ships. Whether the handoff files are written is a
- * separate setting with its own line, handoffFilesLine below (decision
- * project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting).
+ * WORKFLOW (decisions settings-that-replace-project-mode-merge-path-reviewer-count and
+ * settings-redesign-build-shape-one-legacy-to-canonical-config; the line that replaced
+ * "Project mode"): the merge path, the Reviewers count and the Copilot review loop,
+ * read through workflowOfConfig (a legacy mode is carried by the one transform). Three
+ * states, as the TDD line: an absent config IS the schema default (direct, 1, loop
+ * off); an unreadable config is UNKNOWN, never the default (anti-pattern
+ * config-derived-posture-line-collapses-absent-into-unusable); a value the reader
+ * refuses is INVALID, never either path. On the pull-request path with no 'origin'
+ * remote (GitHub issue #39) the line says the merge is local. `root` makes the line
+ * probe the remote itself, only on the pull-request path; a caller that passes no
+ * root passes `noOrigin` instead. The line is informational: whether the handoff files
+ * are written is its own setting (handoffFilesLine below).
  */
-export function projectModeLine({ config, configUnreadable, noOrigin = false }) {
+export function projectModeLine({ config, configUnreadable, noOrigin = false, root = null }) {
   if (configUnreadable) {
     return (
-      'Project mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. ' +
-      'This is NOT the hobby default: repair the config.'
+      'Workflow: UNKNOWN — the project config could not be read, so config.workflow (merge path, Reviewers, Copilot loop) could not be determined. ' +
+      'This is NOT the default (direct merge, 1 reviewer, loop off): repair the config.'
     );
   }
-  const mode = config?.mode;
-  if (mode === undefined || mode === 'hobby' || mode === 'work') {
-    return (
-      `Project mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
-      (mode === 'work' && noOrigin
-        ? "this repository has no 'origin' remote, so /sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen."
-        : mode === 'work'
-        ? 'work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.'
-        : 'work ships by direct merge through /sterling:merge.')
-    );
+  let wf;
+  try {
+    wf = workflowOfConfig(config ?? undefined, '.sterling/config.json');
+  } catch (e) {
+    if (!(e instanceof ProjectWorkflowError)) throw e;
+    return `Workflow: INVALID — ${e.message}. /sterling:merge refuses to act on it until it is fixed (TUI System tab).`;
   }
-  return (
-    `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
-    '/sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).'
-  );
+  const pr = wf.merge === 'pr';
+  const localPr = pr && (root ? noOriginRemote(root) : noOrigin);
+  const loop = !wf.copilot_loop ? 'OFF' : pr ? 'ON' : 'ON but inactive (needs the pull-request merge path)';
+  const head =
+    `Workflow: merge path ${pr ? 'PULL REQUEST' : 'DIRECT'} · Reviewers: ${wf.reviewers} · Copilot loop: ${loop}` +
+    (pr ? ` · auto-merge on clean: ${wf.auto_merge_on_clean ? 'ON' : 'OFF'}` : '') +
+    ' (config.workflow — TUI System tab) — ';
+  const ships = localPr
+    ? "this repository has no 'origin' remote, so /sterling:merge merges locally like the direct merge path: no pull request and no Copilot review will happen."
+    : pr
+    ? `work ships as a pull request through /sterling:merge; nothing is merged directly${wf.copilot_loop ? ', and the Copilot review loop follows' : ''}.`
+    : 'work ships by direct merge through /sterling:merge.';
+  return `${head}${ships} Run ${wf.reviewers} task-end ${wf.reviewers === 1 ? 'reviewer' : 'reviewers in parallel'}, then one fix round and one re-check.`;
 }
 
 // The resolved per-role routes (resolveOverpass().roles, ruled defaults plus any

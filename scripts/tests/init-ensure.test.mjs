@@ -1630,7 +1630,10 @@ test('handoff setting: a fresh init records it off and writes no portable agents
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 0, r.stderr);
     const cfg = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
-    assert.equal(cfg.mode, 'hobby', 'a fresh config records the hobby default');
+    // CHANGED with the settings redesign (item C): a fresh config records the default
+    // workflow instead of a hobby mode.
+    assert.ok(!('mode' in cfg), 'a fresh config records no mode');
+    assert.deepEqual(cfg.workflow, { merge: 'direct', reviewers: 1, copilot_loop: false, auto_merge_on_clean: true });
     assert.deepEqual(cfg.handoff, { enabled: false }, 'a fresh config records handoff off');
     assert.match(r.stdout, HANDOFF_OFF_ROW);
     assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
@@ -1650,7 +1653,10 @@ for (const mode of ['hobby', 'work']) {
       const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-init-combo-'));
       try {
         assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
-        assert.equal(init(dir, [...FRESH_FLAGS, '--mode', mode]).code, 0);
+        // CHANGED with the settings redesign (item C): --mode is retired, so the legacy
+        // mode is written into the config the way an existing project carries it.
+        assert.equal(init(dir, FRESH_FLAGS).code, 0);
+        setMode(dir, mode);
         setHandoff(dir, on);
         const r = init(dir);
         assert.equal(r.code, 0, r.stdout + r.stderr);
@@ -1763,7 +1769,8 @@ test('upgrade through the init ensure pass: { mode: work }, no handoff key, port
   const configPath = join(dir, '.sterling', 'config.json');
   try {
     git(['init', '-q']);
-    assert.equal(init(dir, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    setMode(dir, 'work'); // CHANGED (item C): --mode is retired; the legacy key is written directly
     setHandoff(dir, true);
     assert.equal(init(dir).code, 0);
     git(['add', '.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md']);
@@ -1789,107 +1796,20 @@ test('upgrade through the init ensure pass: { mode: work }, no handoff key, port
   }
 });
 
-// /sterling:init asks work-or-hobby on a NEW project (user-stated 2026-09-28: "When a
-// new proj ct is sterling inited, it should ask if it is a work or hobby project") and
-// passes the answer as --mode. CHANGED: the two tests below pinned that --mode work
-// wrote the OpenCode and handoff files on the first init and --mode hobby did not.
-// --mode records the shipping flow only; neither mode writes those files.
-const MODE_LINE = (text) => new RegExp(`^mode: ${text}`, 'm');
-
-test('--mode work on a new init records work and writes no handoff files: the mode is the shipping flow only', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-work-'));
-  try {
-    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
-    const r = init(dir, [...FRESH_FLAGS, '--mode', 'work']);
-    assert.equal(r.code, 0, r.stdout + r.stderr);
-    const cfg = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
-    assert.equal(cfg.mode, 'work');
-    assert.deepEqual(cfg.handoff, { enabled: false }, 'work mode does not turn the handoff files on');
-    assert.match(r.stdout, MODE_LINE('work \\(set by --mode\\)'));
-    assert.match(r.stdout, HANDOFF_OFF_ROW);
-    for (const f of HANDOFF_SET) assert.ok(!existsSync(join(dir, f)), `${f} not written`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('--mode hobby on a new init records hobby, says it was set, and writes no handoff files', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-hobby-'));
-  try {
-    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
-    const r = init(dir, [...FRESH_FLAGS, '--mode', 'hobby']);
-    assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'hobby');
-    assert.match(r.stdout, MODE_LINE('hobby \\(set by --mode\\)'));
-    assert.match(r.stdout, HANDOFF_OFF_ROW);
-    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
-    assert.ok(!existsSync(join(dir, 'architecture.md')));
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('a new init with no --mode records hobby explicitly and prints the defaulted line naming the TUI System tab', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-default-'));
-  try {
-    const r = init(dir, FRESH_FLAGS);
-    assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'hobby');
-    assert.match(r.stdout, MODE_LINE('hobby \\(defaulted — no --mode was given; change it in the TUI System tab\\)'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('an invalid --mode refuses with exit 2 naming the valid set, before anything is written', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-invalid-'));
-  try {
-    for (const bad of ['Work', 'banana', '']) {
-      const r = init(dir, [...FRESH_FLAGS, `--mode=${bad}`]);
-      assert.equal(r.code, 2, `--mode=${bad}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stdout + r.stderr, /--mode must be 'hobby' or 'work'/);
-      assert.ok(!existsSync(join(dir, '.sterling')), `--mode=${bad}: nothing written`);
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('an existing config\'s mode is never overwritten by --mode: kept, with a loud notice when the flag differs', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-kept-'));
-  try {
-    assert.equal(init(dir, [...FRESH_FLAGS, '--mode', 'hobby']).code, 0);
-    const configBefore = readFileSync(join(dir, '.sterling', 'config.json'), 'utf8');
-    const differs = init(dir, ['--mode', 'work']);
-    assert.equal(differs.code, 0, differs.stdout + differs.stderr);
-    assert.equal(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'), configBefore, 'config byte-identical');
-    assert.match(differs.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
-    assert.match(differs.stdout, /^⚠ --mode work NOT applied: this project's recorded mode is hobby — switch it in the TUI System tab, then rerun init or \/sterling:update$/m);
-    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')), 'the recorded hobby mode still decides');
-
-    const same = init(dir, ['--mode', 'hobby']);
-    assert.equal(same.code, 0, same.stdout + same.stderr);
-    assert.match(same.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
-    assert.doesNotMatch(same.stdout, /NOT applied: this project's recorded mode/);
-
-    const flagless = init(dir);
-    assert.equal(flagless.code, 0, flagless.stdout + flagless.stderr);
-    assert.match(flagless.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
-    assert.equal(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'), configBefore, 'config still byte-identical');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-// A new project initialised from a session in another Sterling project takes that
-// invoking project's mode without asking (board a-project-initialised-from-another-
-// project-inherits-that-pro). The invoking project is EXPLICIT: only
-// --invoking-project names it. Nothing ambient (CLAUDE_PROJECT_DIR, the shell cwd) is
-// read, because neither says reliably which project the session belongs to.
-const INHERIT_LINE = (mode, from) => new RegExp(`^mode: ${mode} \\(inherited from the invoking project ${from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)$`, 'm');
+// ---------------------------------------------------------------- the workflow settings
+// CHANGED with the settings redesign (item C; decisions
+// remove-hobby-work-project-mode-config-mode-is-replaced-by-in and
+// settings-that-replace-project-mode-merge-path-reviewer-count, user-ruled "Copy from
+// caller, else safe"): init no longer asks hobby/work and --mode is retired. A NEW project
+// copies config.workflow and every agent model from --invoking-project; with no invoking
+// project it starts on direct merge, 1 reviewer, loop off and the shipped models. These
+// tests replace the --mode and mode-inheritance tests that stood here.
+const WORKFLOW_LINE = (text) => new RegExp(`^workflow: ${text}`, 'm');
+const DEFAULT_WORKFLOW = { merge: 'direct', reviewers: 1, copilot_loop: false, auto_merge_on_clean: true };
+const DEFAULTED = 'merge path direct, 1 reviewer, Copilot loop off, auto-merge on clean on \\(defaulted, with Sterling\'s shipped models';
 const withTwoDirs = (fn) => {
-  const invoking = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-from-'));
-  const fresh = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-new-'));
+  const invoking = mkdtempSync(join(tmpdir(), 'sterling-workflow-from-'));
+  const fresh = mkdtempSync(join(tmpdir(), 'sterling-workflow-new-'));
   try {
     fn(invoking, fresh);
   } finally {
@@ -1897,79 +1817,99 @@ const withTwoDirs = (fn) => {
     rmSync(fresh, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 };
-const modeOf = (dir) => JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode;
+const configOf = (dir) => JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
 const INVOKING = '--invoking-project';
+const templateModels = () => JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')).models;
 
-for (const mode of ['work', 'hobby']) {
-  test(`--invoking-project: a new project initialised from a ${mode} project inherits ${mode}, with one line naming the source`, () => {
-    withTwoDirs((invoking, fresh) => {
-      assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', mode]).code, 0);
-      const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
-      assert.equal(r.code, 0, r.stdout + r.stderr);
-      assert.equal(modeOf(fresh), mode);
-      assert.match(r.stdout, INHERIT_LINE(mode, invoking));
-      assert.equal(r.stdout.split('\n').filter((l) => /^mode: /.test(l)).length, 1, 'exactly one mode line');
-      assert.doesNotMatch(r.stdout, /defaulted/);
-    });
-  });
-}
+test('a new init with no invoking project writes the default workflow, no mode, the shipped models, and says so; a rerun matches', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-workflow-default-'));
+  try {
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const cfg = configOf(dir);
+    assert.deepEqual(cfg.workflow, DEFAULT_WORKFLOW);
+    assert.ok(!('mode' in cfg), 'no mode is written');
+    for (const [role, entry] of Object.entries(templateModels() ?? {})) assert.deepEqual(cfg.models[role], { ...cfg.models[role], ...entry }, `${role}: the shipped model`);
+    assert.match(r.stdout, WORKFLOW_LINE(DEFAULTED));
+    assert.doesNotMatch(r.stdout, /^mode: /m, 'no mode line');
+    const again = init(dir);
+    assert.equal(again.code, 0, again.stdout + again.stderr);
+    assert.match(again.stdout, /\.sterling\/config\.json\s+matches/);
+    assert.match(again.stdout, WORKFLOW_LINE('merge path direct, 1 reviewer, Copilot loop off, auto-merge on clean on \\(kept — the recorded config wins\\)'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
 
-test('--invoking-project: an invoking project with no mode key is hobby, as everywhere else', () => {
+test('--mode is retired: any form refuses with exit 2 naming the workflow settings, and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-workflow-modeflag-'));
+  try {
+    for (const bad of [['--mode', 'work'], ['--mode=hobby'], ['--mode']]) {
+      const r = init(dir, [...FRESH_FLAGS, ...bad]);
+      assert.equal(r.code, 2, `${bad.join(' ')}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /--mode is retired — the project mode was replaced by the workflow settings/);
+      assert.doesNotMatch(r.stderr, /^\s+at /m, 'no stack trace');
+      assert.ok(!existsSync(join(dir, '.sterling')), `${bad.join(' ')}: nothing written`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('--invoking-project: a legacy work project gives the new project pull request, 3 reviewers, loop on, its auto-merge value and its models', () => {
   withTwoDirs((invoking, fresh) => {
-    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
-    const p = join(invoking, '.sterling', 'config.json');
-    const cfg = JSON.parse(readFileSync(p, 'utf8'));
-    delete cfg.mode;
-    writeFileSync(p, JSON.stringify(cfg, null, 2));
+    assert.equal(init(invoking, FRESH_FLAGS).code, 0);
+    const models = { ...configOf(invoking).models, implementor: { model: 'claude-opus-5-5', effort: 'high' } };
+    setConfigKey(invoking, { mode: 'work', workflow: undefined, pr_review: { copilot_logins: [], auto_merge_on_clean: false }, models });
     const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(modeOf(fresh), 'hobby');
-    assert.match(r.stdout, INHERIT_LINE('hobby', invoking));
+    const cfg = configOf(fresh);
+    assert.deepEqual(cfg.workflow, { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: false });
+    assert.ok(!('mode' in cfg));
+    assert.deepEqual(cfg.models.implementor, { model: 'claude-opus-5-5', effort: 'high' }, 'the invoking model is copied');
+    assert.match(r.stdout, WORKFLOW_LINE(`merge path pull request, 3 reviewers, Copilot loop on, auto-merge on clean off \\(copied from the invoking project ${invoking.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, with its agent models\\)$`));
+    assert.equal(r.stdout.split('\n').filter((l) => /^workflow: /.test(l)).length, 1, 'exactly one workflow line');
   });
 });
 
-test('--invoking-project: an explicit --mode wins and the invoking config is not read', () => {
+test('--invoking-project: a canonical workflow is copied as written; a fresh invoking project gives the defaults', () => {
   withTwoDirs((invoking, fresh) => {
-    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
-    const r = init(fresh, [...FRESH_FLAGS, '--mode', 'hobby', INVOKING, invoking]);
-    assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(modeOf(fresh), 'hobby');
-    assert.match(r.stdout, MODE_LINE('hobby \\(set by --mode\\)'));
-    assert.doesNotMatch(r.stdout, /inherited/);
-    // not read: an invalid invoking mode does not stop an explicit --mode
-    const p = join(invoking, '.sterling', 'config.json');
-    writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), mode: 'Work' }, null, 2));
-    const other = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-explicit-'));
+    assert.equal(init(invoking, FRESH_FLAGS).code, 0);
+    const wf = { merge: 'pr', reviewers: 2, copilot_loop: false, auto_merge_on_clean: false };
+    setConfigKey(invoking, { workflow: wf });
+    assert.equal(init(fresh, [...FRESH_FLAGS, INVOKING, invoking]).code, 0);
+    assert.deepEqual(configOf(fresh).workflow, wf);
+    const other = mkdtempSync(join(tmpdir(), 'sterling-workflow-other-'));
     try {
-      const r2 = init(other, [...FRESH_FLAGS, '--mode', 'work', INVOKING, invoking]);
-      assert.equal(r2.code, 0, r2.stdout + r2.stderr);
-      assert.equal(modeOf(other), 'work');
+      setConfigKey(invoking, { workflow: undefined });
+      assert.equal(init(other, [...FRESH_FLAGS, INVOKING, invoking]).code, 0);
+      assert.deepEqual(configOf(other).workflow, DEFAULT_WORKFLOW, 'a config with no workflow and no mode is the defaults');
     } finally {
       rmSync(other, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 });
 
-test('--invoking-project on an existing project never changes its mode', () => {
+test('--invoking-project on an existing project never changes its settings', () => {
   withTwoDirs((invoking, existing) => {
-    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
-    assert.equal(init(existing, [...FRESH_FLAGS, '--mode', 'hobby']).code, 0);
+    assert.equal(init(invoking, FRESH_FLAGS).code, 0);
+    setConfigKey(invoking, { workflow: { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true } });
+    assert.equal(init(existing, FRESH_FLAGS).code, 0);
     const before = readFileSync(join(existing, '.sterling', 'config.json'), 'utf8');
     const r = init(existing, [INVOKING, invoking]);
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.equal(readFileSync(join(existing, '.sterling', 'config.json'), 'utf8'), before, 'config byte-identical');
-    assert.match(r.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
-    assert.doesNotMatch(r.stdout, /inherited/);
+    assert.match(r.stdout, WORKFLOW_LINE('merge path direct, 1 reviewer, Copilot loop off, auto-merge on clean on \\(kept — the recorded config wins\\)'));
+    assert.doesNotMatch(r.stdout, /copied from/);
   });
 });
 
-test('--invoking-project equal to the target behaves as no flag: hobby with the defaulted line', () => {
+test('--invoking-project equal to the target behaves as no flag: the defaulted line', () => {
   withTwoDirs((_invoking, fresh) => {
     const r = init(fresh, [...FRESH_FLAGS, INVOKING, fresh]);
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(modeOf(fresh), 'hobby');
-    assert.match(r.stdout, MODE_LINE('hobby \\(defaulted — no --mode was given; change it in the TUI System tab\\)'));
-    assert.doesNotMatch(r.stdout, /inherited/);
+    assert.deepEqual(configOf(fresh).workflow, DEFAULT_WORKFLOW);
+    assert.match(r.stdout, WORKFLOW_LINE(DEFAULTED));
   });
 });
 
@@ -1998,24 +1938,25 @@ test('--invoking-project with no value, or followed by another flag, refuses wit
   });
 });
 
-test('--invoking-project whose project has an invalid mode refuses with exit 2 naming the file and the value, and writes nothing', () => {
-  withTwoDirs((invoking, fresh) => {
-    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
-    const p = join(invoking, '.sterling', 'config.json');
-    writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), mode: 'Work' }, null, 2));
-    const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
-    assert.equal(r.code, 2, r.stdout + r.stderr);
-    const out = r.stdout + r.stderr;
-    assert.match(out, /init REFUSED/);
-    assert.ok(out.includes(`${invoking.replace(/\\/g, '/')}/.sterling/config.json`), out);
-    assert.ok(out.includes('"Work"'), out);
-    assert.ok(!existsSync(join(fresh, '.sterling')), 'nothing written');
-  });
+test('--invoking-project whose workflow cannot be read (an invalid mode or merge path) refuses with exit 2 naming the file and the value, and writes nothing', () => {
+  for (const patch of [{ mode: 'Work' }, { workflow: { merge: 'squash' } }]) {
+    withTwoDirs((invoking, fresh) => {
+      assert.equal(init(invoking, FRESH_FLAGS).code, 0);
+      setConfigKey(invoking, patch);
+      const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      const out = r.stdout + r.stderr;
+      assert.match(out, /init REFUSED: the invoking project's workflow settings cannot be copied/);
+      assert.ok(out.includes(`${invoking.replace(/\\/g, '/')}/.sterling/config.json`), out);
+      assert.ok(out.includes(patch.mode ? '"Work"' : 'squash'), out);
+      assert.ok(!existsSync(join(fresh, '.sterling')), 'nothing written');
+    });
+  }
 });
 
 test('--invoking-project whose .sterling is a symlink leaving the project refuses with exit 2, not a stack trace', () => {
   withTwoDirs((invoking, fresh) => {
-    const outside = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-outside-'));
+    const outside = mkdtempSync(join(tmpdir(), 'sterling-workflow-outside-'));
     try {
       writeFileSync(join(outside, 'config.json'), JSON.stringify({ mode: 'work' }));
       symlinkSync(outside, join(invoking, '.sterling'), 'dir');
@@ -2030,50 +1971,15 @@ test('--invoking-project whose .sterling is a symlink leaving the project refuse
   });
 });
 
-test('without --invoking-project nothing ambient is read: a cwd inside a work project and CLAUDE_PROJECT_DIR naming it still default to hobby', () => {
+test('without --invoking-project nothing ambient is read: a cwd inside a pull-request project and CLAUDE_PROJECT_DIR naming it still give the defaults', () => {
   withTwoDirs((invoking, fresh) => {
-    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    assert.equal(init(invoking, FRESH_FLAGS).code, 0);
+    setConfigKey(invoking, { workflow: { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true } });
     const r = init(fresh, FRESH_FLAGS, { CLAUDE_PROJECT_DIR: invoking }, { cwd: invoking });
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(modeOf(fresh), 'hobby');
-    assert.match(r.stdout, MODE_LINE('hobby \\(defaulted — no --mode was given; change it in the TUI System tab\\)'));
-    assert.doesNotMatch(r.stdout, /inherited/);
+    assert.deepEqual(configOf(fresh).workflow, DEFAULT_WORKFLOW);
+    assert.match(r.stdout, WORKFLOW_LINE(DEFAULTED));
   });
-});
-
-test('a malformed --mode (given twice, or followed by another flag) refuses with exit 2, never a stack trace', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-malformed-'));
-  try {
-    for (const bad of [['--mode', 'work', '--mode=work'], ['--mode', '--backup-opt-out']]) {
-      const r = init(dir, [...FRESH_FLAGS, ...bad]);
-      assert.equal(r.code, 2, `${bad.join(' ')}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, /--mode/);
-      assert.doesNotMatch(r.stderr, /^\s+at /m, 'no stack trace');
-      assert.ok(!existsSync(join(dir, '.sterling')), `${bad.join(' ')}: nothing written`);
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-
-test('an existing config with NO mode key is never given one by --mode: bytes identical, key still absent, notice printed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-absent-'));
-  try {
-    assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const p = join(dir, '.sterling', 'config.json');
-    const { mode: _dropped, ...withoutMode } = JSON.parse(readFileSync(p, 'utf8'));
-    writeFileSync(p, JSON.stringify(withoutMode, null, 2));
-    const configBefore = readFileSync(p, 'utf8');
-    const r = init(dir, ['--mode', 'work']);
-    assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(readFileSync(p, 'utf8'), configBefore, 'config byte-identical');
-    assert.ok(!('mode' in JSON.parse(readFileSync(p, 'utf8'))), 'mode still absent');
-    assert.match(r.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
-    assert.match(r.stdout, /^⚠ --mode work NOT applied: this project's recorded mode is hobby — switch it in the TUI System tab, then rerun init or \/sterling:update$/m);
-    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
 });
 
 test('OpenCode handoff: with handoff on, init writes committed .opencode/agents/ and the handoff projection; a rerun matches', () => {

@@ -642,6 +642,11 @@ export const configSchema = z.object({
   // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: z.unknown().default('hobby'),
+  // The workflow settings that replace mode (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). Known here so a legacy
+  // reader does not report it as unread; its strict judge is workflowOfConfig in
+  // project.ts and canonicalConfigSchema below.
+  workflow: z.unknown().optional(),
   // Where the project's stores live (decision
   // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
   // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in

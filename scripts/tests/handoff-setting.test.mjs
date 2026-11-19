@@ -340,14 +340,15 @@ test('exclude block: handoff off with something tracked under .opencode/, or an 
 // ---------------------------------------------------------------- the shipping flow follows the mode
 
 for (const [mode, on] of COMBOS) {
-  test(`PR review loop duty (${label(mode, on)}): an armed loop is ${mode === 'work' ? 'owed' : 'not owed'}`, () => {
+  // CHANGED with the settings redesign (user-ruled "Finish owed loops"): an armed loop is
+  // owed until it settles in every project; only arming is gated (by /sterling:merge).
+  test(`PR review loop duty (${label(mode, on)}): an armed loop is owed`, () => {
     const dir = combo(mode, on, { store: false });
     try {
       armPrLoop(dir, { pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, repo: 'acme/widget', head_sha: HEAD_A });
       const { state, degraded } = evaluatePrLoop(dir);
       assert.equal(degraded, null);
-      if (mode === 'work') assert.equal(state?.pr_number, 7, 'a work project owes the loop with handoff on and off');
-      else assert.equal(state, null, 'a hobby project owes no loop with handoff on and off');
+      assert.equal(state?.pr_number, 7, 'an armed loop is owed with handoff on and off, whatever the mode');
     } finally {
       cleanup(dir);
     }
@@ -358,8 +359,8 @@ for (const [mode, on] of COMBOS) {
 
 const lineOf = (lines, prefix) => lines.filter((l) => l.startsWith(prefix));
 const MODE_TEXT = {
-  work: 'Project mode: WORK (config.mode — TUI System tab) — work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.',
-  hobby: 'Project mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.',
+  work: 'Workflow: merge path PULL REQUEST · Reviewers: 3 · Copilot loop: ON · auto-merge on clean: ON (config.workflow — TUI System tab) — work ships as a pull request through /sterling:merge; nothing is merged directly, and the Copilot review loop follows. Run 3 task-end reviewers in parallel, then one fix round and one re-check.',
+  hobby: 'Workflow: merge path DIRECT · Reviewers: 1 · Copilot loop: OFF (config.workflow — TUI System tab) — work ships by direct merge through /sterling:merge. Run 1 task-end reviewer, then one fix round and one re-check.',
 };
 const HANDOFF_TEXT = {
   true: 'Handoff files: ON (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are written and maintained.',
@@ -371,10 +372,10 @@ for (const [mode, on] of COMBOS) {
     const dir = combo(mode, on, { store: false });
     try {
       const { lines } = operatingStateLines(dir, null);
-      assert.deepEqual(lineOf(lines, 'Project mode:'), [MODE_TEXT[mode]]);
+      assert.deepEqual(lineOf(lines, 'Workflow:'), [MODE_TEXT[mode]]);
       assert.deepEqual(lineOf(lines, 'Handoff files:'), [HANDOFF_TEXT[on]]);
       assert.doesNotMatch(lines.join('\n'), /work-only/);
-      assert.doesNotMatch(lineOf(lines, 'Project mode:')[0], /OpenCode|handoff/i, 'the mode line makes no claim about the handoff files');
+      assert.doesNotMatch(lineOf(lines, 'Workflow:')[0], /OpenCode|handoff/i, 'the mode line makes no claim about the handoff files');
       assert.equal(lines.indexOf(HANDOFF_TEXT[on]), lines.indexOf(MODE_TEXT[mode]) + 1, 'the handoff line follows the mode line');
     } finally {
       cleanup(dir);

@@ -25,11 +25,11 @@ On OpenCode, the Sol bullet reads as follows.
 - **Sol**: dispatch the `subagent` tool with agent `sterling/reviewer` and `model` set to `openai/gpt-6.1-sol#high`. When Overpass is ON for the project, omit `model`: the plugin sets every reviewer to one tier, so there is no Sol or Opus choice and no cross-family pairing, while the review count, the rubric and the "do not modify the worktree" line stay. The rubric is that agent's body, so do not paste it: the prompt is only the brief below. The agent's permissions deny edits, but shell stays available to it and no sandbox was shown, so add "do not modify the worktree" to the brief. The `codex` MCP tool is the Claude Code route only and is not used here. If the openai provider is not logged in, say so and dispatch the Opus reviewer instead.
 <!-- /opencode-only -->
 
-## Work mode: 3 to 5 parallel Sol reviewers
+## The Reviewers setting: N parallel reviewers
 
-Decision `work-mode-3-to-5-parallel-sol-reviewers-before-copilot-loop`. In a work-mode project, when the task is done and before the PR opens, dispatch 3 to 5 Sol reviewers at once, in the background, each with the same brief below over the whole branch's diff and the same rubric (the `reviewer` agent's body). Do not split them by angle and do not mix models. Pick the count by risk: 3 for a small or low-risk diff, up to 5 when it touches runtime code, permissions, credentials or migrations.
+Decision `settings-that-replace-project-mode-merge-path-reviewer-count`. Run N reviewers where N is the Reviewers setting shown in STERLING CONTEXT (the Workflow line, `config.workflow.reviewers`, 1 to 5); one fix round and one re-check. When N is more than one, dispatch them at once, in the background, each with the same brief below over the whole branch's diff and the same rubric (the `reviewer` agent's body). Do not split them by angle and do not mix models.
 
-Merge and de-duplicate the findings, and adjudicate each on evidence. Run one fix round, then resume ONE warm Sol reviewer for the re-check of the fixes. Findings left at MEDIUM or below are recorded as residual risk. Then the PR opens and the Copilot loop (`pr-review-loop`) starts. A test file marked `WEAKENED`, `HOLLOW` or `NOT READ` by any one reviewer is sent back, whatever the others said.
+Merge and de-duplicate the findings, and adjudicate each on evidence. Run one fix round, then resume ONE warm reviewer for the re-check of the fixes. Findings left at MEDIUM or below are recorded as residual risk. Then merge (direct path), or open the PR (pull-request path), after which the Copilot loop (`pr-review-loop`) starts when the Copilot loop setting is on. A test file marked `WEAKENED`, `HOLLOW` or `NOT READ` by any one reviewer is sent back, whatever the others said.
 
 Riskiest means runtime/product code, config, permissions, credentials, lifecycle, migrations, generated catalogs, third-party patches; docs, probe scripts and generated projections go unreviewed.
 

@@ -192,8 +192,9 @@ function createCalls(state) {
 const noPrCreateEver = (state) => assert.equal(ghCalls(state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, '`gh pr create` is never called');
 
 /** A project with a bare origin holding main, a feature branch checked out
- * with `commits` commits, and (unless mode is undefined) .sterling/config.json. */
-function makeProject({ mode, handoff, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets', checkScript } = {}) {
+ * with `commits` commits, and (unless mode and config are undefined) .sterling/config.json:
+ * `config` is written as given (a canonical workflow document), else `{mode, handoff}`. */
+function makeProject({ mode, config, handoff, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets', checkScript } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'sterling-dm-work-'));
   const dir = join(base, 'repo');
   const ssh = sshEnv(base);
@@ -215,7 +216,8 @@ function makeProject({ mode, handoff, commits = [{ subject: 'feat: widget sprock
   git(dir, ['remote', 'add', 'origin', ORIGIN_URL]);
   git(dir, ['push', 'origin', 'main'], env);
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...(handoff === undefined ? {} : { handoff: { enabled: handoff } }) }));
+  if (config !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
+  else if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...(handoff === undefined ? {} : { handoff: { enabled: handoff } }) }));
   new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
   git(dir, ['checkout', '-b', branchName]);
   commits.forEach((c, i) => {
@@ -1100,7 +1102,8 @@ test("work + no 'origin' remote: merges LOCALLY like hobby, says loudly that no 
     git(p.dir, ['remote', 'remove', 'origin']);
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, `the no-origin work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    const notice = /WORK mode, but this repository has no 'origin' remote — merging LOCALLY like hobby mode\. NO pull request was opened and NO Copilot review happened/;
+    // The notice names the merge path since the settings redesign (the mode is retired).
+    const notice = /pull-request merge path, but this repository has no 'origin' remote — merging LOCALLY like the direct merge path\. NO pull request was opened and NO Copilot review happened/;
     assert.match(r.stderr, notice, 'the fallback is announced');
     assert.equal(r.stderr.match(new RegExp(notice.source, 'g')).length, 2, 'announced at the start and again after the merge output');
     const out = parseSingleJson(r.stdout, 'no-origin work merge');
@@ -1173,7 +1176,7 @@ test("work + a GitHub origin: unchanged — no local-fallback notice, no work_mo
   try {
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, oneLine(r.stderr));
-    assert.doesNotMatch(r.stderr, /merging LOCALLY like hobby mode/);
+    assert.doesNotMatch(r.stderr, /merging LOCALLY like the direct merge path/);
     const out = parseSingleJson(r.stdout, 'work with origin');
     assert.equal(out.mode, 'work');
     assert.equal(out.work_mode_local_fallback, undefined);
@@ -1322,6 +1325,88 @@ test('work S3: a failed create, then a PR opened by hand, then a rerun — the r
     noPrCreateEver(p.gh.state);
     assertArmed(p, { number: 52 });
     assert.deepEqual(JSON.parse(readFileSync(prLoopFile(p, 33), 'utf8')), settled, 'the other PR\'s settled loop is kept, moved to its own file');
+  } finally {
+    p.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------- the workflow settings
+// Settings redesign item C (decisions settings-that-replace-project-mode-merge-path-reviewer-count
+// and settings-redesign-build-shape-one-legacy-to-canonical-config): the gate follows
+// config.workflow.merge, and a PR arms the review loop only when config.workflow.copilot_loop is on.
+const WORKFLOW = (workflow) => ({ workflow: { merge: 'pr', reviewers: 3, copilot_loop: true, auto_merge_on_clean: true, ...workflow } });
+
+test('workflow merge direct: a canonical config merges directly — main moves, nothing on gh, no loop armed', () => {
+  const p = makeProject({ config: WORKFLOW({ merge: 'direct', reviewers: 1, copilot_loop: false }) });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
+    const out = parseSingleJson(r.stdout, 'direct');
+    assert.equal(out.mode, undefined, 'the direct report has no PR envelope');
+    assert.equal(out.pushed, true);
+    assert.deepEqual(ghCalls(p.gh.state), [], 'the direct path never calls gh');
+    assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main received the merge');
+    assert.equal(noLoopArmed(p), true);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('workflow merge pr with the Copilot loop on: the PR is created and the loop is armed', () => {
+  const p = makeProject({ config: WORKFLOW({}) });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
+    const out = parseSingleJson(r.stdout, 'pr');
+    assert.equal(out.ok, true);
+    assert.equal(out.pr_number, 7);
+    assertBaseUntouched(p, 'pr path');
+    assertArmed(p, { number: 7 });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('workflow merge pr with the Copilot loop off: the PR is created, NO loop is armed, and the gate says so', () => {
+  const p = makeProject({ config: WORKFLOW({ copilot_loop: false }) });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(parseSingleJson(r.stdout, 'pr loop off').pr_number, 7, 'the PR still ships');
+    assert.equal(noLoopArmed(p), true, 'no loop is armed with the loop off');
+    assert.match(r.stderr, /the Copilot review loop is off \(config\.workflow\.copilot_loop/);
+    assert.deepEqual(evaluatePrLoop(p.dir), { state: null, degraded: null });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("workflow merge pr without an 'origin' remote: merges locally with the loud notice, no gh, no loop", () => {
+  const p = makeProject({ config: WORKFLOW({}) });
+  try {
+    git(p.dir, ['remote', 'remove', 'origin']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
+    assert.match(r.stderr, /pull-request merge path, but this repository has no 'origin' remote — merging LOCALLY/);
+    const out = parseSingleJson(r.stdout, 'pr no origin');
+    assert.equal(out.work_mode_local_fallback, true);
+    assert.equal(out.merged_into, 'main');
+    assert.deepEqual(ghCalls(p.gh.state), []);
+    assert.equal(noLoopArmed(p), true);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('an invalid workflow.merge is refused with exit 2 before anything runs, naming the value', () => {
+  const p = makeProject({ config: WORKFLOW({ merge: 'squash' }) });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 2, oneLine(r.stderr));
+    assert.match(r.stderr, /config\.workflow is invalid .*squash/);
+    assert.equal(r.stdout, '');
+    assert.deepEqual(ghCalls(p.gh.state), []);
+    assertBaseUntouched(p, 'invalid workflow');
   } finally {
     p.cleanup();
   }

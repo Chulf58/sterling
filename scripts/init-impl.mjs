@@ -16,8 +16,8 @@
 //
 //   node scripts/init.mjs --target <dir> [--project-name <name>]
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
-//     [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
-//     [--invoking-project <dir>]   (a NEW project takes that Sterling project's mode)
+//     [--backup-path <p> | --backup-opt-out]
+//     [--invoking-project <dir>]   (a NEW project copies that Sterling project's workflow and models)
 //     [--domain-description <domain>=<text>]...   (repeatable; one per NEW domain store)
 //     [--update-ensure]   (set only by /sterling:update's re-bake step)
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, sta
 import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, unreadConfigKeys, describeUnreadConfigKeys } from '@sterling/schemas';
+import { parseConfig, unreadConfigKeys, describeUnreadConfigKeys, readProjectWorkflow, workflowOfConfig, ProjectWorkflowError } from '@sterling/schemas';
 import { ProjectRegistry, registryPath, createDomain, resolveDomainMounts } from '@sterling/store';
 import { arg, argAll, hasFlag, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
@@ -40,7 +40,7 @@ import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES, readProjectMode, ProjectModeError } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { prepareConfigMigration, commitConfigMigration } from './lib/config-migration.mjs';
 import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED } from './lib/project-identity.mjs';
@@ -74,7 +74,7 @@ const pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log(`usage: node scripts/init.mjs --target <dir> [--project-name <name>]
   [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
-  [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
+  [--backup-path <p> | --backup-opt-out]
   [--invoking-project <dir>] [--domain-description <domain>=<text>]...
   [--update-ensure] [--help]
 --target defaults to the current directory. Declaration flags are required only when no recorded config exists.`);
@@ -85,22 +85,19 @@ const projectNameFlag = arg('--project-name');
 const stackTagsFlag = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
 const backupPathFlag = arg('--backup-path');
 const backupOptOutFlag = process.argv.includes('--backup-opt-out');
-// the project mode the /sterling:init SOP asked for on a NEW project (decision
-// project-mode-hobby-work-toggle-decides-flow). It seeds a fresh config only; an
-// existing config's mode is switched in the TUI System tab, never by this flag.
-// A malformed --mode (given twice, or followed by another flag) makes the parser
-// throw; it is a refusal like an invalid value (exit 2), never a stack trace.
-let modeFlagGiven;
-let modeFlag;
-try {
-  modeFlagGiven = hasFlag('--mode');
-  modeFlag = arg('--mode');
-} catch (e) {
-  fail(`init REFUSED: ${e.message}`, 2);
+// --mode is retired with the project mode (decision
+// remove-hobby-work-project-mode-config-mode-is-replaced-by-in): a caller still passing
+// it is refused by name, before anything is written, rather than silently ignored.
+if (process.argv.some((a) => a === '--mode' || a.startsWith('--mode='))) {
+  fail(
+    'init REFUSED: --mode is retired — the project mode was replaced by the workflow settings (merge path, Reviewers, Copilot loop). ' +
+      'A new project copies them and every agent model from --invoking-project, or starts on direct merge, 1 reviewer, loop off and the shipped models; change them in the TUI System tab. Nothing was written.',
+    2
+  );
 }
 // --invoking-project <dir>: the Sterling project this init was run from (see the
 // inheritance block below). A missing or empty value, or one followed by another
-// flag, refuses like a malformed --mode.
+// flag, refuses (exit 2), never a stack trace.
 let invokingGiven;
 let invokingFlag;
 try {
@@ -172,9 +169,6 @@ if (!(hasFlag('--update-ensure') && existsSync(join(target, '.sterling', 'config
         `Init continues. To get the Plan agent, move Sterling to a path that uses only ${SHELL_SAFE_CHARS_TEXT}, then run /sterling:update.\n`
     );
   }
-}
-if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
-  fail(`init REFUSED: --mode must be 'hobby' or 'work' — got ${JSON.stringify(modeFlag ?? '')}`, 2);
 }
 // The runtime server and the TUI are COMMITTED bundles (gated by check-bundles-fresh), so
 // nothing is built on an installed copy; a missing one is a broken checkout and refuses
@@ -260,36 +254,45 @@ if (!recorded) {
   if (!stackTagsFlag.length) fail(`init REFUSED: --stack-tags is required — ${noConfigAt} (ask, don’t guess — §12 mini-grill)`, 2);
 }
 
-// The mode a NEW project takes from the project that is initialising it (board
-// a-project-initialised-from-another-project-inherits-that-pro): a work project that
-// inits another project makes it a work project, a hobby project a hobby one, with no
-// question. The invoking project is EXPLICIT, never ambient: only --invoking-project
-// <dir> names it, because neither CLAUDE_PROJECT_DIR nor the shell cwd reliably says
-// which project the session belongs to (a subdirectory or a linked worktree has no
-// .sterling/config.json). With no flag nothing is inherited, whatever the env or cwd.
-// Flag given: a directory that is not a Sterling project refuses (the caller claimed an
-// invoking project, so silently defaulting would hide the mismatch); the target itself
-// means no inheritance (not an error); --mode wins and the invoking config is not read;
-// an existing target keeps its mode. A missing mode key in the invoking project is
-// hobby; an invalid value refuses (P5), never defaults.
+// The workflow settings and agent models a NEW project takes from the project that is
+// initialising it (user-ruled "Copy from caller, else safe", decision
+// settings-that-replace-project-mode-merge-path-reviewer-count): merge path, Reviewers,
+// Copilot loop, auto-merge on clean and every agent's model are copied, with no
+// question. With no invoking project the defaults apply: direct merge, 1 reviewer, loop
+// off and Sterling's shipped models. The invoking project is EXPLICIT, never ambient:
+// only --invoking-project <dir> names it, because neither CLAUDE_PROJECT_DIR nor the
+// shell cwd reliably says which project the session belongs to (a subdirectory or a
+// linked worktree has no .sterling/config.json). Flag given: a directory that is not a
+// Sterling project refuses (the caller claimed an invoking project, so silently
+// defaulting would hide the mismatch); the target itself means no inheritance (not an
+// error); an existing target keeps its own settings. An invoking workflow that cannot
+// be read, or invoking models that are not an object, refuse (P5), never default.
 const sameDir = (a, b) => {
   const real = (d) => { try { return realpathSync(d); } catch { return resolve(d); } };
   return fwd(real(a)) === fwd(real(b));
 };
 let inheritedFrom;
-let inheritedMode;
-if (invokingGiven && !recorded && !modeFlagGiven) {
+let inheritedWorkflow;
+let inheritedModels;
+if (invokingGiven && !recorded) {
   const invoking = resolve(invokingFlag);
   if (!sameDir(invoking, target)) {
-    if (!existsSync(join(invoking, '.sterling', 'config.json'))) {
-      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project — '${fwd(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag and pass --mode hobby|work`, 2);
+    const invokingConfig = join(invoking, '.sterling', 'config.json');
+    if (!existsSync(invokingConfig)) {
+      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project — '${fwd(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag to start on the defaults`, 2);
     }
     try {
-      inheritedMode = readProjectMode(invoking);
+      inheritedWorkflow = readProjectWorkflow(invoking);
     } catch (e) {
-      if (!(e instanceof ProjectModeError) && !(e instanceof ContainmentError)) throw e;
-      fail(`init REFUSED: the invoking project's mode cannot be inherited — ${e.message}. Fix it, or pass --mode hobby|work`, 2);
+      if (!(e instanceof ProjectWorkflowError) && !(e instanceof ContainmentError)) throw e;
+      fail(`init REFUSED: the invoking project's workflow settings cannot be copied — ${e.message}. Fix it, or drop --invoking-project to start on the defaults`, 2);
     }
+    // readProjectWorkflow has refused a config that is not a JSON object or not contained.
+    const models = JSON.parse(readFileSync(invokingConfig, 'utf8')).models;
+    if (models !== undefined && (models === null || typeof models !== 'object' || Array.isArray(models))) {
+      fail(`init REFUSED: the invoking project's config.models is ${JSON.stringify(models)} in ${fwd(invokingConfig)} — it must be an object; fix it, or drop --invoking-project to start on the defaults`, 2);
+    }
+    inheritedModels = models;
     inheritedFrom = fwd(invoking);
   }
 }
@@ -338,11 +341,13 @@ const expectedConfig = parseConfig({
     ? { project_name: recorded ? recorded.project_name : eff.projectName }
     : {}),
   ...(eff.backupPath ? { backup_path: eff.backupPath } : { backup_opt_out: eff.backupOptOut }),
-  // the project mode (decision project-mode-hobby-work-toggle-decides-flow) is a
-  // recorded declaration like the ones above, switched in the TUI System tab: a
-  // work project's config is not "hand-edited" for carrying it. A fresh config
-  // takes --mode, else the explicit 'hobby' default.
-  mode: recorded ? recorded.mode : (modeFlag ?? inheritedMode ?? 'hobby'),
+  // a recorded mode is a declaration like the ones above (the parsed copy is compared
+  // below, so a recorded config is not "hand-edited" for carrying one); a fresh config
+  // carries config.workflow instead, written below, and no mode.
+  ...(recorded ? { mode: recorded.mode, workflow: recorded.workflow } : {}),
+  // a fresh config copies every agent model from the invoking project (above), else
+  // takes the shipped models of templates/default-config.json.
+  ...(!recorded && inheritedModels !== undefined ? { models: inheritedModels } : {}),
   // the handoff setting (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
   // a recorded declaration too, switched in the TUI System tab. A fresh config
@@ -421,23 +426,25 @@ if (recorded) {
   if (unread.length) notes.push(`note: .sterling/config.json carries ${describeUnreadConfigKeys(unread)}`);
 }
 
-// the summary's mode line: set (a fresh config took --mode), defaulted (a fresh
-// config with no --mode and no invoking project), inherited (a fresh config from the
-// invoking project's mode) or kept (an existing config's mode always wins; a
-// differing --mode is a loud notice, never a write)
+// the summary's workflow line: copied (a fresh config from the invoking project),
+// defaulted (a fresh config with no invoking project) or kept (an existing config's
+// settings always win; init never changes them).
+const freshWorkflow = recorded ? null : (inheritedWorkflow ?? workflowOfConfig(undefined, 'the defaults'));
+const describeWorkflow = (wf) => `merge path ${wf.merge === 'pr' ? 'pull request' : 'direct'}, ${wf.reviewers} reviewer${wf.reviewers === 1 ? '' : 's'}, Copilot loop ${wf.copilot_loop ? 'on' : 'off'}, auto-merge on clean ${wf.auto_merge_on_clean ? 'on' : 'off'}`;
 const modeLines = [];
 if (!recorded) {
-  modeLines.push(modeFlagGiven
-    ? `mode: ${modeFlag} (set by --mode)`
-    : inheritedFrom !== undefined
-      ? `mode: ${inheritedMode} (inherited from the invoking project ${inheritedFrom})`
-      : 'mode: hobby (defaulted — no --mode was given; change it in the TUI System tab)');
+  modeLines.push(inheritedFrom !== undefined
+    ? `workflow: ${describeWorkflow(freshWorkflow)} (copied from the invoking project ${inheritedFrom}, with its agent models)`
+    : `workflow: ${describeWorkflow(freshWorkflow)} (defaulted, with Sterling's shipped models — no --invoking-project was given; change them in the TUI System tab)`);
 } else {
-  const recordedMode = PROJECT_MODES.includes(recorded.mode) ? recorded.mode : JSON.stringify(recorded.mode);
-  modeLines.push(`mode: ${recordedMode} (kept — the recorded config wins)`);
-  if (modeFlagGiven && modeFlag !== recorded.mode) {
-    modeLines.push(`⚠ --mode ${modeFlag} NOT applied: this project's recorded mode is ${recordedMode} — switch it in the TUI System tab, then rerun init or /sterling:update`);
+  let kept;
+  try {
+    kept = `workflow: ${describeWorkflow(workflowOfConfig(rawRecorded, '.sterling/config.json'))} (kept — the recorded config wins)`;
+  } catch (e) {
+    if (!(e instanceof ProjectWorkflowError)) throw e;
+    kept = `⚠ workflow: INVALID — ${e.message}`;
   }
+  modeLines.push(kept);
 }
 
 // Every preflight above has passed: commit the planned migration now, before the first
@@ -478,10 +485,18 @@ for (const m of domainsExisting) {
 // config: created from declarations | matches defaults+declarations | tuned/hand-edited → left
 const backupDetail = eff.backupPath ? eff.backupPath : 'OPTED OUT (recorded; snapshots will skip loudly)';
 if (!recorded) {
+  // parseConfig materializes the legacy mode default and strips config.workflow, so the
+  // fresh document drops mode and carries workflow (decision
+  // settings-redesign-build-shape-one-legacy-to-canonical-config). The template's
+  // pr_review.auto_merge_on_clean stays until the canonical migration moves it: legacy
+  // readers still read it there, and a rerun compares against the template.
+  const { mode: _legacyMode, ...withoutMode } = expectedConfig;
+  if (withoutMode.pr_review && withoutMode.pr_review.auto_merge_on_clean !== undefined) withoutMode.pr_review = { ...withoutMode.pr_review, auto_merge_on_clean: freshWorkflow.auto_merge_on_clean };
+  const fresh = { ...withoutMode, workflow: freshWorkflow };
   if (freshTracked.unknown === null) {
-    writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
+    writeFileSync(configPath, JSON.stringify(fresh, null, 2));
   } else {
-    const withoutHandoff = { ...expectedConfig };
+    const withoutHandoff = { ...fresh };
     delete withoutHandoff.handoff;
     writeFileSync(configPath, JSON.stringify(withoutHandoff, null, 2));
     notes.push(`note: config.handoff.enabled was left out of the new .sterling/config.json — git could not say whether handoff files are committed (${freshTracked.unknown}); once git answers, the setting follows what is tracked, or set it in the TUI System tab`);

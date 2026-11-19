@@ -2,11 +2,12 @@
 // work-project-identity-file-sterling-project-json). Each project carries a
 // durable identity in .sterling/project.json, {"project_id": "<uuid v4>"},
 // committed to git. init writes it only when absent and never overwrites it;
-// update and sync-agents fail loud in a WORK project, or a project whose
-// config.storage is 'postgres', when it is missing or invalid; any other
-// project is not checked. The reader and its validation are
-// in @sterling/schemas (readProjectIdentity); this file holds the scripts-side
-// pieces: the writer, the work-mode verdict and the .gitignore repair.
+// update and sync-agents fail loud in a project whose config.storage is
+// 'postgres' when it is missing or invalid; any other project is not checked
+// (the workflow settings never require it, decision
+// settings-that-replace-project-mode-merge-path-reviewer-count). The reader and its
+// validation are in @sterling/schemas (readProjectIdentity); this file holds the
+// scripts-side pieces: the writer, the Postgres verdict and the .gitignore repair.
 import { randomUUID } from 'node:crypto';
 import { readProjectIdentity, ProjectIdentityError, PROJECT_IDENTITY_REL } from '@sterling/schemas';
 import { writeContained } from './contained-fs.mjs';
@@ -32,20 +33,19 @@ export function ensureProjectIdentity(root) {
 
 // The refusal text for a project that needs an identity and whose identity is
 // missing or invalid, or null when the project may proceed. A project needs one
-// when `mode` (what readProjectMode said) is 'work' OR its config.storage is
-// 'postgres' (the Postgres schema is named by the project_id, and mode does not
-// decide storage). A hobby project on SQLite is never checked. A config.storage
-// that cannot be read is itself a refusal, never a guess. An unreadable
-// identity file (a symlink in the way) is the same refusal as an invalid one.
-export function workIdentityRefusal(root, mode) {
+// when its config.storage is 'postgres' (the Postgres schema is named by the
+// project_id). A project on SQLite is never checked. A config.storage that cannot
+// be read is itself a refusal, never a guess. An unreadable identity file (a
+// symlink in the way) is the same refusal as an invalid one.
+export function identityRefusal(root) {
   let onPostgres;
   try {
     onPostgres = readProjectStorage(root) === 'postgres';
   } catch (err) {
     return `project storage cannot be read: ${err.message}`;
   }
-  if (mode !== 'work' && !onPostgres) return null;
-  const subject = mode === 'work' ? 'work-mode project' : 'project with storage postgres';
+  if (!onPostgres) return null;
+  const subject = 'project with storage postgres';
   try {
     if (readProjectIdentity(root)) return null;
   } catch (err) {

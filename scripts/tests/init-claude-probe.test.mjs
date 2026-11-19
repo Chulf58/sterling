@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { probeClaude } from '../lib/claude-probe.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const FRESH_FLAGS = ['--project-name', 'claude-probe', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'work'];
+const FRESH_FLAGS = ['--project-name', 'claude-probe', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups']; // --mode is retired (settings redesign item C)
 // The engine is written when either tool is found, an opener pair per tool found (user-ruled
 // 2026-10-08, "Yes, per tool found"). The helper says OpenCode is absent unless a case says
 // otherwise, so with Claude Code absent too no launcher is written.

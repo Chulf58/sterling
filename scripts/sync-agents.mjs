@@ -12,16 +12,16 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
-import { parseConfig, isCustomAgentKey } from '@sterling/schemas';
+import { parseConfig, isCustomAgentKey, readProjectWorkflow, ProjectWorkflowError } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { migrateProjectConfig } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { setupAgy, formatAgyRows, renderGeminiMd } from './lib/agy-setup.mjs';
 import { hasCustomOutputs, syncCustomAgents } from './lib/custom-agent-render.mjs';
-import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
+import { isSterlingClone, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
-import { workIdentityRefusal } from './lib/project-identity.mjs';
+import { identityRefusal as projectIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 import { storeRootFor } from './lib/worktree-root.mjs';
 import { claudeMdWarnings } from './lib/claude-md-extras.mjs';
@@ -38,21 +38,20 @@ const configDir = storeRootFor(targetDir);
 
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 
-// Project mode (decision project-mode-hobby-work-toggle-decides-flow), read
-// from the TARGET's own config. Nothing below depends on which mode it is (the
-// mode decides only how work ships); an INVALID value is still a refusal
-// (exit 2) naming the value, and nothing is synced until it is fixed.
-let projectMode;
+// The workflow settings (config.workflow, or a legacy config.mode through the one
+// transform), read from the TARGET's own config. Nothing below depends on their
+// values (they decide only how work ships and is reviewed); an INVALID value is
+// still a refusal (exit 2) naming the value, and nothing is synced until it is fixed.
 try {
-  projectMode = readProjectMode(configDir);
+  readProjectWorkflow(configDir);
 } catch (err) {
-  if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
-  console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  if (!(err instanceof ProjectWorkflowError) && !(err instanceof ContainmentError)) throw err;
+  console.log(`refused_project_workflow: ${err.message}; nothing synced`);
   process.exit(2);
 }
-// A WORK project must carry its identity (decision
-// work-project-identity-file-sterling-project-json); a project is checked when it is in work mode or its config.storage is postgres.
-const identityRefusal = workIdentityRefusal(configDir, projectMode);
+// A project on Postgres storage must carry its identity (decision
+// work-project-identity-file-sterling-project-json); the workflow settings never require it.
+const identityRefusal = projectIdentityRefusal(configDir);
 if (identityRefusal) {
   console.log(`refused_project_identity: ${identityRefusal}; nothing synced`);
   process.exit(2);

@@ -5,34 +5,22 @@
 // unevaluable state says, and the next-action text. Each host keeps its own
 // delivery (H10 blocks once per session and reminds on every other Stop; the
 // plugin raises a notice), so the two cannot drift on what "owed" means.
-import { readProjectMode } from '../../lib/handoff-projection.mjs';
-import { PR_LOOP_REL, PR_LOOPS_DIR_REL, prLoopStateExists, readPrLoops } from '../../lib/work-pr.mjs';
+// The settings do not gate the duty: /sterling:merge arms a loop only on the
+// pull-request merge path with the Copilot loop on, and a loop once armed stays
+// owed until it settles, whatever the settings say now (user-ruled "Finish owed
+// loops", decision settings-redesign-build-shape-one-legacy-to-canonical-config).
+import { PR_LOOP_REL, PR_LOOPS_DIR_REL, readPrLoops } from '../../lib/work-pr.mjs';
 
 const errMessage = (e) => String((e && e.message) || e);
 const LOOP_FILES = `${PR_LOOPS_DIR_REL}/ or ${PR_LOOP_REL}`;
 
 /**
  * Every loop owed in the project at `root`: { states, degraded }. `states` is
- * the armed loops whose status is 'owed', oldest arming first, and only when
- * the project is WORK; one per PR (GitHub issue #104). `degraded` is a
- * disclosure line when the answer cannot be known (an unreadable mode with
- * loop state present, or an unreadable loop file in a work project); an armed
- * loop is never silently suppressed.
+ * the armed loops whose status is 'owed', oldest arming first; one per PR
+ * (GitHub issue #104). `degraded` is a disclosure line when the answer cannot
+ * be known (an unreadable loop file); an armed loop is never silently suppressed.
  */
 export function evaluatePrLoops(root) {
-  let mode;
-  try {
-    mode = readProjectMode(root);
-  } catch (e) {
-    if (prLoopStateExists(root)) {
-      return {
-        states: [],
-        degraded: `• PR review loop: the project mode is unreadable (${errMessage(e)}) — PR loop state exists (${LOOP_FILES}) but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`,
-      };
-    }
-    return { states: [], degraded: null };
-  }
-  if (mode !== 'work') return { states: [], degraded: null };
   let loops;
   try {
     loops = readPrLoops(root);
@@ -71,6 +59,6 @@ export function prLoopNext(state, waitScript, { host = 'claude-code' } = {}) {
 }
 
 export const prLoopOwedText = (state, next) =>
-  `• PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? '?').slice(0, 7)}, armed ${state.armed_at}) — ${next}`;
+  `• PR review loop owed: PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? '?').slice(0, 7)}, armed ${state.armed_at}) — ${next}`;
 
 export const prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;

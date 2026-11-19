@@ -138,8 +138,8 @@ export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
 export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';
 export type { RuntimeMarker, StalenessVerdict } from './staleness.js';
-export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, judgeProjectMode, modeOfConfig, readProjectIdentity, isProjectId } from './project.js';
-export type { ProjectMode } from './project.js';
+export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, judgeProjectMode, modeOfConfig, readProjectIdentity, isProjectId, ProjectWorkflowError, workflowOfConfig, readProjectWorkflow } from './project.js';
+export type { ProjectMode, ProjectWorkflow } from './project.js';
 export {
   BROKER_PROTOCOL,
   BROKER_MAX_REQUEST_BYTES,
