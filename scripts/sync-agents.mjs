@@ -17,13 +17,13 @@ import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, desc
 import { migrateProjectConfig } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
-import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
+import { setupAgy, formatAgyRows, renderGeminiMd } from './lib/agy-setup.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { workIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 import { storeRootFor } from './lib/worktree-root.mjs';
-import { foreignClaudeMdBullets, foreignBulletWarning } from './lib/claude-md-extras.mjs';
+import { claudeMdWarnings } from './lib/claude-md-extras.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -244,6 +244,7 @@ if (claudeHost) {
 // An explicit non-false autoMemoryEnabled is a NOTICE (printed above), never a refusal:
 // counting it would fail every /sterling:update on the machine for one project's choice.
 // Project rules belong in AGENTS.md (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer):
-// name every CLAUDE.md bullet that is not Sterling's own, never edit the file.
-for (const b of foreignClaudeMdBullets(pluginRoot, targetDir)) console.log(foreignBulletWarning(b));
+// name every CLAUDE.md and GEMINI.md bullet that is not Sterling's own, never edit a file.
+// A failure of this check prints one diagnostic line and keeps the sync's exit status.
+for (const line of claudeMdWarnings(pluginRoot, targetDir, () => renderGeminiMd({ pluginRoot, root: pluginRoot, projectName: 'project' }))) console.log(line);
 process.exit(refused > 0 ? 2 : 0);

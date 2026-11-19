@@ -10133,23 +10133,62 @@ function probeClaudeWithOverride({ env = process.env } = {}) {
 // scripts/lib/claude-md-extras.mjs
 import { existsSync as existsSync11, readFileSync as readFileSync12 } from "node:fs";
 import { join as join16 } from "node:path";
-var LEAD_RE = /^- (\*\*.+?\*\*)/;
-var leadOf = (line) => LEAD_RE.exec(line)?.[1] ?? null;
+var BOLD_RE = /^- \*\*(.+?)\*\*/;
+var PLAIN_RE = /^- (.+)$/;
+var FENCE_LINE = /^\s*(```|~~~)/;
 var key = (lead) => lead.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean).slice(0, 3).join(" ");
+function topLevelBullets(text) {
+  const out = [];
+  let inFence = false;
+  text.split("\n").forEach((raw, i) => {
+    if (FENCE_LINE.test(raw)) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+    const bold = BOLD_RE.exec(raw);
+    const lead = bold ? `**${bold[1]}**` : PLAIN_RE.exec(raw)?.[1].trim();
+    if (lead) out.push({ line: i + 1, lead });
+  });
+  return out;
+}
+function foreignBulletsIn(referenceText, fileText) {
+  const known = new Set(topLevelBullets(referenceText).map((b) => key(b.lead)));
+  return topLevelBullets(fileText).filter((b) => !known.has(key(b.lead)));
+}
 function foreignClaudeMdBullets(pluginRoot2, projectDir) {
   const claudePath = join16(projectDir, "CLAUDE.md");
   const templatePath = join16(pluginRoot2, "templates", "target-claude-md.md");
   if (!existsSync11(claudePath) || !existsSync11(templatePath)) return [];
-  const known = new Set(readFileSync12(templatePath, "utf8").split("\n").map(leadOf).filter(Boolean).map(key));
-  const out = [];
-  readFileSync12(claudePath, "utf8").split("\n").forEach((text, i) => {
-    const lead = leadOf(text);
-    if (lead && !known.has(key(lead))) out.push({ line: i + 1, lead });
-  });
-  return out;
+  return foreignBulletsIn(readFileSync12(templatePath, "utf8"), readFileSync12(claudePath, "utf8")).map((b) => ({ file: "CLAUDE.md", ...b }));
 }
-function foreignBulletWarning({ line, lead }) {
-  return `\u26A0 CLAUDE.md:${line} holds a bullet that is not part of Sterling's layer: ${lead}. Move it to AGENTS.md: every host reads AGENTS.md, while CLAUDE.md and GEMINI.md hold only Sterling's generated layer (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer). Sterling does not edit your file.`;
+function foreignGeminiMdBullets(referenceText, projectDir) {
+  const geminiPath = join16(projectDir, "GEMINI.md");
+  if (!existsSync11(geminiPath)) return [];
+  return foreignBulletsIn(referenceText, readFileSync12(geminiPath, "utf8")).map((b) => ({ file: "GEMINI.md", ...b }));
+}
+function foreignBulletWarning({ file = "CLAUDE.md", line, lead }) {
+  const shown = lead.length > 80 ? `${lead.slice(0, 77)}...` : lead;
+  return `\u26A0 ${file}:${line} holds a bullet that is not part of Sterling's layer: ${shown}. Move it to AGENTS.md: every host reads AGENTS.md, while CLAUDE.md and GEMINI.md hold only Sterling's generated layer (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer). Sterling does not edit your file.`;
+}
+var oneLine2 = (err) => String(err?.message ?? err).replace(/\s+/g, " ").trim();
+function claudeMdWarnings(pluginRoot2, projectDir, geminiReference) {
+  const lines = [];
+  try {
+    for (const b of foreignClaudeMdBullets(pluginRoot2, projectDir)) lines.push(foreignBulletWarning(b));
+  } catch (err) {
+    lines.push(`\u26A0 CLAUDE.md check skipped: ${oneLine2(err)}`);
+  }
+  if (geminiReference) {
+    try {
+      if (existsSync11(join16(projectDir, "GEMINI.md"))) {
+        for (const b of foreignGeminiMdBullets(geminiReference(), projectDir)) lines.push(foreignBulletWarning(b));
+      }
+    } catch (err) {
+      lines.push(`\u26A0 GEMINI.md check skipped: ${oneLine2(err)}`);
+    }
+  }
+  return lines;
 }
 
 // scripts/sync-agents.mjs
@@ -10289,7 +10328,7 @@ if (claudeHost) {
   }
   if (activationResult.activation === "refused") refused += 1;
 }
-for (const b of foreignClaudeMdBullets(pluginRoot, targetDir)) console.log(foreignBulletWarning(b));
+for (const line of claudeMdWarnings(pluginRoot, targetDir, () => renderGeminiMd({ pluginRoot, root: pluginRoot, projectName: "project" }))) console.log(line);
 process.exit(refused > 0 ? 2 : 0);
 /*! Bundled license information:
 
