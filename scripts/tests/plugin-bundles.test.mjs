@@ -227,7 +227,7 @@ test('bin/stamp-contract.mjs from a .git-less plugin root (an installed copy): n
     mkdirSync(join(plugin, 'bin'), { recursive: true });
     mkdirSync(join(plugin, 'templates'), { recursive: true });
     writeFileSync(join(plugin, 'bin', 'stamp-contract.mjs'), readFileSync(join(root, 'bin', 'stamp-contract.mjs')));
-    for (const t of ['target-agents-md.md', 'target-claude-md.md']) writeFileSync(join(plugin, 'templates', t), readFileSync(join(root, 'templates', t)));
+    for (const t of ['target-agents-md.md', 'target-claude-md.md', 'sterling-layer-agents.md']) writeFileSync(join(plugin, 'templates', t), readFileSync(join(root, 'templates', t)));
     const registryDb = join(base, 'registry.db');
     new ProjectRegistry(registryDb).close();
     const r = spawnSync(process.execPath, [join(plugin, 'bin', 'stamp-contract.mjs'), '--project', join(base, 'project')], {

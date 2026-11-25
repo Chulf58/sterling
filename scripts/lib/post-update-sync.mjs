@@ -202,20 +202,27 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
   const layer = (sync.out ?? '').split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
   const layerRefusals = layer.filter((l) => l.startsWith('✗ Sterling layer REFUSED:'));
   if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2 && layerRefusals.length) return { ok: false, migrated, layer, detail: 'sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows)' };
-  if (sync.status === 2) return { ok: false, migrated, layer, detail: `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
+  // sync-agents refreshes the agents it can before it exits 2 for what it refuses (an agent or the
+  // Sterling layer), so the restart is worked out first and rides every result after it has run.
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out ?? '') ||
+    (host === 'opencode' && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out ?? '')) ||
+    (host === 'agy' && AGY_AGENT_WRITTEN_LINE.test(sync.out ?? ''));
+  if (sync.status === 2) {
+    const detail = layerRefusals.length
+      ? `sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows; exit 2, with anything else it refused in its output): ${sync.tail}`
+      : `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
+    return { ok: false, restart, migrated, layer, detail };
+  }
+  // A crash (any other non-zero exit) is not a refusal: its output is not trusted to say what changed.
   if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   // On OpenCode the agents that matter are the Sterling-full ones setupOpenCode writes
   // ("OpenCode created|refreshed: .opencode/agents/..."); a skipped setup ("OpenCode: ...")
   // means none of them was checked, which a running OpenCode contradicts (P5).
   const openCodeSkip = host === 'opencode' ? /^OpenCode: .*$/m.exec(sync.out) : null;
-  if (openCodeSkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  if (openCodeSkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
   // The same on agy: a skipped agy setup checked none of the .agents/agents/ files a running agy reads.
   const agySkip = host === 'agy' ? AGY_SKIP_LINE.exec(sync.out) : null;
-  if (agySkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) ||
-    (host === 'opencode' && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out)) ||
-    (host === 'agy' && AGY_AGENT_WRITTEN_LINE.test(sync.out));
+  if (agySkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: '', inserted: [], migrated, layer };

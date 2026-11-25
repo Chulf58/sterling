@@ -228,8 +228,8 @@ const GOLDEN = {
   },
   "sync-refused": {
     "code": 0,
-    "sys": "⚠ CONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH. ✗ Sterling 0.0.1→9.9.9-fixture: post-update sync FAILED — sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): refreshed: implementor |  | RESTART REQUIRED — project subagents load at session start.. 0 tasks · 0 maintenance items pending",
-    "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC FAILED (H1): Sterling 0.0.1→9.9.9-fixture — sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): refreshed: implementor |  | RESTART REQUIRED — project subagents load at session start.. No marker was written, so it retries at the next session start; tell the user and fix the cause.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nWorkflow: merge path DIRECT · Reviewers: 1 · Copilot loop: OFF (config.workflow — TUI System tab) — work ships by direct merge through /sterling:merge. Run 1 task-end reviewer, then one fix round and one re-check.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nStorage: SQLITE (config.storage not set, so SQLite — TUI System tab; switch with the move-store skill)\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
+    "sys": "⚠ CONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH. ✗ Sterling 0.0.1→9.9.9-fixture: post-update sync FAILED — sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): refreshed: implementor |  | RESTART REQUIRED — project subagents load at session start.. agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). 0 tasks · 0 maintenance items pending",
+    "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC FAILED (H1): Sterling 0.0.1→9.9.9-fixture — sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): refreshed: implementor |  | RESTART REQUIRED — project subagents load at session start.. No marker was written, so it retries at the next session start; tell the user and fix the cause. sync-agents DID refresh agents before the failure: RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nWorkflow: merge path DIRECT · Reviewers: 1 · Copilot loop: OFF (config.workflow — TUI System tab) — work ships by direct merge through /sterling:merge. Run 1 task-end reviewer, then one fix round and one re-check.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nStorage: SQLITE (config.storage not set, so SQLite — TUI System tab; switch with the move-store skill)\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>"
     ],
@@ -1436,4 +1436,22 @@ test('H1 on agy never delivers the Claude Code layer block, with or without a st
     assert.ok(r.stdout.length > 0, `store ${store}: H1 printed its context`);
     assert.ok(!r.stdout.includes(CLAUDE_BLOCK_FIXTURE), `store ${store}: no Claude Code block on agy:\n${r.stdout}`);
   }
+});
+
+// Review loop 2 of #329, finding 5: sync-agents may refresh agents before it exits 2 for the layer
+// (or for another agent), so the failed result still owes the restart and names every refusal.
+test('postUpdateSync: a partial agent refresh plus a layer refusal and an agent refusal fails the sync, owes the restart and names both refusals', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const agentRefusal = 'locally_modified: reviewer (left as it is; refused)';
+  const out = `refreshed: implementor\n${agentRefusal}\n${LAYER_REFUSED}\n\nRESTART REQUIRED — project subagents load at session start.\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail: out.trim().split('\n').slice(-4).join(' | ') } : assert.fail('stamp-contract must not run after a refused sync');
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.match(r.warning, /RESTART|restart/, `the restart is owed:\n${r.warning}`);
+  assert.match(r.context, /DID refresh agents before the failure/, r.context);
+  assert.ok(r.warning.includes(agentRefusal), `the agent refusal is named:\n${r.warning}`);
+  assert.ok(r.warning.includes(LAYER_REFUSED), r.warning);
+  assert.equal(markerOf(project), '0.0.1\n');
 });

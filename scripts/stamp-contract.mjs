@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
-import { LayerMarkerError, layerLineRange } from './lib/sterling-layer.mjs';
+import { LayerMarkerError, layerLineRange, plannedAgentsMdRefusal, readAgentsMd, readLayerSection } from './lib/sterling-layer.mjs';
 import {
   AGENTS_TEMPLATE_REL,
   CLAUDE_TEMPLATE_REL,
@@ -172,6 +172,8 @@ function itemEnd(text, start) {
   return end;
 }
 
+// The shipped layer section: a planned AGENTS.md must still fit agy's cap with it in.
+const layerSection = readLayerSection(repoRoot);
 // The generated Sterling layer section stands as this one line while bullets are matched.
 const LAYER_MASK = '<!-- sterling layer section: generated, never stamped -->';
 function unmask(text, layerLines) {
@@ -263,7 +265,18 @@ for (const { p, dir: repo } of work) {
   }
   if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own contract files are hand-maintained in sync with the templates
   const agentsMd = join(repo, 'AGENTS.md');
-  if (!existsSync(agentsMd)) {
+  // AGENTS.md is read only as a plain, singly linked, lossless UTF-8 file inside the project
+  // (readAgentsMd): a symlink or hard link would carry the stamp into another file.
+  let agentsFile;
+  try {
+    agentsFile = readAgentsMd(repo);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    record({ project: projectLabel, status: 'processed', file: agentsMd, actions: [{ lead: 'AGENTS.md', action: 'AGENTS_MD_REFUSED', file: 'AGENTS.md', detail: `${err.message}. Nothing was stamped.` }] });
+    drift++;
+    continue;
+  }
+  if (!agentsFile.exists) {
     record({ project: projectLabel, status: 'not_migrated', detail: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
@@ -271,7 +284,7 @@ for (const { p, dir: repo } of work) {
   // Only the project's own text is stamped: the generated layer section is swapped for one mask
   // line while the bullets are matched, and put back, unchanged, before the write. The bullets of
   // templates/target-claude-md.md are not stamped anywhere (the layer section carries them).
-  const raw = readFileSync(agentsMd, 'utf8');
+  const raw = agentsFile.text;
   const normalized = normalizeEol(raw);
   let range;
   try {
@@ -448,8 +461,26 @@ for (const { p, dir: repo } of work) {
   if (WRITE_INSERTS) {
     for (const [file, f] of [['AGENTS.md', agents]]) {
       if (f.text === f.original) continue;
+      const planned = withOriginalEols(f.raw, unmask(f.text, layerLines));
+      // The whole planned file, with the Sterling layer in, must still fit agy's cap; and the file
+      // must still be the plain file read above. Otherwise nothing is written.
+      const refusal = plannedAgentsMdRefusal(planned, layerSection) ?? (() => {
+        try {
+          readAgentsMd(repo);
+          return null;
+        } catch (err) {
+          if (err instanceof LayerMarkerError) return err.message;
+          throw err;
+        }
+      })();
+      if (refusal) {
+        for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
+        actions.push({ lead: `${file} (write)`, action: 'PLANNED_AGENTS_MD_REFUSED', file, detail: `${refusal}. Nothing in AGENTS.md was changed.` });
+        drift++;
+        continue;
+      }
       try {
-        writeFileSync(f.path, withOriginalEols(f.raw, unmask(f.text, layerLines)));
+        writeFileSync(f.path, planned);
       } catch (err) {
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({

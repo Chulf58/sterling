@@ -4,18 +4,21 @@
 // This module owns the markers, the in-place regeneration, the Claude Code session block and the
 // cleanup of CLAUDE.md / GEMINI.md files that earlier versions wrote.
 //
-// Safety rules (review of #329): project text is never guessed at. Only exact, standalone marker
-// lines outside fenced code count; anything marker-like that is not exact refuses the file; the
-// splice keeps every byte outside the block. A host file is deleted only when it is a regular file
-// whose whole text (CRLF folded to LF, nothing else) equals a render Sterling shipped, filled with
-// values known independently of the file, and only after the layer is verified in AGENTS.md.
-import { createHash } from 'node:crypto';
+// Safety rules (reviews of #329): when in doubt, keep the file and warn. Only exact, standalone
+// marker lines outside fenced code, HTML comments and raw HTML blocks count; anything marker-like
+// that is not exact refuses the file; the splice keeps every byte outside the block. AGENTS.md is
+// read and written only as a regular, singly linked file inside the project whose bytes decode as
+// UTF-8 without loss, and every planned AGENTS.md (with the layer) must fit agy's cap before any
+// write. A host file is deleted only when it is a regular file whose whole text (CRLF folded to
+// LF, nothing else) equals a render Sterling wrote, filled at its token positions with values known
+// independently of the file, and only after the layer is verified in AGENTS.md.
 import { existsSync, lstatSync, readFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { renderAgyText, renderClaudeText } from './agent-fences.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { ContainmentError, containedPath } from './contained-fs.mjs';
 
 export const LAYER_TEMPLATE_REL = 'templates/sterling-layer-agents.md';
 export const CLAUDE_BLOCK_REL = 'templates/claude-session-block.md';
@@ -28,12 +31,18 @@ export const LAYER_END = '<!-- sterling:end generated -->';
 const LAYER_BEGIN = /^<!-- sterling:begin generated(?: \([^()]*\))? -->$/;
 const MARKER_LIKE = /^\s*<!--\s*sterling:(?:begin|end)\b/;
 
-/** agy cuts AGENTS.md past this many bytes; init keeps 3,000 of them free for project rules. */
+/** agy cuts AGENTS.md past this many bytes: the hard limit every planned write is checked against. */
 export const AGENTS_MD_AGY_CAP_BYTES = 24_000;
+/** The stock render's budget with a typical project name, leaving about 3,000 bytes for project rules. Approximate: long names and stack tags use part of that room; only the 24,000 cap is enforced. */
 export const AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3_000;
 export const CLAUDE_BLOCK_MAX_BYTES = 2_000;
 
 const normalize = (text) => text.replace(/\r\n/g, '\n');
+/** The UTF-8 text of `buf`, or null when decoding would lose or change a byte. */
+export function decodeExact(buf) {
+  const text = buf.toString('utf8');
+  return Buffer.from(text, 'utf8').equals(buf) ? text : null;
+}
 const fwd = (p) => String(p).replace(/\\/g, '/');
 const bytes = (s) => Buffer.byteLength(s, 'utf8');
 
@@ -72,18 +81,61 @@ function scanLines(raw) {
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
-// The marker lines outside fenced code: { begin, end } line indexes (null when absent), or
-// { error } when the file cannot be trusted: a marker-like line that is not exact, a repeated or
-// unpaired marker, an end before its begin, or a fence left open (its text would hide markers).
+// Raw HTML elements whose text a renderer shows as code or hides: a marker inside one is ambiguous.
+const RAW_HTML_OPEN = /<(pre|code|textarea|script|style)\b[^>]*>/gi;
+
+// HTML comment and raw-element state across one line: { comment, raw } after it.
+function htmlAfter(content, { comment, raw }) {
+  let pos = 0;
+  for (;;) {
+    if (raw) {
+      const close = content.toLowerCase().indexOf(`</${raw}`, pos);
+      if (close === -1) return { comment, raw };
+      raw = null;
+      pos = close + 2;
+      continue;
+    }
+    if (comment) {
+      const close = content.indexOf('-->', pos);
+      if (close === -1) return { comment, raw };
+      comment = false;
+      pos = close + 3;
+      continue;
+    }
+    const open = content.indexOf('<!--', pos);
+    RAW_HTML_OPEN.lastIndex = pos;
+    const tag = RAW_HTML_OPEN.exec(content);
+    if (open === -1 && !tag) return { comment, raw };
+    if (tag && (open === -1 || tag.index < open)) {
+      raw = tag[1].toLowerCase();
+      pos = tag.index + tag[0].length;
+    } else {
+      comment = true;
+      pos = open + 4;
+    }
+  }
+}
+
+// The marker lines outside fenced code and HTML containers: { begin, end } line indexes (null
+// when absent), or { error } when the file cannot be trusted: a marker-like line that is not exact
+// or sits inside an HTML comment or raw HTML block, a repeated or unpaired marker, an end before
+// its begin, or a fence, comment or raw block left open (its text would hide markers).
 function findMarkers(lines) {
   const begins = [];
   const ends = [];
   const malformed = [];
+  const contained = [];
   let fence = null;
+  let html = { comment: false, raw: null, line: -1 };
   lines.forEach(({ content }, i) => {
     if (fence) {
       const close = FENCE_CLOSE.exec(content);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      return;
+    }
+    if (html.comment || html.raw) {
+      if (MARKER_LIKE.test(content)) contained.push(i);
+      html = { ...htmlAfter(content, html), line: html.line };
       return;
     }
     const open = FENCE_OPEN.exec(content);
@@ -94,8 +146,12 @@ function findMarkers(lines) {
     if (LAYER_BEGIN.test(content)) begins.push(i);
     else if (content === LAYER_END) ends.push(i);
     else if (MARKER_LIKE.test(content)) malformed.push(i);
+    const next = htmlAfter(content, html);
+    html = { ...next, line: next.comment || next.raw ? i : -1 };
   });
   if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
+  if (html.comment || html.raw) return { error: `AGENTS.md has ${html.comment ? 'an HTML comment' : `a <${html.raw}> block`} opened at line ${html.line + 1} that is never closed, so the Sterling layer cannot be placed safely` };
+  if (contained.length) return { error: `AGENTS.md line ${contained.map((i) => i + 1).join(', ')} names a sterling marker inside an HTML comment or raw HTML block, so it cannot be told from a live marker` };
   if (malformed.length) return { error: `AGENTS.md line ${malformed.map((i) => i + 1).join(', ')} looks like a sterling marker but is not the exact marker line` };
   if (!begins.length && !ends.length) return { begin: null, end: null };
   if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
@@ -135,20 +191,63 @@ export function layerLineRange(text) {
   return { begin: found.begin, end: found.end };
 }
 
-/** { ok: true } when AGENTS.md on disk holds exactly `section` between trusted markers, else { ok: false, reason }. */
-export function verifyLayerOnDisk(agentsPath, section) {
-  let raw;
+/**
+ * AGENTS.md of `projectDir` as { exists, text } for a writer, or throws LayerMarkerError when it
+ * is not safe to read or replace: a symbolic link or other non-regular file on the path
+ * (contained-fs), a file with more than one hard link (it would alias another file), or bytes
+ * that are not lossless UTF-8.
+ */
+export function readAgentsMd(projectDir, { readFile = readFileSync } = {}) {
+  let path;
   try {
-    raw = readFileSync(agentsPath, 'utf8');
+    path = containedPath(projectDir, 'AGENTS.md', 'file');
   } catch (err) {
+    if (err instanceof ContainmentError) throw new LayerMarkerError(`AGENTS.md is not a plain file in the project (${err.message}), so Sterling neither reads nor writes it`);
+    throw err;
+  }
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { exists: false, path, text: null };
+    throw err;
+  }
+  if (st.nlink > 1) throw new LayerMarkerError(`AGENTS.md has ${st.nlink} hard links, so writing it could change another file; Sterling neither reads nor writes it`);
+  const text = decodeExact(readFile(path));
+  if (text === null) throw new LayerMarkerError('AGENTS.md is not valid UTF-8 text, so rewriting it would change bytes Sterling cannot read; Sterling leaves it alone');
+  return { exists: true, path, text };
+}
+
+/** Why `text` may not be written as AGENTS.md (untrusted markers, or over agy's cap once the layer is in), else null. */
+export function plannedAgentsMdRefusal(text, section) {
+  let withLayer;
+  try {
+    withLayer = applyLayer(text, section);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return err.message;
+    throw err;
+  }
+  return capRefusal(withLayer);
+}
+
+/** { ok: true } when AGENTS.md on disk holds exactly `section` between trusted markers, else { ok: false, reason }. */
+export function verifyLayerOnDisk(projectDir, section) {
+  let agents;
+  try {
+    agents = readAgentsMd(projectDir);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return { ok: false, reason: err.message };
     return { ok: false, reason: `AGENTS.md could not be read back (${err?.code ?? err?.message ?? err})` };
   }
-  const lines = scanLines(raw);
+  if (!agents.exists) return { ok: false, reason: 'AGENTS.md does not exist' };
+  const lines = scanLines(agents.text);
   const found = findMarkers(lines);
   if (found.error) return { ok: false, reason: found.error };
   if (found.begin === null) return { ok: false, reason: 'AGENTS.md has no Sterling layer section' };
   const onDisk = lines.slice(found.begin, found.end + 1).map((l) => l.content).join('\n');
-  return onDisk === section ? { ok: true } : { ok: false, reason: 'the Sterling layer section in AGENTS.md differs from the shipped one' };
+  if (onDisk !== section) return { ok: false, reason: 'the Sterling layer section in AGENTS.md differs from the shipped one' };
+  const overCap = capRefusal(agents.text);
+  return overCap ? { ok: false, reason: overCap } : { ok: true };
 }
 
 /** Refusal text when `text` is over agy's cap, else null. */
@@ -160,34 +259,32 @@ export function capRefusal(text) {
 
 // ---- CLAUDE.md / GEMINI.md written by earlier versions ----
 
-const DEFAULT_CONVENTIONS = '(grows only via architecture-altering decision records — nothing yet)';
-const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 const RENDERERS = { claude: renderClaudeText, agy: renderAgyText };
+// The tokens each host file's writer filled: init wrote CLAUDE.md with the project name only, and
+// setupAgy wrote GEMINI.md with the project name and the Sterling root. A template revision whose
+// host render holds any other token was filled from project facts Sterling cannot reproduce
+// (the pre-split CLAUDE.md), so it never authorises a deletion.
+const FILLED_TOKENS = { claude: new Set(['PROJECT_NAME']), agy: new Set(['PROJECT_NAME', 'STERLING_ROOT']) };
+const TOKEN = /\{\{([A-Z_]+)\}\}/g;
 
 // A template revision as that host's file held it before the values were filled in.
 function tokenRender(templateText, host) {
   return normalize(RENDERERS[host](normalize(templateText), HOST_TEMPLATE_REL));
 }
+const reproducible = (tokenText, host) => [...tokenText.matchAll(TOKEN)].every((m) => FILLED_TOKENS[host].has(m[1]));
 
-// Init filled the project name (and the default conventions line in old revisions) into both
-// files; GEMINI.md also got the Sterling root. CLAUDE.md never had its root filled.
+// The values put in at the token positions of `tokenText`; the candidate file is never rewritten.
 function fill(tokenText, { name, root }) {
-  let out = tokenText;
-  if (root !== null) out = out.replaceAll('{{STERLING_ROOT}}', () => root);
-  return out.replaceAll('{{PROJECT_NAME}}', () => name).replaceAll('{{CONVENTIONS_SECTION}}', () => DEFAULT_CONVENTIONS);
-}
-function unfill(text, { name, root }) {
-  let out = text;
-  if (root !== null) out = out.split(root).join('{{STERLING_ROOT}}');
-  return out.split(DEFAULT_CONVENTIONS).join('{{CONVENTIONS_SECTION}}').split(name).join('{{PROJECT_NAME}}');
+  return tokenText.replace(TOKEN, (whole, key) => (key === 'PROJECT_NAME' ? name : key === 'STERLING_ROOT' && root !== null ? root : whole));
 }
 
 /**
- * The bin/host-file-history.json content, built from the git history of the host template:
- * sha256 of every earlier revision's claude and agy render with its {{TOKENS}} unfilled (the
- * current revision's renders are left out, so a template commit does not make bin/ stale), and
- * every distinct pre-split head (the text above {{CONVENTIONS_SECTION}}), newest first, stored
- * as a line table. Throws without git history.
+ * The bin/host-file-history.json content, built from the git history of the host template: every
+ * earlier revision's claude and agy render with its {{TOKENS}} unfilled, kept only when its writer
+ * filled nothing but reproducible tokens (and left out when equal to the current render, so a
+ * template commit does not make bin/ stale), and every distinct pre-split head (the text above
+ * {{CONVENTIONS_SECTION}}), newest first, which init only reads to carry a project's tail. All
+ * texts share one line table. Throws without git history.
  */
 export function hostFileHistorySnapshot({ repoRoot, git = (args) => spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }) }) {
   const log = git(['log', '--format=%H', '--', HOST_TEMPLATE_REL]);
@@ -195,10 +292,18 @@ export function hostFileHistorySnapshot({ repoRoot, git = (args) => spawnSync('g
   const shas = log.stdout.split('\n').filter(Boolean);
   if (!shas.length) throw new Error(`host file history: ${HOST_TEMPLATE_REL} has no git history in ${repoRoot}`);
   const current = readFileSync(join(repoRoot, HOST_TEMPLATE_REL), 'utf8');
-  const renders = { claude: new Set(), agy: new Set() };
   const currentRenders = { claude: tokenRender(current, 'claude'), agy: tokenRender(current, 'agy') };
   const lineIndex = new Map();
   const lines = [];
+  const encode = (text) => text.split('\n').map((line) => {
+    if (!lineIndex.has(line)) {
+      lineIndex.set(line, lines.length);
+      lines.push(line);
+    }
+    return lineIndex.get(line);
+  });
+  const renders = { claude: [], agy: [] };
+  const seen = { claude: new Set(), agy: new Set() };
   const heads = [];
   const seenHeads = new Set();
   for (const sha of shas) {
@@ -206,35 +311,31 @@ export function hostFileHistorySnapshot({ repoRoot, git = (args) => spawnSync('g
     if (show.status !== 0) throw new Error(`host file history: git show ${sha}:${HOST_TEMPLATE_REL} failed (${show.stderr})`);
     const text = normalize(show.stdout);
     for (const host of Object.keys(renders)) {
-      // A revision the current fence renderer refuses contributes no fingerprint for that host:
-      // nothing can match it, so a file written from it is kept (the safe direction).
+      // A revision the current fence renderer refuses contributes nothing for that host: nothing
+      // can match it, so a file written from it is kept (the safe direction).
       let rendered;
       try {
         rendered = tokenRender(text, host);
       } catch {
         continue;
       }
-      if (rendered !== currentRenders[host]) renders[host].add(sha256(rendered));
+      if (rendered === currentRenders[host] || seen[host].has(rendered) || !reproducible(rendered, host)) continue;
+      seen[host].add(rendered);
+      renders[host].push(encode(rendered));
     }
     const at = text.indexOf('{{CONVENTIONS_SECTION}}');
     if (at === -1) continue;
     const head = text.slice(0, at);
     if (seenHeads.has(head)) continue;
     seenHeads.add(head);
-    heads.push(head.split('\n').map((line) => {
-      if (!lineIndex.has(line)) {
-        lineIndex.set(line, lines.length);
-        lines.push(line);
-      }
-      return lineIndex.get(line);
-    }));
+    heads.push(encode(head));
   }
-  return `${JSON.stringify({ renders: { claude: [...renders.claude].sort(), agy: [...renders.agy].sort() }, presplit_heads: { lines, heads } })}\n`;
+  return `${JSON.stringify({ version: 2, lines, renders, presplit_heads: heads })}\n`;
 }
 
 /**
- * The shipped history: { ok: true, renders: { claude: Set, agy: Set }, heads: string[] } or
- * { ok: false, reason } when the file is missing or malformed. Other read errors throw.
+ * The shipped history: { ok: true, renders: { claude: string[], agy: string[] }, heads: string[] }
+ * or { ok: false, reason } when the file is missing or malformed. Other read errors throw.
  */
 export function loadHostFileHistory(pluginRoot) {
   const path = join(pluginRoot, HOST_FILE_HISTORY_REL);
@@ -251,16 +352,17 @@ export function loadHostFileHistory(pluginRoot) {
   } catch (err) {
     return { ok: false, reason: `${fwd(path)} is unparseable (${err.message})` };
   }
-  const isStrings = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string');
-  const lines = parsed?.presplit_heads?.lines;
-  const heads = parsed?.presplit_heads?.heads;
-  const valid = isStrings(parsed?.renders?.claude) && isStrings(parsed?.renders?.agy) && isStrings(lines) &&
-    Array.isArray(heads) && heads.every((h) => Array.isArray(h) && h.every((i) => Number.isInteger(i) && i >= 0 && i < lines.length));
+  const lines = parsed?.lines;
+  const isText = (t) => Array.isArray(t) && t.every((i) => Number.isInteger(i) && i >= 0 && i < lines.length);
+  const valid = parsed?.version === 2 && Array.isArray(lines) && lines.every((l) => typeof l === 'string') &&
+    ['claude', 'agy'].every((h) => Array.isArray(parsed.renders?.[h]) && parsed.renders[h].every(isText)) &&
+    Array.isArray(parsed.presplit_heads) && parsed.presplit_heads.every(isText);
   if (!valid) return { ok: false, reason: `${fwd(path)} does not have the expected shape` };
+  const decode = (t) => t.map((i) => lines[i]).join('\n');
   return {
     ok: true,
-    renders: { claude: new Set(parsed.renders.claude), agy: new Set(parsed.renders.agy) },
-    heads: heads.map((h) => h.map((i) => lines[i]).join('\n')),
+    renders: { claude: parsed.renders.claude.map(decode).filter((t) => reproducible(t, 'claude')), agy: parsed.renders.agy.map(decode).filter((t) => reproducible(t, 'agy')) },
+    heads: parsed.presplit_heads.map(decode),
   };
 }
 
@@ -298,15 +400,11 @@ export function classifyHostFile(fileText, host, { pluginRoot, known, history })
   const text = normalize(fileText);
   if (host === 'claude' && (text === '@AGENTS.md' || text === '@AGENTS.md\n')) return { pure: true };
   const combos = known.names.flatMap((name) => (host === 'agy' ? known.roots.map((root) => ({ name, root })) : [{ name, root: null }]));
-  const current = tokenRender(readFileSync(join(pluginRoot, HOST_TEMPLATE_REL), 'utf8'), host);
-  if (combos.some((v) => fill(current, v) === text)) return { pure: true };
+  const matches = (tokenText) => reproducible(tokenText, host) && combos.some((v) => fill(tokenText, v) === text);
+  if (matches(tokenRender(readFileSync(join(pluginRoot, HOST_TEMPLATE_REL), 'utf8'), host))) return { pure: true };
   const shipped = history ?? loadHostFileHistory(pluginRoot);
   if (!shipped.ok) return { pure: false, unverified: shipped.reason };
-  const hit = combos.some((v) => {
-    const tokens = unfill(text, v);
-    return shipped.renders[host].has(sha256(tokens)) && fill(tokens, v) === text;
-  });
-  return hit ? { pure: true } : { pure: false };
+  return shipped.renders[host].some(matches) ? { pure: true } : { pure: false };
 }
 
 const HOSTS = [
@@ -319,9 +417,9 @@ const HOSTS = [
  * Sterling section is verified in AGENTS.md and the file is a regular file holding nothing but
  * Sterling's render; it is re-read just before the unlink and kept if it changed. Every other
  * case keeps the file. Rows: { item, status: 'removed' | 'kept', detail }; a kept row also
- * carries `warning`, the sentence the user needs.
+ * carries `warning`, the sentence the user needs. `readFile` is a test seam.
  */
-export function retireHostFiles({ projectDir, pluginRoot, known, layer, history }) {
+export function retireHostFiles({ projectDir, pluginRoot, known, layer, history, readFile = readFileSync }) {
   const rows = [];
   let shipped = history;
   const loadHistory = () => {
@@ -357,14 +455,19 @@ export function retireHostFiles({ projectDir, pluginRoot, known, layer, history 
     }
     let content;
     try {
-      content = readFileSync(path);
+      content = readFile(path);
     } catch (err) {
       keep(`could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
     }
+    const text = decodeExact(content);
+    if (text === null) {
+      keep('is not valid UTF-8 text, so it cannot be Sterling\'s render');
+      continue;
+    }
     let verdict;
     try {
-      verdict = classifyHostFile(content.toString('utf8'), host, { pluginRoot, known, history: loadHistory() });
+      verdict = classifyHostFile(text, host, { pluginRoot, known, history: loadHistory() });
     } catch (err) {
       verdict = { pure: false, unverified: `${HOST_TEMPLATE_REL} could not be rendered (${err?.message ?? err})` };
     }
@@ -380,7 +483,7 @@ export function retireHostFiles({ projectDir, pluginRoot, known, layer, history 
     let againStat;
     try {
       againStat = lstatSync(path);
-      again = againStat.isFile() ? readFileSync(path) : null;
+      again = againStat.isFile() ? readFile(path) : null;
     } catch (err) {
       keep(`changed while it was being checked (${err?.code ?? err?.message ?? err})`, 'Rerun to check it again');
       continue;
@@ -414,36 +517,34 @@ export function syncLayer({ projectDir, pluginRoot, roots = [] }) {
     refused++;
   };
   const section = readLayerSection(pluginRoot);
-  const agentsPath = join(projectDir, 'AGENTS.md');
   let layer;
-  if (!existsSync(agentsPath)) {
+  let agents = null;
+  try {
+    agents = readAgentsMd(projectDir);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    refuse(`${err.message}. Nothing was written and no CLAUDE.md or GEMINI.md was removed.`);
+    layer = { ok: false, reason: 'AGENTS.md was refused' };
+  }
+  if (agents && !agents.exists) {
     lines.push(`${LAYER_WARN} skipped — this project has no AGENTS.md; run /sterling:init`);
     layer = { ok: false, reason: 'no AGENTS.md' };
-  } else {
-    const before = readFileSync(agentsPath, 'utf8');
-    let after = null;
-    try {
-      after = applyLayer(before, section);
-    } catch (err) {
-      if (!(err instanceof LayerMarkerError)) throw err;
-      refuse(`${err.message}. Nothing was written and no CLAUDE.md or GEMINI.md was removed.`);
-      layer = { ok: false, reason: 'its markers were refused' };
-    }
-    if (after !== null) {
-      const overCap = capRefusal(after);
-      if (overCap) {
-        refuse(`${overCap} /sterling:update.`);
-        layer = { ok: false, reason: 'it would be over agy\'s cap' };
+  } else if (agents) {
+    const before = agents.text;
+    const why = plannedAgentsMdRefusal(before, section);
+    if (why) {
+      refuse(`${why}. Nothing was written and no CLAUDE.md or GEMINI.md was removed. Fix it, then rerun /sterling:update.`);
+      layer = { ok: false, reason: 'the planned AGENTS.md was refused' };
+    } else {
+      const after = applyLayer(before, section);
+      if (after === before) {
+        lines.push(`${LAYER_LINE} AGENTS.md up to date`);
       } else {
-        if (after === before) {
-          lines.push(`${LAYER_LINE} AGENTS.md up to date`);
-        } else {
-          writeFileAtomic(agentsPath, after);
-          lines.push(`${LAYER_LINE} AGENTS.md regenerated`);
-        }
-        layer = verifyLayerOnDisk(agentsPath, section);
-        if (!layer.ok) refuse(`${layer.reason}; no CLAUDE.md or GEMINI.md was removed.`);
+        writeFileAtomic(agents.path, after);
+        lines.push(`${LAYER_LINE} AGENTS.md regenerated`);
       }
+      layer = verifyLayerOnDisk(projectDir, section);
+      if (!layer.ok) refuse(`${layer.reason}; no CLAUDE.md or GEMINI.md was removed.`);
     }
   }
   const known = knownHostValues({ projectDir, pluginRoot, roots });
@@ -451,4 +552,24 @@ export function syncLayer({ projectDir, pluginRoot, roots = [] }) {
     lines.push(row.status === 'removed' ? `${LAYER_LINE} ${row.item} removed — ${row.detail}` : `${LAYER_WARN} ${row.warning}`);
   }
   return { lines, refused };
+}
+
+/**
+ * Replace AGENTS.md of `projectDir` with `text` only when it is still safe to (readAgentsMd's
+ * checks) and the planned text passes plannedAgentsMdRefusal. Returns null when written, else the
+ * refusal reason; nothing is written on a refusal. For writers other than the layer pass (contract
+ * inserts, the Knowledge refresh).
+ */
+export function writeAgentsMdChecked(projectDir, text, section) {
+  let agents;
+  try {
+    agents = readAgentsMd(projectDir);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return err.message;
+    throw err;
+  }
+  const why = plannedAgentsMdRefusal(text, section);
+  if (why) return why;
+  writeFileAtomic(agents.path, text);
+  return null;
 }

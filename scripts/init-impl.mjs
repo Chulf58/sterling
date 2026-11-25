@@ -54,7 +54,8 @@ import { setupOpenCode } from './lib/opencode-install.mjs';
 import { setupAgy, agyMcpRoot } from './lib/agy-setup.mjs';
 import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
-import { applyLayer, capRefusal, classifyHostFile, knownHostValues, loadHostFileHistory, readLayerSection, retireHostFiles, verifyLayerOnDisk, LayerMarkerError } from './lib/sterling-layer.mjs';
+import { applyLayer, capRefusal, classifyHostFile, decodeExact, knownHostValues, loadHostFileHistory, plannedAgentsMdRefusal, readAgentsMd, readLayerSection, retireHostFiles, verifyLayerOnDisk, LayerMarkerError } from './lib/sterling-layer.mjs';
+import { writeFileAtomic } from './lib/atomic-write.mjs';
 import { renderStackTags, renderDomains, refreshAgentsMdFacts, describeAgentsMdRefresh, renderKnowledgeSection, refreshAgentsMdKnowledge } from './lib/agents-md-facts.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
@@ -647,11 +648,7 @@ const expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
 
 const agentsMdPath = join(target, 'AGENTS.md');
 const claudeMdPath = join(target, 'CLAUDE.md');
-const writeAtomic = (p, content) => {
-  const tmp = `${p}.tmp-${process.pid}`;
-  writeFileSync(tmp, content);
-  renameSync(tmp, p);
-};
+const writeAtomic = writeFileAtomic;
 
 // Legacy pre-split projects carry a single CLAUDE.md whose project-owned tail begins wherever
 // the pre-split template's own head ends. NO MARKER EXISTS OR IS NEEDED (Sol re-spec, corrected
@@ -811,13 +808,36 @@ function computeMigration(rawText) {
   };
 }
 
-const agentsMdExists = existsSync(agentsMdPath);
-const claudeMdRaw = existsSync(claudeMdPath) && lstatSync(claudeMdPath).isFile() ? readFileSync(claudeMdPath, 'utf8') : null;
+// AGENTS.md is read and replaced only as a plain, singly linked, lossless UTF-8 file in the project
+// (readAgentsMd); anything else is reported and left alone, with no host file removed.
+let agentsMdRefusal = null;
+let agentsFile = { exists: false, text: null };
+try {
+  agentsFile = readAgentsMd(target);
+} catch (err) {
+  if (!(err instanceof LayerMarkerError)) throw err;
+  agentsMdRefusal = err.message;
+}
+const agentsMdExists = agentsFile.exists || agentsMdRefusal !== null;
 const hostValues = knownHostValues({ projectDir: target, pluginRoot, projectNames: [eff.projectName], roots: [agyMcpRoot({ pluginRoot }).root] });
-// A pre-split CLAUDE.md that carries project rules (and no AGENTS.md yet) donates its tail to the
-// new AGENTS.md; the file itself is then the project's to delete (retireHostFiles keeps and warns).
+// A pre-split CLAUDE.md that carries project rules donates its tail to a new AGENTS.md, so it is
+// read only when AGENTS.md is absent. One that cannot be read or is not Sterling's own render
+// stays as it was (retireHostFiles keeps it and warns).
+let claudeMdRaw = null;
+let donorUnreadable = null;
+if (!agentsMdExists) {
+  try {
+    if (lstatSync(claudeMdPath).isFile()) {
+      claudeMdRaw = decodeExact(readFileSync(claudeMdPath));
+      if (claudeMdRaw === null) donorUnreadable = 'it is not valid UTF-8 text';
+    }
+  } catch (err) {
+    if (err?.code !== 'ENOENT') donorUnreadable = `it could not be read (${err?.code ?? err?.message ?? err})`;
+  }
+}
+if (donorUnreadable) warns.push(`\n⚠ CLAUDE.md could not be checked as an older Sterling render (${donorUnreadable}), so no project rules were carried from it into AGENTS.md and it was left as it is.`);
 let legacyClaude = false;
-if (!agentsMdExists && claudeMdRaw !== null) {
+if (claudeMdRaw !== null) {
   try {
     legacyClaude = !classifyHostFile(claudeMdRaw, 'claude', { pluginRoot, known: hostValues }).pure;
   } catch (err) {
@@ -838,23 +858,27 @@ const refuseOverCap = (text) => {
   return true;
 };
 
-if (migration?.matched) {
+if (agentsMdRefusal) {
+  items.push({ item: 'AGENTS.md', status: 'manual', detail: `${agentsMdRefusal}; no CLAUDE.md or GEMINI.md was removed` });
+  warns.push(`\n⚠ ${agentsMdRefusal}; no CLAUDE.md or GEMINI.md was removed.`);
+  layerState = { ok: false, reason: 'AGENTS.md was refused' };
+} else if (migration?.matched) {
   if (!refuseOverCap(migration.agentsMd)) {
     writeAtomic(agentsMdPath, migration.agentsMd);
     items.push({ item: 'AGENTS.md', status: migration.flagged.length ? `migrated (${migration.flagged.length} flagged)` : 'migrated', detail: migration.flagged.length ? migration.flagged.join('; ') : 'legacy CLAUDE.md tail carried below the historical boundary, original line endings preserved' });
-    layerState = verifyLayerOnDisk(agentsMdPath, layerSection);
+    layerState = verifyLayerOnDisk(target, layerSection);
   }
 } else if (!agentsMdExists) {
   if (!refuseOverCap(expectedAgentsMd)) {
     writeAtomic(agentsMdPath, expectedAgentsMd);
     items.push({ item: 'AGENTS.md', status: 'created', detail: 'from templates/target-agents-md.md and templates/sterling-layer-agents.md' });
     if (migration) warns.push(`\n⚠ CLAUDE.md was not recognized as an older Sterling render (${migration.reason}), so AGENTS.md was created fresh and CLAUDE.md was left alone.`);
-    layerState = verifyLayerOnDisk(agentsMdPath, layerSection);
+    layerState = verifyLayerOnDisk(target, layerSection);
   }
 } else {
   // Project-editable, never compared byte-for-byte; only the Stack tags and Domain stores lines
   // follow .sterling/config.json, and only while they still hold a generated value (GitHub #158).
-  const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
+  const agentsMdRaw = agentsFile.text;
   const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
   const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
   // The Knowledge section follows the handoff setting the same way, never over a hand edit.
@@ -864,24 +888,21 @@ if (migration?.matched) {
   if (knowledge.refreshed) refresh.refreshed.push('Knowledge section');
   if (knowledge.kept) refresh.kept.push({ name: 'Knowledge section', reason: knowledge.kept });
   refresh.text = knowledge.text;
-  // The Sterling layer section is regenerated in place; markers it cannot trust refuse the file.
-  let layerError = null;
-  try {
+  // The whole planned AGENTS.md (facts, Knowledge section and the regenerated layer) is checked
+  // before any write: untrusted markers or a result over agy's cap write nothing at all.
+  const refusal = plannedAgentsMdRefusal(refresh.text, layerSection);
+  if (refusal) {
+    const detail = `${refusal}; nothing in AGENTS.md was written and no CLAUDE.md or GEMINI.md was removed`;
+    items.push({ item: 'AGENTS.md', status: 'manual', detail });
+    warns.push(`\n⚠ ${detail}. Fix it, then rerun /sterling:init.`);
+    layerState = { ok: false, reason: 'the planned AGENTS.md was refused' };
+  } else {
     const withLayer = applyLayer(refresh.text, layerSection);
     if (withLayer !== refresh.text) refresh.refreshed.push('Sterling layer section');
     refresh.text = withLayer;
-  } catch (err) {
-    if (!(err instanceof LayerMarkerError)) throw err;
-    layerError = `${err.message}; no CLAUDE.md or GEMINI.md was removed`;
-    layerState = { ok: false, reason: 'its markers were refused' };
-  }
-  if (layerError || !refuseOverCap(refresh.text)) {
-    if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
-    if (!layerError) layerState = verifyLayerOnDisk(agentsMdPath, layerSection);
-    if (layerError) {
-      items.push({ item: 'AGENTS.md', status: 'manual', detail: layerError });
-      warns.push(`\n⚠ ${layerError}`);
-    } else if (refresh.kept.length) {
+    if (withLayer !== agentsMdRaw) writeAtomic(agentsMdPath, withLayer);
+    layerState = verifyLayerOnDisk(target, layerSection);
+    if (refresh.kept.length) {
       items.push({ item: 'AGENTS.md', status: 'kept', detail: describeAgentsMdRefresh(refresh, facts) });
       warns.push(`\n⚠ AGENTS.md: ${describeAgentsMdRefresh({ refreshed: [], kept: refresh.kept }, facts)}. Update ${refresh.kept.length > 1 ? 'those lines' : 'that line'} by hand.`);
     } else if (refresh.refreshed.length) {

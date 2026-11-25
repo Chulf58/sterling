@@ -11887,7 +11887,6 @@ function formatAgyRows(result) {
 }
 
 // scripts/lib/sterling-layer.mjs
-import { createHash as createHash6 } from "node:crypto";
 import { existsSync as existsSync11, lstatSync as lstatSync6, readFileSync as readFileSync12, unlinkSync as unlinkSync5 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { basename as basename4, join as join16, resolve as resolve9 } from "node:path";
@@ -11900,6 +11899,10 @@ var MARKER_LIKE = /^\s*<!--\s*sterling:(?:begin|end)\b/;
 var AGENTS_MD_AGY_CAP_BYTES = 24e3;
 var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
 var normalize5 = (text) => text.replace(/\r\n/g, "\n");
+function decodeExact(buf) {
+  const text = buf.toString("utf8");
+  return Buffer.from(text, "utf8").equals(buf) ? text : null;
+}
 var fwd5 = (p) => String(p).replace(/\\/g, "/");
 var bytes = (s) => Buffer.byteLength(s, "utf8");
 var LayerMarkerError = class extends Error {
@@ -11927,15 +11930,53 @@ function scanLines(raw) {
 }
 var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+var RAW_HTML_OPEN = /<(pre|code|textarea|script|style)\b[^>]*>/gi;
+function htmlAfter(content, { comment, raw }) {
+  let pos = 0;
+  for (; ; ) {
+    if (raw) {
+      const close = content.toLowerCase().indexOf(`</${raw}`, pos);
+      if (close === -1) return { comment, raw };
+      raw = null;
+      pos = close + 2;
+      continue;
+    }
+    if (comment) {
+      const close = content.indexOf("-->", pos);
+      if (close === -1) return { comment, raw };
+      comment = false;
+      pos = close + 3;
+      continue;
+    }
+    const open = content.indexOf("<!--", pos);
+    RAW_HTML_OPEN.lastIndex = pos;
+    const tag = RAW_HTML_OPEN.exec(content);
+    if (open === -1 && !tag) return { comment, raw };
+    if (tag && (open === -1 || tag.index < open)) {
+      raw = tag[1].toLowerCase();
+      pos = tag.index + tag[0].length;
+    } else {
+      comment = true;
+      pos = open + 4;
+    }
+  }
+}
 function findMarkers(lines) {
   const begins = [];
   const ends = [];
   const malformed = [];
+  const contained = [];
   let fence = null;
+  let html = { comment: false, raw: null, line: -1 };
   lines.forEach(({ content }, i) => {
     if (fence) {
       const close = FENCE_CLOSE.exec(content);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      return;
+    }
+    if (html.comment || html.raw) {
+      if (MARKER_LIKE.test(content)) contained.push(i);
+      html = { ...htmlAfter(content, html), line: html.line };
       return;
     }
     const open = FENCE_OPEN.exec(content);
@@ -11946,8 +11987,12 @@ function findMarkers(lines) {
     if (LAYER_BEGIN.test(content)) begins.push(i);
     else if (content === LAYER_END) ends.push(i);
     else if (MARKER_LIKE.test(content)) malformed.push(i);
+    const next = htmlAfter(content, html);
+    html = { ...next, line: next.comment || next.raw ? i : -1 };
   });
   if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
+  if (html.comment || html.raw) return { error: `AGENTS.md has ${html.comment ? "an HTML comment" : `a <${html.raw}> block`} opened at line ${html.line + 1} that is never closed, so the Sterling layer cannot be placed safely` };
+  if (contained.length) return { error: `AGENTS.md line ${contained.map((i) => i + 1).join(", ")} names a sterling marker inside an HTML comment or raw HTML block, so it cannot be told from a live marker` };
   if (malformed.length) return { error: `AGENTS.md line ${malformed.map((i) => i + 1).join(", ")} looks like a sterling marker but is not the exact marker line` };
   if (!begins.length && !ends.length) return { begin: null, end: null };
   if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
@@ -11972,40 +12017,68 @@ function applyLayer(agentsText, section) {
   const eol = agentsText.slice(begin.contentEnd, begin.end) || lastEol(agentsText);
   return agentsText.slice(0, begin.start) + section.split("\n").join(eol) + agentsText.slice(end.contentEnd);
 }
-function verifyLayerOnDisk(agentsPath, section) {
-  let raw;
+function readAgentsMd(projectDir, { readFile = readFileSync12 } = {}) {
+  let path;
   try {
-    raw = readFileSync12(agentsPath, "utf8");
+    path = containedPath(projectDir, "AGENTS.md", "file");
   } catch (err) {
+    if (err instanceof ContainmentError) throw new LayerMarkerError(`AGENTS.md is not a plain file in the project (${err.message}), so Sterling neither reads nor writes it`);
+    throw err;
+  }
+  let st;
+  try {
+    st = lstatSync6(path);
+  } catch (err) {
+    if (err?.code === "ENOENT") return { exists: false, path, text: null };
+    throw err;
+  }
+  if (st.nlink > 1) throw new LayerMarkerError(`AGENTS.md has ${st.nlink} hard links, so writing it could change another file; Sterling neither reads nor writes it`);
+  const text = decodeExact(readFile(path));
+  if (text === null) throw new LayerMarkerError("AGENTS.md is not valid UTF-8 text, so rewriting it would change bytes Sterling cannot read; Sterling leaves it alone");
+  return { exists: true, path, text };
+}
+function plannedAgentsMdRefusal(text, section) {
+  let withLayer;
+  try {
+    withLayer = applyLayer(text, section);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return err.message;
+    throw err;
+  }
+  return capRefusal(withLayer);
+}
+function verifyLayerOnDisk(projectDir, section) {
+  let agents;
+  try {
+    agents = readAgentsMd(projectDir);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return { ok: false, reason: err.message };
     return { ok: false, reason: `AGENTS.md could not be read back (${err?.code ?? err?.message ?? err})` };
   }
-  const lines = scanLines(raw);
+  if (!agents.exists) return { ok: false, reason: "AGENTS.md does not exist" };
+  const lines = scanLines(agents.text);
   const found = findMarkers(lines);
   if (found.error) return { ok: false, reason: found.error };
   if (found.begin === null) return { ok: false, reason: "AGENTS.md has no Sterling layer section" };
   const onDisk = lines.slice(found.begin, found.end + 1).map((l) => l.content).join("\n");
-  return onDisk === section ? { ok: true } : { ok: false, reason: "the Sterling layer section in AGENTS.md differs from the shipped one" };
+  if (onDisk !== section) return { ok: false, reason: "the Sterling layer section in AGENTS.md differs from the shipped one" };
+  const overCap = capRefusal(agents.text);
+  return overCap ? { ok: false, reason: overCap } : { ok: true };
 }
 function capRefusal(text) {
   const n = bytes(text);
   if (n <= AGENTS_MD_AGY_CAP_BYTES) return null;
   return `AGENTS.md would be ${n.toLocaleString("en-US")} bytes with the Sterling layer, over agy's ${AGENTS_MD_AGY_CAP_BYTES.toLocaleString("en-US")}-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed. Shorten the project's own text in AGENTS.md by at least ${(n - AGENTS_MD_AGY_CAP_BYTES).toLocaleString("en-US")} bytes (move detail into a linked doc), then rerun`;
 }
-var DEFAULT_CONVENTIONS = "(grows only via architecture-altering decision records \u2014 nothing yet)";
-var sha2564 = (text) => createHash6("sha256").update(text).digest("hex");
 var RENDERERS = { claude: renderClaudeText, agy: renderAgyText };
+var FILLED_TOKENS = { claude: /* @__PURE__ */ new Set(["PROJECT_NAME"]), agy: /* @__PURE__ */ new Set(["PROJECT_NAME", "STERLING_ROOT"]) };
+var TOKEN = /\{\{([A-Z_]+)\}\}/g;
 function tokenRender(templateText, host) {
   return normalize5(RENDERERS[host](normalize5(templateText), HOST_TEMPLATE_REL));
 }
+var reproducible = (tokenText, host) => [...tokenText.matchAll(TOKEN)].every((m) => FILLED_TOKENS[host].has(m[1]));
 function fill(tokenText, { name, root }) {
-  let out = tokenText;
-  if (root !== null) out = out.replaceAll("{{STERLING_ROOT}}", () => root);
-  return out.replaceAll("{{PROJECT_NAME}}", () => name).replaceAll("{{CONVENTIONS_SECTION}}", () => DEFAULT_CONVENTIONS);
-}
-function unfill(text, { name, root }) {
-  let out = text;
-  if (root !== null) out = out.split(root).join("{{STERLING_ROOT}}");
-  return out.split(DEFAULT_CONVENTIONS).join("{{CONVENTIONS_SECTION}}").split(name).join("{{PROJECT_NAME}}");
+  return tokenText.replace(TOKEN, (whole, key) => key === "PROJECT_NAME" ? name : key === "STERLING_ROOT" && root !== null ? root : whole);
 }
 function loadHostFileHistory(pluginRoot2) {
   const path = join16(pluginRoot2, HOST_FILE_HISTORY_REL);
@@ -12022,15 +12095,15 @@ function loadHostFileHistory(pluginRoot2) {
   } catch (err) {
     return { ok: false, reason: `${fwd5(path)} is unparseable (${err.message})` };
   }
-  const isStrings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string");
-  const lines = parsed?.presplit_heads?.lines;
-  const heads = parsed?.presplit_heads?.heads;
-  const valid = isStrings(parsed?.renders?.claude) && isStrings(parsed?.renders?.agy) && isStrings(lines) && Array.isArray(heads) && heads.every((h) => Array.isArray(h) && h.every((i) => Number.isInteger(i) && i >= 0 && i < lines.length));
+  const lines = parsed?.lines;
+  const isText = (t) => Array.isArray(t) && t.every((i) => Number.isInteger(i) && i >= 0 && i < lines.length);
+  const valid = parsed?.version === 2 && Array.isArray(lines) && lines.every((l) => typeof l === "string") && ["claude", "agy"].every((h) => Array.isArray(parsed.renders?.[h]) && parsed.renders[h].every(isText)) && Array.isArray(parsed.presplit_heads) && parsed.presplit_heads.every(isText);
   if (!valid) return { ok: false, reason: `${fwd5(path)} does not have the expected shape` };
+  const decode = (t) => t.map((i) => lines[i]).join("\n");
   return {
     ok: true,
-    renders: { claude: new Set(parsed.renders.claude), agy: new Set(parsed.renders.agy) },
-    heads: heads.map((h) => h.map((i) => lines[i]).join("\n"))
+    renders: { claude: parsed.renders.claude.map(decode).filter((t) => reproducible(t, "claude")), agy: parsed.renders.agy.map(decode).filter((t) => reproducible(t, "agy")) },
+    heads: parsed.presplit_heads.map(decode)
   };
 }
 function knownHostValues({ projectDir, pluginRoot: pluginRoot2, projectNames = [], roots = [], home = homedir5() }) {
@@ -12051,21 +12124,17 @@ function classifyHostFile(fileText, host, { pluginRoot: pluginRoot2, known, hist
   const text = normalize5(fileText);
   if (host === "claude" && (text === "@AGENTS.md" || text === "@AGENTS.md\n")) return { pure: true };
   const combos = known.names.flatMap((name) => host === "agy" ? known.roots.map((root) => ({ name, root })) : [{ name, root: null }]);
-  const current = tokenRender(readFileSync12(join16(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host);
-  if (combos.some((v) => fill(current, v) === text)) return { pure: true };
+  const matches = (tokenText) => reproducible(tokenText, host) && combos.some((v) => fill(tokenText, v) === text);
+  if (matches(tokenRender(readFileSync12(join16(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host))) return { pure: true };
   const shipped = history ?? loadHostFileHistory(pluginRoot2);
   if (!shipped.ok) return { pure: false, unverified: shipped.reason };
-  const hit = combos.some((v) => {
-    const tokens = unfill(text, v);
-    return shipped.renders[host].has(sha2564(tokens)) && fill(tokens, v) === text;
-  });
-  return hit ? { pure: true } : { pure: false };
+  return shipped.renders[host].some(matches) ? { pure: true } : { pure: false };
 }
 var HOSTS = [
   { file: "CLAUDE.md", host: "claude", consequence: "Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists" },
   { file: "GEMINI.md", host: "agy", consequence: "agy loads it next to AGENTS.md, so its text is read twice and counts against agy's 24,000-byte limit" }
 ];
-function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, history }) {
+function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, history, readFile = readFileSync12 }) {
   const rows = [];
   let shipped = history;
   const loadHistory = () => {
@@ -12101,14 +12170,19 @@ function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, hi
     }
     let content;
     try {
-      content = readFileSync12(path);
+      content = readFile(path);
     } catch (err) {
       keep(`could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
     }
+    const text = decodeExact(content);
+    if (text === null) {
+      keep("is not valid UTF-8 text, so it cannot be Sterling's render");
+      continue;
+    }
     let verdict;
     try {
-      verdict = classifyHostFile(content.toString("utf8"), host, { pluginRoot: pluginRoot2, known, history: loadHistory() });
+      verdict = classifyHostFile(text, host, { pluginRoot: pluginRoot2, known, history: loadHistory() });
     } catch (err) {
       verdict = { pure: false, unverified: `${HOST_TEMPLATE_REL} could not be rendered (${err?.message ?? err})` };
     }
@@ -12124,7 +12198,7 @@ function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, hi
     let againStat;
     try {
       againStat = lstatSync6(path);
-      again = againStat.isFile() ? readFileSync12(path) : null;
+      again = againStat.isFile() ? readFile(path) : null;
     } catch (err) {
       keep(`changed while it was being checked (${err?.code ?? err?.message ?? err})`, "Rerun to check it again");
       continue;
@@ -12149,36 +12223,34 @@ function syncLayer({ projectDir, pluginRoot: pluginRoot2, roots = [] }) {
     refused2++;
   };
   const section = readLayerSection(pluginRoot2);
-  const agentsPath = join16(projectDir, "AGENTS.md");
   let layer;
-  if (!existsSync11(agentsPath)) {
+  let agents = null;
+  try {
+    agents = readAgentsMd(projectDir);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    refuse(`${err.message}. Nothing was written and no CLAUDE.md or GEMINI.md was removed.`);
+    layer = { ok: false, reason: "AGENTS.md was refused" };
+  }
+  if (agents && !agents.exists) {
     lines.push(`${LAYER_WARN} skipped \u2014 this project has no AGENTS.md; run /sterling:init`);
     layer = { ok: false, reason: "no AGENTS.md" };
-  } else {
-    const before = readFileSync12(agentsPath, "utf8");
-    let after = null;
-    try {
-      after = applyLayer(before, section);
-    } catch (err) {
-      if (!(err instanceof LayerMarkerError)) throw err;
-      refuse(`${err.message}. Nothing was written and no CLAUDE.md or GEMINI.md was removed.`);
-      layer = { ok: false, reason: "its markers were refused" };
-    }
-    if (after !== null) {
-      const overCap = capRefusal(after);
-      if (overCap) {
-        refuse(`${overCap} /sterling:update.`);
-        layer = { ok: false, reason: "it would be over agy's cap" };
+  } else if (agents) {
+    const before = agents.text;
+    const why = plannedAgentsMdRefusal(before, section);
+    if (why) {
+      refuse(`${why}. Nothing was written and no CLAUDE.md or GEMINI.md was removed. Fix it, then rerun /sterling:update.`);
+      layer = { ok: false, reason: "the planned AGENTS.md was refused" };
+    } else {
+      const after = applyLayer(before, section);
+      if (after === before) {
+        lines.push(`${LAYER_LINE} AGENTS.md up to date`);
       } else {
-        if (after === before) {
-          lines.push(`${LAYER_LINE} AGENTS.md up to date`);
-        } else {
-          writeFileAtomic(agentsPath, after);
-          lines.push(`${LAYER_LINE} AGENTS.md regenerated`);
-        }
-        layer = verifyLayerOnDisk(agentsPath, section);
-        if (!layer.ok) refuse(`${layer.reason}; no CLAUDE.md or GEMINI.md was removed.`);
+        writeFileAtomic(agents.path, after);
+        lines.push(`${LAYER_LINE} AGENTS.md regenerated`);
       }
+      layer = verifyLayerOnDisk(projectDir, section);
+      if (!layer.ok) refuse(`${layer.reason}; no CLAUDE.md or GEMINI.md was removed.`);
     }
   }
   const known = knownHostValues({ projectDir, pluginRoot: pluginRoot2, roots });
@@ -12189,7 +12261,7 @@ function syncLayer({ projectDir, pluginRoot: pluginRoot2, roots = [] }) {
 }
 
 // scripts/lib/custom-agent-render.mjs
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { existsSync as existsSync12, lstatSync as lstatSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync13, readdirSync as readdirSync6, rmSync as rmSync3, rmdirSync as rmdirSync2 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname5, join as join17 } from "node:path";
@@ -12201,7 +12273,7 @@ var AGENT_SOURCE_DIR = "agent-sources";
 var CUSTOM_RENDERER = "custom-agent/1";
 var CUSTOM_HOSTS = ["claude", "opencode", "agy"];
 var STAMP_RE = /^<!-- sterling-custom renderer=(\S+) host=(claude|opencode|agy) key=(\S+) source_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
-var sha2565 = (t) => createHash7("sha256").update(t).digest("hex");
+var sha2564 = (t) => createHash6("sha256").update(t).digest("hex");
 var normalize6 = (s) => s.replace(/\r\n/g, "\n");
 var RESERVED_NAMES = /* @__PURE__ */ new Set([...Object.keys(AGENT_MODEL_KEY), ...AGY_ROSTER, "conductor", "plan", "build", "general", "explore"]);
 function outputPath(host, name) {
@@ -12420,7 +12492,7 @@ function detectInstalledHosts(projectRoot, { env = process.env, home = homedir6(
 }
 var yamlString2 = (s) => JSON.stringify(s);
 function stamp(host, key, sourceHash, content) {
-  return `<!-- sterling-custom renderer=${CUSTOM_RENDERER} host=${host} key=${key} source_hash=${sourceHash} content_hash=${sha2565(content)} -->`;
+  return `<!-- sterling-custom renderer=${CUSTOM_RENDERER} host=${host} key=${key} source_hash=${sourceHash} content_hash=${sha2564(content)} -->`;
 }
 function withStamp(frontmatterBlock, body, host, key, sourceHash) {
   const content = `${frontmatterBlock}
@@ -12531,7 +12603,7 @@ function inspectTarget(root, rel, host, key, sourcePath, vacated = []) {
   const h = disk.match(STAMP_RE);
   if (!h) return { state: "refused", reason: `${rel} carries no Sterling stamp (a file Sterling did not write); the agent's source is ${sourcePath ?? AGENT_SOURCE_DIR}. Move it aside or delete it, then sync again` };
   if (h[2] !== host || h[3] !== key) return { state: "refused", reason: `${rel} is stamped for ${h[2]}:${h[3]}, not ${host}:${key}; it is not overwritten` };
-  if (sha2565(disk.replace(`${h[0]}
+  if (sha2564(disk.replace(`${h[0]}
 `, "")) !== h[5]) return { state: "refused", reason: `${rel} was edited after Sterling wrote it; edit the source ${sourcePath} instead, or delete the copy so Sterling can regenerate it` };
   return { state: "owned", disk };
 }
@@ -12615,7 +12687,7 @@ function planCustomAgents(projectRoot, config2, { hosts, pending, vacated = [] }
       refuse(key, "*", `${twoModelsReason(key)}; its copies are left as they are until then`, src.path);
       continue;
     }
-    agents.push({ key, src, source, name, entry: models[key], sourceHash: sha2565(normalize6(text)) });
+    agents.push({ key, src, source, name, entry: models[key], sourceHash: sha2564(normalize6(text)) });
   }
   const byName = /* @__PURE__ */ new Map();
   for (const a of agents) byName.set(a.name, [...byName.get(a.name) ?? [], a.key]);

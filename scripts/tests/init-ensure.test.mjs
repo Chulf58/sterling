@@ -4,7 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, appendFileSync, unlinkSync, statSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, appendFileSync, unlinkSync, statSync, symlinkSync, chmodSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -985,6 +985,80 @@ test('init: a pure CLAUDE.md beside a valid AGENTS.md is removed once the layer 
     assert.ok(readFileSync(join(dir, 'AGENTS.md'), 'utf8').startsWith('# Ours\n\n- **Ours.** A rule.\n'));
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// Review loop 2 of #329: init reads a CLAUDE.md donor only when AGENTS.md is absent and keeps it
+// when it cannot read it; it writes nothing to AGENTS.md when the planned file is refused; and it
+// never follows a symlinked AGENTS.md.
+test('init: an unreadable CLAUDE.md with no AGENTS.md is kept and named, and init completes with a fresh AGENTS.md', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root reads a mode-000 file, so this read failure cannot be produced; the invalid-UTF-8 case below covers the same keep path');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const legacy = legacyMonolithClaudeMd('ensure-target', '- tail\n');
+    writeFileSync(join(dir, 'CLAUDE.md'), legacy);
+    chmodSync(join(dir, 'CLAUDE.md'), 0o000);
+    const r = init(dir, FRESH_FLAGS);
+    chmodSync(join(dir, 'CLAUDE.md'), 0o644);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), legacy);
+    assert.match(r.stdout, /^AGENTS\.md\s+created\b/m);
+    assert.match(`${r.stdout}${r.stderr}`, /CLAUDE\.md could not be checked as an older Sterling render \(it could not be read \(EACCES\)\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init: a CLAUDE.md that is not valid UTF-8 is never used as a donor and is kept byte for byte', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const raw = Buffer.concat([Buffer.from(legacyMonolithClaudeMd('ensure-target', '- caf')), Buffer.from([0xe9, 0x0a])]);
+    writeFileSync(join(dir, 'CLAUDE.md'), raw);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(readFileSync(join(dir, 'CLAUDE.md')).equals(raw));
+    assert.match(r.stdout, /^AGENTS\.md\s+created\b/m);
+    assert.match(`${r.stdout}${r.stderr}`, /CLAUDE\.md could not be checked as an older Sterling render \(it is not valid UTF-8 text\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init: with broken layer markers, a stale Stack tags line is not rewritten either — AGENTS.md is byte-identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const broken = readFileSync(join(dir, 'AGENTS.md'), 'utf8').replace(/^(<!-- sterling:begin generated.*) -->$/m, '$1');
+    writeFileSync(join(dir, 'AGENTS.md'), broken);
+    const configPath = join(dir, '.sterling', 'config.json');
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
+    cfg.stack_tags = [...cfg.stack_tags, 'typescript'];
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+    const r = init(dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), broken, 'nothing in AGENTS.md is written while its markers are refused');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\b/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init: a symlinked AGENTS.md is left alone (link and target), a pure CLAUDE.md is kept, and init completes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  const outside = mkdtempSync(join(tmpdir(), 'sterling-ensure-outside-'));
+  try {
+    writeFileSync(join(outside, 'AGENTS.md'), '# Shared\n');
+    symlinkSync(join(outside, 'AGENTS.md'), join(dir, 'AGENTS.md'));
+    writeFileSync(join(dir, 'CLAUDE.md'), pureClaude('ensure-target'));
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(outside, 'AGENTS.md'), 'utf8'), '# Shared\n');
+    assert.ok(lstatSync(join(dir, 'AGENTS.md')).isSymbolicLink());
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), pureClaude('ensure-target'));
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\b.*symlink/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 

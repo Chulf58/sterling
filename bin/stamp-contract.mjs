@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync4, realpathSync as realpathSync4 } from "node:fs";
-import { join as join9, dirname as dirname3, resolve as resolve4 } from "node:path";
+import { readFileSync as readFileSync6, writeFileSync, existsSync as existsSync5, realpathSync as realpathSync5 } from "node:fs";
+import { join as join12, dirname as dirname3, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -6477,6 +6477,10 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   return { worktree, mainRoot };
 }
 
+// scripts/lib/sterling-layer.mjs
+import { existsSync as existsSync4, lstatSync as lstatSync3, readFileSync as readFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
+import { basename as basename2, join as join10, resolve as resolve6 } from "node:path";
+
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
@@ -6634,14 +6638,199 @@ function renderClaudeText(text, label) {
   return render(text, label, ["sterling-only", "claude-only"]);
 }
 
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
+import { join as join9, resolve as resolve5 } from "node:path";
+
+// scripts/lib/store-path.mjs
+import { lstatSync, realpathSync as realpathSync4 } from "node:fs";
+import { join as join8, resolve as resolve4, sep as sep2 } from "node:path";
+var StorePathContainmentError = class extends Error {
+  constructor(message, { root, target } = {}) {
+    super(message);
+    this.name = "StorePathContainmentError";
+    this.root = root;
+    this.target = target;
+  }
+};
+function isAbsoluteSegment(seg) {
+  return seg.startsWith("/") || seg.startsWith("\\") || /^[A-Za-z]:[\\/]?/.test(seg);
+}
+function resolveStoreWritePath(root, ...segments) {
+  if (typeof root !== "string" || !root.length) {
+    throw new StorePathContainmentError(`resolveStoreWritePath: root must be a non-empty string (got ${JSON.stringify(root)})`);
+  }
+  for (const raw of segments) {
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: empty or non-string segment (${JSON.stringify(raw)}) \u2014 refusing before any filesystem access`
+      );
+    }
+  }
+  const rootResolved = resolve4(root);
+  const target = resolve4(rootResolved, ...segments);
+  for (const raw of segments) {
+    if (isAbsoluteSegment(raw)) {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: absolute segment '${raw}' resolves outside '${rootResolved}' (got '${target}') \u2014 refused before any filesystem access`,
+        { root: rootResolved, target }
+      );
+    }
+    for (const part of raw.split(/[\\/]/)) {
+      if (part === "..") {
+        throw new StorePathContainmentError(
+          `resolveStoreWritePath: '..' segment in '${raw}' resolves outside '${rootResolved}' (got '${target}') \u2014 refused before any filesystem access`,
+          { root: rootResolved, target }
+        );
+      }
+    }
+  }
+  if (target !== rootResolved && !target.startsWith(rootResolved + sep2)) {
+    throw new StorePathContainmentError(
+      `resolveStoreWritePath: '${join8(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      { root: rootResolved, target }
+    );
+  }
+  const relParts = target.slice(rootResolved.length).split(sep2).filter(Boolean);
+  let cursor = rootResolved;
+  let deepestExisting = rootResolved;
+  for (const part of relParts) {
+    const next = join8(cursor, part);
+    let st;
+    try {
+      st = lstatSync(next);
+    } catch (e) {
+      if (e && e.code === "ENOENT") break;
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: could not stat '${next}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing`,
+        { root: rootResolved, target }
+      );
+    }
+    if (st.isSymbolicLink()) {
+      let resolvedRoot;
+      try {
+        resolvedRoot = realpathSync4(rootResolved);
+      } catch {
+        resolvedRoot = rootResolved;
+      }
+      let resolvedEscape;
+      try {
+        resolvedEscape = realpathSync4(next);
+      } catch {
+        resolvedEscape = null;
+      }
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: '${next}' is a symlink component beneath '${resolvedRoot}' on the way to '${target}'` + (resolvedEscape ? ` \u2014 it resolves to '${resolvedEscape}', outside '${resolvedRoot}'` : " \u2014 the link is dangling") + ` \u2014 refusing, nothing was written`,
+        { root: resolvedRoot, target: resolvedEscape ?? target }
+      );
+    }
+    cursor = next;
+    deepestExisting = next;
+  }
+  let realRoot;
+  try {
+    realRoot = realpathSync4(rootResolved);
+  } catch (e) {
+    if (e && e.code === "ENOENT") {
+      realRoot = rootResolved;
+    } else {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: could not realpath root '${rootResolved}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified root`,
+        { root: rootResolved, target }
+      );
+    }
+  }
+  let realDeepest;
+  if (deepestExisting === rootResolved) {
+    realDeepest = realRoot;
+  } else {
+    try {
+      realDeepest = realpathSync4(deepestExisting);
+    } catch (e) {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
+        { root: rootResolved, target }
+      );
+    }
+  }
+  if (realDeepest !== realRoot && !realDeepest.startsWith(realRoot + sep2)) {
+    throw new StorePathContainmentError(
+      `resolveStoreWritePath: '${deepestExisting}' resolves (via realpath) to '${realDeepest}', outside '${realRoot}' \u2014 refusing`,
+      { root: realRoot, target: realDeepest }
+    );
+  }
+  const suffix = target.slice(deepestExisting.length);
+  const reconstructed = suffix ? join8(realDeepest, suffix) : realDeepest;
+  if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep2)) {
+    throw new StorePathContainmentError(
+      `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
+      { root: realRoot, target: reconstructed }
+    );
+  }
+  return target;
+}
+
+// scripts/lib/contained-fs.mjs
+var ContainmentError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ContainmentError";
+  }
+};
+var lstatOrNull = (p) => {
+  try {
+    return lstatSync2(p);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+};
+function containedPath(root, rel, leaf) {
+  const segments = rel.split("/").filter(Boolean);
+  if (!segments.length || segments.some((s) => s === ".." || s === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
+  let cursor = resolve5(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join9(cursor, part);
+    const st = lstatOrNull(cursor);
+    if (!st) break;
+    const isLeaf = index === segments.length - 1;
+    const wantDir = !isLeaf || leaf === "dir";
+    if (st.isSymbolicLink()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} is a symlink \u2014 refusing to follow it out of the project`);
+    if (wantDir && !st.isDirectory()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} exists but is not a directory`);
+    if (!wantDir && !st.isFile()) throw new ContainmentError(`${rel} exists but is not a regular file`);
+  }
+  try {
+    return resolveStoreWritePath(root, ...segments);
+  } catch (e) {
+    if (e instanceof StorePathContainmentError) throw new ContainmentError(`${rel}: ${e.message.replace(/^resolveStoreWritePath: /, "")}`);
+    throw e;
+  }
+}
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
 // scripts/lib/sterling-layer.mjs
+var LAYER_TEMPLATE_REL = "templates/sterling-layer-agents.md";
 var LAYER_END = "<!-- sterling:end generated -->";
 var LAYER_BEGIN = /^<!-- sterling:begin generated(?: \([^()]*\))? -->$/;
 var MARKER_LIKE = /^\s*<!--\s*sterling:(?:begin|end)\b/;
 var AGENTS_MD_AGY_CAP_BYTES = 24e3;
 var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
+var normalize = (text) => text.replace(/\r\n/g, "\n");
+function decodeExact(buf) {
+  const text = buf.toString("utf8");
+  return Buffer.from(text, "utf8").equals(buf) ? text : null;
+}
+var bytes = (s) => Buffer.byteLength(s, "utf8");
 var LayerMarkerError = class extends Error {
 };
+function readLayerSection(pluginRoot) {
+  const text = normalize(readFileSync4(join10(pluginRoot, LAYER_TEMPLATE_REL), "utf8")).trimEnd();
+  const lines = text.split("\n");
+  if (!LAYER_BEGIN.test(lines[0]) || lines[lines.length - 1] !== LAYER_END || lines.slice(1, -1).some((l) => MARKER_LIKE.test(l))) {
+    throw new LayerMarkerError(`${LAYER_TEMPLATE_REL} must start with the sterling:begin marker line, end with the sterling:end marker line and hold no other marker line`);
+  }
+  return text;
+}
 function scanLines(raw) {
   const out = [];
   let start = 0;
@@ -6657,15 +6846,53 @@ function scanLines(raw) {
 }
 var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+var RAW_HTML_OPEN = /<(pre|code|textarea|script|style)\b[^>]*>/gi;
+function htmlAfter(content, { comment, raw }) {
+  let pos = 0;
+  for (; ; ) {
+    if (raw) {
+      const close = content.toLowerCase().indexOf(`</${raw}`, pos);
+      if (close === -1) return { comment, raw };
+      raw = null;
+      pos = close + 2;
+      continue;
+    }
+    if (comment) {
+      const close = content.indexOf("-->", pos);
+      if (close === -1) return { comment, raw };
+      comment = false;
+      pos = close + 3;
+      continue;
+    }
+    const open = content.indexOf("<!--", pos);
+    RAW_HTML_OPEN.lastIndex = pos;
+    const tag = RAW_HTML_OPEN.exec(content);
+    if (open === -1 && !tag) return { comment, raw };
+    if (tag && (open === -1 || tag.index < open)) {
+      raw = tag[1].toLowerCase();
+      pos = tag.index + tag[0].length;
+    } else {
+      comment = true;
+      pos = open + 4;
+    }
+  }
+}
 function findMarkers(lines) {
   const begins = [];
   const ends = [];
   const malformed = [];
+  const contained = [];
   let fence = null;
+  let html = { comment: false, raw: null, line: -1 };
   lines.forEach(({ content }, i) => {
     if (fence) {
       const close = FENCE_CLOSE.exec(content);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      return;
+    }
+    if (html.comment || html.raw) {
+      if (MARKER_LIKE.test(content)) contained.push(i);
+      html = { ...htmlAfter(content, html), line: html.line };
       return;
     }
     const open = FENCE_OPEN.exec(content);
@@ -6676,22 +6903,80 @@ function findMarkers(lines) {
     if (LAYER_BEGIN.test(content)) begins.push(i);
     else if (content === LAYER_END) ends.push(i);
     else if (MARKER_LIKE.test(content)) malformed.push(i);
+    const next = htmlAfter(content, html);
+    html = { ...next, line: next.comment || next.raw ? i : -1 };
   });
   if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
+  if (html.comment || html.raw) return { error: `AGENTS.md has ${html.comment ? "an HTML comment" : `a <${html.raw}> block`} opened at line ${html.line + 1} that is never closed, so the Sterling layer cannot be placed safely` };
+  if (contained.length) return { error: `AGENTS.md line ${contained.map((i) => i + 1).join(", ")} names a sterling marker inside an HTML comment or raw HTML block, so it cannot be told from a live marker` };
   if (malformed.length) return { error: `AGENTS.md line ${malformed.map((i) => i + 1).join(", ")} looks like a sterling marker but is not the exact marker line` };
   if (!begins.length && !ends.length) return { begin: null, end: null };
   if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
   return { error: `AGENTS.md has ${begins.length} sterling:begin and ${ends.length} sterling:end marker lines outside code (one of each, begin first, is required)` };
+}
+var lastEol = (raw) => {
+  const at = raw.lastIndexOf("\n");
+  return at > 0 && raw[at - 1] === "\r" ? "\r\n" : "\n";
+};
+function applyLayer(agentsText, section) {
+  const lines = scanLines(agentsText);
+  const found = findMarkers(lines);
+  if (found.error) throw new LayerMarkerError(`${found.error}; fix the markers by hand, then rerun`);
+  if (found.begin === null) {
+    const eol2 = lastEol(agentsText);
+    const block = section.split("\n").join(eol2);
+    if (agentsText === "") return `${block}${eol2}`;
+    return `${agentsText}${agentsText.endsWith("\n") ? eol2 : eol2 + eol2}${block}${eol2}`;
+  }
+  const begin = lines[found.begin];
+  const end = lines[found.end];
+  const eol = agentsText.slice(begin.contentEnd, begin.end) || lastEol(agentsText);
+  return agentsText.slice(0, begin.start) + section.split("\n").join(eol) + agentsText.slice(end.contentEnd);
 }
 function layerLineRange(text) {
   const found = findMarkers(scanLines(text));
   if (found.error) throw new LayerMarkerError(found.error);
   return { begin: found.begin, end: found.end };
 }
+function readAgentsMd(projectDir, { readFile = readFileSync4 } = {}) {
+  let path;
+  try {
+    path = containedPath(projectDir, "AGENTS.md", "file");
+  } catch (err) {
+    if (err instanceof ContainmentError) throw new LayerMarkerError(`AGENTS.md is not a plain file in the project (${err.message}), so Sterling neither reads nor writes it`);
+    throw err;
+  }
+  let st;
+  try {
+    st = lstatSync3(path);
+  } catch (err) {
+    if (err?.code === "ENOENT") return { exists: false, path, text: null };
+    throw err;
+  }
+  if (st.nlink > 1) throw new LayerMarkerError(`AGENTS.md has ${st.nlink} hard links, so writing it could change another file; Sterling neither reads nor writes it`);
+  const text = decodeExact(readFile(path));
+  if (text === null) throw new LayerMarkerError("AGENTS.md is not valid UTF-8 text, so rewriting it would change bytes Sterling cannot read; Sterling leaves it alone");
+  return { exists: true, path, text };
+}
+function plannedAgentsMdRefusal(text, section) {
+  let withLayer;
+  try {
+    withLayer = applyLayer(text, section);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return err.message;
+    throw err;
+  }
+  return capRefusal(withLayer);
+}
+function capRefusal(text) {
+  const n = bytes(text);
+  if (n <= AGENTS_MD_AGY_CAP_BYTES) return null;
+  return `AGENTS.md would be ${n.toLocaleString("en-US")} bytes with the Sterling layer, over agy's ${AGENTS_MD_AGY_CAP_BYTES.toLocaleString("en-US")}-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed. Shorten the project's own text in AGENTS.md by at least ${(n - AGENTS_MD_AGY_CAP_BYTES).toLocaleString("en-US")} bytes (move detail into a linked doc), then rerun`;
+}
 
 // scripts/lib/contract-bullets.mjs
-import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join8 } from "node:path";
+import { readFileSync as readFileSync5 } from "node:fs";
+import { join as join11 } from "node:path";
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -6908,7 +7193,7 @@ function extractTemplateBlock(text, lead) {
   return extractBlock(renderClaudeText(text, "template"), lead);
 }
 function readTemplateBullets(repoRoot2) {
-  const templates2 = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join8(repoRoot2, rel), "utf8")]));
+  const templates2 = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync5(join11(repoRoot2, rel), "utf8")]));
   const leadLayer2 = /* @__PURE__ */ new Map();
   const current2 = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
@@ -6941,20 +7226,20 @@ var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve4(process.argv[++i]));
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve7(process.argv[++i]));
 }
 var realOrResolved = (path) => {
   try {
-    return realpathSync4(path);
+    return realpathSync5(path);
   } catch {
-    return resolve4(path);
+    return resolve7(path);
   }
 };
 var projectTargets = onlyProjects.map((value) => {
   const linked = resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
-var repoRoot = join9(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var repoRoot = join12(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
 function withOriginalEols(raw, finalLf) {
   const pieces = raw.split("\n");
@@ -7007,6 +7292,7 @@ function itemEnd(text, start) {
   }
   return end;
 }
+var layerSection = readLayerSection(repoRoot);
 var LAYER_MASK = "<!-- sterling layer section: generated, never stamped -->";
 function unmask(text, layerLines) {
   if (!layerLines.length) return text;
@@ -7031,7 +7317,7 @@ try {
 } finally {
   registry.close();
 }
-var selfPath = realpathSync4(repoRoot);
+var selfPath = realpathSync5(repoRoot);
 var results = [];
 var drift = 0;
 var matchedProjects = /* @__PURE__ */ new Set();
@@ -7062,7 +7348,7 @@ function record(r) {
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 function stampDirs(p) {
   if (!onlyProjects.length) return [p.repo_path];
-  const hits = projectTargets.filter((t) => t.match === resolve4(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  const hits = projectTargets.filter((t) => t.match === resolve7(p.repo_path) || t.match === realOrResolved(p.repo_path));
   for (const t of hits) matchedProjects.add(t.value);
   if (!hits.length) return null;
   const worktrees = hits.filter((t) => t.worktree);
@@ -7071,18 +7357,27 @@ function stampDirs(p) {
 var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
-  if (!existsSync4(repo)) {
+  if (!existsSync5(repo)) {
     record({ project: projectLabel, status: "missing_path", detail: repo });
     continue;
   }
-  if (realpathSync4(repo) === selfPath) continue;
-  const agentsMd = join9(repo, "AGENTS.md");
-  if (!existsSync4(agentsMd)) {
+  if (realpathSync5(repo) === selfPath) continue;
+  const agentsMd = join12(repo, "AGENTS.md");
+  let agentsFile;
+  try {
+    agentsFile = readAgentsMd(repo);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    record({ project: projectLabel, status: "processed", file: agentsMd, actions: [{ lead: "AGENTS.md", action: "AGENTS_MD_REFUSED", file: "AGENTS.md", detail: `${err.message}. Nothing was stamped.` }] });
+    drift++;
+    continue;
+  }
+  if (!agentsFile.exists) {
     record({ project: projectLabel, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
-  const raw = readFileSync4(agentsMd, "utf8");
+  const raw = agentsFile.text;
   const normalized = normalizeEol(raw);
   let range;
   try {
@@ -7230,8 +7525,24 @@ for (const { p, dir: repo } of work) {
   if (WRITE_INSERTS) {
     for (const [file, f] of [["AGENTS.md", agents]]) {
       if (f.text === f.original) continue;
+      const planned = withOriginalEols(f.raw, unmask(f.text, layerLines));
+      const refusal = plannedAgentsMdRefusal(planned, layerSection) ?? (() => {
+        try {
+          readAgentsMd(repo);
+          return null;
+        } catch (err) {
+          if (err instanceof LayerMarkerError) return err.message;
+          throw err;
+        }
+      })();
+      if (refusal) {
+        for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
+        actions.push({ lead: `${file} (write)`, action: "PLANNED_AGENTS_MD_REFUSED", file, detail: `${refusal}. Nothing in AGENTS.md was changed.` });
+        drift++;
+        continue;
+      }
       try {
-        writeFileSync(f.path, withOriginalEols(f.raw, unmask(f.text, layerLines)));
+        writeFileSync(f.path, planned);
       } catch (err) {
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({

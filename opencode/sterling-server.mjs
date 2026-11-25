@@ -24434,6 +24434,14 @@ init_dist2();
 // scripts/lib/update.mjs
 import { closeSync as closeSync7, existsSync as existsSync24, mkdirSync as mkdirSync18, openSync as openSync7, readFileSync as readFileSync23, readdirSync as readdirSync8, readSync as readSync3, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname17, join as join35 } from "node:path";
+
+// scripts/lib/sterling-layer.mjs
+init_agent_fences();
+init_atomic_write();
+var AGENTS_MD_AGY_CAP_BYTES = 24e3;
+var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
+
+// scripts/lib/update.mjs
 init_dist();
 
 // scripts/lib/project-identity.mjs
@@ -25496,14 +25504,16 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
   const layerRefusals = layer.filter((l) => l.startsWith("\u2717 Sterling layer REFUSED:"));
   if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2 && layerRefusals.length) return { ok: false, migrated, layer, detail: "sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows)" };
-  if (sync.status === 2) return { ok: false, migrated, layer, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out ?? "") || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out ?? "") || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out ?? "");
+  if (sync.status === 2) {
+    const detail = layerRefusals.length ? `sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows; exit 2, with anything else it refused in its output): ${sync.tail}` : `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
+    return { ok: false, restart, migrated, layer, detail };
+  }
   if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
-  if (openCodeSkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  if (openCodeSkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
   const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
-  if (agySkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out) || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out);
+  if (agySkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` };

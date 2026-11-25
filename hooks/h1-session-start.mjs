@@ -16539,36 +16539,18 @@ function renderUnavailable(reason) {
 }
 
 // scripts/lib/sterling-layer.mjs
-import { existsSync as existsSync11, lstatSync as lstatSync5, readFileSync as readFileSync12, unlinkSync as unlinkSync2 } from "node:fs";
-import { basename as basename3, join as join20, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync11, lstatSync as lstatSync7, readFileSync as readFileSync13, unlinkSync as unlinkSync3 } from "node:fs";
+import { basename as basename3, join as join22, resolve as resolve9 } from "node:path";
 init_agent_fences();
 init_atomic_write();
-var CLAUDE_BLOCK_REL = "templates/claude-session-block.md";
-var AGENTS_MD_AGY_CAP_BYTES = 24e3;
-var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
-var normalize = (text) => text.replace(/\r\n/g, "\n");
-function readClaudeSessionBlock(pluginRoot3) {
-  return normalize(readFileSync12(join20(pluginRoot3, CLAUDE_BLOCK_REL), "utf8")).trimEnd();
-}
-
-// scripts/hooks/lib/operating-state.mjs
-import { existsSync as existsSync14, readFileSync as readFileSync14 } from "node:fs";
-import { join as join24 } from "node:path";
-init_dist();
-init_dist2();
-
-// scripts/lib/handoff-projection.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync12 } from "node:fs";
-import { join as join23, resolve as resolve10 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync as unlinkSync3, constants } from "node:fs";
-import { join as join22, resolve as resolve9 } from "node:path";
+import { lstatSync as lstatSync6, readFileSync as readFileSync12, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { join as join21, resolve as resolve8 } from "node:path";
 
 // scripts/lib/store-path.mjs
-import { lstatSync as lstatSync6, realpathSync as realpathSync7 } from "node:fs";
-import { join as join21, resolve as resolve8, sep } from "node:path";
+import { lstatSync as lstatSync5, realpathSync as realpathSync7 } from "node:fs";
+import { join as join20, resolve as resolve7, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -16591,8 +16573,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve8(root);
-  const target = resolve8(rootResolved, ...segments);
+  const rootResolved = resolve7(root);
+  const target = resolve7(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -16611,7 +16593,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join21(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join20(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -16619,10 +16601,10 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join21(cursor, part);
+    const next = join20(cursor, part);
     let st;
     try {
-      st = lstatSync6(next);
+      st = lstatSync5(next);
     } catch (e) {
       if (e && e.code === "ENOENT") break;
       throw new StorePathContainmentError(
@@ -16684,7 +16666,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join21(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join20(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -16703,7 +16685,7 @@ var ContainmentError = class extends Error {
 };
 var lstatOrNull = (p) => {
   try {
-    return lstatSync7(p);
+    return lstatSync6(p);
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw e;
@@ -16712,9 +16694,9 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve9(root);
+  let cursor = resolve8(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join22(cursor, part);
+    cursor = join21(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -16734,9 +16716,29 @@ function existsContained(root, rel, leaf) {
   return lstatOrNull(containedPath(root, rel, leaf)) !== null;
 }
 function readContained(root, rel) {
-  return readFileSync13(containedPath(root, rel, "file"), "utf8");
+  return readFileSync12(containedPath(root, rel, "file"), "utf8");
 }
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/sterling-layer.mjs
+var CLAUDE_BLOCK_REL = "templates/claude-session-block.md";
+var AGENTS_MD_AGY_CAP_BYTES = 24e3;
+var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
+var normalize = (text) => text.replace(/\r\n/g, "\n");
+function readClaudeSessionBlock(pluginRoot3) {
+  return normalize(readFileSync13(join22(pluginRoot3, CLAUDE_BLOCK_REL), "utf8")).trimEnd();
+}
+
+// scripts/hooks/lib/operating-state.mjs
+import { existsSync as existsSync14, readFileSync as readFileSync14 } from "node:fs";
+import { join as join24 } from "node:path";
+init_dist();
+init_dist2();
+
+// scripts/lib/handoff-projection.mjs
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { existsSync as existsSync12 } from "node:fs";
+import { join as join23, resolve as resolve10 } from "node:path";
 
 // scripts/lib/sterling-source-tree.mjs
 var MANIFEST = ".claude-plugin/plugin.json";
@@ -17777,14 +17779,16 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
   const layerRefusals = layer.filter((l) => l.startsWith("\u2717 Sterling layer REFUSED:"));
   if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2 && layerRefusals.length) return { ok: false, migrated, layer, detail: "sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows)" };
-  if (sync.status === 2) return { ok: false, migrated, layer, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out ?? "") || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out ?? "") || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out ?? "");
+  if (sync.status === 2) {
+    const detail = layerRefusals.length ? `sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows; exit 2, with anything else it refused in its output): ${sync.tail}` : `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
+    return { ok: false, restart, migrated, layer, detail };
+  }
   if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
-  if (openCodeSkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  if (openCodeSkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
   const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
-  if (agySkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out) || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out);
+  if (agySkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` };

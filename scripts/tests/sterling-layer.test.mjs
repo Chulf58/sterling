@@ -8,7 +8,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,7 @@ import {
   LayerMarkerError,
   applyLayer,
   classifyHostFile,
+  plannedAgentsMdRefusal,
   knownHostValues,
   readClaudeSessionBlock,
   readLayerSection,
@@ -122,7 +123,7 @@ test('applyLayer refuses a file whose code fence is never closed, since its mark
 
 // ---- byte bounds and the shipped text ----
 
-test('AGENTS.md as init renders it for a fresh agy project stays within 21,000 bytes, leaving 3,000 under the 24,000 cap', () => {
+test('AGENTS.md as init renders it for a fresh agy project with a typical name stays within about 21,000 bytes; with a 100-character name it is still under the 24,000 cap', () => {
   const section = readLayerSection(repo);
   const tags = ['node', 'typescript', 'sterling'];
   const template = readFileSync(join(repo, 'templates', 'target-agents-md.md'), 'utf8')
@@ -135,6 +136,11 @@ test('AGENTS.md as init renders it for a fresh agy project stays within 21,000 b
     .replace('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');
   const rendered = applyLayer(template, section);
   assert.ok(bytes(rendered) <= AGENTS_MD_MAX_BYTES, `${bytes(rendered)} bytes is over ${AGENTS_MD_MAX_BYTES}`);
+  const longName = 'p'.repeat(100);
+  const long = applyLayer(template.replaceAll('a-project-with-a-fairly-long-name', longName), section);
+  assert.ok(long.includes(longName));
+  assert.ok(bytes(long) < AGENTS_MD_AGY_CAP_BYTES, `${bytes(long)} bytes with a 100-character name`);
+  assert.equal(plannedAgentsMdRefusal(long, section), null);
   assert.equal(AGENTS_MD_MAX_BYTES, 21_000);
   assert.equal(AGENTS_MD_AGY_CAP_BYTES, 24_000);
 });
@@ -161,6 +167,8 @@ test('each host gets its own root and rotation line: the agy path and READY FOR 
   assert.ok(!shared.includes('READY FOR NEW SESSION') && !shared.includes('READY TO CLEAR'), 'the shared text names no host rotation literal');
   assert.match(agy, /`<root>` and `CLAUDE_PLUGIN_ROOT` mean `~\/\.gemini\/config\/plugins\/sterling`/);
   assert.match(agy, /READY FOR NEW SESSION/);
+  assert.match(agy, /EXIT AND RELAUNCH/);
+  assert.ok(!shared.includes('EXIT AND RELAUNCH') && !shared.includes('RELOAD'), 'the shared text names no host reload literal');
   const claude = readClaudeSessionBlock(repo);
   assert.match(claude, /READY TO CLEAR/);
   assert.doesNotMatch(claude, /READY FOR NEW SESSION/);
@@ -279,16 +287,13 @@ test('retireHostFiles keeps a CLAUDE.md that is a directory or a symbolic link, 
   assert.match(rows[0].warning, /a symbolic link/);
   assert.ok(lstatSync(join(linked, 'CLAUDE.md')).isSymbolicLink(), 'the link is still there');
 
+  // The read failure is injected (a mode-000 file is readable as root).
   const unreadable = project();
   writeFileSync(join(unreadable, 'CLAUDE.md'), claudeRender());
-  chmodSync(join(unreadable, 'CLAUDE.md'), 0o000);
-  try {
-    ({ rows } = retireHostFiles({ projectDir: unreadable, pluginRoot: repo, known: known(unreadable), layer: OK }));
-    assert.deepEqual(rows.map((r) => r.status), ['kept']);
-    assert.match(rows[0].warning, /could not be read \(EACCES\)/);
-  } finally {
-    chmodSync(join(unreadable, 'CLAUDE.md'), 0o644);
-  }
+  const eacces = () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); };
+  ({ rows } = retireHostFiles({ projectDir: unreadable, pluginRoot: repo, known: known(unreadable), layer: OK, readFile: eacces }));
+  assert.deepEqual(rows.map((r) => r.status), ['kept']);
+  assert.match(rows[0].warning, /could not be read \(EACCES\)/);
   assert.equal(read(unreadable, 'CLAUDE.md'), claudeRender());
 });
 
@@ -375,4 +380,104 @@ test('syncLayer regenerates the section, preserves project rules outside the mar
   assert.ok(first.lines.some((l) => /^Sterling layer: CLAUDE\.md removed — /.test(l)), first.lines.join('\n'));
   assert.equal(existsSync(join(dir, 'CLAUDE.md')), false);
   assert.ok(syncLayer({ projectDir: dir, pluginRoot: repo }).lines.includes('Sterling layer: AGENTS.md up to date'));
+});
+
+// ---- review loop 2 of #329 ----
+
+const repoHistory = () => JSON.parse(readFileSync(join(repo, 'bin', 'host-file-history.json'), 'utf8'));
+const gitShow = (sha) => spawnSync('git', ['show', `${sha}:templates/target-claude-md.md`], { cwd: repo, encoding: 'utf8' }).stdout;
+const templateShas = () => spawnSync('git', ['log', '--format=%H', '--', 'templates/target-claude-md.md'], { cwd: repo, encoding: 'utf8' }).stdout.split('\n').filter(Boolean);
+
+test('a pre-split CLAUDE.md render whose project-fact tokens were left unfilled is never pure: its writer filled values Sterling cannot reproduce', () => {
+  const sha = templateShas().find((h) => /\{\{STACK_TAGS\}\}/.test(gitShow(h)) && gitShow(h).includes('{{CONVENTIONS_SECTION}}'));
+  assert.ok(sha, 'fixture: a pre-split template revision');
+  const text = renderClaudeText(gitShow(sha), 't').replaceAll('{{PROJECT_NAME}}', 'demo').replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');
+  assert.match(text, /\{\{STACK_TAGS\}\}/, 'fixture: the project facts are literal placeholders');
+  const dir = project();
+  assert.equal(classifyHostFile(text, 'claude', { pluginRoot: repo, known: known(dir) }).pure, false);
+  writeFileSync(join(dir, 'CLAUDE.md'), text);
+  const { rows } = retireHostFiles({ projectDir: dir, pluginRoot: repo, known: known(dir), layer: OK });
+  assert.deepEqual(rows.map((r) => r.status), ['kept']);
+  assert.equal(read(dir, 'CLAUDE.md'), text);
+});
+
+test('the shipped history holds no render with a token its writer did not fill', () => {
+  const h = repoHistory();
+  const texts = (host) => h.renders[host].map((t) => t.map((i) => h.lines[i]).join('\n'));
+  for (const t of texts('claude')) assert.deepEqual([...new Set(t.match(/\{\{[A-Z_]+\}\}/g) ?? [])].filter((k) => k !== '{{PROJECT_NAME}}'), []);
+  for (const t of texts('agy')) assert.deepEqual([...new Set(t.match(/\{\{[A-Z_]+\}\}/g) ?? [])].filter((k) => k !== '{{PROJECT_NAME}}' && k !== '{{STERLING_ROOT}}'), []);
+});
+
+test('an older render for a project named Sterling or project is recognised: values are filled at the token positions, never substituted back into the file', () => {
+  const withHistory = noGitPluginRoot();
+  for (const name of ['Sterling', 'project', 'CLAUDE']) {
+    const dir = project();
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: name }));
+    const older = claudeRender(name, olderTemplate());
+    assert.deepEqual(classifyHostFile(older, 'claude', { pluginRoot: withHistory, known: known(dir) }), { pure: true }, name);
+  }
+});
+
+test('markers inside an HTML comment or a <pre> block are refused, never treated as the live section', () => {
+  const section = readLayerSection(repo);
+  for (const text of [
+    `# P\n\n<!--\nexample:\n${section}\n-->\n\n- **Mine.**\n`,
+    `# P\n\n<pre>\n${section}\n</pre>\n`,
+    `# P\n\n<!-- an unclosed comment\n\n- **Mine.**\n`,
+  ]) assert.throws(() => applyLayer(text, section), LayerMarkerError, text.slice(0, 40));
+  const inline = `# P\n\n<!-- one-line comment -->\n<code>x</code>\n`;
+  assert.equal(applyLayer(inline, section), `${inline}\n${section}\n`, 'a closed one-line comment or element is ordinary text');
+});
+
+test('syncLayer leaves an AGENTS.md whose markers sit in an HTML comment byte-identical and keeps a pure CLAUDE.md', () => {
+  const agents = `# P\n\n<!--\n${readLayerSection(repo)}\n-->\n`;
+  const dir = project({ agents });
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  const { refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  assert.equal(refused, 1);
+  assert.equal(read(dir, 'AGENTS.md'), agents);
+  assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
+});
+
+test('syncLayer refuses an AGENTS.md with bytes that are not valid UTF-8: every byte kept, nothing removed', () => {
+  const dir = project();
+  const raw = Buffer.concat([Buffer.from('# P\n\nLatin-1 caf'), Buffer.from([0xe9]), Buffer.from('\n')]);
+  writeFileSync(join(dir, 'AGENTS.md'), raw);
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  const { refused, lines } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  assert.equal(refused, 1, lines.join('\n'));
+  assert.ok(readFileSync(join(dir, 'AGENTS.md')).equals(raw), 'AGENTS.md bytes unchanged');
+  assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
+});
+
+test('syncLayer never follows or replaces a symlinked AGENTS.md: link, target and a pure CLAUDE.md are all left as they were', () => {
+  const dir = project();
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  const outside = join(tmp(), 'AGENTS.md');
+  writeFileSync(outside, '# Shared rules\n');
+  symlinkSync(outside, join(dir, 'AGENTS.md'));
+  const { refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  assert.equal(refused, 1);
+  assert.ok(lstatSync(join(dir, 'AGENTS.md')).isSymbolicLink());
+  assert.equal(readlinkSync(join(dir, 'AGENTS.md')), outside);
+  assert.equal(readFileSync(outside, 'utf8'), '# Shared rules\n');
+  assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
+});
+
+test('syncLayer refuses an AGENTS.md hard-linked to another file, leaving both untouched', () => {
+  const dir = project();
+  const other = join(tmp(), 'other.md');
+  writeFileSync(other, '# Other\n');
+  linkSync(other, join(dir, 'AGENTS.md'));
+  const { refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  assert.equal(refused, 1);
+  assert.equal(readFileSync(other, 'utf8'), '# Other\n');
+});
+
+test('plannedAgentsMdRefusal judges the whole planned file with the layer in: a text that fits alone but not with the layer is refused', () => {
+  const section = readLayerSection(repo);
+  const filler = `# P\n\n${'- **Rule.** Project text.\n'.repeat(700)}`;
+  assert.ok(bytes(filler) < AGENTS_MD_AGY_CAP_BYTES && bytes(applyLayer(filler, section)) > AGENTS_MD_AGY_CAP_BYTES, 'fixture');
+  assert.match(plannedAgentsMdRefusal(filler, section), /over agy's 24,000-byte cap/);
+  assert.equal(plannedAgentsMdRefusal('# P\n', section), null);
 });

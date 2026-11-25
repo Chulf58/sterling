@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, lstatSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1387,6 +1387,48 @@ test('stamp-contract --apply-inserts: a CRLF AGENTS.md with the generated sectio
     const r = runStampContract(f.regDb, ['--apply-inserts']);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     assert.equal(f.read('AGENTS.md'), toCrlf(`${complete}\n${section}\n`));
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 2 of #329: stamp-contract never follows an aliased AGENTS.md, and never writes a
+// planned AGENTS.md that would not fit agy's cap once the Sterling layer is in.
+test('stamp-contract: a symlinked AGENTS.md (here pointing at CLAUDE.md) is AGENTS_MD_REFUSED — link and target byte-identical, exit 2', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'linked');
+  const f = layerFixture('linked', { agents: '' });
+  try {
+    rmSync(join(f.dir, 'AGENTS.md'));
+    const claude = `${dropBlock(complete, INSERT_LEAD)}\n`;
+    writeFileSync(join(f.dir, 'CLAUDE.md'), claude);
+    symlinkSync('CLAUDE.md', join(f.dir, 'AGENTS.md'));
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /AGENTS_MD_REFUSED/);
+    assert.equal(f.read('CLAUDE.md'), claude, 'the link target is not stamped');
+    assert.ok(lstatSync(join(f.dir, 'AGENTS.md')).isSymbolicLink(), 'the link is left in place');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: an insert that would take AGENTS.md (with the layer) past agy\'s 24,000-byte cap is PLANNED_AGENTS_MD_REFUSED — nothing written, exit 2', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'near-cap');
+  const section = readLayerSection(root);
+  const base = `${dropBlock(complete, INSERT_LEAD)}\n`;
+  const room = 24_000 - Buffer.byteLength(`${base}\n${section}\n`);
+  assert.ok(room > 200, 'fixture: the stock text fits with the layer');
+  const lint = complete.split('\n').find((l) => l.startsWith(INSERT_LEAD));
+  const pad = `\n## Our notes\n\n${'x'.repeat(room - Buffer.byteLength(lint) + 10 - 16)}\n`;
+  const planted = `${base}${pad}\n${section}\n`;
+  assert.ok(Buffer.byteLength(planted) <= 24_000, 'fixture: the file fits before the insert');
+  const f = layerFixture('near-cap', { agents: planted });
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /PLANNED_AGENTS_MD_REFUSED/);
+    assert.match(r.stdout, /over agy's 24,000-byte cap/);
+    assert.equal(f.read('AGENTS.md'), planted);
   } finally {
     f.cleanup();
   }

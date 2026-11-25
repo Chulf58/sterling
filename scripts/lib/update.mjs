@@ -33,7 +33,8 @@ import { fileURLToPath } from 'node:url';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
-import { refreshAgentsMdKnowledgeFile } from './agents-md-facts.mjs';
+import { refreshAgentsMdKnowledge } from './agents-md-facts.mjs';
+import { LayerMarkerError, readAgentsMd, readLayerSection, writeAgentsMdChecked } from './sterling-layer.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
 import { identityRefusal as projectIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
@@ -910,12 +911,20 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // The AGENTS.md Knowledge section names architecture.md/rulings.md only while handoff is on
       // (GitHub #218); a shipped-wording section is flipped to match, a hand-edited one is left
       // and named. A Sterling clone has its own projections and keeps the projection wording.
-      try {
-        const knowledge = refreshAgentsMdKnowledgeFile(join(p.repo_path, 'AGENTS.md'), isSterlingClone(p.repo_path, cwd) || handoffEnabled);
-        if (knowledge?.refreshed) log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+      // After a layer refusal nothing else writes AGENTS.md; otherwise the rewrite goes through the
+      // same checks as the layer (a plain file, and the whole planned file under agy's cap).
+      if (layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) {
+        log('      ⚠ AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed');
+      } else try {
+        const agents = readAgentsMd(p.repo_path);
+        const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
+        if (knowledge?.refreshed) {
+          const refusal = writeAgentsMdChecked(p.repo_path, knowledge.text, readLayerSection(cwd));
+          log(refusal ? `      ⚠ AGENTS.md Knowledge section not rewritten: ${refusal}` : `      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+        }
         if (knowledge?.kept) log(`      ⚠ AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
       } catch (err) {
-        if (!isProjectReadRefusal(err)) throw err;
+        if (!(err instanceof LayerMarkerError) && !isProjectReadRefusal(err)) throw err;
         log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
       }
       // Handoff projection (decision

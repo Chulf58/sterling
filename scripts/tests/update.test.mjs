@@ -8,7 +8,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, rmSync, existsSync, lstatSync, symlinkSync } from 'node:fs';
+import { refreshAgentsMdKnowledge, renderKnowledgeSection } from '../lib/agents-md-facts.mjs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -534,6 +535,56 @@ test('fan-out: a Sterling layer refusal (sync-agents exit 2) fails the project a
     assert.ok(log.includes(refused), log);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Review loop 2 of #329, findings 3 and 4: after a layer refusal nothing else writes AGENTS.md,
+// and the Knowledge refresh never follows a symlinked AGENTS.md.
+function knowledgeProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-knowledge-'));
+  mkdirSync(join(dir, '.sterling'));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ handoff: { enabled: false } }));
+  return dir;
+}
+const projectedAgentsMd = () => renderKnowledgeSection(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'target-agents-md.md'), 'utf8'), true);
+
+test('fan-out: after a Sterling layer refusal the Knowledge section is not rewritten — AGENTS.md is byte-identical', async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  try {
+    const agents = projectedAgentsMd();
+    assert.notEqual(refreshAgentsMdKnowledge(agents, false).text, agents, 'fixture: the handoff-off refresh would rewrite this AGENTS.md');
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    const refused = "✗ Sterling layer REFUSED: AGENTS.md would be 27,738 bytes with the Sterling layer, over agy's 24,000-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed.";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 2, syncStdout: `up_to_date: scout\n${refused}\n` });
+    const lines = [];
+    await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents);
+    assert.match(lines.join('\n'), /Knowledge section not checked: the Sterling layer in AGENTS\.md was refused above/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fan-out: the Knowledge refresh never follows a symlinked AGENTS.md — link and target unchanged, and it says why', async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  const outside = mkdtempSync(join(tmpdir(), 'sterling-update-outside-'));
+  try {
+    const agents = projectedAgentsMd();
+    writeFileSync(join(outside, 'AGENTS.md'), agents);
+    symlinkSync(join(outside, 'AGENTS.md'), join(dir, 'AGENTS.md'));
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\n' });
+    const lines = [];
+    await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    assert.equal(readFileSync(join(outside, 'AGENTS.md'), 'utf8'), agents);
+    assert.ok(lstatSync(join(dir, 'AGENTS.md')).isSymbolicLink());
+    assert.match(lines.join('\n'), /Knowledge section not checked: AGENTS\.md is not a plain file in the project/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 

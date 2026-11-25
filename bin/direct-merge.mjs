@@ -12878,6 +12878,21 @@ var init_dist2 = __esm({
   }
 });
 
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS, EXACT_MARKERS;
+var init_agent_fences = __esm({
+  "scripts/lib/agent-fences.mjs"() {
+    FENCE_KINDS = {
+      "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+      "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+      "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+      "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
+    };
+    EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
+  }
+});
+
 // scripts/lib/atomic-write.mjs
 var init_atomic_write = __esm({
   "scripts/lib/atomic-write.mjs"() {
@@ -14005,6 +14020,12 @@ var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NO
      your commit message rather than editing it. -->`;
 var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
+// scripts/lib/sterling-layer.mjs
+init_agent_fences();
+init_atomic_write();
+var AGENTS_MD_AGY_CAP_BYTES = 24e3;
+var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
 
 // scripts/lib/update.mjs
 init_dist();
