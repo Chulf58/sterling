@@ -929,16 +929,27 @@ test('a green test battery run is unchanged: migration still runs (machine + per
 // never abort this clone's update) — but tolerated used to mean its verdict lived
 // only in a block sandwiched between build/test/check output. The closing summary
 // now repeats it, so a refusal cannot scroll past (P1/P5).
+// Review loop 8 of #329: the drift output is stamp-contract's real format (captured from a run of
+// scripts/stamp-contract.mjs --apply-inserts --project <dir> --exact-projects on a hand-tuned
+// Anti-speculation bullet): a header naming THIS project's AGENTS.md and the indented action line,
+// so a change that made a scoped HAND_TUNED_REFUSED fatal would turn this test red.
+const HAND_TUNED_OUT = (dir) =>
+  `✗ p (${join(dir, 'AGENTS.md')})\n` +
+  '    HAND_TUNED_REFUSED  - **Anti-speculation:**…\n' +
+  '      sibling text (hand-tuned, NOT touched):\n' +
+  '      - **Anti-speculation:** This project tunes the rest of the rule its own hand-edited way.\n' +
+  '\nINSERTS APPLIED (new text only; existing wording is never replaced without --apply) — 1 project(s) processed, 0 already in sync, 1 refusal(s).\n';
+const IN_SYNC_OUT = '\nINSERTS APPLIED (new text only; existing wording is never replaced without --apply) — 1 project(s) processed, 1 already in sync, 0 refusal(s). Pass --verbose to list the in-sync bullets.\n';
 test('sibling contract drift is tolerated but repeated in the closing summary, never only in the scrolled-past block', async () => {
-  for (const [contractStatus, expectDrift] of [
-    [2, true],
-    [0, false],
+  for (const [contractStatus, expectDrift, contractStdout] of [
+    [2, true, HAND_TUNED_OUT('/tmp/p')],
+    [0, false, IN_SYNC_OUT],
   ]) {
     const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-contract-'));
     try {
       mkdirSync(join(cwd, 'scripts'), { recursive: true });
       writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
-      const { exec, calls } = fakeExec({ behind: 1, contractStatus });
+      const { exec, calls } = fakeExec({ behind: 1, contractStatus, contractStdout });
       const lines = [];
       // Review loop 7 of #329: stamp-contract runs only with an explicit target set (one --project
       // per refreshed project), so the fixture registers one project.
@@ -946,9 +957,10 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
       const out = lines.join('\n');
 
       assert.ok(calls.some((c) => c.includes('stamp-contract.mjs')), 'the dry run runs either way');
-      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/p$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
+      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/p --exact-projects$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
       assert.equal(report.contract_drift, expectDrift, 'the report carries the verdict for callers');
       assert.equal(report.exit, 0, "a sibling's CLAUDE.md never blocks this clone's update");
+      assert.doesNotMatch(out, /✗ p: stamp-contract could not update AGENTS\.md/, 'hand-tuned text is drift, never a failed stamp');
       assert.equal(/CONTRACT DRIFT/.test(out), expectDrift, 'the summary names drift only when there is drift');
       if (expectDrift) assert.match(out, /stamp-contract\.mjs --apply/, 'and names the command that fixes it');
       assert.match(out, /RESTART THE SESSION/, 'the restart instruction survives either way');
@@ -1074,7 +1086,7 @@ test('already current: stamp-contract runs for the registered projects, so a not
     const lines = [];
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'legacy', repo_path: '/tmp/legacy' }], opts: {} });
     const log = lines.join('\n');
-    const stamp = calls.findIndex((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/legacy$/.test(c));
+    const stamp = calls.findIndex((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/legacy --exact-projects$/.test(c));
     assert.ok(stamp !== -1, `the already-current refresh runs stamp-contract, inserts only:\n${calls.join('\n')}`);
     assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > stamp, 'retirement stays the last step');
     assert.equal(report.exit, 2, log);
@@ -1114,7 +1126,7 @@ for (const [label, behind] of [['full path', 1], ['already current', 0]]) {
       const log = lines.join('\n');
       const stamps = calls.filter((c) => c.includes('stamp-contract.mjs'));
       assert.equal(stamps.length, 1, calls.join('\n'));
-      assert.match(stamps[0], /stamp-contract\.mjs --apply-inserts --project \/tmp\/dome$/, 'the one target, explicitly');
+      assert.match(stamps[0], /stamp-contract\.mjs --apply-inserts --project \/tmp\/dome --exact-projects$/, 'the one target, explicitly');
       assert.match(log, /✗ refused: REFUSED — handoff setting/, 'fixture: the project was refused before any write');
       assert.match(log, /• checkout: a Sterling source tree — its contract files are hand-maintained, not stamped/);
       assert.ok(!calls.some((c) => c.includes(`retire-host-files.mjs --target ${f.checkout}`)), 'no host file is retired in a source tree');
@@ -1271,7 +1283,7 @@ test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the in
     assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/dome-farmer'], 'sync-agents gets the invoking project only — no fan-out');
     const contract = calls.filter((c) => c.includes('stamp-contract.mjs'));
     assert.equal(contract.length, 1);
-    assert.match(contract[0], /--project \/tmp\/dome-farmer$/, 'stamp-contract is scoped to the invoking project');
+    assert.match(contract[0], /--project \/tmp\/dome-farmer --exact-projects$/, 'stamp-contract is scoped to the invoking project, as its exact registry row');
     assert.match(contract[0], /stamp-contract\.mjs --apply-inserts --project /, 'inserts only, never a full --apply');
     assert.doesNotMatch(contract[0], /--apply( |$)/, 'existing wording is never replaced by an update: no full --apply');
     assert.ok(lines.some((l) => l.includes('AUTHORING clone — no pull on the authoring machine; syncing /tmp/dome-farmer only')), 'the loud line names the project');

@@ -1088,11 +1088,13 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // those (review loop 7 of #329): a project refused by the pre-write checks, the clone and any
   // other Sterling source tree (hand-maintained instruction files) are never stamped, and with no
   // target it does not run at all, since without --project it would stamp the whole registry.
+  // --exact-projects (review loop 8): each target is a registry row stamped in its own directory, so
+  // a registered linked worktree never takes the place of its registered main checkout.
   // Returns the number of projects whose stamp failed.
   const stampSiblings = () => {
     const targets = stampTargets();
     if (!targets.length || !existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
-    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', ...targets.flatMap((p) => ['--project', p.repo_path])], {
+    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', ...targets.flatMap((p) => ['--project', p.repo_path]), '--exact-projects'], {
       show: true,
       tolerate: true,
     });
@@ -1194,7 +1196,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       log('▸ contract text not stamped: the project was refused above, before any write');
     } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
       // --apply-inserts: see the sibling-projects step below.
-      const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path], {
+      const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path, '--exact-projects'], {
         show: true,
         tolerate: true,
       });

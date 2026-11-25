@@ -18318,7 +18318,7 @@ ${lines.map((l) => `      ${l}`).join("\n")}`);
   const stampSiblings = () => {
     const targets = stampTargets();
     if (!targets.length || !existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) return 0;
-    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", ...targets.flatMap((p) => ["--project", p.repo_path])], {
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", ...targets.flatMap((p) => ["--project", p.repo_path]), "--exact-projects"], {
       show: true,
       tolerate: true
     });
@@ -18408,7 +18408,7 @@ AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_
     } else if (!stampable) {
       log("\u25B8 contract text not stamped: the project was refused above, before any write");
     } else if (existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) {
-      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
+      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path, "--exact-projects"], {
         show: true,
         tolerate: true
       });

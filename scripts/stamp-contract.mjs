@@ -32,7 +32,7 @@
 //     summary; --verbose restores the per-bullet listing. The caller that matters
 //     is /sterling:update, where this block sits between build/test/check output
 //     and a per-bullet inventory would bury the rare refusal (P1).
-//   node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...]
+//   node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>... [--exact-projects]]
 import { readFileSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,8 +59,8 @@ import {
   INSERT_AFTER,
 } from './lib/contract-bullets.mjs';
 
-const USAGE = 'usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...] [--help]';
-const KNOWN_FLAGS = new Set(['--apply', '--apply-inserts', '--verbose', '--project']);
+const USAGE = 'usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>... [--exact-projects]] [--help]';
+const KNOWN_FLAGS = new Set(['--apply', '--apply-inserts', '--verbose', '--project', '--exact-projects']);
 const argv = process.argv.slice(2);
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(USAGE);
@@ -92,8 +92,12 @@ const realOrResolved = (path) => {
     return resolve(path);
   }
 };
+// --exact-projects (the automatic callers: /sterling:update and the post-update sync, review loop 8
+// of #329): each --project names a registry row exactly, with no worktree mapping, so a registered
+// main checkout and its registered linked worktree are each stamped in their own directory.
+const EXACT_PROJECTS = process.argv.includes('--exact-projects');
 const projectTargets = onlyProjects.map((value) => {
-  const linked = resolveLinkedWorktree(value);
+  const linked = EXACT_PROJECTS ? null : resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
 

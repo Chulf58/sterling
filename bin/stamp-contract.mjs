@@ -7153,8 +7153,8 @@ function readTemplateBullets(repoRoot2) {
 }
 
 // scripts/stamp-contract.mjs
-var USAGE = "usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...] [--help]";
-var KNOWN_FLAGS = /* @__PURE__ */ new Set(["--apply", "--apply-inserts", "--verbose", "--project"]);
+var USAGE = "usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>... [--exact-projects]] [--help]";
+var KNOWN_FLAGS = /* @__PURE__ */ new Set(["--apply", "--apply-inserts", "--verbose", "--project", "--exact-projects"]);
 var argv = process.argv.slice(2);
 if (argv.includes("--help") || argv.includes("-h")) {
   console.log(USAGE);
@@ -7182,8 +7182,9 @@ var realOrResolved = (path) => {
     return resolve6(path);
   }
 };
+var EXACT_PROJECTS = process.argv.includes("--exact-projects");
 var projectTargets = onlyProjects.map((value) => {
-  const linked = resolveLinkedWorktree(value);
+  const linked = EXACT_PROJECTS ? null : resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
 var repoRoot = join11(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
