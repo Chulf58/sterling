@@ -14128,9 +14128,6 @@ function render2(text, label, keepKinds) {
   }
   return out.join("\n");
 }
-function renderClaudeText(text, label) {
-  return render2(text, label, ["sterling-only", "claude-only"]);
-}
 function renderOpenCodeFullText(text, label) {
   return render2(text, label, ["sterling-only", "opencode-only"]);
 }
@@ -16401,14 +16398,14 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
   const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const clip3 = (v, n2 = 160) => {
+  const clip2 = (v, n2 = 160) => {
     const t = String(v ?? "").replace(/\s+/g, " ").trim();
     return t.length <= n2 ? t : `${t.slice(0, n2)}\u2026`;
   };
-  const pointerHead = (r, name) => `  \u2192 ${clip3(name, 80)} (${String(r.id).slice(0, 8)})`;
+  const pointerHead = (r, name) => `  \u2192 ${clip2(name, 80)} (${String(r.id).slice(0, 8)})`;
   const questionDecisionLine = (d) => {
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-    return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${authorityMarker(d)}${clip3(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip3(rejected, DECISION_REJECTED_CLIP)}` : "");
+    return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${authorityMarker(d)}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
   };
   const questionDecisionText = (records, remedy) => {
     const shown = records.slice(0, MAX_DECISIONS);
@@ -16421,12 +16418,12 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
   const questionPriorLine = (r) => {
     const stale = r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : "";
     const head = pointerHead(r, r.slug || r.question);
-    const q = r.slug ? `: ${clip3(r.question, 120)}` : "";
+    const q = r.slug ? `: ${clip2(r.question, 120)}` : "";
     if (r.type === "research_finding") return `${head} \u2014 ANSWERED${q} (captured ${r.capture_date ?? "?"}${stale})`;
     if (r.type === "open_question") {
       return r.resolution_status === "closed" ? `${head} \u2014 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"})${q}` : `${head} \u2014 ALREADY UNDER INVESTIGATION (open, no answer yet)${q}`;
     }
-    return `${head} \u2014 REFUTED TRAIL${q} \u2014 rejected: ${clip3(r.rejected_answer, 100)}`;
+    return `${head} \u2014 REFUTED TRAIL${q} \u2014 rejected: ${clip2(r.rejected_answer, 100)}`;
   };
   const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
   const hazardBlocks = [
@@ -16474,15 +16471,15 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
         const r = x.record;
         if (isQuestion) return questionPriorLine(r);
         if (r.type === "research_finding") {
-          return `  \u2192 ANSWERED: ${clip3(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
+          return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
         }
         if (r.type === "open_question") {
           if (r.resolution_status === "closed") {
-            return `  \u2192 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"}): ${clip3(r.question)} \xB7 knowledge_get ${r.id}`;
+            return `  \u2192 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"}): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
           }
-          return `  \u2192 ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip3(r.question)} \xB7 knowledge_get ${r.id}`;
+          return `  \u2192 ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
         }
-        return `  \u2192 REFUTED TRAIL: ${clip3(r.question)} \u2014 rejected: ${clip3(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
+        return `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
       }),
       ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
     ].join("\n")
@@ -16500,7 +16497,7 @@ function composeSubjectAxis(store, { root, outgoing, toolInput, surface, subagen
     (t) => asPart(
       t,
       `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`,
-      shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record), name: x.record.slug || clip3(x.record.question, 60) }))
+      shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record), name: x.record.slug || clip2(x.record.question, 60) }))
     )
   );
   const pinPart = pinLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: pinLine }] : [];
@@ -22874,7 +22871,6 @@ init_atomic_write();
 // scripts/lib/agy-setup.mjs
 init_dist();
 init_agent_fences();
-init_agent_distribution();
 init_atomic_write();
 var AGY_AGENTS_DIR = ".agents/agents";
 var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
@@ -24073,7 +24069,7 @@ function opencodeHostTail(pluginRoot) {
   return [
     "## OpenCode host",
     "",
-    "This session runs on OpenCode, not Claude Code. The layer above is this project's CLAUDE.md rendered for OpenCode: each Claude-only rule Sterling ships is replaced by its OpenCode text. The other differences:",
+    "This session runs on OpenCode, not Claude Code. The OpenCode rules above are Sterling's OpenCode text; the shared Sterling layer is in AGENTS.md. The other differences:",
     "",
     install,
     "- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling through the plugin shim in its config dir. Sterling's commands are registered as OpenCode slash commands under the same names (`/sterling:<name>`), except `sterling:dashboard`, which does not exist here: open the dashboard with `/sterling` or <leader>k. Each command this layer names also points at its file under the commands directory. .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here.",
@@ -24088,7 +24084,7 @@ function defaultTemplatePath(moduleUrl = import.meta.url) {
   return join32(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
 }
 var ROOT_TOKEN = "{{STERLING_ROOT}}";
-var CLAUDE_ONLY_RESIDUE = ["${CLAUDE_PLUGIN_ROOT}", "READY TO CLEAR", "/clear", "AskUserQuestion"];
+var CLAUDE_ONLY_RESIDUE = ["READY TO CLEAR", "/clear", "AskUserQuestion"];
 var CLAUDE_OPEN = FENCE_KINDS["claude-only"].open;
 var CLAUDE_CLOSE = FENCE_KINDS["claude-only"].close;
 var OPENCODE_CLOSE = FENCE_KINDS["opencode-only"].close;
@@ -24115,73 +24111,42 @@ function hostBlockPairs(templateText, label = "templates/target-claude-md.md") {
   }
   return pairs;
 }
-function swapBlocks(lines, pairs) {
-  const unmatched = [];
-  for (const { claude, opencode } of pairs) {
-    if (!claude.length) throw new Error("Sterling layer: a host block pair has no claude lines, so it cannot be swapped");
-    let found = false;
-    for (let i = 0; i + claude.length <= lines.length; i++) {
-      if (!claude.every((l, k) => lines[i + k] === l)) continue;
-      lines.splice(i, claude.length, ...opencode);
-      i += opencode.length - 1;
-      found = true;
-    }
-    if (!found) unmatched.push(claude[0]);
-  }
-  return unmatched;
-}
-var clip2 = (s2) => s2.length > 90 ? `${s2.slice(0, 90)}\u2026` : s2;
-var leadOf = (line) => /^- \*\*.*?\*\*/.exec(line)?.[0] ?? line.slice(0, 40);
-function unfencedText(source) {
-  const markers = new Map(Object.values(FENCE_KINDS).flatMap((f) => [[f.open, true], [f.close, false]]));
+var OPENCODE_OPEN = FENCE_KINDS["opencode-only"].open;
+function opencodeLines(templateText) {
+  const out = [];
   let inside = false;
-  const out = [];
-  for (const line of source.replace(/\r\n/g, "\n").split("\n")) {
-    if (markers.has(line)) inside = markers.get(line);
-    else if (!inside) out.push(line);
+  for (const line of templateText.replace(/\r\n/g, "\n").split("\n")) {
+    if (line === OPENCODE_OPEN) inside = true;
+    else if (line === OPENCODE_CLOSE) inside = false;
+    else if (inside) out.push(line);
   }
-  return out.join("\n");
-}
-var ON_OPENCODE = /^(?:- )?(?:\*\*)?On OpenCode,/;
-function unmarkedOpenCodeBlocks(source) {
-  const lines = source.replace(/\r\n/g, "\n").split("\n");
-  const out = [];
-  lines.forEach((line, i) => {
-    if (line !== FENCE_KINDS["opencode-only"].open) return;
-    const first = lines.slice(i + 1).find((l) => l.trim() !== "") ?? "";
-    if (!ON_OPENCODE.test(first)) out.push(`CLAUDE.md:${i + 1}`);
-  });
   return out;
 }
 function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join32(pluginRoot, "templates", "target-claude-md.md")) {
   const projectName = loadConfig(projectDir)?.project_name ?? basename5(projectDir);
-  const named = (s2) => s2.replaceAll("{{PROJECT_NAME}}", () => projectName);
   const templateText = readFileSync21(templatePath, "utf8");
-  const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
-  const claudeMdPath = join32(projectDir, "CLAUDE.md");
-  const source = existsSync21(claudeMdPath) ? readFileSync21(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
-  const lines = renderOpenCodeFullText(source, "CLAUDE.md").split("\n");
-  const plain = unfencedText(source);
-  const unmatched = swapBlocks(lines, pairs).filter((first) => plain.includes(leadOf(first)));
+  hostBlockPairs(templateText);
   const missingCommands = [];
-  const text = lines.join("\n").replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
+  const rules = opencodeLines(templateText).join("\n").replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
     const file = join32(pluginRoot, "commands", `${name}.md`);
     if (existsSync21(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
     missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
     return whole;
   });
-  const residue = CLAUDE_ONLY_RESIDUE.filter((t) => text.includes(t));
+  const residue = CLAUDE_ONLY_RESIDUE.filter((t) => rules.includes(t));
   const problems = [
     ...residue.length ? [`Claude-only phrase(s) left in the text: ${residue.join(", ")}.`] : [],
-    ...missingCommands,
-    ...unmarkedOpenCodeBlocks(source).map((at) => `The opencode-only block at ${at} does not open with "On OpenCode,". Claude Code reads CLAUDE.md raw, so the Claude model could take it as its own instruction; start its first line with "On OpenCode,".`),
-    ...unmatched.length ? [`Claude-only template block(s) not found verbatim in CLAUDE.md: the project keeps its own wording of them, so their Claude Code text was not swapped for OpenCode's: ${unmatched.map((l) => `"${clip2(l)}"`).join("; ")}. Restore the template wording, or wrap the project's version in claude-only / opencode-only blocks.`] : []
+    ...missingCommands
   ];
-  const body = `${text.trimEnd()}
+  const body = `## Sterling layer on OpenCode
+
+The shared Sterling rules are in the "Sterling layer (generated)" section of AGENTS.md. These rules are OpenCode's own.
+
+${rules.trim()}
 
 ${opencodeHostTail(pluginRoot)}`;
   if (!problems.length) return body;
-  return `STERLING LAYER HOST CHECK: parts of this project's CLAUDE.md could not be rendered for OpenCode and are injected unchanged. Read them as Claude Code instructions, apply the OpenCode host section at the end, and tell the user.
+  return `STERLING LAYER HOST CHECK: parts of the OpenCode text could not be rendered and are injected unchanged. Read them as Claude Code instructions, apply the OpenCode host section at the end, and tell the user.
 ${problems.map((p) => `- ${p}`).join("\n")}
 
 ${body}`;
@@ -25229,7 +25194,7 @@ function readProjectConfig2(cwd) {
   }
   return { config, configUnreadable };
 }
-var MACHINE_ROLE_LAYER = { claude: "Sterling layer in CLAUDE.md's", opencode: "Sterling layer's" };
+var MACHINE_ROLE_LAYER = { claude: "Sterling layer in AGENTS.md's", opencode: "Sterling layer's" };
 function machineRoleLine({ atClone, installedCopy, config, host = "claude" }) {
   if (!Object.hasOwn(MACHINE_ROLE_LAYER, host)) throw new Error(`machineRoleLine: unknown host '${host}'`);
   const layer = MACHINE_ROLE_LAYER[host];

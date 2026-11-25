@@ -13188,7 +13188,7 @@ function lintRecordCitations(content, label, resolve5) {
   }
   return violations2;
 }
-var POINTER_SURFACE_FILES = ["AGENTS.md", "CLAUDE.md", "templates/target-agents-md.md", "templates/target-claude-md.md"];
+var POINTER_SURFACE_FILES = ["AGENTS.md", "CLAUDE.md", "templates/target-agents-md.md", "templates/target-claude-md.md", "templates/sterling-layer-agents.md", "templates/claude-session-block.md"];
 var POINTER_SURFACE_PREFIXES = ["skills/", "commands/"];
 function isPointerSurface(file) {
   return POINTER_SURFACE_FILES.includes(file) || POINTER_SURFACE_PREFIXES.some((p) => file.startsWith(p));

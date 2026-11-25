@@ -13,7 +13,7 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync20, writeFileSync as writeFileSync8, existsSync as existsSync18, rmSync as rmSync8, mkdirSync as mkdirSync11 } from "node:fs";
-import { basename as basename6, dirname as dirname12, join as join27 } from "node:path";
+import { basename as basename5, dirname as dirname12, join as join27 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { homedir as homedir10 } from "node:os";
 
@@ -19510,13 +19510,11 @@ import { join as join22 } from "node:path";
 // scripts/lib/agy-setup.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync14, readdirSync as readdirSync5, readlinkSync, rmdirSync, statSync as statSync7, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync8, readFileSync as readFileSync14, readdirSync as readdirSync5, rmdirSync, statSync as statSync7, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { basename as basename5, dirname as dirname9, isAbsolute as isAbsolute2, join as join21, resolve as resolve10 } from "node:path";
+import { dirname as dirname9, isAbsolute as isAbsolute2, join as join21, resolve as resolve10 } from "node:path";
 var AGY_AGENTS_DIR = ".agents/agents";
-var GEMINI_MD = "GEMINI.md";
 var AGY_CONDUCTOR = "conductor";
-var GEMINI_MD_MAX_BYTES = 24e3;
 var AGY_MCP_SERVER_NAME = "sterling";
 var AGY_MCP_READ_ONLY_SERVER_NAME = "sterling-ro";
 var AGY_READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
@@ -19746,87 +19744,7 @@ function readAgyModels(projectDir2) {
   }
   return { pins, ignored };
 }
-function projectNameOf(projectDir2) {
-  const configPath2 = join21(storeRootFor(projectDir2), ".sterling", "config.json");
-  if (!existsSync13(configPath2)) return basename5(projectDir2);
-  const name = JSON.parse(readFileSync14(configPath2, "utf8")).project_name;
-  return typeof name === "string" && name ? name : basename5(projectDir2);
-}
-function renderGeminiMd({ pluginRoot, root, projectName }) {
-  const rel = "templates/target-claude-md.md";
-  const text = renderAgyText(readFileSync14(join21(pluginRoot, rel), "utf8"), rel).replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll("{{STERLING_ROOT}}", () => fwd3(root));
-  if (/^@AGENTS\.md\s*$/m.test(text)) throw new Error(`${GEMINI_MD}: the agy render of ${rel} imports @AGENTS.md; agy loads AGENTS.md itself (P5)`);
-  const leftover = text.match(/\{\{[A-Z_]+\}\}/);
-  if (leftover) throw new Error(`${GEMINI_MD}: the agy render of ${rel} keeps the token ${leftover[0]} (P5)`);
-  const dead = findDeadTerms(text);
-  if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
-  return text;
-}
-function geminiRootAlias(home) {
-  return join21(home, ".gemini", "sterling-root");
-}
-function ensureRootAlias(alias, root) {
-  let st = null;
-  try {
-    st = lstatSync7(alias);
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-  }
-  if (st) {
-    if (!st.isSymbolicLink()) throw new Error(`${fwd3(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
-    if (resolve10(dirname9(alias), readlinkSync(alias)) === resolve10(root)) return;
-    unlinkSync4(alias);
-  }
-  mkdirSync8(dirname9(alias), { recursive: true });
-  symlinkSync(root, alias, "junction");
-}
-function geminiUsesRootAlias(text, home = homedir8()) {
-  return String(text).includes(`${fwd3(geminiRootAlias(home))}/`);
-}
-function ensureGeminiMd({ projectDir: projectDir2, pluginRoot, root, home = homedir8() }) {
-  const path = join21(projectDir2, GEMINI_MD);
-  const alias = geminiRootAlias(home);
-  const existing = existsSync13(path) ? normalize4(readFileSync14(path, "utf8")) : null;
-  const keepAlias = () => {
-    try {
-      ensureRootAlias(alias, root);
-      return null;
-    } catch (err) {
-      return refusal2(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd3(alias)}, which could not be pointed at ${fwd3(root)}: ${err.message}`, "fix the cause named, then rerun /sterling:update");
-    }
-  };
-  if (existing !== null && geminiUsesRootAlias(existing, home)) {
-    const refused = keepAlias();
-    if (refused) return refused;
-  }
-  const projectName = projectNameOf(projectDir2);
-  let want;
-  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
-  try {
-    try {
-      want = renderGeminiMd({ pluginRoot, root: aliased ? alias : root, projectName });
-    } catch (err) {
-      if (!err.overCap || aliased) throw err;
-      want = renderGeminiMd({ pluginRoot, root: alias, projectName });
-      aliased = true;
-    }
-  } catch (err) {
-    return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
-  }
-  if (existing === null) {
-    if (aliased) {
-      const refused = keepAlias();
-      if (refused) return refused;
-    }
-    writeFileAtomic(path, want);
-    return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
-  }
-  if (existing === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
-  return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
-}
-function ensureAgyExcluded({ projectDir: projectDir2, gemini }) {
+function ensureAgyExcluded({ projectDir: projectDir2 }) {
   const label = ".git/info/exclude (agy)";
   const gp = git2(projectDir2, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
@@ -19834,9 +19752,7 @@ function ensureAgyExcluded({ projectDir: projectDir2, gemini }) {
   const current = existsSync13(excludePath) ? normalize4(readFileSync14(excludePath, "utf8")) : "";
   const begin = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END);
-  const listed = begin !== -1 && end > begin && current.slice(begin, end).split("\n").includes(`/${GEMINI_MD}`);
-  const excludeGemini = gemini === "exclude" || gemini === "keep" && listed;
-  const lines = [...AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`), ...excludeGemini ? [`/${GEMINI_MD}`] : []];
+  const lines = AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`);
   const want = [EXCLUDE_BEGIN, ...lines, EXCLUDE_END].join("\n");
   if (begin !== -1 && end > begin) {
     if (current.slice(begin, end + EXCLUDE_END.length) === want) return { item: label, status: "matches", detail: lines.join(" ") };
@@ -19853,12 +19769,12 @@ function setupAgy({ projectDir: projectDir2, pluginRoot, env = process.env, home
   if (!isAbsolute2(projectDir2)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir2}`);
   if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
   const found = probe({ env, home });
-  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
+  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/ or exclude block written; install agy, then run /sterling:update` };
   const { root, why } = agyMcpRoot({ pluginRoot, env, home, installed });
   const rows = [{ item: "Sterling MCP server", status: "matches", detail: `${fwd3(join21(root, "mcp", "sterling-mcp.mjs"))} (${why})` }];
-  const inventory = trackedFiles(projectDir2, [AGY_AGENTS_DIR, GEMINI_MD], runGit);
+  const inventory = trackedFiles(projectDir2, [AGY_AGENTS_DIR], runGit);
   if (inventory.failed) {
-    rows.push(refusal2(`${AGY_AGENTS_DIR}/, ${GEMINI_MD}, .git/info/exclude (agy)`, `git ls-files failed in ${fwd3(projectDir2)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/, .git/info/exclude (agy)`, `git ls-files failed in ${fwd3(projectDir2)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
     return { root, rows };
   }
   const { tracked } = inventory;
@@ -19874,10 +19790,7 @@ function setupAgy({ projectDir: projectDir2, pluginRoot, env = process.env, home
     const remedy = resolve10(root) !== resolve10(pluginRoot) ? `install this Sterling into agy (agy plugin install ${fwd3(resolve10(pluginRoot))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd3(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
     rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
   }
-  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir: projectDir2, pluginRoot, root, home });
-  rows.push(gemini);
-  const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
-  rows.push(ensureAgyExcluded({ projectDir: projectDir2, gemini: geminiRule }));
+  rows.push(ensureAgyExcluded({ projectDir: projectDir2 }));
   return { root, rows };
 }
 
@@ -20031,12 +19944,12 @@ function discoverCustomAgents(projectRoot) {
 
 // scripts/lib/agent-adoption.mjs
 import { createHash as createHash6 } from "node:crypto";
-import { existsSync as existsSync17, lstatSync as lstatSync9, readFileSync as readFileSync18, readdirSync as readdirSync8, rmSync as rmSync6, rmdirSync as rmdirSync3 } from "node:fs";
+import { existsSync as existsSync17, lstatSync as lstatSync8, readFileSync as readFileSync18, readdirSync as readdirSync8, rmSync as rmSync6, rmdirSync as rmdirSync3 } from "node:fs";
 import { dirname as dirname11, isAbsolute as isAbsolute3, join as join25 } from "node:path";
 
 // scripts/lib/custom-agent-render.mjs
 import { createHash as createHash5 } from "node:crypto";
-import { existsSync as existsSync16, lstatSync as lstatSync8, mkdirSync as mkdirSync9, readFileSync as readFileSync17, readdirSync as readdirSync7, rmSync as rmSync5, rmdirSync as rmdirSync2 } from "node:fs";
+import { existsSync as existsSync16, lstatSync as lstatSync7, mkdirSync as mkdirSync9, readFileSync as readFileSync17, readdirSync as readdirSync7, rmSync as rmSync5, rmdirSync as rmdirSync2 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname10, join as join24 } from "node:path";
 var CUSTOM_RENDERER = "custom-agent/1";
@@ -20352,7 +20265,7 @@ function symlinkIn(root, rel) {
     p = join24(p, part);
     let st;
     try {
-      st = lstatSync8(p);
+      st = lstatSync7(p);
     } catch (err) {
       if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
       throw err;
@@ -20367,7 +20280,7 @@ function inspectTarget(root, rel, host, key, sourcePath, vacated = []) {
   if (link) return { state: "refused", reason: `${rel} is reached through the symlink ${link}; Sterling does not write through links` };
   const path = join24(root, rel);
   if (!existsSync16(path)) return { state: "absent" };
-  if (!lstatSync8(path).isFile()) return { state: "refused", reason: `${rel} exists and is not a file` };
+  if (!lstatSync7(path).isFile()) return { state: "refused", reason: `${rel} exists and is not a file` };
   const disk = normalize5(readFileSync17(path, "utf8"));
   const h = disk.match(STAMP_RE);
   if (!h) return { state: "refused", reason: `${rel} carries no Sterling stamp (a file Sterling did not write); the agent's source is ${sourcePath ?? AGENT_SOURCE_DIR}. Move it aside or delete it, then sync again` };
@@ -20380,11 +20293,11 @@ function stampedOutputs(root) {
   const out = [];
   const scan = (host, rel) => {
     const dir = join24(root, rel);
-    if (!existsSync16(dir) || symlinkIn(root, rel) || !lstatSync8(dir).isDirectory()) return;
+    if (!existsSync16(dir) || symlinkIn(root, rel) || !lstatSync7(dir).isDirectory()) return;
     for (const e of readdirSync7(dir, { withFileTypes: true })) {
       if (host === "agy" ? !e.isDirectory() : !(e.isFile() && e.name.endsWith(".md"))) continue;
       const fileRel = host === "agy" ? `${rel}/${e.name}/agent.md` : `${rel}/${e.name}`;
-      if (!existsSync16(join24(root, fileRel)) || !lstatSync8(join24(root, fileRel)).isFile()) continue;
+      if (!existsSync16(join24(root, fileRel)) || !lstatSync7(join24(root, fileRel)).isFile()) continue;
       const m = normalize5(readFileSync17(join24(root, fileRel), "utf8")).match(STAMP_RE);
       if (m && m[2] === host) out.push({ host, key: m[3], rel: fileRel });
     }
@@ -20667,7 +20580,7 @@ function adopt(projectRoot, plan) {
   unlinkContained(projectRoot, plan.move.from);
   if (plan.move.from.startsWith(HOST_DIRS.agy)) {
     const folder = containedPath(projectRoot, dirname11(plan.move.from), "dir");
-    if (lstatSync9(folder).isDirectory() && readdirSync8(folder).length === 0) rmdirSync3(folder);
+    if (lstatSync8(folder).isDirectory() && readdirSync8(folder).length === 0) rmdirSync3(folder);
   }
   return { from: plan.move.from, to: plan.move.to, key: plan.key };
 }
@@ -20731,7 +20644,7 @@ function openDashboard(storePath, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename6(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename5(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -23602,7 +23515,7 @@ function frameAt(tick2, phase, running) {
 // opencode/sterling-tui/pane.ts
 import { execFile } from "node:child_process";
 import { existsSync as existsSync19 } from "node:fs";
-import { basename as basename7, dirname as dirname13, isAbsolute as isAbsolute4, join as join28, relative as relative2, resolve as resolve11, sep as sep4 } from "node:path";
+import { basename as basename6, dirname as dirname13, isAbsolute as isAbsolute4, join as join28, relative as relative2, resolve as resolve11, sep as sep4 } from "node:path";
 var PANE_TITLE = "Sterling side pane";
 var EXEC_TIMEOUT_MS = 15e3;
 function isWithin(dir, root) {
@@ -23611,7 +23524,7 @@ function isWithin(dir, root) {
 }
 function launcherRoot(dir, storePath, exists) {
   if (exists(join28(dir, "sterling-launch.sh"))) return dir;
-  const storeRoot = storePath && basename7(dirname13(storePath)) === ".sterling" ? dirname13(dirname13(storePath)) : void 0;
+  const storeRoot = storePath && basename6(dirname13(storePath)) === ".sterling" ? dirname13(dirname13(storePath)) : void 0;
   return storeRoot && isWithin(dir, storeRoot) && exists(join28(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
 }
 async function reopenPane(root, deps) {
@@ -23773,7 +23686,7 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync12, readFileSync as readFileSync21, writeFileSync as writeFileSync9, rmSync as rmSync9, rmdirSync as rmdirSync4, renameSync as renameSync5, existsSync as existsSync20, lstatSync as lstatSync10, readdirSync as readdirSync9, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
+import { mkdirSync as mkdirSync12, readFileSync as readFileSync21, writeFileSync as writeFileSync9, rmSync as rmSync9, rmdirSync as rmdirSync4, renameSync as renameSync5, existsSync as existsSync20, lstatSync as lstatSync9, readdirSync as readdirSync9, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
 import { join as join29, resolve as resolve12, dirname as dirname14, isAbsolute as isAbsolute5 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash7 } from "node:crypto";
@@ -24041,7 +23954,7 @@ function validateRecordShape(r) {
 function classifyRecordFile(file) {
   let st;
   try {
-    st = lstatSync10(file);
+    st = lstatSync9(file);
   } catch {
     return { exists: false };
   }
@@ -24069,7 +23982,7 @@ function checkDispatchStateContainment(root, { create }) {
   const dir = dispatchStateDir(root);
   let st;
   try {
-    st = lstatSync10(dir);
+    st = lstatSync9(dir);
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
@@ -24087,7 +24000,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync10(join29(dir, to));
+    lstatSync9(join29(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;

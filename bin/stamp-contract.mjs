@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, existsSync as existsSync5, realpathSync as realpathSync4 } from "node:fs";
-import { join as join10, dirname as dirname4, resolve as resolve5 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync4, realpathSync as realpathSync4 } from "node:fs";
+import { join as join9, dirname as dirname3, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -4054,15 +4054,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd2 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd2)) {
+  const fwd = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd2.startsWith("/")) {
+  if (fwd.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd2.split("/")) {
+  for (const seg of fwd.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -6477,6 +6477,10 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   return { worktree, mainRoot };
 }
 
+// scripts/lib/contract-bullets.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join8 } from "node:path";
+
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
@@ -6633,68 +6637,8 @@ function render(text, label, keepKinds) {
 function renderClaudeText(text, label) {
   return render(text, label, ["sterling-only", "claude-only"]);
 }
-function renderAgyText(text, label) {
-  return render(text, label, ["sterling-only", "agy-only"]);
-}
-
-// scripts/lib/agy-setup.mjs
-import { existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, rmdirSync, statSync as statSync2, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { basename as basename2, dirname as dirname3, isAbsolute, join as join8, resolve as resolve4 } from "node:path";
-
-// scripts/lib/agent-distribution.mjs
-var RESTART_INSTRUCTION = [
-  "================================================================",
-  "RESTART REQUIRED \u2014 project subagents load at session start.",
-  "Agents installed into .claude/agents/ are NOT visible to a",
-  "session that was already running. Restart Claude Code in this",
-  "project before dispatching any of the agents above.",
-  "================================================================"
-].join("\n");
-
-// scripts/lib/agy-setup.mjs
-var GEMINI_MD = "GEMINI.md";
-var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
-var SHELL = ["run_command", "command_status"];
-var EDIT = ["write_file", "edit_file", "multi_replace_file_content"];
-var WEB = ["search_web", "read_url_content"];
-var DISPATCH = ["invoke_subagent", "send_message"];
-var AGY_TOOLS = {
-  conductor: [...READ, ...SHELL, ...EDIT, ...WEB, ...DISPATCH, "ask_question"],
-  implementor: [...READ, ...SHELL, ...EDIT, ...WEB],
-  "implementor-hard": [...READ, ...SHELL, ...EDIT, ...WEB],
-  researcher: [...READ, ...SHELL, ...WEB],
-  scout: [...READ],
-  reviewer: [...READ, ...SHELL],
-  sparring: [...READ, ...SHELL],
-  librarian: ["read_file", "grep_search"],
-  preflight: [...READ]
-};
-var AGY_ROSTER = Object.keys(AGY_TOOLS);
-var fwd = (p) => p.replace(/\\/g, "/");
-function agyPluginCopy({ env = process.env, home = homedir5() } = {}) {
-  return join8(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
-}
-function agyMcpRoot({ pluginRoot, env = process.env, home = homedir5(), installed }) {
-  const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
-  if (!isInstalled) return { root: resolve4(pluginRoot), why: "the Sterling clone running this" };
-  const agyCopy = agyPluginCopy({ env, home });
-  if (existsSync4(join8(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
-  return { root: resolve4(pluginRoot), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd(agyCopy)})` };
-}
-function geminiRootAlias(home) {
-  return join8(home, ".gemini", "sterling-root");
-}
-function geminiUsesRootAlias(text, home = homedir5()) {
-  return String(text).includes(`${fwd(geminiRootAlias(home))}/`);
-}
-function geminiRootFor(text, { root, home = homedir5() }) {
-  return geminiUsesRootAlias(text, home) ? fwd(geminiRootAlias(home)) : fwd(root);
-}
 
 // scripts/lib/contract-bullets.mjs
-import { readFileSync as readFileSync4 } from "node:fs";
-import { join as join9 } from "node:path";
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -6911,7 +6855,7 @@ function extractTemplateBlock(text, lead) {
   return extractBlock(renderClaudeText(text, "template"), lead);
 }
 function readTemplateBullets(repoRoot2) {
-  const templates2 = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync4(join9(repoRoot2, rel), "utf8")]));
+  const templates2 = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join8(repoRoot2, rel), "utf8")]));
   const leadLayer2 = /* @__PURE__ */ new Map();
   const current2 = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
@@ -6944,20 +6888,20 @@ var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve5(process.argv[++i]));
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve4(process.argv[++i]));
 }
 var realOrResolved = (path) => {
   try {
     return realpathSync4(path);
   } catch {
-    return resolve5(path);
+    return resolve4(path);
   }
 };
 var projectTargets = onlyProjects.map((value) => {
   const linked = resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
-var repoRoot = join10(dirname4(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var repoRoot = join9(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
 function withOriginalEols(raw, finalLf) {
   const pieces = raw.split("\n");
@@ -7018,17 +6962,6 @@ var variants = historicalVariants({
   extractBlock: extractTemplateBlock,
   currentBlocks: current
 });
-var agyRoot = agyMcpRoot({ pluginRoot: repoRoot }).root;
-var agyBlocksByRoot = /* @__PURE__ */ new Map();
-function agyCurrentFor(rootText) {
-  if (!agyBlocksByRoot.has(rootText)) {
-    const agyClaudeTemplate = renderAgyText(templates.get(CLAUDE_TEMPLATE_REL), CLAUDE_TEMPLATE_REL).replaceAll("{{STERLING_ROOT}}", () => rootText);
-    agyBlocksByRoot.set(rootText, new Map(
-      TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL).map((lead) => [lead, extractBlock(agyClaudeTemplate, lead)?.block]).filter(([, block]) => block !== void 0)
-    ));
-  }
-  return agyBlocksByRoot.get(rootText);
-}
 var registry = new ProjectRegistry(registryPath());
 var projects;
 try {
@@ -7067,7 +7000,7 @@ function record(r) {
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 function stampDirs(p) {
   if (!onlyProjects.length) return [p.repo_path];
-  const hits = projectTargets.filter((t) => t.match === resolve5(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  const hits = projectTargets.filter((t) => t.match === resolve4(p.repo_path) || t.match === realOrResolved(p.repo_path));
   for (const t of hits) matchedProjects.add(t.value);
   if (!hits.length) return null;
   const worktrees = hits.filter((t) => t.worktree);
@@ -7076,42 +7009,35 @@ function stampDirs(p) {
 var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
-  if (!existsSync5(repo)) {
+  if (!existsSync4(repo)) {
     record({ project: projectLabel, status: "missing_path", detail: repo });
     continue;
   }
   if (realpathSync4(repo) === selfPath) continue;
-  const agentsMd = join10(repo, "AGENTS.md");
-  const claudeMd = join10(repo, "CLAUDE.md");
-  if (!existsSync5(agentsMd)) {
+  const agentsMd = join9(repo, "AGENTS.md");
+  const claudeMd = join9(repo, "CLAUDE.md");
+  if (!existsSync4(agentsMd)) {
     record({ project: projectLabel, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
-  const geminiMd = join10(repo, GEMINI_MD);
-  const hasClaude = existsSync5(claudeMd);
-  const hasGemini = existsSync5(geminiMd);
-  if (!hasClaude && !hasGemini) {
-    record({ project: projectLabel, status: "no_claude_md", detail: claudeMd });
-    drift++;
-    continue;
-  }
+  const hasClaude = existsSync4(claudeMd);
   const loadSibling = (path) => {
-    const raw = readFileSync5(path, "utf8");
+    const raw = readFileSync4(path, "utf8");
     const text = normalizeEol(raw);
     return { path, raw, original: text, text };
   };
   const agents = loadSibling(agentsMd);
   const claude = hasClaude ? loadSibling(claudeMd) : null;
-  const gemini = hasGemini ? loadSibling(geminiMd) : null;
-  const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, claude ?? gemini]]);
-  const hostName = claude ? "CLAUDE.md" : GEMINI_MD;
-  const layerName = (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : hostName;
+  const absentClaude = { path: claudeMd, raw: "", original: "", text: "" };
+  const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, claude ?? absentClaude]]);
+  const layerName = (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : "CLAUDE.md";
   const actions = [];
   const VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
   const sectionRefused = /* @__PURE__ */ new Set();
   for (const section of TARGET_SECTIONS) {
     const home = leadLayer.get(section.leads[0]);
+    if (home === CLAUDE_TEMPLATE_REL && !claude) continue;
     const target = siblingFiles.get(home);
     if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
     const label = `${section.heading} (section)`;
@@ -7233,25 +7159,12 @@ for (const { p, dir: repo } of work) {
     nameOf: layerName,
     pass: actions
   });
-  if (gemini) {
-    const agyCurrent = agyCurrentFor(geminiRootFor(gemini.original, { root: agyRoot }));
-    const geminiPass = [];
-    stampLeads({
-      files: /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, gemini]]),
-      leads: TARGET_LEADS.filter((lead) => leadLayer.get(lead) === CLAUDE_TEMPLATE_REL && agyCurrent.has(lead) && !sectionRefused.has(lead) && !["WRONG_LAYER_REFUSED", "DUPLICATE_REFUSED"].includes(actions.find((a) => a.lead === lead)?.action)),
-      wantOf: (lead) => agyCurrent.get(lead),
-      variantsOf: (lead) => /* @__PURE__ */ new Set([...variants.get(lead) ?? [], ...agyCurrent.has(lead) ? [agyCurrent.get(lead)] : []]),
-      nameOf: (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : GEMINI_MD,
-      pass: geminiPass
-    });
-    actions.push(...geminiPass.map((a) => ({ ...a, lead: a.file === GEMINI_MD ? `[${GEMINI_MD}] ${a.lead}` : a.lead })));
-  }
   if (WRITE_INSERTS) {
-    const written = [["AGENTS.md", agents], ...claude ? [["CLAUDE.md", claude]] : [], ...gemini ? [[GEMINI_MD, gemini]] : []];
+    const written = [["AGENTS.md", agents], ...claude ? [["CLAUDE.md", claude]] : []];
     for (const [file, f] of written) {
       if (f.text === f.original) continue;
       try {
-        writeFileSync2(f.path, withOriginalEols(f.raw, f.text));
+        writeFileSync(f.path, withOriginalEols(f.raw, f.text));
       } catch (err) {
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({
@@ -7264,7 +7177,7 @@ for (const { p, dir: repo } of work) {
       }
     }
   }
-  record({ project: projectLabel, status: "processed", file: [agentsMd, ...claude ? [claudeMd] : [], ...gemini ? [geminiMd] : []].join(" + "), actions });
+  record({ project: projectLabel, status: "processed", file: [agentsMd, ...claude ? [claudeMd] : []].join(" + "), actions });
 }
 var processed = results.filter((r) => r.status === "processed").length;
 console.log(
