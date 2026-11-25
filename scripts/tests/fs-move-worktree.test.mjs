@@ -99,7 +99,7 @@ test('fs-move: a destination under a symlinked directory is refused; nothing mov
 test('fs-move: a source under a symlinked directory is refused; the file behind the link survives', () => {
   const { base, dir, wt, store } = fixture('sterling-fsmv-srcsym-');
   try {
-    store.create(article('feat-srcsym', 'src/other.mjs'));
+    store.create(article('feat-srcsym', 'linked/other.mjs'));
     git(dir, ['worktree', 'add', '-b', 'feat/x', wt]);
     symlinkSync(join(dir, 'src'), join(wt, 'linked'));
 
@@ -108,7 +108,8 @@ test('fs-move: a source under a symlinked directory is refused; the file behind 
     assert.match(r.stderr, /symlink/);
     assert.equal(existsSync(join(dir, 'src', 'other.mjs')), true, 'source behind a symlinked parent survives');
     assert.equal(existsSync(join(wt, 'src', 'moved.mjs')), false);
-    assert.equal(store.query({ types: ['feature_article'], file_keys: ['src/other.mjs'], cap: 10 }).length, 1, 'file_keys not rewritten');
+    assert.equal(store.query({ types: ['feature_article'], file_keys: ['linked/other.mjs'], cap: 10 }).length, 1, 'the owner key is still linked/other.mjs');
+    assert.equal(store.query({ types: ['feature_article'], file_keys: ['src/moved.mjs'], cap: 10 }).length, 0, 'the key was not rewritten to the destination');
     store.close();
   } finally {
     rmSync(base, { recursive: true, force: true });
@@ -181,8 +182,8 @@ test('fs-move: a round trip old -> new -> old keeps both moves as evidence; item
       assert.equal(r.status, 0, `${a} -> ${b}: stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     }
     const [item] = reconcileTodos(store, owner);
-    const states = item.observations.filter((o) => o.path === 'src/old.mjs').map((o) => o.state.kind).sort();
-    assert.deepEqual(states, ['absent', 'file'], 'old.mjs was observed absent (move 1) and present (move 2); neither was rewritten');
+    const pairs = item.observations.map((o) => `${o.path}:${o.state.kind}`).sort();
+    assert.deepEqual(pairs, ['src/new.mjs:absent', 'src/new.mjs:file', 'src/old.mjs:absent', 'src/old.mjs:file'], 'both moves kept both paths, each in both states; none was rewritten');
     const head = git(dir, ['rev-parse', 'HEAD']);
     const p = itemProvenance(item, dir, head);
     // Evidence is stored without order, so two states of one path at one commit cannot be
