@@ -122,3 +122,18 @@ test('a cites link still works on knowledge_create and knowledge_update', () => 
     cleanup();
   }
 });
+
+test('knowledge_update with an empty patch is refused and the version is unchanged (GitHub #334)', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const rec = mkDecision(tools, 'empty patch ruling');
+    const before = store.get(rec.id as string)?.version;
+    assert.throws(() => tools.knowledgeUpdate(rec.id as string, {}, undefined, before), /no fields to update[\s\S]*Nothing was written/);
+    assert.throws(() => tools.knowledgeUpdateResult(rec.id as string, { version: 99 }, undefined, before), /no fields to update/);
+    assert.equal(store.get(rec.id as string)?.version, before, 'version was not bumped');
+    tools.knowledgeUpdate(rec.id as string, { rationale: 'changed' }, undefined, before);
+    assert.equal(store.get(rec.id as string)?.version, (before as number) + 1, 'a real change still bumps');
+  } finally {
+    cleanup();
+  }
+});

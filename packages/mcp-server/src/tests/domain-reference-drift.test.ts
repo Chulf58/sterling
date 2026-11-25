@@ -140,3 +140,53 @@ test('#114 control: a project-held reference whose file is gone still mints the 
     cleanup();
   }
 });
+
+// 200 days before NOW: past the 90-day default clock of a finding with no volatility_hint
+const FINDING_DATE = '2026-03-30';
+
+const mkFinding = (tools: SterlingTools, scope: string): Loose =>
+  (
+    tools.knowledgeCreate('research_finding', {
+      scope,
+      question: `how ${scope} finding behaves`,
+      answer: 'a',
+      source_urls: [],
+      source_date: FINDING_DATE,
+      capture_date: FINDING_DATE,
+    } as unknown as Parameters<SterlingTools['knowledgeCreate']>[1]) as unknown as { record: Loose }
+  ).record;
+
+const readFindings = (tools: SterlingTools): Loose[] =>
+  (tools.knowledgeQueryResult({ types: ['research_finding'] } as unknown as Parameters<SterlingTools['knowledgeQueryResult']>[0]) as unknown as { records: Loose[] })
+    .records;
+
+const staleItems = (tools: SterlingTools): Loose[] => tools.maintenanceQuery({ system_reason: 'stale_research' }) as unknown as Loose[];
+
+test('GitHub #283 a domain-held finding past its clock reads stale but mints no stale_research item', () => {
+  const { store, tools, cleanup } = fixture();
+  try {
+    const finding = mkFinding(tools, 'domain:sterling');
+    assert.equal(store.projectStoreHolds(String(finding.id)), false, 'precondition: the project store does not hold the record');
+
+    const read = readFindings(tools).find((r) => r.id === finding.id);
+    assert.equal((read?.staleness as Loose | undefined)?.stale, true, 'the read still marks it stale');
+    assert.deepEqual(staleItems(tools), [], 'no stale_research item is minted for a domain-held finding');
+  } finally {
+    cleanup();
+  }
+});
+
+test('GitHub #283 control: a project-held finding past its clock still mints one stale_research item', () => {
+  const { store, tools, cleanup } = fixture();
+  try {
+    const finding = mkFinding(tools, 'project');
+    assert.equal(store.projectStoreHolds(String(finding.id)), true, 'precondition: the project store holds the record');
+
+    readFindings(tools);
+    const items = staleItems(tools);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, finding.id);
+  } finally {
+    cleanup();
+  }
+});

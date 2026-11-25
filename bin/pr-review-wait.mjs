@@ -6269,7 +6269,7 @@ function fetchPrMergeState(cwd, repo, number, { deadline: deadline2 = null } = {
   let state = null;
   for (; ; ) {
     const page = after ? `, after:"${after}"` : "";
-    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid baseRefName mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query, deadline2)?.repository?.pullRequest;
     if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes) || typeof pull.state !== "string" || typeof pull.merged !== "boolean" || typeof pull.headRefOid !== "string" || !Array.isArray(pull.reviews?.nodes)) {
       throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads/state/merged/headRefOid/reviews for ${repo}#${number}`);
@@ -6277,7 +6277,7 @@ function fetchPrMergeState(cwd, repo, number, { deadline: deadline2 = null } = {
     if (!state) {
       const rollup = readCheckRollup(pull);
       const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === "Bot", commit: r?.commit?.oid ?? null }));
-      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
+      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, review_decision_read: pull.reviewDecision !== void 0, base_ref: typeof pull.baseRefName === "string" && pull.baseRefName !== "" ? pull.baseRefName : null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
@@ -6313,7 +6313,7 @@ function fetchSettledMergeState(cwd, repo, number, { retryDelayMs: retryDelayMs2
   sleep2(retryDelayMs2);
   return fetchPrMergeState(cwd, repo, number, { deadline: deadline2 });
 }
-function mergeBlockers(state) {
+function mergeBlockers(state, { waiveBehind = false } = {}) {
   const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
   const blockers = unresolved.map((t) => `unresolved review thread ${t.id}${t.path ? ` on ${t.path}` : ""}${t.url ? ` (${t.url})` : ""}`);
   const status = state.merge_state_status;
@@ -6327,7 +6327,8 @@ function mergeBlockers(state) {
     } else if (status === "UNKNOWN") blockers.push("mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)");
     else if (status === "BLOCKED" && unresolved.length > 0) blockers.push("mergeStateStatus is BLOCKED");
     else if (status === "BLOCKED") blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? "none"}) with no unresolved thread: a ruleset or required check blocks the merge`);
-    else blockers.push(`mergeStateStatus is ${status}`);
+    else if (status === "BEHIND" && waiveBehind && state.review_decision_read === true && (state.review_decision === null || state.review_decision === "APPROVED")) {
+    } else blockers.push(`mergeStateStatus is ${status}`);
   }
   if (state.check_rollup_error) blockers.push(state.check_rollup_error);
   return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
@@ -6546,12 +6547,24 @@ ${r.stdout ?? ""}`.trim();
     return { ok: false, http: null, error: `gh api ${path} returned unreadable JSON (${e.message})` };
   }
 }
+function baseQueueSnapshot(originRepo, number) {
+  const [host, owner2, name2] = originRepo.split("/");
+  const pullPath = `repos/${owner2}/${name2}/pulls/${number}`;
+  const pull = evidenceRead(host, pullPath);
+  const baseRef = pull.ok && pull.pages.length === 1 ? pull.pages[0]?.base?.ref : void 0;
+  if (typeof baseRef !== "string" || baseRef === "") return { base_ref: null, merge_queue: null, error: pull.ok ? `gh api ${pullPath} returned no base branch` : pull.error };
+  const rulesPath = `repos/${owner2}/${name2}/rules/branches/${encodeURIComponent(baseRef)}`;
+  const rules = evidenceRead(host, rulesPath, { paginate: true });
+  if (!rules.ok) return { base_ref: baseRef, merge_queue: null, error: `rulesets: ${rules.error}` };
+  if (!rules.pages.every((p) => Array.isArray(p) && p.every((r) => r !== null && typeof r === "object" && typeof r.type === "string"))) return { base_ref: baseRef, merge_queue: null, error: `rulesets: gh api ${rulesPath} returned an answer of an unexpected shape` };
+  return { base_ref: baseRef, merge_queue: rules.pages.flat().some((r) => r.type === "merge_queue"), error: null };
+}
 function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null } = {}) {
   const [host, owner2, name2] = originRepo.split("/");
   const repoPath2 = `repos/${owner2}/${name2}`;
   const reasons = [];
   let finals = 0;
-  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
+  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null, merge_queue: null };
   let cut = false;
   const read = (path, opts = {}) => {
     const res = evidenceRead(host, path, { ...opts, deadline: deadline2 });
@@ -6610,6 +6623,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
   else if (!rules.pages.every((p) => Array.isArray(p) && p.every(ruleShapeOk))) unreadable.push(`rulesets: gh api ${rulesPath} returned an answer of an unexpected shape: ${JSON.stringify(rules.pages).slice(0, 200)}`);
   else {
     const before = required.size;
+    evidence.merge_queue = rules.pages.flat().some((rule) => rule.type === "merge_queue");
     for (const rule of rules.pages.flat()) if (rule.type === "required_status_checks") for (const c of rule.parameters.required_status_checks) required.add(c.context);
     if (required.size === before) notConfigured.push("no ruleset requires a status check");
   }
@@ -6685,7 +6699,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline: deadline2 = null
   if (!cmp.ok) final(`whether the branch is behind ${baseRef} could not be read (${cmp.error})`);
   else {
     evidence.behind_by = behind;
-    if (behind > 0) final(`the branch is behind base: ${behind} commit${behind > 1 ? "s" : ""} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
+    if (behind > 0 && evidence.merge_queue !== true) final(`the branch is behind base: ${behind} commit${behind > 1 ? "s" : ""} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
   }
   return { reasons, evidence, pending: reasons.length > 0 && finals === 0, cut };
 }
@@ -6702,6 +6716,25 @@ if (argv.includes("--settle")) {
         const err = new Error(message);
         err.blocked = { ...merge, ...extra };
         return err;
+      };
+      let queueSnap = null;
+      let waivedBehind = null;
+      const blockersOf = (s2) => {
+        waivedBehind = null;
+        if (s2.merge_state_status !== "BEHIND") return mergeBlockers(s2);
+        if (queueSnap === null || queueSnap.merge_queue === null || queueSnap.base_ref !== s2.base_ref) queueSnap = baseQueueSnapshot(originRepo, armed.pr_number);
+        const waive = queueSnap.merge_queue === true && s2.base_ref !== null && s2.base_ref === queueSnap.base_ref;
+        const verdict2 = mergeBlockers(s2, { waiveBehind: waive });
+        if (waive && verdict2.blockers.every((b) => !b.startsWith("mergeStateStatus is BEHIND"))) waivedBehind = queueSnap;
+        if (queueSnap.merge_queue === true && !waive) {
+          verdict2.blockers.push(`the BEHIND blocker is not waived: the merge-queue evidence is for base ${queueSnap.base_ref}, the merge state was read for base ${s2.base_ref ?? "unknown"}`);
+          verdict2.mergeable_now = false;
+        }
+        if (queueSnap.merge_queue === null) {
+          verdict2.blockers.push(`the base branch's merge-queue rules could not be read (${queueSnap.error}), so the BEHIND blocker cannot be waived: it is unknown whether the base has a merge queue`);
+          verdict2.mergeable_now = false;
+        }
+        return verdict2;
       };
       const started = Date.now();
       let state;
@@ -6770,7 +6803,7 @@ if (argv.includes("--settle")) {
         }
         const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
         let waitingFor = pending ? `the head's check rollup is ${state.check_rollup}` : null;
-        if (!pending && (state.check_rollup === "SUCCESS" || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
+        if (!pending && (state.check_rollup === "SUCCESS" || state.check_rollup === null) && !blockersOf(state).blockers.length) {
           const reRead = lastEvidence !== null;
           const fresh = { ...mergeEvidence(originRepo, armed.pr_number, state.head_sha, { deadline: bounded && reRead ? deadline2 : null }), read: reads };
           if (reRead && bounded && (fresh.cut || Date.now() >= deadline2)) {
@@ -6801,7 +6834,7 @@ if (argv.includes("--settle")) {
         merge = { pr_state: state.pr_state, already_merged: false, head_sha: state.head_sha, armed_head_sha: armed.head_sha };
         throw blocked(`the PR is ${state.pr_state}, not open and not merged, so the loop is NOT clean: reopen it and settle again, or settle escalated; nothing settled`, { blockers: [`the PR is ${state.pr_state}`], unresolved_threads: [] });
       }
-      const verdict = mergeBlockers(state);
+      const verdict = blockersOf(state);
       const rollup = state.check_rollup ?? null;
       const withheld = [];
       if (autoMergeOnClean !== true) withheld.push("the auto-merge switch workflow.auto_merge_on_clean is off");
@@ -6817,9 +6850,19 @@ if (argv.includes("--settle")) {
         const found = lastEvidence?.read === reads ? lastEvidence : mergeEvidence(originRepo, armed.pr_number, state.head_sha);
         withheld.push(...found.reasons);
         evidence = found.evidence;
+        if (waivedBehind && !(evidence.merge_queue === true && evidence.base_ref === waivedBehind.base_ref && evidence.base_ref === state.base_ref)) {
+          withheld.push(`the branch is behind base and the merge-queue evidence changed between reads (base ${waivedBehind.base_ref} had a queue, the merge evidence reads base ${evidence.base_ref ?? "unknown"} with merge_queue ${evidence.merge_queue}): a behind branch is only enqueued, never merged directly; run --settle clean again`);
+        }
+        if (evidence.merge_queue === true) {
+          if (state.base_ref === null || state.base_ref === void 0 || evidence.base_ref !== state.base_ref) {
+            withheld.push(`the merge state was read for base ${state.base_ref ?? "unknown"} but the merge-queue evidence is for base ${evidence.base_ref ?? "unknown"}: the PR may have been retargeted between the reads, so nothing is enqueued; run --settle clean again`);
+          } else if (evidence.behind_by > 0 && !(state.review_decision_read === true && (state.review_decision === null || state.review_decision === "APPROVED"))) {
+            withheld.push(`the branch is behind ${evidence.base_ref} and the review decision (${state.review_decision_read === true ? state.review_decision : "not read"}) is not APPROVED or explicitly none, so a behind branch is not enqueued`);
+          }
+        }
       }
       const authorized = withheld.length === 0;
-      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: authorized, merge_authorized: authorized, withheld_reasons: withheld, auto_merge_withheld: withheld.length ? withheld.join("; ") : null, merge_evidence: evidence, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...resettle ? { resettle: true } : {} };
+      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: authorized, merge_authorized: authorized, withheld_reasons: withheld, auto_merge_withheld: withheld.length ? withheld.join("; ") : null, merge_queue: evidence ? evidence.merge_queue : queueSnap?.merge_queue ?? null, merge_action: authorized ? waivedBehind || evidence?.merge_queue === true ? "enqueue" : "merge" : null, authorized_base_ref: authorized && evidence?.base_ref === state.base_ref ? state.base_ref ?? null : null, merge_evidence: evidence, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...resettle ? { resettle: true } : {} };
       if (verdict.blockers.length) {
         throw blocked(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join("; ")} \u2014 resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`, { blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads });
       }
@@ -6835,7 +6878,7 @@ if (argv.includes("--settle")) {
     const s = settlePrLoop(storeRoot, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : outcome === "closed" ? closedGuard : null });
     if (outcome === "clean" && merge) {
       process.stderr.write(
-        merge.merge_authorized ? `pr-review-wait: settled clean; authorized to merge ${merge.head_sha} (this script does not merge: the conductor runs the merge pinned to that head)
+        merge.merge_authorized ? `pr-review-wait: settled clean; authorized to ${merge.merge_action === "enqueue" ? "enqueue (the base branch has a merge queue)" : "merge"} ${merge.head_sha} (this script does not merge: the conductor runs the ${merge.merge_action === "enqueue" ? "enqueue" : "merge"} pinned to that head)
 ` : `pr-review-wait: settled clean; merge withheld: ${merge.withheld_reasons.join("; ")}
 `
       );

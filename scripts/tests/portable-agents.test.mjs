@@ -12,7 +12,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig } from '@sterling/schemas';
-import { validateFences, renderClaudeText, renderPortableText, findPortableVocabulary } from '../lib/agent-fences.mjs';
+import { validateFences, renderClaudeText, renderPortableText, renderOpenCodeFullText, renderAgyText, findPortableVocabulary } from '../lib/agent-fences.mjs';
+import { renderAgyAgent } from '../lib/agy-setup.mjs';
 import { renderInstalledAgent, loadRegistry, parseInstalledHeader, claudeAgentEntries } from '../lib/agent-distribution.mjs';
 import {
   renderOpenCodeAgent,
@@ -150,21 +151,28 @@ const withoutHeader = (content) => content.replace(parseInstalledHeader(content)
 // render is its source and the pin that holds is that no fence or marker line exists in either.
 // preflight.md (2026-10-23, decision knowledge-pre-flight-agent-sterling-preflight-a-read-only-la) is the other.
 const WRITTEN_AFTER_FENCING = new Set(['sparring.md', 'preflight.md']);
+// 358b8ab7 is the last commit before GitHub #330 fenced the host-specific lines of these two templates.
+const AFTER_FENCING_BASELINE = '358b8ab7';
+// The one approved change to a Claude body since that baseline (GitHub #330 re-check): the sparring description no longer advertises Overpass, which is OpenCode-only.
+const AFTER_FENCING_APPROVED_EDITS = { 'sparring.md': { before: '; the model is pinned per dispatch or set by the Overpass sparring tier.', after: '; it runs on the model configured for the sparring agent.' } };
 // implementor-hard.md (2026-10-23, decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
 // is the implementor's template as its own agent, fences included, so its Claude render is pinned to
 // the implementor's pinned baseline with its own name, description and one added paragraph.
 const DERIVED_FROM_IMPLEMENTOR = new Set(['implementor-hard.md']);
-const IMPLEMENTOR_HARD_PARAGRAPH = "You are the hard-task implementor: you are dispatched instead of the implementor only on evidence that the implementor tier was not enough (a Sonnet lane on this work already needed a fix round, two attempts produced no new information, or lanes returned contradictory evidence), so that you can run on a stronger model. Resuming a hard lane may stay on hard. Everything below is the implementor's contract, unchanged.";
+const IMPLEMENTOR_HARD_PARAGRAPH = "You are the hard-task implementor: you are dispatched instead of the implementor only on evidence that the implementor tier was not enough (an implementor lane on this work already needed a fix round, two attempts produced no new information, or lanes returned contradictory evidence), so that you can run on a stronger model. Resuming a hard lane may stay on hard. Everything below is the implementor's contract, unchanged.";
 
 // Only the entries Claude Code installs: an OpenCode-only template (plan.md) has no Claude render.
 for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
   if (WRITTEN_AFTER_FENCING.has(entry.file)) {
-    test(`Claude render of ${entry.file} (written after the fencing) carries no fence and no marker line`, () => {
-      const source = template(entry.name);
-      assert.doesNotMatch(source, /<!--\s*\/?(claude|opencode|sterling|portable)-only\s*-->/, 'the source has no host fence');
-      const after = renderInstalledAgent(source, entry.file, renderOpts).installedContent;
-      assert.doesNotMatch(after, /(sterling|portable)-only/, 'no marker line may reach a Claude agent');
-      assert.equal(withoutHeader(after).replace(/^model: .*$/m, '').replace(/^effort: .*$/m, ''), source.replace(/^model: .*$/m, '').replace(/^effort: .*$/m, ''), 'the render is the source apart from the header and the model and effort tokens');
+    test(`Claude render of ${entry.file} (written after the fencing) carries no marker line and equals the ${AFTER_FENCING_BASELINE} render (header aside)`, () => {
+      const shown = spawnSync('git', ['show', `${AFTER_FENCING_BASELINE}:agent-templates/${entry.file}`], { cwd: root, encoding: 'utf8' });
+      assert.equal(shown.status, 0, `git show ${AFTER_FENCING_BASELINE} failed: ${shown.stderr}`);
+      const strip = (c) => withoutHeader(c).replace(/^model: .*$/m, '').replace(/^effort: .*$/m, '');
+      const baselineText = shown.stdout.replace(AFTER_FENCING_APPROVED_EDITS[entry.file]?.before ?? '\0', AFTER_FENCING_APPROVED_EDITS[entry.file]?.after ?? '');
+      const before = renderInstalledAgent(baselineText, entry.file, renderOpts).installedContent;
+      const after = renderInstalledAgent(template(entry.name), entry.file, renderOpts).installedContent;
+      assert.doesNotMatch(after, /(sterling|portable|claude|opencode|agy)-only|no-counterpart/, 'no marker line may reach a Claude agent');
+      assert.equal(strip(after), strip(before), 'the Claude body is the pre-change body: the fencing changed nothing Claude sees');
     });
     continue;
   }
@@ -514,4 +522,111 @@ test('sync treats a CRLF checkout of an unmodified agent as up_to_date', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+// GitHub #330: what each host receives for the host-specific lines. A wrongly fenced line cannot pass
+// here, because every expectation is a literal, not a render of the same source.
+const hostRender = (file) => {
+  const source = readFileSync(join(root, 'agent-templates', file), 'utf8');
+  return { claude: renderClaudeText(source, file), opencode: renderOpenCodeFullText(source, file), agy: renderAgyText(source, file), portable: renderPortableText(source, file) };
+};
+const HARNESS_LINE = 'Sterling hook-delivered context that the harness shows truncated with a persisted-file path';
+for (const file of ['implementor.md', 'implementor-hard.md', 'librarian.md', 'preflight.md', 'researcher.md', 'reviewer.md', 'scout.md', 'sparring.md']) {
+  test(`${file}: the Claude-harness line reaches Claude and no other host`, () => {
+    const r = hostRender(file);
+    assert.ok(r.claude.includes(HARNESS_LINE), 'Claude keeps it');
+    for (const host of ['opencode', 'agy', 'portable']) assert.ok(!r[host].includes(HARNESS_LINE), `${host} does not get it`);
+  });
+}
+
+test('preflight.md and researcher.md: each host reads its own tool names', () => {
+  const pre = hostRender('preflight.md');
+  assert.ok(pre.claude.includes('Use Read, Grep and Glob only'));
+  assert.ok(pre.opencode.includes('Use `read`, `grep` and `glob` only'));
+  assert.ok(pre.agy.includes('Use `read_file`, `grep_search` and `find_by_name` only'));
+  const res = hostRender('researcher.md');
+  assert.ok(res.claude.includes('(WebSearch, WebFetch)'));
+  assert.ok(res.opencode.includes('(`websearch`, `webfetch`)'));
+  assert.ok(res.agy.includes('(`search_web`, `read_url_content`)'));
+  for (const host of ['opencode', 'agy']) {
+    assert.ok(!/WebSearch|WebFetch/.test(res[host].replace(/^tools: .*$/m, '')), `${host} researcher body names no Claude web tool`);
+    assert.ok(!/Read, Grep and Glob/.test(pre[host]), `${host} preflight names no Claude read tools`);
+  }
+});
+
+test('librarian.md and implementor-hard.md: no host-specific launch command or model name in any render', () => {
+  for (const host of Object.values(hostRender('librarian.md'))) assert.ok(!host.includes('claude -p'), 'librarian names no claude -p launch');
+  for (const host of Object.values(hostRender('implementor-hard.md'))) assert.ok(!/a Sonnet lane/.test(host), 'implementor-hard names no Sonnet-specific cue');
+});
+
+test('conductor.md: instruction file, model defaults and web tools per host, and the agy MCP-missing cases', () => {
+  const r = hostRender('conductor.md');
+  assert.ok(r.claude.includes('`AGENTS.md` and `CLAUDE.md`'));
+  assert.ok(r.opencode.includes('`AGENTS.md` and `CLAUDE.md`'));
+  assert.ok(!r.agy.includes('`AGENTS.md` and `CLAUDE.md`') && r.agy.includes('`AGENTS.md` and `GEMINI.md`'), 'agy reads GEMINI.md, not CLAUDE.md');
+  assert.ok(r.claude.includes('Sonnet 5.5 by default') && r.claude.includes('(WebSearch, WebFetch;'));
+  for (const host of ['opencode', 'agy']) assert.ok(!/Sonnet 5\.5 by default|a Sonnet lane|WebSearch, WebFetch/.test(r[host]), `${host} gets no Claude model default or web tool names`);
+  assert.ok(r.opencode.includes('(`websearch`, `webfetch`;') && r.agy.includes('(`search_web`, `read_url_content`;'));
+  for (const host of ['claude', 'opencode']) assert.ok(!r[host].includes('turn 2 or later of a correctly launched session'), `${host} gets no agy start text`);
+  assert.match(r.agy, /the user's message arrived right after startup, and this session's own startup output or MCP status shows the Sterling server started \(another session's `sterling-mcp` process proves nothing\): agy can attach MCP tools only after the first turn \(seen on agy 1\.5\.14\)/);
+  assert.match(r.agy, /\(3\) This session shows no server start, or `call_mcp_tool` is still missing on turn 2 or later of a correctly launched session: this is not the first-turn delay/);
+  assert.match(r.agy, /another session's `sterling-mcp` process proves nothing/);
+  assert.ok(!/Overpass is ON|Overpass ON/.test(r.opencode), 'no Overpass ON switch in the OpenCode conductor');
+  assert.match(r.opencode, /`models\.maintenance-worker`[^]*legacy `maintenance_worker\.opencode_model` key/);
+});
+
+test('target-claude-md.md: the agy GEMINI.md start text names the three MCP-missing cases and only agy gets it', () => {
+  const source = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
+  const agy = renderAgyText(source, 'target-claude-md.md');
+  assert.match(agy, /\(1\) The session was started without `--agent conductor`/);
+  assert.match(agy, /\(2\) It was started with it, this is the first turn, the message arrived right after startup, and this session's own startup output or MCP status shows the Sterling server started \(another session's `sterling-mcp` process proves nothing\): agy can attach MCP tools only after the first turn \(seen on agy 1\.5\.14\)/);
+  assert.match(agy, /\(3\) This session shows no server start, or the tool is still missing on turn 2 or later of a correctly launched session: this is not the first-turn delay/);
+  assert.ok(!renderClaudeText(source, 'target-claude-md.md').includes('agy 1.5.14'));
+  assert.ok(!renderOpenCodeFullText(source, 'target-claude-md.md').includes('agy 1.5.14'));
+});
+
+
+// GitHub #330 re-check: the installed agy agent file, frontmatter description included, carries no Claude or
+// OpenCode mechanism; Claude and OpenCode keep their own descriptions.
+const AGY_FORBIDDEN = /Overpass|per dispatch|Sonnet|Opus|claude -p|Skill tool|CLAUDE\.md|WebSearch|WebFetch|ToolSearch|mcp__|\bH10\b stop block/;
+test('agy installed agent files (description and body) name no Claude or OpenCode mechanism', () => {
+  for (const [file, name] of [['sparring.md', 'sparring'], ['implementor-hard.md', 'implementor-hard'], ['librarian.md', 'librarian'], ['preflight.md', 'preflight'], ['researcher.md', 'researcher'], ['conductor.md', 'conductor']]) {
+    const out = renderAgyAgent(readFileSync(join(root, 'agent-templates', file), 'utf8'), file, name, { root: '/x/sterling', nodePath: '/usr/bin/node' });
+    const description = out.match(/^description: (.*)$/m)[1];
+    assert.ok(!AGY_FORBIDDEN.test(description), `${file}: agy description is host-neutral: ${description}`);
+    const body = out.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const hit = body.match(AGY_FORBIDDEN);
+    if (name === 'conductor') assert.ok(!/invoke it through the Skill tool|claude -p/.test(body), 'agy conductor does not send the model to a Skill tool or claude -p');
+    else assert.ok(!hit, `${file}: agy body names ${hit?.[0]}`);
+  }
+});
+
+test('descriptions per host: no Overpass on Claude, no per-dispatch pin on OpenCode, neutral on agy', () => {
+  const sp = hostRender('sparring.md');
+  assert.match(sp.claude, /^description: .*Advisory, never gating; it runs on the model configured for the sparring agent\.$/m);
+  assert.match(sp.opencode, /^description: .*Advisory, never gating; its model comes from the agent's configured model, which the dispatch does not override\.$/m);
+  assert.match(sp.agy, /^description: .*Advisory, never gating\.$/m);
+  const hard = hostRender('implementor-hard.md');
+  assert.match(hard.claude, /^description: .*so that it can run on its own model\.$/m);
+  assert.match(hard.opencode, /^description: .*so that it can run on its own configured model\.$/m);
+  assert.match(hard.agy, /^description: .*so that it can run on a stronger model\.$/m);
+  for (const r of [sp, hard]) {
+    assert.doesNotMatch(r.claude, /^description: .*Overpass/m, 'Claude description names no Overpass');
+    assert.doesNotMatch(r.opencode, /^description: .*(per dispatch|Overpass)/m, 'OpenCode description has no per-dispatch pin');
+    assert.doesNotMatch(r.agy, /^description: .*(Overpass|per dispatch)/m);
+  }
+});
+
+test('conductor.md on agy: Skill files are read, GEMINI.md is the rule file, and the conductor owns every queue lane; librarian carries the worker sentence for claude and opencode only', () => {
+  const r = hostRender('conductor.md');
+  assert.ok(r.claude.includes('invoke it through the Skill tool') && r.opencode.includes('invoke it through the Skill tool'));
+  assert.ok(!r.agy.includes('Skill tool') || /agy has no Skill tool/.test(r.agy));
+  assert.ok(r.agy.includes('read `<Sterling root>/skills/<skill-name>/SKILL.md` with `read_file`'));
+  assert.ok(r.agy.includes('the GEMINI.md rule "Author records to be found"') && !r.agy.includes('the CLAUDE.md rule'));
+  for (const host of ['claude', 'opencode']) assert.ok(r[host].includes('A background worker drains `reconcile_needed`'), host);
+  assert.ok(!r.agy.includes('A background worker drains') && r.agy.includes('No background worker runs on agy, so every maintenance-queue lane is yours'));
+  const lib = hostRender('librarian.md');
+  for (const host of ['claude', 'opencode']) assert.ok(lib[host].includes('You may run as the background maintenance worker.'), host);
+  assert.ok(!lib.agy.includes('background maintenance worker'), 'no worker on agy');
 });

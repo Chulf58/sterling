@@ -508,3 +508,35 @@ test('readMaintenanceState counts by responsibility: every worker lane is the wo
     assert.match(line, /The 1 item in lane reconcile_needed is drained by the background worker, not by you, and so is 1 item in lane stale_research, and so is 1 item in lane article_missing/);
   });
 });
+
+test('BACKLOG worker state: on agy the line says no worker is launched and claude is unchanged', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const agy = backlog(dir, reconcile(now), now, { host: 'agy' });
+    assert.match(agy.banner, /worker: not launched on agy — drain the worker lanes yourself$/);
+    assert.match(agy.line, /worker: not launched on agy — drain the worker lanes yourself\.$/);
+    const claude = backlog(dir, reconcile(now), now, { host: 'claude' });
+    assert.doesNotMatch(claude.line, /agy/);
+  });
+});
+
+test('BACKLOG on agy: mixed handoff and unjudged items make no "worker handles" claim and keep the handoff as history', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const rec = { ...reconcile(now, { count: 4, unjudged: 3 }), handoffs: [{ id: 'abcdef123456', lane: 'reconcile_needed', reason: 'needs a human' }] };
+    const agy = backlog(dir, rec, now, { host: 'agy' });
+    assert.doesNotMatch(agy.line, /worker handles/);
+    assert.doesNotMatch(agy.line, /needs_conductor/);
+    assert.match(agy.line, /No worker runs on agy, so all 4 items are yours\. 1 of them were handed to you by the worker in an earlier session \(history only\)\./);
+    assert.match(backlog(dir, rec, now, { host: 'claude' }).line, /The worker handles the other 3/);
+  });
+});
+
+test('DEEP line on agy: a worker-only deep queue fires and names no background worker; claude stays silent', () => {
+  const entries = [['reconcile_needed', 20]];
+  const args = { drainable: 20, parked: 0, queueReasonEntries: entries, queueReasons: [inLane(20, 'reconcile_needed')], deepThreshold: 15 };
+  assert.equal(queueDepthLine(args), '');
+  const line = queueDepthLine({ ...args, host: 'agy' });
+  assert.match(line, /MAINTENANCE QUEUE IS DEEP — 20 drainable items \(20 items in lane reconcile_needed\)/);
+  assert.doesNotMatch(line, /background worker/);
+});

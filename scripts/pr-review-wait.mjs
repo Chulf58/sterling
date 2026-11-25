@@ -426,6 +426,24 @@ function evidenceRead(host, path, { paginate = false, deadline = null } = {}) {
   }
 }
 
+/** The PR's base branch and whether it has a merge-queue rule:
+ * { base_ref, merge_queue, error }. merge_queue is true or false only from a
+ * readable, correctly shaped answer; otherwise null with the read error named
+ * (never read as false: only positive evidence waives anything). Two REST
+ * reads, no throw. */
+function baseQueueSnapshot(originRepo, number) {
+  const [host, owner, name] = originRepo.split('/');
+  const pullPath = `repos/${owner}/${name}/pulls/${number}`;
+  const pull = evidenceRead(host, pullPath);
+  const baseRef = pull.ok && pull.pages.length === 1 ? pull.pages[0]?.base?.ref : undefined;
+  if (typeof baseRef !== 'string' || baseRef === '') return { base_ref: null, merge_queue: null, error: pull.ok ? `gh api ${pullPath} returned no base branch` : pull.error };
+  const rulesPath = `repos/${owner}/${name}/rules/branches/${encodeURIComponent(baseRef)}`;
+  const rules = evidenceRead(host, rulesPath, { paginate: true });
+  if (!rules.ok) return { base_ref: baseRef, merge_queue: null, error: `rulesets: ${rules.error}` };
+  if (!rules.pages.every((p) => Array.isArray(p) && p.every((r) => r !== null && typeof r === 'object' && typeof r.type === 'string'))) return { base_ref: baseRef, merge_queue: null, error: `rulesets: gh api ${rulesPath} returned an answer of an unexpected shape` };
+  return { base_ref: baseRef, merge_queue: rules.pages.flat().some((r) => r.type === 'merge_queue'), error: null };
+}
+
 /** The merge evidence for `headSha` of PR `number`: { reasons: [string],
  * evidence, pending }. Every reason withholds the merge. pending is true when
  * every reason is something still to finish (a required check not reported or
@@ -436,7 +454,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
   const repoPath = `repos/${owner}/${name}`;
   const reasons = [];
   let finals = 0; // reasons that waiting cannot change
-  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null };
+  const evidence = { base_ref: null, required_checks: [], required_checks_missing: [], required_checks_pending: [], required_checks_failing: [], workflow_runs: [], behind_by: null, merge_queue: null };
   let cut = false; // a read the deadline cut short: this evidence is incomplete
   const read = (path, opts = {}) => {
     const res = evidenceRead(host, path, { ...opts, deadline });
@@ -515,6 +533,7 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
   else if (!rules.pages.every((p) => Array.isArray(p) && p.every(ruleShapeOk))) unreadable.push(`rulesets: gh api ${rulesPath} returned an answer of an unexpected shape: ${JSON.stringify(rules.pages).slice(0, 200)}`);
   else {
     const before = required.size;
+    evidence.merge_queue = rules.pages.flat().some((rule) => rule.type === 'merge_queue');
     for (const rule of rules.pages.flat()) if (rule.type === 'required_status_checks') for (const c of rule.parameters.required_status_checks) required.add(c.context);
     if (required.size === before) notConfigured.push('no ruleset requires a status check');
   }
@@ -603,7 +622,11 @@ function mergeEvidence(originRepo, number, headSha, { deadline = null } = {}) {
   if (!cmp.ok) final(`whether the branch is behind ${baseRef} could not be read (${cmp.error})`);
   else {
     evidence.behind_by = behind;
-    if (behind > 0) final(`the branch is behind base: ${behind} commit${behind > 1 ? 's' : ''} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
+    // MERGE-QUEUE EXCEPTION (decision merge-queue-exception-when-the-base-branch-has-a-github-merg,
+    // GitHub #323): the queue rebases onto the base and tests the result, so
+    // being behind does not withhold. An unreadable ruleset leaves merge_queue
+    // null, which keeps the withhold and the 'unreadable' reason above.
+    if (behind > 0 && evidence.merge_queue !== true) final(`the branch is behind base: ${behind} commit${behind > 1 ? 's' : ''} on ${baseRef} are not in the head, so the merged result was never reviewed or tested: merge ${baseRef} into the branch, push, and run the loop again`);
   }
   return { reasons, evidence, pending: reasons.length > 0 && finals === 0, cut };
 }
@@ -622,6 +645,32 @@ if (argv.includes('--settle')) {
         const err = new Error(message);
         err.blocked = { ...merge, ...extra };
         return err;
+      };
+      // MERGE-QUEUE EXCEPTION for GraphQL's BEHIND (decision merge-queue-exception-when-the-base-branch-has-a-github-merg,
+      // GitHub #323): only positive queue evidence waives the BEHIND blocker,
+      // and nothing else; unreadable rules or no queue keep it.
+      // The waiver is bound to the snapshot it used (waivedBehind): the merge
+      // evidence read after it must show the same base with a queue, or the
+      // merge is withheld; a waived BEHIND never authorizes a direct merge.
+      let queueSnap = null;
+      let waivedBehind = null;
+      const blockersOf = (s) => {
+        waivedBehind = null;
+        if (s.merge_state_status !== 'BEHIND') return mergeBlockers(s);
+        if (queueSnap === null || queueSnap.merge_queue === null || queueSnap.base_ref !== s.base_ref) queueSnap = baseQueueSnapshot(originRepo, armed.pr_number);
+        // The GraphQL state must be for the same base the queue was read on.
+        const waive = queueSnap.merge_queue === true && s.base_ref !== null && s.base_ref === queueSnap.base_ref;
+        const verdict = mergeBlockers(s, { waiveBehind: waive });
+        if (waive && verdict.blockers.every((b) => !b.startsWith('mergeStateStatus is BEHIND'))) waivedBehind = queueSnap;
+        if (queueSnap.merge_queue === true && !waive) {
+          verdict.blockers.push(`the BEHIND blocker is not waived: the merge-queue evidence is for base ${queueSnap.base_ref}, the merge state was read for base ${s.base_ref ?? 'unknown'}`);
+          verdict.mergeable_now = false;
+        }
+        if (queueSnap.merge_queue === null) {
+          verdict.blockers.push(`the base branch's merge-queue rules could not be read (${queueSnap.error}), so the BEHIND blocker cannot be waived: it is unknown whether the base has a merge queue`);
+          verdict.mergeable_now = false;
+        }
+        return verdict;
       };
       const started = Date.now();
       let state;
@@ -716,7 +765,7 @@ if (argv.includes('--settle')) {
         // required check not reported or not finished yet, or a workflow run still
         // running, is waited for inside the same bounded wait. Only a rollup that
         // could still authorize (SUCCESS or null) on an unblocked PR is worth it.
-        if (!pending && (state.check_rollup === 'SUCCESS' || state.check_rollup === null) && !mergeBlockers(state).blockers.length) {
+        if (!pending && (state.check_rollup === 'SUCCESS' || state.check_rollup === null) && !blockersOf(state).blockers.length) {
           // The FIRST evidence read always completes, bounded only by each gh
           // call's own timeout (a read that errors still withholds); the
           // deadline bounds only the re-reads of the wait after it.
@@ -755,7 +804,7 @@ if (argv.includes('--settle')) {
         merge = { pr_state: state.pr_state, already_merged: false, head_sha: state.head_sha, armed_head_sha: armed.head_sha };
         throw blocked(`the PR is ${state.pr_state}, not open and not merged, so the loop is NOT clean: reopen it and settle again, or settle escalated; nothing settled`, { blockers: [`the PR is ${state.pr_state}`], unresolved_threads: [] });
       }
-      const verdict = mergeBlockers(state);
+      const verdict = blockersOf(state);
       // A clean settle may still carry a failing or pending check that is not
       // required (UNSTABLE); only a green or absent rollup lets it auto-merge.
       const rollup = state.check_rollup ?? null;
@@ -776,9 +825,23 @@ if (argv.includes('--settle')) {
         const found = lastEvidence?.read === reads ? lastEvidence : mergeEvidence(originRepo, armed.pr_number, state.head_sha);
         withheld.push(...found.reasons);
         evidence = found.evidence;
+        if (waivedBehind && !(evidence.merge_queue === true && evidence.base_ref === waivedBehind.base_ref && evidence.base_ref === state.base_ref)) {
+          withheld.push(`the branch is behind base and the merge-queue evidence changed between reads (base ${waivedBehind.base_ref} had a queue, the merge evidence reads base ${evidence.base_ref ?? 'unknown'} with merge_queue ${evidence.merge_queue}): a behind branch is only enqueued, never merged directly; run --settle clean again`);
+        }
+        // EVERY enqueue needs the GraphQL review state and the REST queue evidence
+        // to be for the same, known base (a retarget between the reads would
+        // otherwise borrow another base's queue and checks); a REST-behind branch
+        // also needs the review decision the GraphQL waiver needs.
+        if (evidence.merge_queue === true) {
+          if (state.base_ref === null || state.base_ref === undefined || evidence.base_ref !== state.base_ref) {
+            withheld.push(`the merge state was read for base ${state.base_ref ?? 'unknown'} but the merge-queue evidence is for base ${evidence.base_ref ?? 'unknown'}: the PR may have been retargeted between the reads, so nothing is enqueued; run --settle clean again`);
+          } else if (evidence.behind_by > 0 && !(state.review_decision_read === true && (state.review_decision === null || state.review_decision === 'APPROVED'))) {
+            withheld.push(`the branch is behind ${evidence.base_ref} and the review decision (${state.review_decision_read === true ? state.review_decision : 'not read'}) is not APPROVED or explicitly none, so a behind branch is not enqueued`);
+          }
+        }
       }
       const authorized = withheld.length === 0;
-      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: authorized, merge_authorized: authorized, withheld_reasons: withheld, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, merge_evidence: evidence, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
+      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: authorized, merge_authorized: authorized, withheld_reasons: withheld, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, merge_queue: evidence ? evidence.merge_queue : (queueSnap?.merge_queue ?? null), merge_action: authorized ? (waivedBehind || evidence?.merge_queue === true ? 'enqueue' : 'merge') : null, authorized_base_ref: authorized && evidence?.base_ref === state.base_ref ? state.base_ref ?? null : null, merge_evidence: evidence, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
       if (verdict.blockers.length) {
         throw blocked(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`, { blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads });
       }
@@ -799,7 +862,7 @@ if (argv.includes('--settle')) {
     if (outcome === 'clean' && merge) {
       process.stderr.write(
         merge.merge_authorized
-          ? `pr-review-wait: settled clean; authorized to merge ${merge.head_sha} (this script does not merge: the conductor runs the merge pinned to that head)\n`
+          ? `pr-review-wait: settled clean; authorized to ${merge.merge_action === 'enqueue' ? 'enqueue (the base branch has a merge queue)' : 'merge'} ${merge.head_sha} (this script does not merge: the conductor runs the ${merge.merge_action === 'enqueue' ? 'enqueue' : 'merge'} pinned to that head)\n`
           : `pr-review-wait: settled clean; merge withheld: ${merge.withheld_reasons.join('; ')}\n`
       );
     }

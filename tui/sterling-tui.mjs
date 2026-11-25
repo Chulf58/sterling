@@ -52927,6 +52927,12 @@ function effortOptions(model) {
     return ["unset", ...OVERPASS_EFFORTS];
   return ["unset", "low", "medium", "high"];
 }
+var AGY_MODEL_LABELS = {
+  inherit: "agy session model (your agy default, e.g. Neon)",
+  flash_lite: "agy flash-lite tier",
+  flash: "agy flash tier",
+  pro: "agy pro tier"
+};
 function modelChoices(snap, key) {
   const out = [];
   const seen = /* @__PURE__ */ new Set();
@@ -52947,7 +52953,7 @@ function modelChoices(snap, key) {
       if ((e.vendor ?? CLAUDE_PROVIDER) === v)
         add(v, `${v}/${e.id}`, e.label);
   for (const id of AGY_MODEL_IDS)
-    add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, id === "inherit" ? "agy session model (your agy default, e.g. Neon)" : "");
+    add(AGY_MODEL_NAMESPACE, `${AGY_MODEL_NAMESPACE}/${id}`, AGY_MODEL_LABELS[id]);
   for (const tier of OVERPASS_TIERS)
     add(OVERPASS_MODEL_NAMESPACE, `${OVERPASS_MODEL_NAMESPACE}/${tier}`, "");
   const current = snap.models[key]?.model;

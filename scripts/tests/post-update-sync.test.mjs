@@ -25,6 +25,8 @@ import { dirname, join, relative as relativePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
 import { cloneAgentSync, compareVersions, parseVersion, postUpdateSync, runPostUpdateSteps, runStepAsync } from '../lib/post-update-sync.mjs';
+import { toCanonicalConfig } from '@sterling/schemas';
+import { describeCanonicalChanges } from '../lib/config-migration.mjs';
 import { sterlingRootLine } from '../hooks/lib/operating-state.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
 
@@ -394,52 +396,92 @@ test('cloneAgentSync: dropped retired models keys are named in the banner and th
   assert.ok(r.context.includes('value was {"model":"claude-opus-5","effort":"high"}'), r.context);
 });
 
-// The Overpass defaults reset (decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max)
-// changes routing, so the banner and context must not call it a dropped retired key or say no model changed.
-const RESET_LINES = [
-  'config migration: overpass.roles removed (value was {"scout":{"tier":"agentic-low"}}); every role now runs on its default tier',
-  'config migration: overpass.conductor_bypass set to true (was false); the conductor keeps its direct model pin',
-];
+// The canonical conversion of the legacy Overpass keys (config-migration.mjs) is built here from the real
+// toCanonicalConfig output, never hand-written receipt lines (GitHub #322). Active Overpass: a custom tier,
+// effort and conductor bypass move into config.models and routing is kept. Inactive: the legacy keys are
+// only removed and no models entry is written.
+const receipts = (legacy) => describeCanonicalChanges(toCanonicalConfig(legacy).changes);
+const ACTIVE_LINES = receipts({ mode: 'work', overpass: { enabled: true, conductor_bypass: true, roles: { reviewer: { tier: 'agentic-premium', effort: 'max' } } }, models: { scout: { model: 'claude-sonnet-5-5', effort: 'low' } } });
+const HOBBY_LINES = receipts({ mode: 'hobby', overpass: { enabled: true } });
+const SHAPE_ONLY_LINES = receipts({ mode: 'work' });
+const INACTIVE_LINES = receipts({ mode: 'work', overpass: { enabled: false, roles: { reviewer: { tier: 'agentic-premium' } } } });
 const HARD_MOVE_LINE = 'config migration: models.implementor.hard_task {"model":"claude-opus-5-5"} moved to models.implementor-hard as {"model":"claude-opus-5-5","effort":"high"}, the sterling/implementor-hard agent\'s model; change it in the System tab';
+const overpassLines = (lines) => lines.filter((l) => /^config migration: (overpass\.|models\.[^\s.]+ set to \{"model":"overpass\/)/.test(l));
+const RETIRED_OK = /retired models key|no model changed|reset|changes model routing/;
 
-test('postUpdateSync: the Overpass reset is described as a routing change, never as dropped retired keys or "no model changed"', async () => {
+async function syncWith(lines, host = 'claude') {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '0.0.1', store: false });
-  const out = `up_to_date: implementor\n${RESET_LINES.join('\n')}\n`;
+  const out = `up_to_date: implementor\n${lines.join('\n')}\n`;
   const runStep = async (root, name) =>
     name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
-  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  const r = await postUpdateSync({ root: plugin, project, host, runStep });
   assert.equal(r.outcome, 'synced', r.context);
-  assert.match(r.warning, /\.sterling\/config\.json had its Overpass settings reset to the defaults \(tier overrides removed, conductor bypass on\), which changes model routing\./, r.warning);
-  assert.doesNotMatch(r.warning, /retired models key|no model changed/, r.warning);
-  assert.doesNotMatch(r.context, /retired models key|no model changed/, r.context);
-  assert.match(r.context, /sync-agents reset the Overpass settings in \.sterling\/config\.json, which changes model routing/);
-  for (const l of RESET_LINES) assert.ok(r.context.includes(l.replace(/^config migration: /, '')), l);
+  return r;
+}
+
+test('postUpdateSync: an active Overpass conversion is one grouped, routing-preserving message that includes its models entries', async () => {
+  const conversion = overpassLines(ACTIVE_LINES);
+  assert.ok(conversion.some((l) => /models\.reviewer set to \{"model":"overpass\/agentic-premium","effort":"max"\}/.test(l)), 'real receipts carry the custom tier and effort');
+  assert.ok(conversion.some((l) => /overpass\.conductor_bypass removed \(value was true\)/.test(l)));
+  const r = await syncWith(ACTIVE_LINES);
+  assert.match(r.warning, new RegExp(`legacy Overpass settings converted to per-agent models entries \\(${conversion.length} steps\\); the tiers, efforts and conductor bypass in use are kept, so routing is unchanged\\.`), r.warning);
+  assert.doesNotMatch(r.warning, RETIRED_OK, r.warning);
+  assert.match(r.context, /converted the legacy Overpass settings in \.sterling\/config\.json .* routing did not change and nothing needs restoring/);
+  for (const l of conversion) assert.ok(r.context.includes(l.replace(/^config migration: /, '')), l);
+  assert.match(r.warning, /had 1 other config migration step applied/, 'only the unrelated scout normalisation is an other step; the conversion entries are not counted a second time');
+  assert.ok(!r.context.match(/other config migration step[^]*models\.reviewer set to/), 'the conversion entries are not in the other-steps list');
 });
 
-test('postUpdateSync: a retired-key drop next to the Overpass reset keeps its own text, and the reset gets its own', async () => {
-  const plugin = makePluginRoot();
-  const project = makeProject({ marker: '0.0.1', store: false });
-  const out = `up_to_date: implementor\n${DROP_LINE}\n${HARD_MOVE_LINE}\n${RESET_LINES.join('\n')}\n`;
-  const runStep = async (root, name) =>
-    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
-  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+test('postUpdateSync: an inactive Overpass (enabled false, saved override) is a removal of unused settings, with no models entries claimed', async () => {
+  assert.ok(!INACTIVE_LINES.some((l) => /models\./.test(l)), 'real receipts write no models entries when Overpass was off');
+  const r = await syncWith(INACTIVE_LINES);
+  assert.match(r.warning, /had legacy Overpass settings removed \(2 steps\); no Overpass models entries were written, so routing is unchanged\./, r.warning);
+  assert.doesNotMatch(r.warning, /converted|per-agent models entries|other config migration step/, r.warning);
+  assert.match(r.warning, /1 settings-shape step applied|2 settings-shape steps applied/, 'workflow and mode get their own clause');
+  assert.match(r.context, /removed legacy Overpass settings .*without writing any Overpass models entries.*routing is unchanged/);
+  assert.doesNotMatch(r.context, /converted the legacy|nothing needs restoring|other config migration step/, r.context);
+  assert.ok(r.context.includes('overpass.roles removed (value was {"reviewer":{"tier":"agentic-premium"}})'), r.context);
+});
+
+test('postUpdateSync: enabled:true in hobby mode writes no Overpass entries, so it is a removal, never a conversion', async () => {
+  assert.ok(!HOBBY_LINES.some((l) => /^config migration: models\./.test(l)), 'real receipts write no models entries in hobby mode');
+  assert.ok(HOBBY_LINES.some((l) => /overpass\.enabled removed \(value was true\)/.test(l)));
+  const r = await syncWith(HOBBY_LINES);
+  assert.match(r.warning, /had legacy Overpass settings removed \(1 step\); no Overpass models entries were written, so routing is unchanged\./, r.warning);
+  assert.doesNotMatch(r.warning, /converted|per-agent models entries|other config migration step/, r.warning);
+  assert.doesNotMatch(r.context, /converted the legacy|nothing needs restoring/, r.context);
+});
+
+test('postUpdateSync: a workflow/mode-only migration is reported on its own line and claims no model change', async () => {
+  assert.ok(SHAPE_ONLY_LINES.length > 0 && SHAPE_ONLY_LINES.every((l) => !/^config migration: (models|overpass)\./.test(l)), 'real receipts for {mode:"work"} are workflow and mode only');
+  const r = await syncWith(SHAPE_ONLY_LINES);
+  assert.match(r.warning, /had 2 settings-shape steps applied \(workflow and mode only, not model settings\)\./, r.warning);
+  assert.doesNotMatch(r.warning, /pin|Overpass|retired/, r.warning);
+  for (const l of SHAPE_ONLY_LINES) assert.ok(r.context.includes(l.replace(/^config migration: /, '')), l);
+  assert.doesNotMatch(r.context, /can change model pins/, r.context);
+});
+
+test('postUpdateSync: an unrelated models change next to the conversion keeps the pin-change note and a retired-key drop keeps its own text', async () => {
+  const unrelated = ACTIVE_LINES.filter((l) => /models\.scout\.model set to/.test(l));
+  assert.equal(unrelated.length, 1, 'real receipts include the unrelated provider-prefix normalisation');
+  const r = await syncWith([DROP_LINE, HARD_MOVE_LINE, ...ACTIVE_LINES]);
   assert.match(r.warning, /\.sterling\/config\.json lost 1 retired models key \(ignored before, so no model changed\)\. /, 'the retired-key clause counts only the drop');
-  assert.match(r.warning, /Overpass settings reset to the defaults/);
-  assert.match(r.warning, /had 1 other config migration step applied \(model defaults or the implementor-hard move\), which can change model pins\./, 'the hard_task move is not a retired key');
+  assert.match(r.warning, /legacy Overpass settings converted/);
+  assert.match(r.warning, /had 2 other config migration steps applied \(model entries or the implementor-hard move\), which can change model pins\./, 'the hard_task move and the unrelated models change');
   assert.ok(r.context.includes('sync-agents removed 1 retired models key from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: models.coder dropped'), r.context);
-  assert.ok(!r.context.includes('(they were already ignored, so no model changed); tell the user, because the values are no longer in the file: models.coder dropped (ignored since the roster rename to models.implementor); value was {"model":"claude-opus-5","effort":"high"}; set models.implementor in the System tab if you want it; overpass'), 'the reset is not folded into the retired-key sentence');
+  assert.ok(r.context.includes(`which can change model pins; tell the user: ${[HARD_MOVE_LINE, ...unrelated].map((l) => l.replace(/^config migration: /, '')).join('; ')}.`), r.context);
 });
 
-test('cloneAgentSync: the Overpass reset is described as a routing change', async () => {
+test('cloneAgentSync: the Overpass conversion is described as routing-preserving', async () => {
   const plugin = makePluginRoot({ clone: true });
   const project = makeProject({ marker: null, store: false });
-  const out = `up_to_date: implementor\n${RESET_LINES.join('\n')}\n`;
+  const out = `up_to_date: implementor\n${ACTIVE_LINES.join('\n')}\n`;
   const { runStep } = recordingSteps({ 'sync-agents.mjs': { status: 0, error: null, out, tail: out } });
   const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
   assert.equal(r.outcome, 'synced', r.context);
-  assert.match(r.warning, /Overpass settings reset to the defaults/, r.warning);
-  assert.doesNotMatch(r.warning, /retired models key|no model changed/, r.warning);
+  assert.match(r.warning, /legacy Overpass settings converted/, r.warning);
+  assert.doesNotMatch(r.warning, /retired models key|no model changed|reset/, r.warning);
 });
 
 // A failure after the drop must still carry the receipts: the values are gone from the file and the

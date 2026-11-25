@@ -814,6 +814,7 @@ test('stamp-contract --apply-inserts: every partial absence of lint, plain-writi
 // GitHub issues #79 (finish what you start) and #42/#78 (resolve review threads): two bullets new
 // to every sibling, inserted after the background-subagents bullet in template order.
 const FINISH_LEAD = '- **Finish what you start.**';
+const COMMENTS_LEAD = "- **Write self-explanatory code; comment only what the code can't say.**";
 const RESOLVE_LEAD = '- **Resolve a review thread once its finding is handled.**';
 
 test('stamp-contract --apply-inserts: a project without the finish and resolve bullets gets both once, after the background bullet in template order, and a second run writes nothing', () => {
@@ -941,6 +942,7 @@ const OWN_WORDING = new Map([
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Run the de-ai-writing pass on prose.** Ours.'],
   [SOLVE_LEAD, '- **Every user ask is boarded at intake.** Ours.'],
   [CLOSE_LEAD, '- **Close-on-commit for board items.** Ours.'],
+  [COMMENTS_LEAD, '- **Write self-explanatory code; comment only a non-obvious reason.** Ours.'],
 ]);
 
 // The Domains leads arrive through TARGET_SECTIONS (the whole section is inserted, or a bullet is
@@ -1000,6 +1002,7 @@ const UNRELATED_WORDING = new Map([
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Spell-check prose deliverables.** Ours.', '- **AI-writing tools require approval.** Do not send customer data to them.']],
   [SOLVE_LEAD, ['- **Every user ask goes to the support board.** Ours.']],
   [CLOSE_LEAD, ['- **Close-on-commit for support tickets.** Ours.']],
+  [COMMENTS_LEAD, ['- **Comments on the support board are public.** Ours.', '- **Code review comments get answered in a day.** Ours.', '- **Code review comments are visible only to reviewers.** Ours.', 'Code review comments are visible only to reviewers.', '- **Comments in code review are visible only to reviewers.** Ours.', '- **Code comments require no special formatting.** Ours.', '- **Default to no inline comments in code.** Ours.']],
 ]);
 
 test('stamp-contract (#111): the copy-text marker matches a bullet naming both a copy context and a formatting context, in either wording', () => {

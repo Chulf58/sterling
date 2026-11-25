@@ -938,13 +938,13 @@ const boardReadinessContext = boardReadinessText ? `\n\n${boardReadinessText}` :
 
 // DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold): the
 // two-tier text and its rationale live in lib/maintenance-state.mjs queueDepthLine.
-const queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold });
+const queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold, host: input.host });
 const queueContext = queueLine ? `\n\n${queueLine}` : '';
 
 
 // RECONCILE BACKLOG: the banner segment and the conductor line come from the shared
 // lib (lib/maintenance-state.mjs reconcileBacklog), which carries the rationale.
-const backlog = reconcileBacklog({ reconcile, cwd: storeRoot });
+const backlog = reconcileBacklog({ reconcile, cwd: storeRoot, host: input.host });
 const reconcileBanner = backlog.banner;
 const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 

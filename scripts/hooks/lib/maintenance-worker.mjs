@@ -220,6 +220,9 @@ export const KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, 'knowledge_line_ref_fix', 
  *  which is 'claude'. The OpenCode plugin passes 'opencode' when `claude` is
  *  not on PATH. */
 export const WORKER_HOSTS = ['claude', 'opencode'];
+
+/** The line an agy session gets in place of a worker state: no runner exists for agy (GitHub #333, user-ruled 2026-11-25 'Skip loudly on agy'). */
+export const AGY_NO_WORKER_TEXT = 'worker: not launched on agy — drain the worker lanes yourself';
 /** Config key (in maintenance_worker) naming the OpenCode runner's model as
  *  provider/model. It is a config choice because Anthropic OAuth through
  *  OpenCode bills as extra usage (finding
@@ -1097,6 +1100,7 @@ function failDetail(reason) {
  *   opts.pluginRoot override; opts.env process.env override
  */
 export function maybeLaunchMaintenanceWorker(opts) {
+  if (opts.host === 'agy') return { launched: false, reason: 'agy_host', skipped: AGY_NO_WORKER_TEXT };
   // ONE worker per project STORE: a trigger from any checkout (a linked
   // worktree's Stop or commit included) launches, locks, journals and reads
   // the queue at the store's root, never at the triggering checkout.

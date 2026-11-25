@@ -1384,3 +1384,38 @@ test('MCP boot with a PRE-V2 domain store mounted succeeds: its description read
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('served schemas: write tools say a directory file_keys is refused, read filters say exact-path match (GitHub #325)', async () => {
+  const { client, cleanup } = await harness();
+  try {
+    const listed = (await client.listTools()).tools;
+    const get = (name: string) => listed.find((t) => t.name === name)!;
+    const desc = (node: unknown) => (node as { description?: string }).description ?? '';
+    const refused = /existing directory path is refused/;
+
+    for (const name of ['board_add', 'board_update']) {
+      const props = get(name).inputSchema.properties as Record<string, unknown>;
+      assert.match(desc(props.file_keys), refused, `${name} file_keys says directories are refused`);
+    }
+
+    const createVariants = (get('knowledge_create').inputSchema.properties as { fields: { anyOf: { properties: Record<string, unknown> }[] } }).fields.anyOf;
+    const withFileKeys = createVariants.filter((v) => 'file_keys' in v.properties);
+    assert.ok(withFileKeys.length > 0, 'some create variant takes file_keys');
+    for (const v of withFileKeys) assert.match(desc(v.properties.file_keys), refused, 'create file_keys says directories are refused');
+
+    const updateProps = get('knowledge_update').inputSchema.properties as Record<string, unknown>;
+    for (const alias of ['body', 'fields']) assert.match(desc(updateProps[alias]), refused, `knowledge_update ${alias} says directories are refused`);
+
+    for (const name of ['knowledge_query', 'board_query', 'maintenance_query']) {
+      const d = desc((get(name).inputSchema.properties as Record<string, unknown>).file_keys);
+      assert.match(d, /exact-path match/, `${name} file_keys describes exact-path matching`);
+      assert.doesNotMatch(d, /refused/, `${name} is a filter and refuses nothing`);
+    }
+
+    for (const name of ['board_add', 'board_update', 'knowledge_create', 'knowledge_update', 'knowledge_query', 'board_query', 'maintenance_query']) {
+      assert.doesNotMatch(JSON.stringify(get(name).inputSchema), /"\$ref"/, `${name} serves no $ref`);
+    }
+  } finally {
+    await cleanup();
+  }
+});

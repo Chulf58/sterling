@@ -17,6 +17,7 @@ import {
   ageText,
   handoffVerdicts,
   isHandedOff,
+  AGY_NO_WORKER_TEXT,
   workerBreakage,
   workerPaths,
   workerStatus,
@@ -107,7 +108,7 @@ export function readMaintenanceState(store, cwd) {
  * The deep-queue signal for the conductor, or '' below `deepThreshold`
  * (config.maintenance_queue.deep_threshold, default 15, clamped to >= 1).
  */
-export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: rawThreshold }) {
+export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: rawThreshold, host }) {
   // DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold).
   // The counts above go to the human as a systemMessage, which the MODEL never
   // sees — correct while the queue is shallow and event-drained, wrong once it is
@@ -146,7 +147,8 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
   const conductorText = new Map();
   const workerEntries = [];
   for (const [r, n, handed = 0] of queueReasonEntries) {
-    if (!isWorkerLane(r)) {
+    // No worker runs on agy (GitHub #333), so every worker-lane item is the conductor's.
+    if (!isWorkerLane(r) || host === 'agy') {
       conductorEntries.push([r, n]);
       conductorText.set(r, reasonText.get(r) ?? inLane(n, r));
       continue;
@@ -350,6 +352,12 @@ function handoffSentence(handed, total, handoffs = []) {
   return `${lead}Why: ${shown.join('; ')}${more > 0 ? ` (+${more} more in .sterling/maintenance-worker.jsonl)` : ''}. `;
 }
 
+/** On agy no worker runs, so every item is the conductor's; earlier handoffs are history only. */
+function agyOwnershipSentence(reconcile) {
+  const past = reconcile.handedOff > 0 ? `${reconcile.handedOff} of them were handed to you by the worker in an earlier session (history only). ` : '';
+  return `No worker runs on agy, so all ${reconcile.count} item${reconcile.count === 1 ? ' is' : 's are'} yours. ${past}`;
+}
+
 /** The sample-audit pointer (decision point (4), change CUT): how many writes
  *  the worker landed, and where they are, for an informational spot check. */
 function auditSentence(writes) {
@@ -363,7 +371,7 @@ function auditSentence(writes) {
  *   config  the parsed .sterling/config.json when the caller holds it, else read here
  *   nowMs / env  overrides for tests
  */
-export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env }) {
+export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env, host }) {
   // RECONCILE BACKLOG LINE (the worker's backlog across its lanes): one '·'
   // segment on the human banner (after the maintenance clause, so that clause's
   // text is unchanged) and one line for the conductor, who takes the items the
@@ -379,7 +387,9 @@ export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), e
   if (reconcile.count > 0) {
     let worker;
     let lastRunNote = '';
-    try {
+    if (host === 'agy') {
+      worker = AGY_NO_WORKER_TEXT;
+    } else try {
       const ws = workerStatus(cwd, nowMs);
       worker = workerStateText({ ws, reconcile, cwd, config, nowMs, env });
       const broken = workerBreakage(ws.lastRun);
@@ -396,7 +406,9 @@ export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), e
     reconcileBanner = ` · ${lanesText}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext =
       `\n\nRECONCILE BACKLOG: ${lanesText}, the oldest of all items open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
-      (reconcile.handedOff === null
+      (host === 'agy'
+        ? agyOwnershipSentence(reconcile)
+        : reconcile.handedOff === null
         ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. `
         : handoffSentence(reconcile.handedOff ?? 0, reconcile.count, reconcile.handoffs)) +
       auditSentence(reconcile.writes) +

@@ -18773,6 +18773,7 @@ var WORKER_DISALLOWED_TOOLS = [
 ];
 var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_move", "knowledge_link"];
 var WORKER_HOSTS = ["claude", "opencode"];
+var AGY_NO_WORKER_TEXT = "worker: not launched on agy \u2014 drain the worker lanes yourself";
 var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
@@ -19049,6 +19050,7 @@ function failDetail(reason) {
   return `launch FAILED (${reason}) \u2014 the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
+  if (opts.host === "agy") return { launched: false, reason: "agy_host", skipped: AGY_NO_WORKER_TEXT };
   opts = { ...opts, root: storeRootFor(opts.root) };
   const result = launchWorker(opts);
   if (result.detail) {
@@ -24627,7 +24629,7 @@ function readMaintenanceState(store, cwd) {
   queueReasons = queueReasonEntries.map(([r, n2]) => inLane(n2, r));
   return { total: systemTotal, reconcile, drainable, parked, queueReasonEntries, queueReasons };
 }
-function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: rawThreshold }) {
+function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: rawThreshold, host }) {
   const TOO_DEEP_MULTIPLIER = 10;
   let queueContext = "";
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
@@ -24636,7 +24638,7 @@ function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, d
   const conductorText = /* @__PURE__ */ new Map();
   const workerEntries = [];
   for (const [r, n2, handed = 0] of queueReasonEntries) {
-    if (!isWorkerLane(r)) {
+    if (!isWorkerLane(r) || host === "agy") {
       conductorEntries.push([r, n2]);
       conductorText.set(r, reasonText.get(r) ?? inLane(n2, r));
       continue;
@@ -24764,17 +24766,23 @@ function handoffSentence(handed, total, handoffs = []) {
   const more = handoffs.length - shown.length;
   return `${lead}Why: ${shown.join("; ")}${more > 0 ? ` (+${more} more in .sterling/maintenance-worker.jsonl)` : ""}. `;
 }
+function agyOwnershipSentence(reconcile) {
+  const past = reconcile.handedOff > 0 ? `${reconcile.handedOff} of them were handed to you by the worker in an earlier session (history only). ` : "";
+  return `No worker runs on agy, so all ${reconcile.count} item${reconcile.count === 1 ? " is" : "s are"} yours. ${past}`;
+}
 function auditSentence(writes) {
   if (!writes || !writes.count) return "";
   return `Worker writes on record: ${writes.count} (spot-check a few in ${writes.path}). `;
 }
-function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env }) {
+function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env, host }) {
   let reconcileBanner = "";
   let reconcileContext = "";
   if (reconcile.count > 0) {
     let worker;
     let lastRunNote = "";
-    try {
+    if (host === "agy") {
+      worker = AGY_NO_WORKER_TEXT;
+    } else try {
       const ws = workerStatus(cwd, nowMs);
       worker = workerStateText({ ws, reconcile, cwd, config, nowMs, env });
       const broken = workerBreakage(ws.lastRun);
@@ -24788,7 +24796,7 @@ function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = pr
     reconcileBanner = ` \xB7 ${lanesText2}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext = `
 
-RECONCILE BACKLOG: ${lanesText2}, the oldest of all items open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (reconcile.handedOff === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. ` : handoffSentence(reconcile.handedOff ?? 0, reconcile.count, reconcile.handoffs)) + auditSentence(reconcile.writes) + `${worker}${lastRunNote}.`;
+RECONCILE BACKLOG: ${lanesText2}, the oldest of all items open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (host === "agy" ? agyOwnershipSentence(reconcile) : reconcile.handedOff === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. ` : handoffSentence(reconcile.handedOff ?? 0, reconcile.count, reconcile.handoffs)) + auditSentence(reconcile.writes) + `${worker}${lastRunNote}.`;
   }
   return { banner: reconcileBanner, line: reconcileContext.replace(/^\n\n/, "") };
 }
@@ -25616,23 +25624,30 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
   };
 }
 var RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
-var OVERPASS_RESET_LINE = /^config migration: overpass\./;
+var OVERPASS_CONVERSION_LINE = /^config migration: overpass\./;
 var plural2 = (n2, word) => `${n2} ${word}${n2 === 1 ? "" : "s"}`;
 var strip = (l) => l.replace(/^config migration: /, "");
+var MODELS_LINE = /^config migration: models\./;
+var OVERPASS_ENTRY_LINE = /^config migration: models\.[^\s.]+ set to \{"model":"overpass\//;
 function splitMigrated(migrated) {
+  const hasOverpassKeys = migrated.some((l) => OVERPASS_CONVERSION_LINE.test(l));
+  const converted = hasOverpassKeys && migrated.some((l) => OVERPASS_ENTRY_LINE.test(l));
+  const inConversion = (l) => OVERPASS_CONVERSION_LINE.test(l) || converted && OVERPASS_ENTRY_LINE.test(l);
   return {
     retired: migrated.filter((l) => RETIRED_KEY_LINE.test(l)),
-    overpass: migrated.filter((l) => OVERPASS_RESET_LINE.test(l)),
-    other: migrated.filter((l) => !RETIRED_KEY_LINE.test(l) && !OVERPASS_RESET_LINE.test(l))
+    overpass: migrated.filter(inConversion),
+    overpassActive: converted,
+    other: migrated.filter((l) => MODELS_LINE.test(l) && !RETIRED_KEY_LINE.test(l) && !inConversion(l)),
+    shape: migrated.filter((l) => !MODELS_LINE.test(l) && !OVERPASS_CONVERSION_LINE.test(l))
   };
 }
 function migratedWarning(migrated) {
-  const { retired, overpass, other } = splitMigrated(migrated);
-  return (retired.length ? `.sterling/config.json lost ${plural2(retired.length, "retired models key")} (ignored before, so no model changed). ` : "") + (overpass.length ? `.sterling/config.json had its Overpass settings reset to the defaults (tier overrides removed, conductor bypass on), which changes model routing. ` : "") + (other.length ? `.sterling/config.json had ${plural2(other.length, "other config migration step")} applied (model defaults or the implementor-hard move), which can change model pins. ` : "");
+  const { retired, overpass, overpassActive, other, shape } = splitMigrated(migrated);
+  return (retired.length ? `.sterling/config.json lost ${plural2(retired.length, "retired models key")} (ignored before, so no model changed). ` : "") + (overpass.length ? overpassActive ? `.sterling/config.json had its legacy Overpass settings converted to per-agent models entries (${plural2(overpass.length, "step")}); the tiers, efforts and conductor bypass in use are kept, so routing is unchanged. ` : `.sterling/config.json had legacy Overpass settings removed (${plural2(overpass.length, "step")}); no Overpass models entries were written, so routing is unchanged. ` : "") + (shape.length ? `.sterling/config.json had ${plural2(shape.length, "settings-shape step")} applied (workflow and mode only, not model settings). ` : "") + (other.length ? `.sterling/config.json had ${plural2(other.length, "other config migration step")} applied (model entries or the implementor-hard move), which can change model pins. ` : "");
 }
 function migratedContext(migrated) {
-  const { retired, overpass, other } = splitMigrated(migrated);
-  return (retired.length ? ` sync-agents removed ${plural2(retired.length, "retired models key")} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join("; ")}.` : "") + (overpass.length ? ` sync-agents reset the Overpass settings in .sterling/config.json, which changes model routing (config.overpass.roles overrides are gone and the conductor bypass is on); tell the user, because the old values are no longer in the file: ${overpass.map(strip).join("; ")}.` : "") + (other.length ? ` sync-agents applied ${plural2(other.length, "other config migration step")} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join("; ")}.` : "");
+  const { retired, overpass, overpassActive, other, shape } = splitMigrated(migrated);
+  return (retired.length ? ` sync-agents removed ${plural2(retired.length, "retired models key")} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join("; ")}.` : "") + (overpass.length ? overpassActive ? ` sync-agents converted the legacy Overpass settings in .sterling/config.json (overpass.enabled, overpass.conductor_bypass, overpass.roles) into per-agent config.models entries: a role on Overpass has model \`overpass/<tier>\` with its effort, and the conductor keeps its direct model when models.conductor is unset. The tiers and bypass the project ran on are carried, so routing did not change and nothing needs restoring; tell the user what moved, because the old keys are no longer in the file: ${overpass.map(strip).join("; ")}.` : ` sync-agents removed legacy Overpass settings from .sterling/config.json without writing any Overpass models entries (Overpass was off or not used in this mode), so routing is unchanged; tell the user, because the values are no longer in the file: ${overpass.map(strip).join("; ")}.` : "") + (shape.length ? ` sync-agents moved the settings shape in .sterling/config.json (workflow and mode, not model settings); tell the user: ${shape.map(strip).join("; ")}.` : "") + (other.length ? ` sync-agents applied ${plural2(other.length, "other config migration step")} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join("; ")}.` : "");
 }
 
 // packages/opencode-plugin/src/operating-state.mjs
