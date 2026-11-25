@@ -12088,6 +12088,9 @@ var SterlingStore = class _SterlingStore {
           continue;
         this.applyInPlace("renameFileKey", record_id, (current) => {
           const patched = deepReplaceString(current, from, to);
+          const observations = current.observations;
+          if (observations !== void 0)
+            patched.observations = observations;
           const c = current;
           if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
             const fileKeys = [...new Set(patched.file_keys ?? [])].sort();

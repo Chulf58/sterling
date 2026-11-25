@@ -8,8 +8,6 @@ var __export = (target2, all) => {
 
 // scripts/fs-remove.mjs
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync5, realpathSync as realpathSync5 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -12041,6 +12039,9 @@ var SterlingStore = class _SterlingStore {
           continue;
         this.applyInPlace("renameFileKey", record_id, (current) => {
           const patched = deepReplaceString(current, from, to);
+          const observations = current.observations;
+          if (observations !== void 0)
+            patched.observations = observations;
           const c = current;
           if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
             const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
@@ -13084,6 +13085,27 @@ function openProject(cwd = process.cwd()) {
   return { cwd, store: openRouted(cwd).store, config };
 }
 
+// scripts/lib/checkout-root-guard.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { realpathSync as realpathSync4 } from "node:fs";
+var GIT_LOCATION_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE"];
+function requireCheckoutRoot(target2, script, untouched) {
+  const setLocationVars = GIT_LOCATION_ENV.filter((k) => process.env[k] !== void 0);
+  if (setLocationVars.length) {
+    fail(`${script} REFUSED: ${setLocationVars.join(", ")} set in the environment alter git's checkout discovery; unset them and rerun. Nothing was ${untouched}.`, 2);
+  }
+  const top = spawnSync2("git", ["rev-parse", "--show-toplevel"], { cwd: target2, encoding: "utf8", timeout: 3e4, env: { ...process.env, LC_ALL: "C" } });
+  const notGit = !top.error && top.status === 128 && /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(top.stderr ?? "");
+  if (notGit) return;
+  if (top.error || top.status !== 0) {
+    const why = top.error?.message ?? (String(top.stderr ?? "").trim() || `git exited ${top.status}`);
+    fail(`${script} REFUSED: cannot establish the git checkout root of ${target2} (${why}). Nothing was ${untouched}.`, 2);
+  }
+  if (realpathSync4(top.stdout.trim()) !== realpathSync4(target2)) {
+    fail(`${script} REFUSED: --target ${target2} is inside the checkout ${top.stdout.trim()}; pass the checkout root with checkout-relative paths. Nothing was ${untouched}.`, 2);
+  }
+}
+
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync4, readFileSync as readFileSync6, readdirSync, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
 import { join as join10, resolve as resolve5 } from "node:path";
@@ -13131,17 +13153,17 @@ function unlinkContained(root, rel) {
 }
 
 // scripts/hooks/lib/reconcile-origins.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { lstatSync as lstatSync5, readFileSync as readFileSync7, readlinkSync, realpathSync as realpathSync4 } from "node:fs";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { lstatSync as lstatSync5, readFileSync as readFileSync7, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
 import { basename as basename3, join as join11, resolve as resolve6 } from "node:path";
 var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 function git(root, args, input) {
-  const r = spawnSync2("git", ["-C", root, ...args], { input, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync3("git", ["-C", root, ...args], { input, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
   return { ok: !r.error && r.status === 0, status: r.status, out: r.stdout ? r.stdout.toString("utf8") : "", err: r.error?.message ?? (r.stderr ? r.stderr.toString("utf8").trim() : "") };
 }
 var realOr = (p) => {
   try {
-    return realpathSync4(p);
+    return realpathSync5(p);
   } catch {
     return p;
   }
@@ -13155,9 +13177,9 @@ function checkoutIdentity(root, storeRoot2) {
   const head = headCommit(root);
   const r = git(root, ["rev-parse", "--absolute-git-dir", "--git-common-dir", "--show-toplevel", "--show-prefix"]);
   if (!head || !r.ok) return null;
-  const [gitDir, commonDir, top2, prefix = ""] = r.out.split("\n");
+  const [gitDir, commonDir, top, prefix = ""] = r.out.split("\n");
   const common = realOr(resolve6(root, commonDir));
-  const sameTop = storeRoot2 && realOr(top2) === realOr(storeRoot2);
+  const sameTop = storeRoot2 && realOr(top) === realOr(storeRoot2);
   let checkout;
   if (sameTop) checkout = { kind: "store" };
   else {
@@ -13203,22 +13225,7 @@ function observePaths(root, paths2, storeRoot2) {
 var target = arg("--target") ?? process.cwd();
 var paths = process.argv.slice(2).filter((a) => !a.startsWith("--") && a !== target);
 if (!paths.length) fail("usage: fs-remove.mjs <repo-relative path>... [--target <dir>]");
-var GIT_LOCATION_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE"];
-var setLocationVars = GIT_LOCATION_ENV.filter((k) => process.env[k] !== void 0);
-if (setLocationVars.length) {
-  fail(`fs-remove REFUSED: ${setLocationVars.join(", ")} set in the environment alter git's checkout discovery; unset them and rerun. Nothing was removed.`, 2);
-}
-var top = spawnSync3("git", ["rev-parse", "--show-toplevel"], { cwd: target, encoding: "utf8", timeout: 3e4, env: { ...process.env, LC_ALL: "C" } });
-var notGit = !top.error && top.status === 128 && /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(top.stderr ?? "");
-if (!notGit) {
-  if (top.error || top.status !== 0) {
-    const why = top.error?.message ?? (String(top.stderr ?? "").trim() || `git exited ${top.status}`);
-    fail(`fs-remove REFUSED: cannot establish the git checkout root of ${target} (${why}). Nothing was removed.`, 2);
-  }
-  if (realpathSync5(top.stdout.trim()) !== realpathSync5(target)) {
-    fail(`fs-remove REFUSED: --target ${target} is inside the checkout ${top.stdout.trim()}; pass the checkout root with checkout-relative paths. Nothing was removed.`, 2);
-  }
-}
+requireCheckoutRoot(target, "fs-remove", "removed");
 var storeRoot = resolveStoreRoot(target);
 var { store } = openProject(storeRoot);
 var now = (/* @__PURE__ */ new Date()).toISOString();

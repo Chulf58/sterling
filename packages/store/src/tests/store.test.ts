@@ -1789,6 +1789,23 @@ test('pruneReconcileNeeded: a shrink by a path the item does NOT name leaves the
   }
 });
 
+test('renameFileKey: historical observations are evidence, not ownership keys — path and state.kind are never rewritten', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'file', role: 'impl' }] }));
+    const observations = [{ path: 'file', checkout: { kind: 'store' as const }, commit: 'a'.repeat(40), state: { kind: 'file' as const, mode: '100644', blob: 'b'.repeat(40) } }];
+    const item = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['file'], observations } as never)).record;
+
+    store.renameFileKey('file', 'renamed.ts');
+
+    const after = store.get(item.id) as unknown as { file_keys: string[]; observations: typeof observations };
+    assert.deepEqual(after.file_keys, ['renamed.ts'], 'the queue key followed the rename');
+    assert.deepEqual(after.observations, observations, 'the observation is untouched — SABOTAGE: rewriting it turns state.kind "file" into "renamed.ts" and the write fails schema validation');
+  } finally {
+    cleanup();
+  }
+});
+
 test('renameFileKey: a rename is NOT a shrink — the item\'s path follows the rename, nothing is pruned', () => {
   const { store, cleanup } = storeHarness();
   try {
