@@ -4,15 +4,15 @@
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { article } from './lib-article-fixture.mjs';
+import { itemProvenance } from '../hooks/lib/reconcile-origins.mjs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const NOW = '2026-06-10T12:00:00.000Z';
 
 let SterlingStore;
 before(async () => {
@@ -25,18 +25,6 @@ function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${oneLine(r.stderr)}`);
   return r.stdout.trim();
-}
-
-function article(slug, path) {
-  return {
-    id: randomUUID(), type: 'feature_article', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
-    superseded_by: null, links: [], scope: 'project', stack_tags: [],
-    slug, title: slug, what_it_does: 'x', intended_behavior: 'x',
-    files: [{ path, role: 'impl' }],
-    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
-    dependencies: { relies_on: [], relied_by: [] }, state: 'active', version: 1,
-    history: [{ date: NOW, event: 'originating brief' }], live_test_refs: [],
-  };
 }
 
 function fixture(prefix) {
@@ -102,10 +90,25 @@ test('fs-move: a destination under a symlinked directory is refused; nothing mov
     assert.equal(existsSync(join(dir, 'src', 'new.mjs')), false, 'nothing landed through the link');
     assert.equal(store.query({ types: ['feature_article'], file_keys: ['src/old.mjs'], cap: 10 }).length, 1, 'file_keys not rewritten');
 
-    const r2 = run(['linked/other.mjs', 'src/moved.mjs', '--target', wt], wt);
-    assert.equal(r2.status, 2, `stdout=${oneLine(r2.stdout)} stderr=${oneLine(r2.stderr)}`);
-    assert.match(r2.stderr, /symlink/);
+    store.close();
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('fs-move: a source under a symlinked directory is refused; the file behind the link survives', () => {
+  const { base, dir, wt, store } = fixture('sterling-fsmv-srcsym-');
+  try {
+    store.create(article('feat-srcsym', 'src/other.mjs'));
+    git(dir, ['worktree', 'add', '-b', 'feat/x', wt]);
+    symlinkSync(join(dir, 'src'), join(wt, 'linked'));
+
+    const r = run(['linked/other.mjs', 'src/moved.mjs', '--target', wt], wt);
+    assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /symlink/);
     assert.equal(existsSync(join(dir, 'src', 'other.mjs')), true, 'source behind a symlinked parent survives');
+    assert.equal(existsSync(join(wt, 'src', 'moved.mjs')), false);
+    assert.equal(store.query({ types: ['feature_article'], file_keys: ['src/other.mjs'], cap: 10 }).length, 1, 'file_keys not rewritten');
     store.close();
   } finally {
     rmSync(base, { recursive: true, force: true });
@@ -136,6 +139,56 @@ test('fs-move: a --target below the checkout root is refused', () => {
     assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /inside the checkout/);
     assert.equal(existsSync(join(dir, 'src', 'old.mjs')), true);
+    store.close();
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+const reconcileTodos = (store, owner) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed' && t.feature_link === owner.id);
+
+test('fs-move: moving a file whose path equals an observation state kind ("file") keeps the evidence intact and the second move succeeds', () => {
+  const { base, dir, wt, store } = fixture('sterling-fsmv-kind-');
+  try {
+    writeFileSync(join(dir, 'file'), 'plain\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'add file']);
+    const owner = store.create(article('feat-kind', 'src/old.mjs'));
+    git(dir, ['worktree', 'add', '-b', 'feat/x', wt]);
+
+    for (const [a, b] of [['src/old.mjs', 'file2'], ['file2', 'file'], ['file', 'new.mjs']]) {
+      if (b === 'file') rmSync(join(wt, 'file'));
+      const r = run([a, b, '--target', wt], wt);
+      assert.equal(r.status, 0, `${a} -> ${b}: stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    }
+    assert.equal(store.query({ types: ['feature_article'], file_keys: ['new.mjs'], cap: 10 }).length, 1, 'owner followed every move');
+    const [item] = reconcileTodos(store, owner);
+    for (const o of item.observations) assert.ok(['file', 'absent', 'unknown'].includes(o.state.kind), `state.kind intact: ${o.state.kind}`);
+    assert.ok(item.observations.some((o) => o.path === 'src/old.mjs' && o.state.kind === 'absent'), 'historical observation path never rewritten');
+    store.close();
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('fs-move: a round trip old -> new -> old keeps both moves as evidence; itemProvenance holds it for the conductor, never pays it from a stale half', () => {
+  const { base, dir, wt, store } = fixture('sterling-fsmv-trip-');
+  try {
+    const owner = store.create(article('feat-trip', 'src/old.mjs'));
+    git(dir, ['worktree', 'add', '-b', 'feat/x', wt]);
+    for (const [a, b] of [['src/old.mjs', 'src/new.mjs'], ['src/new.mjs', 'src/old.mjs']]) {
+      const r = run([a, b, '--target', wt], wt);
+      assert.equal(r.status, 0, `${a} -> ${b}: stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    }
+    const [item] = reconcileTodos(store, owner);
+    const states = item.observations.filter((o) => o.path === 'src/old.mjs').map((o) => o.state.kind).sort();
+    assert.deepEqual(states, ['absent', 'file'], 'old.mjs was observed absent (move 1) and present (move 2); neither was rewritten');
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const p = itemProvenance(item, dir, head);
+    // Evidence is stored without order, so two states of one path at one commit cannot be
+    // sequenced: the item is the conductor's rather than paid from the wrong half.
+    assert.equal(p.payable, false);
+    assert.equal(p.conductor, true);
     store.close();
   } finally {
     rmSync(base, { recursive: true, force: true });
