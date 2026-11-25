@@ -595,6 +595,33 @@ test('fan-out: the Knowledge refresh never follows a symlinked AGENTS.md — lin
   }
 });
 
+// Review loop 5 of #329: a file system error from the Knowledge writer (here EACCES on a read-only
+// project directory, as EROFS on a read-only mount) is a failed project refresh, never a warning.
+test('fan-out: a Knowledge section that cannot be written (read-only project dir) fails the project refresh', { skip: process.getuid?.() === 0 && 'root ignores directory permissions' }, async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  try {
+    const agents = projectedAgentsMd();
+    assert.notEqual(refreshAgentsMdKnowledge(agents, false).text, agents, 'fixture: the handoff-off refresh would rewrite this AGENTS.md');
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    chmodSync(dir, 0o555);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\n' });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, 'nothing was written');
+    assert.match(log, /✗ AGENTS\.md Knowledge section NOT updated: .*EACCES/, log);
+    assert.doesNotMatch(log, /Knowledge section not checked/);
+    assert.equal(report.projects[0].knowledge, 'failed');
+    assert.equal(report.exit, 2);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    chmodSync(dir, 0o755);
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // THE BOOTSTRAP DEFECT, found by running the real CLI against a fresh clone:
 // the workspace packages are gitignored, so on a first update NOTHING is built —
 // and the CLI needs @sterling/store to read the project registry. Reading it at
@@ -1008,6 +1035,107 @@ for (const [label, contract, exit, pattern] of [
     }
   });
 }
+
+// Review loop 5 of #329: a project stamp-contract could not check (a legacy project with only
+// CLAUDE.md is not_migrated) fails the update, on the full path and on the already-current path, so
+// a stamp that failed after the completion marker was written is reached again on the next run.
+const notMigrated = (dir) => `✗ legacy (${join(dir, 'AGENTS.md')}): not_migrated (no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${dir})\n\nINSERTS APPLIED — 1 project(s) processed, 1 already in sync, 1 refusal(s).\n`;
+function contractCwd() {
+  const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-contract-'));
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
+  return cwd;
+}
+
+test('fan-out: a not_migrated project from stamp-contract fails the update (exit 2) and is named; a project it checked is not', async () => {
+  const cwd = contractCwd();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1, contractStatus: 2, contractStdout: notMigrated('/tmp/legacy') });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'legacy', repo_path: '/tmp/legacy' }, { name: 'dome', repo_path: '/tmp/dome' }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(report.exit, 2, log);
+    assert.match(log, /✗ legacy: stamp-contract could not update AGENTS\.md \(not_migrated — no AGENTS\.md — run: /);
+    assert.doesNotMatch(log, /✗ dome: stamp-contract/);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+    assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > calls.findIndex((c) => c.includes('stamp-contract.mjs')));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('already current: stamp-contract runs for the registered projects, so a not_migrated project still fails the update on the next run', async () => {
+  const cwd = contractCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const { exec, calls } = fakeExec({ behind: 0, contractStatus: 2, contractStdout: notMigrated('/tmp/legacy') });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'legacy', repo_path: '/tmp/legacy' }], opts: {} });
+    const log = lines.join('\n');
+    const stamp = calls.findIndex((c) => /stamp-contract\.mjs --apply-inserts$/.test(c));
+    assert.ok(stamp !== -1, `the already-current refresh runs stamp-contract, inserts only:\n${calls.join('\n')}`);
+    assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > stamp, 'retirement stays the last step');
+    assert.equal(report.exit, 2, log);
+    assert.match(log, /✗ legacy: stamp-contract could not update AGENTS\.md \(not_migrated/);
+    assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')), log);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Review loop 5 of #329: the authoring update syncs Sterling's own checkout, whose hand-maintained
+// AGENTS.md is close enough to agy's cap that adding the layer would pass it. sync-agents (run for
+// real here) leaves a Sterling source tree's AGENTS.md alone, so the update succeeds; the control
+// shows the same file in an ordinary project is refused for the cap.
+test('authoring role: updating a Sterling source tree whose AGENTS.md plus the layer is over the cap succeeds and leaves AGENTS.md byte-identical', async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const home = mkdtempSync(join(tmpdir(), 'sterling-update-home-'));
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_STATE_HOME: join(home, '.state'), STERLING_OPENCODE_SETUP_DISABLE: '1', STERLING_AGY_SETUP_DISABLE: '1', STERLING_CLAUDE_PROBE: 'absent' };
+  delete env.OPENCODE;
+  delete env.OPENCODE_SESSION_ID;
+  const realSync = (target) => spawnSync(process.execPath, [join(repoRoot, 'scripts', 'sync-agents.mjs'), '--target', target], { encoding: 'utf8', env });
+  const agents = `# AGENTS.md — hand-maintained\n\n${'- **A rule.** Kept as written.\n'.repeat(700)}`;
+  const tree = (sourceTree) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-update-source-tree-'));
+    mkdirSync(join(dir, '.sterling'));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring', handoff: { enabled: false } }));
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(join(dir, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
+    if (sourceTree) {
+      mkdirSync(join(dir, '.claude-plugin'));
+      writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0' }));
+      writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '');
+    }
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    return dir;
+  };
+  const cwd = tree(true);
+  const control = tree(false);
+  try {
+    assert.ok(Buffer.byteLength(agents) < 24_000, 'fixture: the hand-maintained file alone is under the cap');
+    const refused = realSync(control);
+    assert.equal(refused.status, 2, `control: the layer would push this AGENTS.md over the cap:\n${refused.stdout}${refused.stderr}`);
+    assert.match(refused.stdout, /✗ Sterling layer REFUSED: AGENTS\.md would be [\d,]+ bytes with the Sterling layer, over agy's 24,000-byte cap/);
+
+    const { exec: fake, calls } = fakeExec();
+    const exec = (cmd, args, o) => {
+      if (!args[0]?.endsWith('sync-agents.mjs')) return fake(cmd, args, o);
+      calls.push(`${cmd} ${args.join(' ')}`);
+      return realSync(args[2]);
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'sterling', repo_path: cwd }], invokingProject: cwd, opts: {} });
+    const log = lines.join('\n');
+    assert.ok(calls.some((c) => c.includes(`sync-agents.mjs --target ${cwd}`)), calls.join('\n'));
+    assert.equal(report.exit, 0, log);
+    assert.doesNotMatch(log, /Sterling layer REFUSED/);
+    assert.equal(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), agents, 'the source tree\'s AGENTS.md is not touched');
+    assert.equal(calls.filter((c) => c.includes('retire-host-files.mjs')).length, 0, 'no host file is retired in a source tree');
+  } finally {
+    for (const d of [cwd, control, home]) rmSync(d, { recursive: true, force: true });
+  }
+});
 
 test('already current: the refresh runs the retire step for each project and relays its receipts', async () => {
   const cwd = scratchCwd();

@@ -12779,9 +12779,9 @@ if (claudeHost) {
   }
   if (activationResult.activation === "refused") refused += 1;
 }
-var layerSync = syncLayer({ projectDir: targetDir, pluginRoot });
+var layerSync = cloneTarget ? { lines: ["Sterling layer: SKIPPED \u2014 the target is a Sterling source tree, whose AGENTS.md is hand-maintained"], refused: 0 } : syncLayer({ projectDir: targetDir, pluginRoot });
 for (const line of layerSync.lines) console.log(line);
-var retainedHost = retainedHostFiles(targetDir);
+var retainedHost = cloneTarget ? [] : retainedHostFiles(targetDir);
 if (retainedHost.length) console.log(`\u26A0 host files retained: ${retainedHost.join(" and ")} \u2014 sync-agents removes none. If ${retainedHost.length > 1 ? "one holds" : "it holds"} only Sterling's generated text, run node "${pluginRoot}/bin/retire-host-files.mjs" --target "${targetDir}" or /sterling:update.`);
 refused += layerSync.refused;
 process.exit(refused > 0 ? 2 : 0);

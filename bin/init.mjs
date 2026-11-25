@@ -20613,12 +20613,12 @@ function knownHostValues({ projectDir, pluginRoot: pluginRoot2, projectNames = [
   return { names: [...new Set(names.filter(Boolean))], roots: [...new Set(allRoots.filter(Boolean))] };
 }
 function classifyHostFile(fileText, host, { pluginRoot: pluginRoot2, known }) {
-  const text = normalize7(fileText);
-  if (host === "claude" && (text === "@AGENTS.md" || text === "@AGENTS.md\n")) return { pure: true };
+  if (host === "claude" && ["@AGENTS.md", ...authorizedEols("@AGENTS.md\n")].includes(fileText)) return { pure: true };
   const combos = known.names.flatMap((name4) => host === "agy" ? known.roots.map((root) => ({ name: name4, root })) : [{ name: name4, root: null }]);
   const current = tokenRender(readFileSync24(join32(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host);
-  return { pure: combos.some((v) => fill(current, v) === text) };
+  return { pure: combos.some((v) => authorizedEols(fill(current, v)).includes(fileText)) };
 }
+var authorizedEols = (lf3) => [lf3, lf3.replace(/\n/g, "\r\n")];
 var HOSTS = [
   { file: "CLAUDE.md", host: "claude", consequence: "Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists" },
   { file: "GEMINI.md", host: "agy", consequence: "agy loads it next to AGENTS.md, so its text is read twice and counts against agy's 24,000-byte limit" }

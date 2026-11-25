@@ -22,6 +22,10 @@
 // the same private temp root as the lock root, so both are cleaned up
 // together.
 //
+// XDG_CONFIG_HOME, XDG_CACHE_HOME, XDG_STATE_HOME and XDG_DATA_HOME are also
+// pointed at subdirectories of that root, so no child a test spawns can write
+// the user's real OpenCode config, cache, state or data.
+//
 // Does NOT guarantee: isolation for a test file run without this preload, a
 // test that spawns a child with an env built from scratch (it falls back to
 // /tmp/sterling-locks-<uid> and the real per-user registry), or cleanup when
@@ -47,6 +51,14 @@ if (!process.env[MARKER]) {
   // shims into the user's actual ~/.config/opencode (scripts/lib/opencode-install.mjs).
   process.env.STERLING_OPENCODE_SETUP_DISABLE = '1';
   process.env.STERLING_AGY_SETUP_DISABLE = '1';
+  // A test that turns the disable flag off for a real setup (opencode-plan-unsafe-path,
+  // open-session) must still land in the temp root: opencodeConfigDir() honors
+  // XDG_CONFIG_HOME, and a write there rewrites the real plugin and restarts the shared
+  // OpenCode server.
+  process.env.XDG_CONFIG_HOME = join(root, 'xdg-config');
+  process.env.XDG_CACHE_HOME = join(root, 'xdg-cache');
+  process.env.XDG_STATE_HOME = join(root, 'xdg-state');
+  process.env.XDG_DATA_HOME = join(root, 'xdg-data');
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });

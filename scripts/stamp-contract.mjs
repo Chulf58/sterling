@@ -220,7 +220,8 @@ let inSync = 0;
 function record(r) {
   results.push(r);
   if (r.status !== 'processed') {
-    console.log(`✗ ${r.project}: ${r.status} (${r.detail})`);
+    // The AGENTS.md path names the project for scripts/lib/stamp-outcome.mjs, which fails it.
+    console.log(`✗ ${r.project} (${r.file}): ${r.status} (${r.detail})`);
     return;
   }
   const notable = r.actions.filter((a) => a.action !== 'matches');
@@ -258,7 +259,7 @@ const work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
   if (!existsSync(repo)) {
-    record({ project: projectLabel, status: 'missing_path', detail: repo });
+    record({ project: projectLabel, status: 'missing_path', file: join(repo, 'AGENTS.md'), detail: repo });
     continue;
   }
   if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own contract files are hand-maintained in sync with the templates
@@ -275,7 +276,7 @@ for (const { p, dir: repo } of work) {
     continue;
   }
   if (!agentsFile.exists) {
-    record({ project: projectLabel, status: 'not_migrated', detail: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
+    record({ project: projectLabel, status: 'not_migrated', file: agentsMd, detail: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }

@@ -36,6 +36,7 @@ import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HAN
 import { refreshAgentsMdKnowledge } from './agents-md-facts.mjs';
 import { LayerMarkerError, readAgentsMd, writeAgentsMdChecked } from './sterling-layer.mjs';
 import { stampFailures, stampProcessedNothing } from './stamp-outcome.mjs';
+import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
 import { identityRefusal as projectIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
@@ -945,8 +946,13 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           fail(2);
           failed = true;
         } else {
+          // A file system error reading or writing AGENTS.md (EROFS, EACCES) leaves the section
+          // unrefreshed: a failed project refresh like a writer refusal (review loop 5 of #329).
           if (!isProjectReadRefusal(err)) throw err;
-          log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
+          log(`      ✗ AGENTS.md Knowledge section NOT updated: ${err.message}`);
+          entry.knowledge = 'failed';
+          fail(2);
+          failed = true;
         }
       }
       // Handoff projection (decision
@@ -1027,12 +1033,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
-  // The last step of a refresh: retire-host-files for every queued project (the clone itself
-  // excepted). Its receipts are relayed whatever its exit code, so a file removed before a later
+  // The last step of a refresh: retire-host-files for every queued project (the clone itself and
+  // any other Sterling source tree excepted: sync-agents writes no layer there). Its receipts are relayed whatever its exit code, so a file removed before a later
   // unlink failed is still named.
   const retireAfterWriters = () => {
     for (const p of retireQueue.splice(0)) {
-      if (normPath(p.repo_path) === normPath(cwd)) continue;
+      if (normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path)) continue;
       const r = exec(nodeBin, [join(cwd, 'scripts', 'retire-host-files.mjs'), '--target', p.repo_path], { cwd });
       const lines = `${r.stdout ?? ''}`.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
       if (lines.length) log(`  • ${p.name}:\n${lines.map((l) => `      ${l}`).join('\n')}`);
@@ -1043,19 +1049,45 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     }
   };
   // A stamp-contract run's verdict for the projects it touched (scripts/lib/stamp-outcome.mjs): a
-  // write or safety refusal fails that project (exit 2); a crash fails the update (exit 1).
+  // write or safety refusal, or a project it could not check (no AGENTS.md), fails that project
+  // (exit 2); a crash fails the update (exit 1). Returns the number of failed projects.
   const judgeContract = (contract, projects) => {
     const status = report.steps[report.steps.length - 1]?.status;
     if (status !== 0 && status !== 2) {
       log(`✗ stamp-contract crashed (exit ${status}) — instruction files were not checked; see its output above.`);
       fail(1);
     }
+    let failed = 0;
     for (const p of projects) {
       const failures = stampFailures(contract.out, join(p.repo_path, 'AGENTS.md'));
       if (!failures.length) continue;
       log(`✗ ${p.name}: stamp-contract could not update AGENTS.md (${failures.join('; ')})`);
       fail(2);
+      failed++;
     }
+    return failed;
+  };
+  // INSERTS ONLY (user-ruled 2026-10-04 through the question form, "Auto-insert, new text
+  // only"): --apply-inserts writes a tracked section or bullet that is entirely absent from
+  // a sibling's AGENTS.md/CLAUDE.md and lists what it inserted; without that, text a newer
+  // template added never reaches a project initialized before it. Existing wording is
+  // reported and never replaced here: the full --apply stays a deliberate act (it rewrites
+  // seven repos), and hand-tuned text is still refused.
+  // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
+  // but tolerated is not the same as unseen: the step's own block sits between
+  // build/test/check output, so its verdict is repeated in the closing summary
+  // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
+  // It runs on the already-current path too, so a project whose stamp failed after the completion
+  // marker was written is stamped again on the next run (review loop 5 of #329).
+  // Returns the number of projects whose stamp failed.
+  const stampSiblings = (projects) => {
+    if (!existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
+    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts'], {
+      show: true,
+      tolerate: true,
+    });
+    report.contract_drift = !contract.ok;
+    return judgeContract(contract, projects);
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`\n▸ ${label}`);
@@ -1348,7 +1380,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       } else if (list.length) {
         log(`\n▸ already current at ${before.head_short}; refreshing ${list.length} registered project(s) — each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
+        failures += stampSiblings(list);
         retireAfterWriters();
+        if (report.contract_drift) log('CONTRACT DRIFT in a sibling project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.');
       }
       if (report.exit === 0) {
         log(`\nAlready current — nothing to do for the core update at ${before.head_short}${list.length ? `; ${list.length} registered project(s) refreshed` : ''}. (Rerun with --force to rebuild and re-sync anyway.)`);
@@ -1610,27 +1644,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
 
-  // INSERTS ONLY (user-ruled 2026-10-04 through the question form, "Auto-insert, new text
-  // only"): --apply-inserts writes a tracked section or bullet that is entirely absent from
-  // a sibling's AGENTS.md/CLAUDE.md and lists what it inserted; without that, text a newer
-  // template added never reaches a project initialized before it. Existing wording is
-  // reported and never replaced here: the full --apply stays a deliberate act (it rewrites
-  // seven repos), and hand-tuned text is still refused.
-  // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
-  // but tolerated is not the same as unseen: the step's own block sits between
-  // build/test/check output, so its verdict is repeated in the closing summary
-  // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
-  if (opts.projects !== false && existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts'], {
-      show: true,
-      tolerate: true,
-    });
-    report.contract_drift = !contract.ok;
-    judgeContract(contract, projectList);
-    retireAfterWriters();
-  } else {
-    retireAfterWriters();
-  }
+  // The contract step (stampSiblings above), then host-file retirement after every writer.
+  if (opts.projects !== false) refreshFailures += stampSiblings(projectList);
+  retireAfterWriters();
 
   log(
     `\n${'─'.repeat(60)}\n` +

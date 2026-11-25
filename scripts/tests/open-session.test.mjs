@@ -384,7 +384,7 @@ exit 0
     const state = join(f.base, 'state');
     mkdirSync(join(state, 'opencode'), { recursive: true });
     writeFileSync(join(state, 'opencode', 'service.json'), JSON.stringify({ url: 'http://127.0.0.1:1', password: 'test-pass' }));
-    const env = cleanEnv({ HOME: f.home, XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` });
+    const env = cleanEnv({ HOME: f.home, XDG_CONFIG_HOME: join(f.home, '.config'), XDG_CACHE_HOME: join(f.home, '.cache'), XDG_DATA_HOME: join(f.home, '.local', 'share'), XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}` });
     delete env.STERLING_OPENCODE_SETUP_DISABLE;
     const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env, cwd: f.main });
     const plain = run(['--name', 'nocall']);

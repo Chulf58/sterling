@@ -17697,7 +17697,9 @@ import { join as join29, resolve as resolve13 } from "node:path";
 
 // scripts/lib/stamp-outcome.mjs
 var STAMP_FAILURE_CODES = ["WRITE_FAILED_REFUSED", "PLANNED_AGENTS_MD_REFUSED", "AGENTS_MD_REFUSED", "LAYER_MARKERS_REFUSED"];
+var STAMP_UNCHECKED_STATUSES = ["not_migrated", "missing_path"];
 var FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join("|")})\\s`);
+var UNCHECKED_LINE = new RegExp(`^\u2717 .*\\): (${STAMP_UNCHECKED_STATUSES.join("|")}) \\((.*)\\)$`);
 var DETAIL_LINE = /^\s{6}\S/;
 function stampFailures(out, agentsMdPath = null) {
   const lines = String(out ?? "").split("\n");
@@ -17706,12 +17708,17 @@ function stampFailures(out, agentsMdPath = null) {
   if (agentsMdPath !== null) {
     const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${agentsMdPath})`));
     if (at === -1) return [];
-    from = at + 1;
-    to = from;
+    from = at;
+    to = at + 1;
     while (to < lines.length && /^\s/.test(lines[to])) to++;
   }
   const found = [];
   for (let i = from; i < to; i++) {
+    const unchecked = UNCHECKED_LINE.exec(lines[i]);
+    if (unchecked && (agentsMdPath === null || lines[i].includes(`(${agentsMdPath}): `))) {
+      found.push(`${unchecked[1]} \u2014 ${unchecked[2]}`);
+      continue;
+    }
     if (!FAILURE_LINE.test(lines[i])) continue;
     found.push([lines[i].trim(), DETAIL_LINE.test(lines[i + 1] ?? "") ? lines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 "));
   }

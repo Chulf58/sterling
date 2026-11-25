@@ -7249,7 +7249,7 @@ var inSync = 0;
 function record(r) {
   results.push(r);
   if (r.status !== "processed") {
-    console.log(`\u2717 ${r.project}: ${r.status} (${r.detail})`);
+    console.log(`\u2717 ${r.project} (${r.file}): ${r.status} (${r.detail})`);
     return;
   }
   const notable = r.actions.filter((a) => a.action !== "matches");
@@ -7282,7 +7282,7 @@ var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir }
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
   if (!existsSync5(repo)) {
-    record({ project: projectLabel, status: "missing_path", detail: repo });
+    record({ project: projectLabel, status: "missing_path", file: join11(repo, "AGENTS.md"), detail: repo });
     continue;
   }
   if (realpathSync5(repo) === selfPath) continue;
@@ -7297,7 +7297,7 @@ for (const { p, dir: repo } of work) {
     continue;
   }
   if (!agentsFile.exists) {
-    record({ project: projectLabel, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
+    record({ project: projectLabel, status: "not_migrated", file: agentsMd, detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }

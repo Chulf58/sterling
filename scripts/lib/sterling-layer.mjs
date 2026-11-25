@@ -12,8 +12,8 @@
 // - AGENTS.md is read and written only as a regular, singly linked file inside the project whose
 //   bytes decode as UTF-8 without loss, and every writer checks the exact bytes it writes against
 //   agy's 24,000-byte cap.
-// - A host file is deleted only when it is a regular file whose whole text (CRLF folded to LF)
-//   equals the CURRENT template's render for its host filled with the project's own values, or the
+// - A host file is deleted only when it is a regular file whose whole text, with all-LF or
+//   all-CRLF line endings, equals the CURRENT template's render for its host filled with the project's own values, or the
 //   one-line `@AGENTS.md` stub; and only by retireAfterWriters, which callers run after every
 //   AGENTS.md writer of their sequence, on a layer verified on disk. Older renders are kept.
 import { existsSync, lstatSync, readFileSync, unlinkSync } from 'node:fs';
@@ -312,17 +312,21 @@ export function knownHostValues({ projectDir, pluginRoot, projectNames = [], roo
 
 /**
  * How `fileText`, a CLAUDE.md (host 'claude') or GEMINI.md (host 'agy'), relates to Sterling's
- * render: { pure: true } only when its whole text, CRLF folded to LF, is the current template's
- * render for that host filled at its token positions with `known` values, or (claude) the
- * one-line `@AGENTS.md` stub. An older render is not pure: it is kept, and the warning says so.
+ * render: { pure: true } only when its whole text is exactly, with all-LF or all-CRLF line
+ * endings, the current template's render for that host filled at its token positions with `known`
+ * values, or (claude) the one-line `@AGENTS.md` stub. An older render is not pure: it is kept, and
+ * the warning says so.
  */
 export function classifyHostFile(fileText, host, { pluginRoot, known }) {
-  const text = normalize(fileText);
-  if (host === 'claude' && (text === '@AGENTS.md' || text === '@AGENTS.md\n')) return { pure: true };
+  if (host === 'claude' && ['@AGENTS.md', ...authorizedEols('@AGENTS.md\n')].includes(fileText)) return { pure: true };
   const combos = known.names.flatMap((name) => (host === 'agy' ? known.roots.map((root) => ({ name, root })) : [{ name, root: null }]));
   const current = tokenRender(readFileSync(join(pluginRoot, HOST_TEMPLATE_REL), 'utf8'), host);
-  return { pure: combos.some((v) => fill(current, v) === text) };
+  return { pure: combos.some((v) => authorizedEols(fill(current, v)).includes(fileText)) };
 }
+
+// The exact texts a render `lf` may have been written as: LF, or every line CRLF (a CRLF checkout
+// of the template on Windows). The candidate is never folded, so mixed line endings match neither.
+const authorizedEols = (lf) => [lf, lf.replace(/\n/g, '\r\n')];
 
 const HOSTS = [
   { file: 'CLAUDE.md', host: 'claude', consequence: 'Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists' },

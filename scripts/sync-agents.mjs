@@ -279,11 +279,16 @@ if (claudeHost) {
 // (exit 2). No host file is removed here: /sterling:update and the post-update sync run
 // retire-host-files after every AGENTS.md writer. The lines carry the "Sterling layer" prefixes
 // those callers relay.
-const layerSync = syncLayer({ projectDir: targetDir, pluginRoot });
+// A Sterling source tree (cloneTarget, the same probe the portable copies skip on) is exempt:
+// its AGENTS.md is hand-maintained and carries no generated layer, as the post-update sync and
+// /sterling:update already treat it for stamp-contract and host-file retirement (review loop 5).
+const layerSync = cloneTarget
+  ? { lines: ['Sterling layer: SKIPPED — the target is a Sterling source tree, whose AGENTS.md is hand-maintained'], refused: 0 }
+  : syncLayer({ projectDir: targetDir, pluginRoot });
 for (const line of layerSync.lines) console.log(line);
 // sync-agents itself removes no host file; a retained one is named once, with the step that does.
 // The prefix is not one /sterling:update or the post-update sync relays: they run that step next.
-const retainedHost = retainedHostFiles(targetDir);
+const retainedHost = cloneTarget ? [] : retainedHostFiles(targetDir);
 if (retainedHost.length) console.log(`⚠ host files retained: ${retainedHost.join(' and ')} — sync-agents removes none. If ${retainedHost.length > 1 ? 'one holds' : 'it holds'} only Sterling's generated text, run node "${pluginRoot}/bin/retire-host-files.mjs" --target "${targetDir}" or /sterling:update.`);
 refused += layerSync.refused;
 process.exit(refused > 0 ? 2 : 0);

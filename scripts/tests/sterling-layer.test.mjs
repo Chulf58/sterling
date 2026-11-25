@@ -198,9 +198,24 @@ const known = (dir) => knownHostValues({ projectDir: dir, pluginRoot: repo });
 test('classifyHostFile: the current render with the project\'s own name, the one-line import and the agy render with a known root are pure', () => {
   const dir = project();
   assert.equal(classifyHostFile(claudeRender(), 'claude', { pluginRoot: repo, known: known(dir) }).pure, true);
-  assert.equal(classifyHostFile(claudeRender().replace(/\n/g, '\r\n'), 'claude', { pluginRoot: repo, known: known(dir) }).pure, true, 'CRLF folds to LF');
+  assert.equal(classifyHostFile(claudeRender().replace(/\n/g, '\r\n'), 'claude', { pluginRoot: repo, known: known(dir) }).pure, true, 'the all-CRLF render is one of the authorized byte forms');
   assert.equal(classifyHostFile('@AGENTS.md\n', 'claude', { pluginRoot: repo, known: known(dir) }).pure, true);
+  assert.equal(classifyHostFile('@AGENTS.md\r\n', 'claude', { pluginRoot: repo, known: known(dir) }).pure, true);
   assert.equal(classifyHostFile(agyRender(), 'agy', { pluginRoot: repo, known: known(dir) }).pure, true);
+  assert.equal(classifyHostFile(agyRender().replace(/\n/g, '\r\n'), 'agy', { pluginRoot: repo, known: known(dir) }).pure, true);
+});
+
+// Review loop 5 of #329: the candidate is compared as written, never folded, so a file whose line
+// endings are mixed is not one of the authorized renders and is kept.
+test('classifyHostFile: a render or stub with mixed line endings is not pure', () => {
+  const dir = project();
+  const k = known(dir);
+  const mixed = (text) => text.replace('\n', '\r\n');
+  assert.ok(mixed(claudeRender()).includes('\n') && /[^\r]\n/.test(mixed(claudeRender())), 'fixture: one CRLF line among LF lines');
+  assert.equal(classifyHostFile(mixed(claudeRender()), 'claude', { pluginRoot: repo, known: k }).pure, false);
+  assert.equal(classifyHostFile(claudeRender().replace(/\n/g, '\r\n').replace(/\r\n$/, '\n'), 'claude', { pluginRoot: repo, known: k }).pure, false, 'CRLF lines with an LF last line');
+  assert.equal(classifyHostFile(mixed(agyRender()), 'agy', { pluginRoot: repo, known: k }).pure, false);
+  assert.equal(classifyHostFile('@AGENTS.md\r', 'claude', { pluginRoot: repo, known: k }).pure, false, 'a lone CR is not a line ending');
 });
 
 test('classifyHostFile: a rule added on the project-name heading line, another project name, an extra line, trailing text or another root is not pure', () => {

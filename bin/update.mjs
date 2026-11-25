@@ -16759,6 +16759,14 @@ function isSterlingSourceTree(dir) {
   if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
   return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
 }
+function looksLikeSterlingSourceTree(dir) {
+  try {
+    return isSterlingSourceTree(dir);
+  } catch (err) {
+    if (err instanceof ContainmentError || err instanceof SyntaxError || err instanceof TypeError || typeof err?.code === "string") return false;
+    throw err;
+  }
+}
 
 // scripts/lib/handoff-projection.mjs
 init_dist();
@@ -17032,7 +17040,9 @@ function writeAgentsMdChecked(projectDir, text) {
 
 // scripts/lib/stamp-outcome.mjs
 var STAMP_FAILURE_CODES = ["WRITE_FAILED_REFUSED", "PLANNED_AGENTS_MD_REFUSED", "AGENTS_MD_REFUSED", "LAYER_MARKERS_REFUSED"];
+var STAMP_UNCHECKED_STATUSES = ["not_migrated", "missing_path"];
 var FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join("|")})\\s`);
+var UNCHECKED_LINE = new RegExp(`^\u2717 .*\\): (${STAMP_UNCHECKED_STATUSES.join("|")}) \\((.*)\\)$`);
 var DETAIL_LINE = /^\s{6}\S/;
 function stampFailures(out, agentsMdPath = null) {
   const lines = String(out ?? "").split("\n");
@@ -17041,12 +17051,17 @@ function stampFailures(out, agentsMdPath = null) {
   if (agentsMdPath !== null) {
     const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${agentsMdPath})`));
     if (at === -1) return [];
-    from = at + 1;
-    to = from;
+    from = at;
+    to = at + 1;
     while (to < lines.length && /^\s/.test(lines[to])) to++;
   }
   const found = [];
   for (let i = from; i < to; i++) {
+    const unchecked = UNCHECKED_LINE.exec(lines[i]);
+    if (unchecked && (agentsMdPath === null || lines[i].includes(`(${agentsMdPath}): `))) {
+      found.push(`${unchecked[1]} \u2014 ${unchecked[2]}`);
+      continue;
+    }
     if (!FAILURE_LINE.test(lines[i])) continue;
     found.push([lines[i].trim(), DETAIL_LINE.test(lines[i + 1] ?? "") ? lines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 "));
   }
@@ -18203,7 +18218,10 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
           failed = true;
         } else {
           if (!isProjectReadRefusal(err)) throw err;
-          log(`      \u26A0 AGENTS.md Knowledge section not checked: ${err.message}`);
+          log(`      \u2717 AGENTS.md Knowledge section NOT updated: ${err.message}`);
+          entry.knowledge = "failed";
+          fail(2);
+          failed = true;
         }
       }
       if (!withHandoff) {
@@ -18268,7 +18286,7 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
   };
   const retireAfterWriters = () => {
     for (const p of retireQueue.splice(0)) {
-      if (normPath(p.repo_path) === normPath(cwd)) continue;
+      if (normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path)) continue;
       const r = exec(nodeBin, [join21(cwd, "scripts", "retire-host-files.mjs"), "--target", p.repo_path], { cwd });
       const lines = `${r.stdout ?? ""}`.split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
       if (lines.length) log(`  \u2022 ${p.name}:
@@ -18285,12 +18303,24 @@ ${lines.map((l) => `      ${l}`).join("\n")}`);
       log(`\u2717 stamp-contract crashed (exit ${status}) \u2014 instruction files were not checked; see its output above.`);
       fail(1);
     }
+    let failed = 0;
     for (const p of projects2) {
       const failures = stampFailures(contract.out, join21(p.repo_path, "AGENTS.md"));
       if (!failures.length) continue;
       log(`\u2717 ${p.name}: stamp-contract could not update AGENTS.md (${failures.join("; ")})`);
       fail(2);
+      failed++;
     }
+    return failed;
+  };
+  const stampSiblings = (projects2) => {
+    if (!existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) return 0;
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
+      show: true,
+      tolerate: true
+    });
+    report2.contract_drift = !contract.ok;
+    return judgeContract(contract, projects2);
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`
@@ -18511,7 +18541,9 @@ ${lines.join("\n")}`);
         log(`
 \u25B8 already current at ${before.head_short}; refreshing ${list.length} registered project(s) \u2014 each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
+        failures += stampSiblings(list);
         retireAfterWriters();
+        if (report2.contract_drift) log("CONTRACT DRIFT in a sibling project \u2014 see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.");
       }
       if (report2.exit === 0) {
         log(`
@@ -18681,17 +18713,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) {
-    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
-      show: true,
-      tolerate: true
-    });
-    report2.contract_drift = !contract.ok;
-    judgeContract(contract, projectList);
-    retireAfterWriters();
-  } else {
-    retireAfterWriters();
-  }
+  if (opts2.projects !== false) refreshFailures += stampSiblings(projectList);
+  retireAfterWriters();
   log(
     `
 ${"\u2500".repeat(60)}

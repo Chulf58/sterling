@@ -17,6 +17,7 @@ import { ProjectRegistry } from '@sterling/store';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
 import { AGENTS_TEMPLATE_REL, INSERT_AFTER, SUBJECT_MARKERS, TARGET_LEADS, TARGET_SECTIONS, findCoveringBullet, readTemplateBullets } from '../lib/contract-bullets.mjs';
 import { LAYER_END, readLayerSection, syncLayer } from '../lib/sterling-layer.mjs';
+import { stampFailures } from '../lib/stamp-outcome.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { leadLayer } = readTemplateBullets(root);
@@ -90,6 +91,12 @@ test('stamp-contract: an AGENTS.md-homed lead is updated in AGENTS.md (ancestry 
 
     assert.equal(r.status, 2, 'a not_migrated sibling counts as a refusal — exit 2');
     assert.match(r.stdout, /not_migrated.*run: node "<Sterling root>\/bin\/init\.mjs" --target/,'the legacy sibling (no AGENTS.md) is reported not_migrated, naming the ensure command');
+    // Review loop 5 of #329: the one classifier /sterling:update and the post-update sync share
+    // reads the legacy sibling as a failed stamp, and only for that project.
+    const legacyFailures = stampFailures(r.stdout, join(legacyDir, 'AGENTS.md'));
+    assert.equal(legacyFailures.length, 1, r.stdout);
+    assert.match(legacyFailures[0], /^not_migrated — no AGENTS\.md — run: node /);
+    assert.deepEqual(stampFailures(r.stdout, join(migratedDir, 'AGENTS.md')), [], 'the migrated sibling is not failed by its neighbour');
     // legacy sibling untouched — no CLAUDE.md write, no AGENTS.md guessed into existence
     assert.equal(readFileSync(join(legacyDir, 'CLAUDE.md'), 'utf8'), '# CLAUDE.md\n\n(pre-split project, never migrated)\n', 'not_migrated sibling: nothing written');
   } finally {
