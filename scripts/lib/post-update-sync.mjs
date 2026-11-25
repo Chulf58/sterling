@@ -176,6 +176,15 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
   });
 }
 
+// The Sterling layer lines callers relay (scripts/lib/sterling-layer.mjs prefixes; literal here,
+// builtins-only).
+const LAYER_RELAY_LINE = /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/;
+// sync-agents lines that name a refusal (its refused_* lines, the agent statuses that set
+// `refused`, and the layer refusal); anything else in a refused run's output is context.
+const SYNC_REFUSAL_LINE = /^(✗ Sterling layer REFUSED:|refused[a-z_]*: |foreign_file: |retired_(but_modified|delete_failed|identity_mismatch|read_failed|scan_failed|unrecognized): |unsupported_but_modified: |conductor activation: refused)/;
+// stamp-contract actions that mean AGENTS.md itself could not be safely updated.
+const STAMP_SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
+
 /**
  * The two steps and their verdicts: sync-agents exit 2 is a refusal and any other
  * non-zero a failure; stamp-contract exit 2 is tolerated drift, but any
@@ -199,7 +208,7 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
   // The Sterling layer in AGENTS.md (scripts/lib/sterling-layer.mjs syncLayer prints these
   // prefixes; literal here, builtins-only): a removed host file, a kept one that hides AGENTS.md,
   // and a refusal ride every result, so the session banner and context name them.
-  const layer = (sync.out ?? '').split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
+  const layer = (sync.out ?? '').split('\n').map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l));
   const layerRefusals = layer.filter((l) => l.startsWith('✗ Sterling layer REFUSED:'));
   if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
   // sync-agents refreshes the agents it can before it exits 2 for what it refuses (an agent or the
@@ -208,8 +217,11 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
     (host === 'opencode' && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out ?? '')) ||
     (host === 'agy' && AGY_AGENT_WRITTEN_LINE.test(sync.out ?? ''));
   if (sync.status === 2) {
-    const detail = layerRefusals.length
-      ? `sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows; exit 2, with anything else it refused in its output): ${sync.tail}`
+    // The reasons come from the whole output, never only its last lines; an output with no line
+    // this module can classify falls back to the tail.
+    const reasons = (sync.out ?? '').split('\n').map((l) => l.trim()).filter((l) => SYNC_REFUSAL_LINE.test(l));
+    const detail = reasons.length
+      ? `sync-agents REFUSED${layerRefusals.length ? ' the Sterling layer in AGENTS.md' : ''} (exit 2): ${reasons.join(' | ')}`
       : `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
     return { ok: false, restart, migrated, layer, detail };
   }
@@ -236,6 +248,19 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
     if (refusals.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join('; ')})` };
     return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) — the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
+  // An AGENTS.md stamp-contract could not safely update (unsafe file, untrusted markers, a planned
+  // file over agy's cap) is a failed instruction-file update, not tolerated wording drift.
+  const contractLines = contract.out.split('\n');
+  const safety = contractLines
+    .map((l, i) => (STAMP_SAFETY_REFUSAL.test(l) ? [l.trim(), /^\s{6}/.test(contractLines[i + 1] ?? '') ? contractLines[i + 1].trim() : ''].filter(Boolean).join(' — ') : null))
+    .filter(Boolean);
+  if (safety.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract REFUSED to update AGENTS.md (${safety.join('; ')}); no CLAUDE.md or GEMINI.md was removed` };
+  // The last step, after every AGENTS.md writer: remove a CLAUDE.md / GEMINI.md that holds only
+  // Sterling's current render, once the layer is verified on disk.
+  const retire = await runStep(root, 'retire-host-files.mjs', ['--target', project]);
+  if (retire.error) return { ok: false, restart, migrated, layer, detail: `retire-host-files did not run (${retire.error})` };
+  if (retire.status !== 0) return { ok: false, restart, migrated, layer, detail: `retire-host-files exited ${retire.status}: ${retire.tail}` };
+  layer.push(...(retire.out ?? '').split('\n').map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l)));
   const inserted = contract.out
     .split('\n')
     .map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l))

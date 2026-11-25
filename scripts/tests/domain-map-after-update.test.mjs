@@ -336,6 +336,8 @@ function installedPluginRoot() {
   mkdirSync(join(dir, 'bin'), { recursive: true });
   writeFileSync(join(dir, 'bin', 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', 'up_to_date: implementor\n', 'FIXTURE_SYNC_EXIT'));
   writeFileSync(join(dir, 'bin', 'stamp-contract.mjs'), LOGGING_SCRIPT('stamp-contract', 'stamp-contract: 1 already in sync — 1 project(s) processed\n', 'FIXTURE_CONTRACT_EXIT'));
+  // The sync's last step (GitHub #329); this one removes nothing and logs nothing.
+  writeFileSync(join(dir, 'bin', 'retire-host-files.mjs'), 'process.exit(0);\n');
   writeFileSync(
     join(dir, 'bin', 'domains.mjs'),
     `import { appendFileSync } from 'node:fs';\n` +

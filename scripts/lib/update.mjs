@@ -34,7 +34,7 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mj
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
 import { refreshAgentsMdKnowledge } from './agents-md-facts.mjs';
-import { LayerMarkerError, readAgentsMd, readLayerSection, writeAgentsMdChecked } from './sterling-layer.mjs';
+import { LayerMarkerError, readAgentsMd, writeAgentsMdChecked } from './sterling-layer.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
 import { identityRefusal as projectIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
@@ -799,6 +799,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // any persisted schedule. One target's failure never stops another's refresh.
   // This guarantees convergence when refresh runs, not freshness between runs.
   // Returns the number of targets whose refresh failed or was refused.
+  // Projects whose AGENTS.md writers in the refresh ran without a refusal: their CLAUDE.md /
+  // GEMINI.md are checked for removal only after the contract step, the last AGENTS.md writer
+  // (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer).
+  const retireQueue = [];
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
@@ -919,7 +923,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         const agents = readAgentsMd(p.repo_path);
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
         if (knowledge?.refreshed) {
-          const refusal = writeAgentsMdChecked(p.repo_path, knowledge.text, readLayerSection(cwd));
+          const refusal = writeAgentsMdChecked(p.repo_path, knowledge.text);
           log(refusal ? `      ⚠ AGENTS.md Knowledge section not rewritten: ${refusal}` : `      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
         }
         if (knowledge?.kept) log(`      ⚠ AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
@@ -927,6 +931,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         if (!(err instanceof LayerMarkerError) && !isProjectReadRefusal(err)) throw err;
         log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
       }
+      if (r.status === 0 && !failed && !layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) retireQueue.push(p);
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):
       // refresh the project's committed architecture.md / rulings.md /
@@ -1005,6 +1010,39 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
+  // stamp-contract refusals that mean AGENTS.md itself could not be safely updated (an unsafe file,
+  // untrusted markers, a planned file over agy's cap): a failed instruction-file update, never
+  // tolerated wording drift. Returns the refusal lines of `repo`'s block in stamp-contract's output.
+  const SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
+  const stampSafetyRefusals = (out, repo) => {
+    const lines = String(out ?? '').split('\n');
+    const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${join(repo, 'AGENTS.md')})`));
+    if (at === -1) return [];
+    const found = [];
+    for (let i = at + 1; i < lines.length && /^\s/.test(lines[i]); i++) {
+      if (SAFETY_REFUSAL.test(lines[i])) found.push([lines[i].trim(), /^\s{6}/.test(lines[i + 1] ?? '') ? lines[i + 1].trim() : ''].filter(Boolean).join(' — '));
+    }
+    return found;
+  };
+  const retireAfterWriters = (contractOut = '') => {
+    for (const p of retireQueue.splice(0)) {
+      if (normPath(p.repo_path) === normPath(cwd)) continue;
+      const refused = stampSafetyRefusals(contractOut, p.repo_path);
+      if (refused.length) {
+        log(`  ✗ ${p.name}: AGENTS.md update REFUSED by stamp-contract (${refused.join('; ')}); no CLAUDE.md or GEMINI.md was removed`);
+        fail(2);
+        continue;
+      }
+      const r = exec(nodeBin, [join(cwd, 'scripts', 'retire-host-files.mjs'), '--target', p.repo_path], { cwd });
+      if (r.status !== 0) {
+        log(`  ✗ ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout}${r.stderr}`.trim().split('\n').slice(-3).join(' | ')}; no CLAUDE.md or GEMINI.md was removed`);
+        fail(1);
+        continue;
+      }
+      const lines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
+      if (lines.length) log(`  • ${p.name}:\n${lines.map((l) => `      ${l}`).join('\n')}`);
+    }
+  };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`\n▸ ${label}`);
     const r = exec(cmd, args, { cwd: stepCwd, timeout });
@@ -1098,6 +1136,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         fail(1);
       }
       if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
+      retireAfterWriters(contract.out);
     }
     log('RESTART THE SESSION if agents changed — subagents load at CLI start.');
     return report;
@@ -1294,6 +1333,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       } else if (list.length) {
         log(`\n▸ already current at ${before.head_short}; refreshing ${list.length} registered project(s) — each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
+        retireAfterWriters();
       }
       if (report.exit === 0) {
         log(`\nAlready current — nothing to do for the core update at ${before.head_short}${list.length ? `; ${list.length} registered project(s) refreshed` : ''}. (Rerun with --force to rebuild and re-sync anyway.)`);
@@ -1571,6 +1611,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       tolerate: true,
     });
     report.contract_drift = !contract.ok;
+    retireAfterWriters(contract.out);
+  } else {
+    retireAfterWriters();
   }
 
   log(

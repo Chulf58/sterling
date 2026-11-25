@@ -17773,15 +17773,19 @@ function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
   const r = spawnSync9(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
+var LAYER_RELAY_LINE = /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/;
+var SYNC_REFUSAL_LINE = /^(✗ Sterling layer REFUSED:|refused[a-z_]*: |foreign_file: |retired_(but_modified|delete_failed|identity_mismatch|read_failed|scan_failed|unrecognized): |unsupported_but_modified: |conductor activation: refused)/;
+var STAMP_SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
 async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   const migrated = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
-  const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
+  const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l));
   const layerRefusals = layer.filter((l) => l.startsWith("\u2717 Sterling layer REFUSED:"));
   if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out ?? "") || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out ?? "") || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out ?? "");
   if (sync.status === 2) {
-    const detail = layerRefusals.length ? `sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows; exit 2, with anything else it refused in its output): ${sync.tail}` : `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
+    const reasons = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => SYNC_REFUSAL_LINE.test(l));
+    const detail = reasons.length ? `sync-agents REFUSED${layerRefusals.length ? " the Sterling layer in AGENTS.md" : ""} (exit 2): ${reasons.join(" | ")}` : `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
     return { ok: false, restart, migrated, layer, detail };
   }
   if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
@@ -17798,6 +17802,13 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
     if (refusals.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
     return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
+  const contractLines = contract.out.split("\n");
+  const safety = contractLines.map((l, i) => STAMP_SAFETY_REFUSAL.test(l) ? [l.trim(), /^\s{6}/.test(contractLines[i + 1] ?? "") ? contractLines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 ") : null).filter(Boolean);
+  if (safety.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract REFUSED to update AGENTS.md (${safety.join("; ")}); no CLAUDE.md or GEMINI.md was removed` };
+  const retire = await runStep(root, "retire-host-files.mjs", ["--target", project]);
+  if (retire.error) return { ok: false, restart, migrated, layer, detail: `retire-host-files did not run (${retire.error})` };
+  if (retire.status !== 0) return { ok: false, restart, migrated, layer, detail: `retire-host-files exited ${retire.status}: ${retire.tail}` };
+  layer.push(...(retire.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l)));
   const inserted = contract.out.split("\n").map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l)).filter(Boolean).map((m) => `${m[1]} ${m[2].trim()}`);
   const kept = contract.out.split("\n").map((l) => /^\s*SIMILAR_BULLET_KEPT {2}(.+)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
   return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated, layer };

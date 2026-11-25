@@ -63,8 +63,6 @@ function makePluginRoot() {
   git(dir, ['config', 'user.email', 'test@example.com']);
   git(dir, ['config', 'user.name', 'test']);
   git(dir, ['config', 'core.autocrlf', 'false']);
-  // stamp-contract reads the shipped layer section to check a planned AGENTS.md against agy's cap.
-  cpSync(join(root, 'templates', 'sterling-layer-agents.md'), join(dir, 'templates', 'sterling-layer-agents.md'));
   writeFileSync(join(dir, AGENTS_REL), withStaleAntiSpec(realTemplate(AGENTS_REL)));
   writeFileSync(join(dir, CLAUDE_REL), withStaleReconcile(realTemplate(CLAUDE_REL)));
   git(dir, ['add', 'templates']);

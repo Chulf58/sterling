@@ -405,6 +405,8 @@ export const BIN_ENTRIES = {
   // the one-way board-to-GitHub-issues mirror skills/sync-board-issues/SKILL.md runs in any consumer project
   'sync-board-issues': 'scripts/sync-board-issues.mjs',
   update: 'scripts/update.mjs',
+  // the last step of an update: remove a CLAUDE.md / GEMINI.md that holds only Sterling's current render (GitHub #329)
+  'retire-host-files': 'scripts/retire-host-files.mjs',
   // multi-session toolkit slice 3: wake another registered project's owner session; --set-owner, --show-owners
   'wake-project': 'scripts/wake-project.mjs',
 };

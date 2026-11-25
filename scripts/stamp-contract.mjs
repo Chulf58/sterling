@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
-import { LayerMarkerError, layerLineRange, plannedAgentsMdRefusal, readAgentsMd, readLayerSection } from './lib/sterling-layer.mjs';
+import { LayerMarkerError, layerLineRange, plannedAgentsMdRefusal, readAgentsMd } from './lib/sterling-layer.mjs';
 import {
   AGENTS_TEMPLATE_REL,
   CLAUDE_TEMPLATE_REL,
@@ -172,8 +172,6 @@ function itemEnd(text, start) {
   return end;
 }
 
-// The shipped layer section: a planned AGENTS.md must still fit agy's cap with it in.
-const layerSection = readLayerSection(repoRoot);
 // The generated Sterling layer section stands as this one line while bullets are matched.
 const LAYER_MASK = '<!-- sterling layer section: generated, never stamped -->';
 function unmask(text, layerLines) {
@@ -462,9 +460,9 @@ for (const { p, dir: repo } of work) {
     for (const [file, f] of [['AGENTS.md', agents]]) {
       if (f.text === f.original) continue;
       const planned = withOriginalEols(f.raw, unmask(f.text, layerLines));
-      // The whole planned file, with the Sterling layer in, must still fit agy's cap; and the file
+      // The exact bytes about to be written must fit agy's cap with trusted markers, and the file
       // must still be the plain file read above. Otherwise nothing is written.
-      const refusal = plannedAgentsMdRefusal(planned, layerSection) ?? (() => {
+      const refusal = plannedAgentsMdRefusal(planned) ?? (() => {
         try {
           readAgentsMd(repo);
           return null;

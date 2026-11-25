@@ -888,16 +888,24 @@ if (agentsMdRefusal) {
   if (knowledge.refreshed) refresh.refreshed.push('Knowledge section');
   if (knowledge.kept) refresh.kept.push({ name: 'Knowledge section', reason: knowledge.kept });
   refresh.text = knowledge.text;
-  // The whole planned AGENTS.md (facts, Knowledge section and the regenerated layer) is checked
+  // The exact planned AGENTS.md (facts, Knowledge section and the regenerated layer) is checked
   // before any write: untrusted markers or a result over agy's cap write nothing at all.
-  const refusal = plannedAgentsMdRefusal(refresh.text, layerSection);
+  let planned = null;
+  let refusal = null;
+  try {
+    planned = applyLayer(refresh.text, layerSection);
+    refusal = plannedAgentsMdRefusal(planned);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    refusal = err.message;
+  }
   if (refusal) {
     const detail = `${refusal}; nothing in AGENTS.md was written and no CLAUDE.md or GEMINI.md was removed`;
     items.push({ item: 'AGENTS.md', status: 'manual', detail });
     warns.push(`\n⚠ ${detail}. Fix it, then rerun /sterling:init.`);
     layerState = { ok: false, reason: 'the planned AGENTS.md was refused' };
   } else {
-    const withLayer = applyLayer(refresh.text, layerSection);
+    const withLayer = planned;
     if (withLayer !== refresh.text) refresh.refreshed.push('Sterling layer section');
     refresh.text = withLayer;
     if (withLayer !== agentsMdRaw) writeAtomic(agentsMdPath, withLayer);

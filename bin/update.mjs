@@ -8172,7 +8172,7 @@ var init_move_lock = __esm({
 import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
 import { readFileSync as readFileSync12, statSync as statSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join13 } from "node:path";
 function isPlainObject2(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -8272,7 +8272,7 @@ var init_pg_bridge = __esm({
     STATE_WAITING = 0;
     STATE_REPLY = 1;
     STATE_DEAD = 2;
-    DEFAULT_PG_CREDENTIALS_PATH = join14(homedir4(), ".sterling", "credentials", "served.json");
+    DEFAULT_PG_CREDENTIALS_PATH = join13(homedir4(), ".sterling", "credentials", "served.json");
     DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
     HANDSHAKE_MARGIN_MS = 5e3;
     PgConfigError = class extends Error {
@@ -9290,19 +9290,19 @@ COMMIT`);
 // packages/store/dist/mounted.js
 import { mkdirSync as mkdirSync4, existsSync as existsSync9, rmSync as rmSync4, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { dirname as dirname4, join as join15 } from "node:path";
+import { dirname as dirname4, join as join14 } from "node:path";
 import { homedir as homedir5 } from "node:os";
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join15(domainsHome(), name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join14(domainsHome(), name, "sterling.db")
   }));
 }
 function domainsHome() {
-  return join15(homedir5(), ".sterling", "domains");
+  return join14(homedir5(), ".sterling", "domains");
 }
 function defaultMoveLockPath() {
-  return join15(domainsHome(), ".move.lock");
+  return join14(domainsHome(), ".move.lock");
 }
 function open(dbPath) {
   mkdirSync4(dirname4(dbPath), { recursive: true });
@@ -10871,9 +10871,9 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID as randomUUID4 } from "node:crypto";
 import { mkdirSync as mkdirSync5, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname5, join as join16, resolve as resolve8 } from "node:path";
+import { dirname as dirname5, join as join15, resolve as resolve7 } from "node:path";
 function canonicalPath(p) {
-  const abs = resolve8(p);
+  const abs = resolve7(p);
   try {
     return realpathSync3(abs);
   } catch {
@@ -10906,7 +10906,7 @@ function resolveReceiverLocation(ref, createdAt, snapshot) {
   return { reason: `no registered project has its root ${ref.to_root} or its name '${ref.to_name}'` };
 }
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join16(homedir6(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join15(homedir6(), ".sterling", "registry.db");
 }
 var REGISTRY_DDL, OCCUPANCY_DDL, MIGRATED_FROM, ProjectRegistry;
 var init_registry2 = __esm({
@@ -11133,7 +11133,7 @@ CREATE INDEX IF NOT EXISTS project_occupancy_key ON project_occupancy (project_k
 // packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { closeSync as closeSync3, existsSync as existsSync10, openSync as openSync3, readFileSync as readFileSync13, readSync } from "node:fs";
-import { join as join17 } from "node:path";
+import { join as join16 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 function sentHandoffOf(rec) {
   if (rec.handoff === void 0)
@@ -11192,7 +11192,7 @@ function evidenceText(e) {
 function readSidecar(h, root) {
   let parsed;
   try {
-    const text = readIfPresent(join17(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    const text = readIfPresent(join16(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
     if (text === void 0)
       return {};
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
@@ -11216,14 +11216,14 @@ function errText(e) {
   return e?.message ?? String(e);
 }
 function receiverStorage(root) {
-  const text = readIfPresent(join17(root, ".sterling", "config.json"));
+  const text = readIfPresent(join16(root, ".sterling", "config.json"));
   if (text === void 0)
     return void 0;
   const raw = JSON.parse(text);
   return typeof raw.storage === "string" ? raw.storage : void 0;
 }
 function closureStatus(h, root) {
-  const p = join17(root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
+  const p = join16(root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
   let text;
   let parsed;
   try {
@@ -11399,7 +11399,7 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
     }
     let db;
     try {
-      db = openForeignDbReadOnly(join17(root, ".sterling", "sterling.db"), Math.min(busy, left));
+      db = openForeignDbReadOnly(join16(root, ".sterling", "sterling.db"), Math.min(busy, left));
     } catch (e) {
       fail(errText(e));
       continue;
@@ -11638,7 +11638,7 @@ var init_handoff = __esm({
 
 // packages/store/dist/board-snapshot.js
 import { readFileSync as readFileSync14 } from "node:fs";
-import { join as join18 } from "node:path";
+import { join as join17 } from "node:path";
 function journalRowToEntry(row) {
   let evidence;
   if (row.evidence !== null) {
@@ -11670,7 +11670,7 @@ function journalSelect(withHandoff = true) {
   return `SELECT seq, item_id, slug, text, source, objective, priority, outcome, evidence, note, removed_at, ${handoff} FROM board_removal_journal ORDER BY seq ASC`;
 }
 function storageOf(projectRoot) {
-  const p = join18(projectRoot, ".sterling", "config.json");
+  const p = join17(projectRoot, ".sterling", "config.json");
   let text;
   try {
     text = readFileSync14(p, "utf8");
@@ -11701,7 +11701,7 @@ function readBoardSnapshot(projectRoot, opts2 = {}) {
   if (storage !== void 0 && storage !== "sqlite") {
     throw new BoardSnapshotError("not_sqlite", `board snapshot: ${projectRoot} stores its knowledge in '${storage}', and the board snapshot reads SQLite only. Nothing was read.`);
   }
-  const dbPath = join18(projectRoot, ".sterling", "sterling.db");
+  const dbPath = join17(projectRoot, ".sterling", "sterling.db");
   let db;
   try {
     db = openForeignDbReadOnly(dbPath, opts2.busyTimeoutMs ?? 5e3);
@@ -11806,7 +11806,7 @@ var init_board_snapshot = __esm({
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync as realpathSync4 } from "node:fs";
-import { dirname as dirname6, basename as basename3, join as join19, resolve as resolvePath } from "node:path";
+import { dirname as dirname6, basename as basename2, join as join18, resolve as resolvePath } from "node:path";
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
     return false;
@@ -12010,7 +12010,7 @@ CREATE INDEX IF NOT EXISTS idx_board_removal_journal_item ON board_removal_journ
         this.db = new DatabaseSync3(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join19(realpathSync4(dirname6(this.dbPath)), basename3(this.dbPath));
+          classifiedPath = join18(realpathSync4(dirname6(this.dbPath)), basename2(this.dbPath));
         } catch {
         }
         this.classifiedPath = classifiedPath;
@@ -12401,14 +12401,14 @@ __export(dist_exports2, {
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { mkdirSync as mkdirSync6, existsSync as existsSync11, statSync as statSync4 } from "node:fs";
-import { dirname as dirname7, join as join20, resolve as resolvePath2 } from "node:path";
+import { dirname as dirname7, join as join19, resolve as resolvePath2 } from "node:path";
 import { randomUUID as randomUUID5 } from "node:crypto";
 function setStoreDriverFactory(factory) {
   storeDriverFactory = factory;
 }
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync4(join20(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync4(join19(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -15911,19 +15911,19 @@ var init_checks = __esm({
 
 // scripts/lib/agent-distribution.mjs
 function parseInstalledHeader(content) {
-  const m = normalize4(content).match(HEADER_RE);
+  const m = normalize3(content).match(HEADER_RE);
   if (!m) return null;
   const [line, pluginVersion, template, templateHash, contentHash, installedAt] = m;
   return { headerLine: line, pluginVersion, template, templateHash, contentHash, installedAt };
 }
-var normalize4, HEADER_RE, RESTART_INSTRUCTION;
+var normalize3, HEADER_RE, RESTART_INSTRUCTION;
 var init_agent_distribution = __esm({
   "scripts/lib/agent-distribution.mjs"() {
     init_dist();
     init_checks();
     init_agent_fences();
     init_atomic_write();
-    normalize4 = (s2) => s2.replace(/\r\n/g, "\n");
+    normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
     HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
     RESTART_INSTRUCTION = [
       "================================================================",
@@ -15944,9 +15944,9 @@ __export(agent_coverage_exports, {
   scanAgentCoverage: () => scanAgentCoverage
 });
 import { readdirSync as readdirSync3, readFileSync as readFileSync15, realpathSync as realpathSync5, statSync as statSync5 } from "node:fs";
-import { join as join21, resolve as resolve9 } from "node:path";
+import { join as join20, resolve as resolve8 } from "node:path";
 function normalizeProjectPath(p) {
-  const raw = resolve9(String(p));
+  const raw = resolve8(String(p));
   let real = raw;
   try {
     real = realpathSync5(raw);
@@ -15976,7 +15976,7 @@ function sterlingAgentsIn(agentsDir) {
     if (!f.endsWith(".md")) continue;
     let content;
     try {
-      content = readFileSync15(join21(agentsDir, f), "utf8");
+      content = readFileSync15(join20(agentsDir, f), "utf8");
     } catch (err) {
       damaged.push(`${f} (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -16007,8 +16007,8 @@ function scanAgentCoverage({ roots = [], registeredProjects = [] } = {}) {
       continue;
     }
     for (const name of entries) {
-      const projectDir = join21(root, name);
-      const agentsDir = join21(projectDir, ".claude", "agents");
+      const projectDir = join20(root, name);
+      const agentsDir = join20(projectDir, ".claude", "agents");
       try {
         if (!statSync5(agentsDir).isDirectory()) continue;
       } catch (err) {
@@ -16045,14 +16045,14 @@ var init_agent_coverage = __esm({
 // scripts/update.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { existsSync as existsSync13 } from "node:fs";
-import { dirname as dirname9, join as join23, resolve as resolve10 } from "node:path";
+import { dirname as dirname9, join as join22, resolve as resolve9 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { closeSync as closeSync4, existsSync as existsSync12, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync16, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join22 } from "node:path";
+import { dirname as dirname8, join as join21 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/update-launcher.mjs
@@ -16929,16 +16929,12 @@ function refreshAgentsMdKnowledge(text, projected) {
 
 // scripts/lib/sterling-layer.mjs
 import { existsSync as existsSync7, lstatSync as lstatSync4, readFileSync as readFileSync7, unlinkSync as unlinkSync3 } from "node:fs";
-import { basename, join as join10, resolve as resolve6 } from "node:path";
 init_agent_fences();
 init_atomic_write();
-var LAYER_TEMPLATE_REL = "templates/sterling-layer-agents.md";
 var LAYER_END = "<!-- sterling:end generated -->";
 var LAYER_BEGIN = /^<!-- sterling:begin generated(?: \([^()]*\))? -->$/;
-var MARKER_LIKE = /^\s*<!--\s*sterling:(?:begin|end)\b/;
 var AGENTS_MD_AGY_CAP_BYTES = 24e3;
 var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
-var normalize3 = (text) => text.replace(/\r\n/g, "\n");
 function decodeExact(buf) {
   const text = buf.toString("utf8");
   return Buffer.from(text, "utf8").equals(buf) ? text : null;
@@ -16946,14 +16942,6 @@ function decodeExact(buf) {
 var bytes = (s2) => Buffer.byteLength(s2, "utf8");
 var LayerMarkerError = class extends Error {
 };
-function readLayerSection(pluginRoot2) {
-  const text = normalize3(readFileSync7(join10(pluginRoot2, LAYER_TEMPLATE_REL), "utf8")).trimEnd();
-  const lines = text.split("\n");
-  if (!LAYER_BEGIN.test(lines[0]) || lines[lines.length - 1] !== LAYER_END || lines.slice(1, -1).some((l) => MARKER_LIKE.test(l))) {
-    throw new LayerMarkerError(`${LAYER_TEMPLATE_REL} must start with the sterling:begin marker line, end with the sterling:end marker line and hold no other marker line`);
-  }
-  return text;
-}
 function scanLines(raw) {
   const out = [];
   let start = 0;
@@ -16969,92 +16957,34 @@ function scanLines(raw) {
 }
 var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-var RAW_HTML_OPEN = /<(pre|code|textarea|script|style)\b[^>]*>/gi;
-function htmlAfter(content, { comment, raw }) {
-  let pos = 0;
-  for (; ; ) {
-    if (raw) {
-      const close = content.toLowerCase().indexOf(`</${raw}`, pos);
-      if (close === -1) return { comment, raw };
-      raw = null;
-      pos = close + 2;
-      continue;
-    }
-    if (comment) {
-      const close = content.indexOf("-->", pos);
-      if (close === -1) return { comment, raw };
-      comment = false;
-      pos = close + 3;
-      continue;
-    }
-    const open2 = content.indexOf("<!--", pos);
-    RAW_HTML_OPEN.lastIndex = pos;
-    const tag = RAW_HTML_OPEN.exec(content);
-    if (open2 === -1 && !tag) return { comment, raw };
-    if (tag && (open2 === -1 || tag.index < open2)) {
-      raw = tag[1].toLowerCase();
-      pos = tag.index + tag[0].length;
-    } else {
-      comment = true;
-      pos = open2 + 4;
-    }
-  }
-}
+var MARKER_WORD = /sterling:(?:begin|end)/;
 function findMarkers(lines) {
   const begins = [];
   const ends = [];
-  const malformed = [];
-  const contained = [];
+  const other = [];
   let fence = null;
-  let html = { comment: false, raw: null, line: -1 };
   lines.forEach(({ content }, i) => {
     if (fence) {
+      if (MARKER_WORD.test(content)) other.push(i);
       const close = FENCE_CLOSE.exec(content);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
-      return;
-    }
-    if (html.comment || html.raw) {
-      if (MARKER_LIKE.test(content)) contained.push(i);
-      html = { ...htmlAfter(content, html), line: html.line };
       return;
     }
     const open2 = FENCE_OPEN.exec(content);
     if (open2 && !(open2[1][0] === "`" && open2[2].includes("`"))) {
       fence = { ch: open2[1][0], len: open2[1].length, line: i };
+      if (MARKER_WORD.test(content)) other.push(i);
       return;
     }
     if (LAYER_BEGIN.test(content)) begins.push(i);
     else if (content === LAYER_END) ends.push(i);
-    else if (MARKER_LIKE.test(content)) malformed.push(i);
-    const next = htmlAfter(content, html);
-    html = { ...next, line: next.comment || next.raw ? i : -1 };
+    else if (MARKER_WORD.test(content)) other.push(i);
   });
   if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
-  if (html.comment || html.raw) return { error: `AGENTS.md has ${html.comment ? "an HTML comment" : `a <${html.raw}> block`} opened at line ${html.line + 1} that is never closed, so the Sterling layer cannot be placed safely` };
-  if (contained.length) return { error: `AGENTS.md line ${contained.map((i) => i + 1).join(", ")} names a sterling marker inside an HTML comment or raw HTML block, so it cannot be told from a live marker` };
-  if (malformed.length) return { error: `AGENTS.md line ${malformed.map((i) => i + 1).join(", ")} looks like a sterling marker but is not the exact marker line` };
+  if (other.length) return { error: `AGENTS.md line ${other.map((i) => i + 1).join(", ")} names a sterling marker but is not one exact marker line outside code` };
   if (!begins.length && !ends.length) return { begin: null, end: null };
   if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
   return { error: `AGENTS.md has ${begins.length} sterling:begin and ${ends.length} sterling:end marker lines outside code (one of each, begin first, is required)` };
-}
-var lastEol = (raw) => {
-  const at = raw.lastIndexOf("\n");
-  return at > 0 && raw[at - 1] === "\r" ? "\r\n" : "\n";
-};
-function applyLayer(agentsText, section) {
-  const lines = scanLines(agentsText);
-  const found = findMarkers(lines);
-  if (found.error) throw new LayerMarkerError(`${found.error}; fix the markers by hand, then rerun`);
-  if (found.begin === null) {
-    const eol2 = lastEol(agentsText);
-    const block = section.split("\n").join(eol2);
-    if (agentsText === "") return `${block}${eol2}`;
-    return `${agentsText}${agentsText.endsWith("\n") ? eol2 : eol2 + eol2}${block}${eol2}`;
-  }
-  const begin = lines[found.begin];
-  const end = lines[found.end];
-  const eol = agentsText.slice(begin.contentEnd, begin.end) || lastEol(agentsText);
-  return agentsText.slice(0, begin.start) + section.split("\n").join(eol) + agentsText.slice(end.contentEnd);
 }
 function readAgentsMd(projectDir, { readFile = readFileSync7 } = {}) {
   let path;
@@ -17076,22 +17006,17 @@ function readAgentsMd(projectDir, { readFile = readFileSync7 } = {}) {
   if (text === null) throw new LayerMarkerError("AGENTS.md is not valid UTF-8 text, so rewriting it would change bytes Sterling cannot read; Sterling leaves it alone");
   return { exists: true, path, text };
 }
-function plannedAgentsMdRefusal(text, section) {
-  let withLayer;
-  try {
-    withLayer = applyLayer(text, section);
-  } catch (err) {
-    if (err instanceof LayerMarkerError) return err.message;
-    throw err;
-  }
-  return capRefusal(withLayer);
+function plannedAgentsMdRefusal(text) {
+  const found = findMarkers(scanLines(text));
+  if (found.error) return found.error;
+  return capRefusal(text);
 }
 function capRefusal(text) {
   const n = bytes(text);
   if (n <= AGENTS_MD_AGY_CAP_BYTES) return null;
   return `AGENTS.md would be ${n.toLocaleString("en-US")} bytes with the Sterling layer, over agy's ${AGENTS_MD_AGY_CAP_BYTES.toLocaleString("en-US")}-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed. Shorten the project's own text in AGENTS.md by at least ${(n - AGENTS_MD_AGY_CAP_BYTES).toLocaleString("en-US")} bytes (move detail into a linked doc), then rerun`;
 }
-function writeAgentsMdChecked(projectDir, text, section) {
+function writeAgentsMdChecked(projectDir, text) {
   let agents;
   try {
     agents = readAgentsMd(projectDir);
@@ -17099,7 +17024,7 @@ function writeAgentsMdChecked(projectDir, text, section) {
     if (err instanceof LayerMarkerError) return err.message;
     throw err;
   }
-  const why = plannedAgentsMdRefusal(text, section);
+  const why = plannedAgentsMdRefusal(text);
   if (why) return why;
   writeFileAtomic(agents.path, text);
   return null;
@@ -17162,11 +17087,11 @@ function withNestedIgnore(text) {
 import { createHash as createHash3 } from "node:crypto";
 import { appendFileSync as appendFileSync3, chmodSync, existsSync as existsSync8, readFileSync as readFileSync10, statSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename as basename2, delimiter, join as join13, resolve as resolve7 } from "node:path";
+import { basename, delimiter, join as join12, resolve as resolve6 } from "node:path";
 
 // scripts/lib/launcher-tmux.mjs
 import { readFileSync as readFileSync8 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join10 } from "node:path";
 var fwd4 = (p) => p.replace(/\\/g, "/");
 var OPENCODE_PANE_MARKER = "# OpenCode pane: the dashboard of the Sterling copy the OpenCode plugin loads";
 var OPENCODE_PANE_PATHS = [
@@ -17210,14 +17135,14 @@ var INSTALLED_PATHS = [
   OPENCODE_PANE_PATHS
 ].join("\n");
 function renderTmuxLauncher(pluginRoot2, { session, legacySession = session, splitPercent, installed = isInstalledCopy(pluginRoot2) }) {
-  return readFileSync8(join11(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{LEGACY_SESSION}}", () => legacySession).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent));
+  return readFileSync8(join10(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{LEGACY_SESSION}}", () => legacySession).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent));
 }
 
 // scripts/lib/launcher-history.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { mkdirSync as mkdirSync2, mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname as dirname2, join as join12 } from "node:path";
+import { dirname as dirname2, join as join11 } from "node:path";
 import { pathToFileURL } from "node:url";
 var LAUNCHER_TEMPLATES = ["launcher-tmux.sh", "launcher-win.bat", "tui-win.bat"];
 var RETIRED_LAUNCHER_TEMPLATES = ["launcher-win-native.bat"];
@@ -17290,7 +17215,7 @@ var replayFailureLine = (failures, consequence) => {
   const detail = failures.length > 1 && reasons.every((r) => r === reasons[0]) ? `all: ${reasons[0]}` : failures.join("; ");
   return `launcher history: ${failures.length} earlier renderer version(s) could not be replayed (${detail}); ${consequence}`;
 };
-var currentText = (repoRoot, name) => lf(readFileSync9(join12(repoRoot, "templates", name), "utf8"));
+var currentText = (repoRoot, name) => lf(readFileSync9(join11(repoRoot, "templates", name), "utf8"));
 var currentOrNull = (repoRoot, name) => RETIRED_LAUNCHER_TEMPLATES.includes(name) ? null : currentText(repoRoot, name);
 var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync2("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
 function gitLog(git, repoRoot, rels) {
@@ -17341,7 +17266,7 @@ function rendererClosure(read) {
     if (src === null) return null;
     files[rel] = src;
     for (const m of src.matchAll(RELATIVE_SPECIFIER)) {
-      pending.push(join12(dirname2(rel), m[2]).split("\\").join("/"));
+      pending.push(join11(dirname2(rel), m[2]).split("\\").join("/"));
     }
   }
   return files;
@@ -17361,7 +17286,7 @@ function rendererClosures(blobs, shas) {
           break;
         }
         s2.files[rel] = src;
-        for (const m of src.matchAll(RELATIVE_SPECIFIER)) s2.next.push(join12(dirname2(rel), m[2]).split("\\").join("/"));
+        for (const m of src.matchAll(RELATIVE_SPECIFIER)) s2.next.push(join11(dirname2(rel), m[2]).split("\\").join("/"));
       }
     }
   }
@@ -17369,19 +17294,19 @@ function rendererClosures(blobs, shas) {
 }
 function replayRenderers(versions, spawn) {
   if (!versions.length) return [];
-  const root = mkdtempSync(join12(tmpdir(), "sterling-launcher-history-"));
+  const root = mkdtempSync(join11(tmpdir(), "sterling-launcher-history-"));
   try {
     const dirs = versions.map(({ files }, i) => {
-      const dir = join12(root, String(i));
+      const dir = join11(root, String(i));
       for (const [rel, src] of Object.entries(files)) {
-        mkdirSync2(join12(dir, dirname2(rel)), { recursive: true });
-        writeFileSync4(join12(dir, rel), src);
+        mkdirSync2(join11(dir, dirname2(rel)), { recursive: true });
+        writeFileSync4(join11(dir, rel), src);
       }
-      mkdirSync2(join12(dir, "templates"));
-      writeFileSync4(join12(dir, "templates", "launcher-tmux.sh"), "{{PLUGIN_PATHS}}");
+      mkdirSync2(join11(dir, "templates"));
+      writeFileSync4(join11(dir, "templates", "launcher-tmux.sh"), "{{PLUGIN_PATHS}}");
       return dir;
     });
-    const urls = dirs.map((dir) => pathToFileURL(join12(dir, RENDERER_REL)).href);
+    const urls = dirs.map((dir) => pathToFileURL(join11(dir, RENDERER_REL)).href);
     const program = `const dirs = ${JSON.stringify(dirs)};
 const urls = ${JSON.stringify(urls)};
 const out = [];
@@ -17418,7 +17343,7 @@ process.stdout.write(JSON.stringify(out));`;
 function gitHistory(repoRoot, git, spawn) {
   if (isInstalledCopy(repoRoot)) return null;
   const blobs = gitBlobs(git);
-  const closure = Object.keys(rendererClosure((rel) => readFileSync9(join12(repoRoot, rel), "utf8")));
+  const closure = Object.keys(rendererClosure((rel) => readFileSync9(join11(repoRoot, rel), "utf8")));
   const templateRels = ALL_TEMPLATES.map((name) => `templates/${name}`);
   const shas = gitLog(git, repoRoot, [...templateRels, ...closure]);
   blobs.fetch(shas.flatMap((sha) => [...templateRels, ...closure].map((rel) => `${sha}:${rel}`)));
@@ -17473,7 +17398,7 @@ function historicalLauncherTemplates({ repoRoot, git = defaultGit(repoRoot), spa
     }
     return { templates, installedBlocks: /* @__PURE__ */ new Set([INSTALLED_PATHS, ...fromGit.installedBlocks]), degraded: null, replayFailures: fromGit.replayFailures };
   }
-  const path = join12(repoRoot, LAUNCHER_HISTORY_REL);
+  const path = join11(repoRoot, LAUNCHER_HISTORY_REL);
   const snapshot = loadSnapshot(path);
   for (const name of ALL_TEMPLATES) templates.set(name, snapshot.ok ? (snapshot.data[name] ?? []).map(lf) : []);
   const installedBlocks = /* @__PURE__ */ new Set([INSTALLED_PATHS, ...snapshot.ok ? snapshot.data[INSTALLED_BLOCKS_KEY] ?? [] : []]);
@@ -17557,7 +17482,7 @@ var executableFile = (path) => {
     throw err;
   }
 };
-var onPath = (name, env = process.env) => (env.PATH ?? "").split(delimiter).some((dir) => dir && executableFile(join13(dir, name)));
+var onPath = (name, env = process.env) => (env.PATH ?? "").split(delimiter).some((dir) => dir && executableFile(join12(dir, name)));
 function launcherTools({ env = process.env, home = homedir3(), claude } = {}) {
   const forced = env[LAUNCHER_OPENCODE_ENV];
   if (forced && forced !== "found" && forced !== "absent") {
@@ -17569,8 +17494,8 @@ function launcherTools({ env = process.env, home = homedir3(), claude } = {}) {
   }
   return {
     claude: claude ?? onPath("claude", env),
-    opencode: forced ? forced === "found" : onPath("opencode", env) || executableFile(join13(home, ".opencode", "bin", "opencode")),
-    agy: forcedAgy ? forcedAgy === "found" : onPath("agy", env) || executableFile(join13(home, ".local", "bin", "agy"))
+    opencode: forced ? forced === "found" : onPath("opencode", env) || executableFile(join12(home, ".opencode", "bin", "opencode")),
+    agy: forcedAgy ? forcedAgy === "found" : onPath("agy", env) || executableFile(join12(home, ".local", "bin", "agy"))
   };
 }
 function launcherHistoryLoader(pluginRoot2) {
@@ -17598,10 +17523,10 @@ var wslCdPath = (target2) => {
   const posix = fwd5(target2);
   return /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath2(posix) : posix;
 };
-var legacySessionName = (target2) => `sterling-${basename2(target2).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project"}`;
-var sessionName = (target2) => `${legacySessionName(target2)}-${createHash3("sha256").update(fwd5(resolve7(target2))).digest("hex").slice(0, 4)}`;
+var legacySessionName = (target2) => `sterling-${basename(target2).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project"}`;
+var sessionName = (target2) => `${legacySessionName(target2)}-${createHash3("sha256").update(fwd5(resolve6(target2))).digest("hex").slice(0, 4)}`;
 function renderOpener(pluginRoot2, target2, host, opener) {
-  const template = readFileSync10(join13(pluginRoot2, "templates", OPENER_TEMPLATES[host]), "utf8");
+  const template = readFileSync10(join12(pluginRoot2, "templates", OPENER_TEMPLATES[host]), "utf8");
   const body = lf2(template).replaceAll("{{APP}}", () => opener.app).replaceAll("{{MODE}}", () => opener.mode).replaceAll("{{WIN_PROJECT_DIR}}", () => wslCdPath(target2));
   return host === "windows" ? crlf2(stampBody(body, "rem")) : stampBody(body, "#");
 }
@@ -17631,7 +17556,7 @@ function ensureLaunchers(target2, pluginRoot2, {
     return { item: file, status: "differs", detail: "left untouched (matches no generated version: hand-edited or another path) \u2014 delete it and re-run /sterling:init to regenerate" };
   };
   const expected = checkText(ENGINE_NAME, lf2(renderTmuxLauncher(pluginRoot2, { session, legacySession, splitPercent, installed: installedCopy })));
-  const enginePath = join13(target2, ENGINE_NAME);
+  const enginePath = join12(target2, ENGINE_NAME);
   const existing = existsSync8(enginePath) ? readFileSync10(enginePath, "utf8") : null;
   const cloneLauncher = installedCopy && existing !== null ? cloneLauncherTarget(existing) : null;
   if (existing === null) {
@@ -17663,7 +17588,7 @@ function ensureLaunchers(target2, pluginRoot2, {
   const prefix = host === "windows" ? "rem" : "#";
   for (const opener of OPENERS[host].filter((o) => tools[o.tool])) {
     const text = checkText(opener.file, renderOpener(pluginRoot2, target2, host, opener));
-    const path = join13(target2, opener.file);
+    const path = join12(target2, opener.file);
     const created = host === "windows" ? `double-click -> wsl ${wslCdPath(target2)} -> ./${ENGINE_NAME} ${opener.mode}` : `run or double-click -> ./${ENGINE_NAME} ${opener.mode} in a terminal`;
     if (!existsSync8(path)) {
       writeFileSync5(path, text, host === "linux" ? { mode: 493 } : void 0);
@@ -17692,7 +17617,7 @@ function removeRetiredLaunchers(target2, pluginRoot2, { history = launcherHistor
   const items = [];
   const warns = [];
   for (const [file, { template, why }] of Object.entries(RETIRED_LAUNCHERS)) {
-    const path = join13(target2, file);
+    const path = join12(target2, file);
     if (!existsSync8(path)) continue;
     let body = lf2(readFileSync10(path, "utf8"));
     const stamp = verifyStamp(body, "rem");
@@ -17701,7 +17626,7 @@ function removeRetiredLaunchers(target2, pluginRoot2, { history = launcherHistor
       body = [lines[0], ...lines.slice(2)].join("\n");
     }
     const known = history.get();
-    const currentPath = join13(pluginRoot2, "templates", template);
+    const currentPath = join12(pluginRoot2, "templates", template);
     const generated = stamp?.unmodified !== false && (existsSync8(currentPath) && matchTemplateRender(body, readFileSync10(currentPath, "utf8"), { installedBlocks: known.installedBlocks }) !== null || olderGeneratedLauncher(body, template, known) !== null);
     if (generated) {
       unlinkSync4(path);
@@ -17717,7 +17642,7 @@ function removeRetiredLaunchers(target2, pluginRoot2, { history = launcherHistor
   return { items, warns };
 }
 function ensureLauncherIgnores(target2) {
-  const path = join13(target2, ".gitignore");
+  const path = join12(target2, ".gitignore");
   const existing = existsSync8(path) ? readFileSync10(path, "utf8") : "";
   const lines = existing.split(/\r?\n/);
   const missing = LAUNCHER_GITIGNORE_ENTRIES.filter((e) => !lines.includes(e));
@@ -17920,7 +17845,7 @@ function refusalFor(c) {
   return null;
 }
 function stampConsumerRoleIfAbsent(cwd, log) {
-  const configPath = join22(cwd, ".sterling", "config.json");
+  const configPath = join21(cwd, ".sterling", "config.json");
   if (!existsSync12(configPath)) {
     log(
       "\n\u25B8 machine-role stamp \u2014 SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init'd as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER \u2014 declare machine_role explicitly only on the authoring machine."
@@ -17944,7 +17869,7 @@ function stampConsumerRoleIfAbsent(cwd, log) {
 }
 function readMachineRole(cwd) {
   try {
-    const role = JSON.parse(readFileSync16(join22(cwd, ".sterling", "config.json"), "utf8")).machine_role;
+    const role = JSON.parse(readFileSync16(join21(cwd, ".sterling", "config.json"), "utf8")).machine_role;
     return typeof role === "string" ? role : null;
   } catch {
     return null;
@@ -17957,7 +17882,7 @@ var normPath = (p) => {
 var OLD_TUI_BUNDLE = "packages/tui/bundle/sterling-tui.mjs";
 var SHIPPED_TUI_BUNDLE = "tui/sterling-tui.mjs";
 function warnIfLauncherNamesOldBundle(repoPath2, log) {
-  const launcher = join22(repoPath2, "sterling-launch.sh");
+  const launcher = join21(repoPath2, "sterling-launch.sh");
   if (!existsSync12(launcher)) return;
   let text;
   try {
@@ -17996,9 +17921,9 @@ var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed
 function preScaleDownMarkers(text) {
   return PRE_SCALE_DOWN_MARKERS.filter((m) => text.includes(m));
 }
-var UPDATE_MARKER_RELATIVE_PATH = join22(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join21(".sterling", "update-complete.json");
 function readUpdateMarker(cwd, log) {
-  const p = join22(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join21(cwd, UPDATE_MARKER_RELATIVE_PATH);
   if (!existsSync12(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync16(p, "utf8"));
@@ -18011,11 +17936,11 @@ function readUpdateMarker(cwd, log) {
   }
 }
 function writeUpdateMarker(cwd, sha) {
-  const p = join22(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join21(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync7(dirname8(p), { recursive: true });
   writeFileSync7(p, JSON.stringify({ sha, completed_at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2) + "\n");
 }
-var DOMAIN_MAP_PENDING_REL = join22(".sterling", "domain-map-pending");
+var DOMAIN_MAP_PENDING_REL = join21(".sterling", "domain-map-pending");
 function parseDomainProposal(stdout) {
   const map = JSON.parse(stdout);
   if (!Array.isArray(map?.proposal?.add)) throw new Error("the output carries no proposal list");
@@ -18029,7 +17954,7 @@ function handoffRefusalRemedy(repoPath2) {
 function ownPluginRoot() {
   let dir = dirname8(fileURLToPath(new URL("../scripts/lib/update.mjs", import.meta.url).href));
   for (let i = 0; i < 4; i++) {
-    if (existsSync12(join22(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync12(join21(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname8(dir);
   }
   return null;
@@ -18039,11 +17964,11 @@ function installedCopyRefusal(host, { env = process.env, home = homedir7(), root
   return `Sterling is installed ${by} \u2014 update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 function machineStores(cwd) {
-  const stores = [join22(cwd, ".sterling", "sterling.db")];
-  const domains = join22(homedir7(), ".sterling", "domains");
+  const stores = [join21(cwd, ".sterling", "sterling.db")];
+  const domains = join21(homedir7(), ".sterling", "domains");
   if (existsSync12(domains)) {
     for (const name of readdirSync4(domains).sort()) {
-      stores.push(join22(domains, name, "sterling.db"));
+      stores.push(join21(domains, name, "sterling.db"));
     }
   }
   return stores.filter((store) => existsSync12(store));
@@ -18098,13 +18023,13 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
   const launcherHistory = launcherHistoryLoader(cwd);
   const projectLaunchers = (repoPath2) => {
     try {
-      if (!existsSync12(join22(repoPath2, ".sterling", "config.json"))) return [];
+      if (!existsSync12(join21(repoPath2, ".sterling", "config.json"))) return [];
       launcherSetup ??= { host: launcherHost({ env }), tools: launcherTools({ env, home }) };
       const { host, tools } = launcherSetup;
       const rows = [];
       const warns = [];
       if (tools.claude || tools.opencode || tools.agy) {
-        const ratio = JSON.parse(readFileSync16(join22(repoPath2, ".sterling", "config.json"), "utf8")).tui_split_ratio;
+        const ratio = JSON.parse(readFileSync16(join21(repoPath2, ".sterling", "config.json"), "utf8")).tui_split_ratio;
         if (ratio !== void 0 && !(typeof ratio === "number" && ratio > 0 && ratio <= 1)) throw new Error(`tui_split_ratio in .sterling/config.json is ${JSON.stringify(ratio)}, not a number in (0, 1]`);
         const r = ensureLaunchers(repoPath2, cwd, { splitPercent: Math.round((ratio ?? 0.35) * 100), host, tools, history: launcherHistory, installedCopy: false });
         rows.push(...r.items);
@@ -18143,6 +18068,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
       return null;
     }
   };
+  const retireQueue = [];
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
@@ -18166,7 +18092,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         failures++;
         continue;
       }
-      const gitignorePath = join22(p.repo_path, ".gitignore");
+      const gitignorePath = join21(p.repo_path, ".gitignore");
       if (existsSync12(gitignorePath)) {
         const repaired = withIdentityIgnore(readFileSync16(gitignorePath, "utf8"), { addIfAbsent: false });
         if (repaired.changed) {
@@ -18194,7 +18120,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         continue;
       }
       let failed = false;
-      const r = exec(nodeBin, [join22(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
+      const r = exec(nodeBin, [join21(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
@@ -18233,7 +18159,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         const agents = readAgentsMd(p.repo_path);
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
         if (knowledge?.refreshed) {
-          const refusal2 = writeAgentsMdChecked(p.repo_path, knowledge.text, readLayerSection(cwd));
+          const refusal2 = writeAgentsMdChecked(p.repo_path, knowledge.text);
           log(refusal2 ? `      \u26A0 AGENTS.md Knowledge section not rewritten: ${refusal2}` : `      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? "on" : "off"})`);
         }
         if (knowledge?.kept) log(`      \u26A0 AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
@@ -18241,13 +18167,14 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         if (!(err instanceof LayerMarkerError) && !isProjectReadRefusal(err)) throw err;
         log(`      \u26A0 AGENTS.md Knowledge section not checked: ${err.message}`);
       }
+      if (r.status === 0 && !failed && !layerLines.some((l) => l.startsWith("\u2717 Sterling layer REFUSED:"))) retireQueue.push(p);
       if (!withHandoff) {
         entry.handoff = "not_run";
       } else if (!handoffEnabled) {
         log(`      skipped \u2014 ${HANDOFF_OFF_DETAIL}`);
         entry.handoff = "skipped";
       } else {
-        const handoff = exec(nodeBin, [join22(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
+        const handoff = exec(nodeBin, [join21(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
         const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
         const handoffLine = handoffOut.split("\n")[0];
         entry.handoff = handoff.status;
@@ -18268,16 +18195,16 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
         }
       }
       if (failed) failures++;
-      if (existsSync12(join22(p.repo_path, ".sterling", "config.json"))) {
+      if (existsSync12(join21(p.repo_path, ".sterling", "config.json"))) {
         try {
-          const dm = exec(nodeBin, [join22(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
+          const dm = exec(nodeBin, [join21(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
           if (dm.status !== 0) throw new Error(`exit ${dm.status}: ${`${dm.stdout}${dm.stderr}`.trim().split("\n").slice(-3).join(" | ")}`);
           const { add } = parseDomainProposal(dm.stdout);
           entry.domain_proposal = add.map((a) => a.domain);
           if (add.length) {
             for (const a of add) log(`      domains: proposes adding '${a.domain}' \u2014 ${a.reason}`);
             log(`      Nothing was applied. Run /sterling:domains in ${p.repo_path} to see the map; it adds a domain only after you agree.`);
-            writeFileSync7(join22(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
+            writeFileSync7(join21(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
           }
         } catch (err) {
@@ -18300,6 +18227,37 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
       }
     }
     return failures;
+  };
+  const SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
+  const stampSafetyRefusals = (out, repo) => {
+    const lines = String(out ?? "").split("\n");
+    const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${join21(repo, "AGENTS.md")})`));
+    if (at === -1) return [];
+    const found = [];
+    for (let i = at + 1; i < lines.length && /^\s/.test(lines[i]); i++) {
+      if (SAFETY_REFUSAL.test(lines[i])) found.push([lines[i].trim(), /^\s{6}/.test(lines[i + 1] ?? "") ? lines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 "));
+    }
+    return found;
+  };
+  const retireAfterWriters = (contractOut = "") => {
+    for (const p of retireQueue.splice(0)) {
+      if (normPath(p.repo_path) === normPath(cwd)) continue;
+      const refused = stampSafetyRefusals(contractOut, p.repo_path);
+      if (refused.length) {
+        log(`  \u2717 ${p.name}: AGENTS.md update REFUSED by stamp-contract (${refused.join("; ")}); no CLAUDE.md or GEMINI.md was removed`);
+        fail(2);
+        continue;
+      }
+      const r = exec(nodeBin, [join21(cwd, "scripts", "retire-host-files.mjs"), "--target", p.repo_path], { cwd });
+      if (r.status !== 0) {
+        log(`  \u2717 ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout}${r.stderr}`.trim().split("\n").slice(-3).join(" | ")}; no CLAUDE.md or GEMINI.md was removed`);
+        fail(1);
+        continue;
+      }
+      const lines = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
+      if (lines.length) log(`  \u2022 ${p.name}:
+${lines.map((l) => `      ${l}`).join("\n")}`);
+    }
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`
@@ -18371,8 +18329,8 @@ AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_
     warnIfLauncherNamesOldBundle(project.repo_path, log);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
-    } else if (existsSync12(join22(cwd, "scripts", "stamp-contract.mjs"))) {
-      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join22(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
+    } else if (existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) {
+      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
         show: true,
         tolerate: true
       });
@@ -18383,6 +18341,7 @@ AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_
         fail(1);
       }
       if (report2.contract_drift) log("CONTRACT DRIFT in the invoking project \u2014 see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.");
+      retireAfterWriters(contract.out);
     }
     log("RESTART THE SESSION if agents changed \u2014 subagents load at CLI start.");
     return report2;
@@ -18446,7 +18405,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
           `  \u26A0 ${coverage.unregistered.length} project(s) carry Sterling agents but are NOT in the shared project registry, so the agent sync never visits them \u2014 their agents are frozen at install date:
 ` + coverage.unregistered.map((u) => `      ${u.path} (${u.agents.join(", ")})`).join("\n") + `
     Register each by running /sterling:init in that project, or refresh one now:
-      node ${join22(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
+      node ${join21(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
         );
       } else if (incomplete) {
         log(`  \u26A0 PARTIAL \u2014 nothing unregistered was found in what could be read, but ${incomplete} item(s) above could NOT be inspected, so coverage under these known roots is UNKNOWN, not clean`);
@@ -18474,7 +18433,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
     const lines = [];
     for (const p of [{ name: "Sterling clone", repo_path: cwd, clone: true }, ...list]) {
       if (!p.clone) {
-        const claudePath = join22(p.repo_path, "CLAUDE.md");
+        const claudePath = join21(p.repo_path, "CLAUDE.md");
         try {
           if (existsSync12(claudePath)) {
             const markers = preScaleDownMarkers(readFileSync16(claudePath, "utf8"));
@@ -18485,7 +18444,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
         }
       }
       if (!describe) continue;
-      const configPath = join22(p.repo_path, ".sterling", "config.json");
+      const configPath = join21(p.repo_path, ".sterling", "config.json");
       if (!existsSync12(configPath)) continue;
       let raw;
       try {
@@ -18518,6 +18477,7 @@ ${lines.join("\n")}`);
         log(`
 \u25B8 already current at ${before.head_short}; refreshing ${list.length} registered project(s) \u2014 each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
+        retireAfterWriters();
       }
       if (report2.exit === 0) {
         log(`
@@ -18540,7 +18500,7 @@ Already current \u2014 nothing to do for the core update at ${before.head_short}
       return report2;
     }
     if (reexec2) {
-      const script = join22(cwd, "scripts", "update.mjs");
+      const script = join21(cwd, "scripts", "update.mjs");
       const failed = (why) => {
         log(`
 \u2717 RE-EXEC of the updated updater FAILED \u2014 ${why}. The fast-forward stands and nothing after it ran; rerun /sterling:update to finish (it resumes from the build step).`);
@@ -18623,15 +18583,15 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         return report2;
       }
       if (version < 2) {
-        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join22(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
+        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join21(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
         log(`  \u25B8 migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough \u2014 MCP servers survive it) before it can write again`);
       }
     }
   } else {
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
-  if (existsSync12(join22(cwd, ".sterling", "config.json"))) {
-    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join22(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
+  if (existsSync12(join21(cwd, ".sterling", "config.json"))) {
+    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join21(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
   } else {
     log(
       "\n\u25B8 re-bake machine artifacts \u2014 SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is committed and arrived with the fast-forward. Run /sterling:init in a project \u2014 not here \u2014 if this machine has never done so."
@@ -18650,7 +18610,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     }
   } else if (opts2.projects !== false && projectList.length) {
     for (const p of projectList) {
-      const projStore = join22(p.repo_path, ".sterling", "sterling.db");
+      const projStore = join21(p.repo_path, ".sterling", "sterling.db");
       if (!existsSync12(projStore)) continue;
       let projVersion;
       try {
@@ -18663,7 +18623,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         continue;
       }
       if (projVersion < 2) {
-        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join22(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
+        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join21(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
         if (!migrated.ok) {
           log(`  \u2717 ${p.name}: store migration FAILED \u2014 this project's store stays unmigrated; continuing with the remaining projects and the agent-sync fan-out below.`);
           report2.migrations.push({ name: p.name, repo_path: p.repo_path, ok: false });
@@ -18687,12 +18647,15 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync12(join22(cwd, "scripts", "stamp-contract.mjs"))) {
-    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join22(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
+  if (opts2.projects !== false && existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) {
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
       show: true,
       tolerate: true
     });
     report2.contract_drift = !contract.ok;
+    retireAfterWriters(contract.out);
+  } else {
+    retireAfterWriters();
   }
   log(
     `
@@ -18725,8 +18688,8 @@ var argOf = (name) => {
   const i = process.argv.indexOf(name);
   return i !== -1 ? process.argv[i + 1] : void 0;
 };
-var pluginRoot = resolve10(dirname9(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
-var target = resolve10(argOf("--target") ?? pluginRoot);
+var pluginRoot = resolve9(dirname9(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
+var target = resolve9(argOf("--target") ?? pluginRoot);
 var opts = {
   check: process.argv.includes("--check"),
   force: process.argv.includes("--force"),

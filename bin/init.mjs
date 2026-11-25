@@ -20473,70 +20473,31 @@ function scanLines(raw) {
 }
 var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-var RAW_HTML_OPEN = /<(pre|code|textarea|script|style)\b[^>]*>/gi;
-function htmlAfter(content, { comment, raw }) {
-  let pos = 0;
-  for (; ; ) {
-    if (raw) {
-      const close = content.toLowerCase().indexOf(`</${raw}`, pos);
-      if (close === -1) return { comment, raw };
-      raw = null;
-      pos = close + 2;
-      continue;
-    }
-    if (comment) {
-      const close = content.indexOf("-->", pos);
-      if (close === -1) return { comment, raw };
-      comment = false;
-      pos = close + 3;
-      continue;
-    }
-    const open2 = content.indexOf("<!--", pos);
-    RAW_HTML_OPEN.lastIndex = pos;
-    const tag = RAW_HTML_OPEN.exec(content);
-    if (open2 === -1 && !tag) return { comment, raw };
-    if (tag && (open2 === -1 || tag.index < open2)) {
-      raw = tag[1].toLowerCase();
-      pos = tag.index + tag[0].length;
-    } else {
-      comment = true;
-      pos = open2 + 4;
-    }
-  }
-}
+var MARKER_WORD = /sterling:(?:begin|end)/;
 function findMarkers(lines) {
   const begins = [];
   const ends = [];
-  const malformed = [];
-  const contained = [];
+  const other = [];
   let fence = null;
-  let html = { comment: false, raw: null, line: -1 };
   lines.forEach(({ content }, i) => {
     if (fence) {
+      if (MARKER_WORD.test(content)) other.push(i);
       const close = FENCE_CLOSE.exec(content);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
-      return;
-    }
-    if (html.comment || html.raw) {
-      if (MARKER_LIKE.test(content)) contained.push(i);
-      html = { ...htmlAfter(content, html), line: html.line };
       return;
     }
     const open2 = FENCE_OPEN.exec(content);
     if (open2 && !(open2[1][0] === "`" && open2[2].includes("`"))) {
       fence = { ch: open2[1][0], len: open2[1].length, line: i };
+      if (MARKER_WORD.test(content)) other.push(i);
       return;
     }
     if (LAYER_BEGIN.test(content)) begins.push(i);
     else if (content === LAYER_END) ends.push(i);
-    else if (MARKER_LIKE.test(content)) malformed.push(i);
-    const next = htmlAfter(content, html);
-    html = { ...next, line: next.comment || next.raw ? i : -1 };
+    else if (MARKER_WORD.test(content)) other.push(i);
   });
   if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
-  if (html.comment || html.raw) return { error: `AGENTS.md has ${html.comment ? "an HTML comment" : `a <${html.raw}> block`} opened at line ${html.line + 1} that is never closed, so the Sterling layer cannot be placed safely` };
-  if (contained.length) return { error: `AGENTS.md line ${contained.map((i) => i + 1).join(", ")} names a sterling marker inside an HTML comment or raw HTML block, so it cannot be told from a live marker` };
-  if (malformed.length) return { error: `AGENTS.md line ${malformed.map((i) => i + 1).join(", ")} looks like a sterling marker but is not the exact marker line` };
+  if (other.length) return { error: `AGENTS.md line ${other.map((i) => i + 1).join(", ")} names a sterling marker but is not one exact marker line outside code` };
   if (!begins.length && !ends.length) return { begin: null, end: null };
   if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
   return { error: `AGENTS.md has ${begins.length} sterling:begin and ${ends.length} sterling:end marker lines outside code (one of each, begin first, is required)` };
@@ -20580,15 +20541,10 @@ function readAgentsMd(projectDir, { readFile = readFileSync24 } = {}) {
   if (text === null) throw new LayerMarkerError("AGENTS.md is not valid UTF-8 text, so rewriting it would change bytes Sterling cannot read; Sterling leaves it alone");
   return { exists: true, path, text };
 }
-function plannedAgentsMdRefusal(text, section) {
-  let withLayer;
-  try {
-    withLayer = applyLayer(text, section);
-  } catch (err) {
-    if (err instanceof LayerMarkerError) return err.message;
-    throw err;
-  }
-  return capRefusal(withLayer);
+function plannedAgentsMdRefusal(text) {
+  const found = findMarkers(scanLines(text));
+  if (found.error) return found.error;
+  return capRefusal(text);
 }
 function verifyLayerOnDisk(projectDir, section) {
   let agents;
@@ -20614,12 +20570,10 @@ function capRefusal(text) {
   return `AGENTS.md would be ${n.toLocaleString("en-US")} bytes with the Sterling layer, over agy's ${AGENTS_MD_AGY_CAP_BYTES.toLocaleString("en-US")}-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed. Shorten the project's own text in AGENTS.md by at least ${(n - AGENTS_MD_AGY_CAP_BYTES).toLocaleString("en-US")} bytes (move detail into a linked doc), then rerun`;
 }
 var RENDERERS = { claude: renderClaudeText, agy: renderAgyText };
-var FILLED_TOKENS = { claude: /* @__PURE__ */ new Set(["PROJECT_NAME"]), agy: /* @__PURE__ */ new Set(["PROJECT_NAME", "STERLING_ROOT"]) };
 var TOKEN = /\{\{([A-Z_]+)\}\}/g;
 function tokenRender(templateText, host) {
   return normalize7(RENDERERS[host](normalize7(templateText), HOST_TEMPLATE_REL));
 }
-var reproducible = (tokenText, host) => [...tokenText.matchAll(TOKEN)].every((m) => FILLED_TOKENS[host].has(m[1]));
 function fill(tokenText, { name: name4, root }) {
   return tokenText.replace(TOKEN, (whole, key) => key === "PROJECT_NAME" ? name4 : key === "STERLING_ROOT" && root !== null ? root : whole);
 }
@@ -20640,14 +20594,9 @@ function loadHostFileHistory(pluginRoot2) {
   }
   const lines = parsed?.lines;
   const isText = (t) => Array.isArray(t) && t.every((i) => Number.isInteger(i) && i >= 0 && i < lines.length);
-  const valid = parsed?.version === 2 && Array.isArray(lines) && lines.every((l) => typeof l === "string") && ["claude", "agy"].every((h) => Array.isArray(parsed.renders?.[h]) && parsed.renders[h].every(isText)) && Array.isArray(parsed.presplit_heads) && parsed.presplit_heads.every(isText);
+  const valid = parsed?.version === 3 && Array.isArray(lines) && lines.every((l) => typeof l === "string") && Array.isArray(parsed.presplit_heads) && parsed.presplit_heads.every(isText);
   if (!valid) return { ok: false, reason: `${fwd9(path)} does not have the expected shape` };
-  const decode = (t) => t.map((i) => lines[i]).join("\n");
-  return {
-    ok: true,
-    renders: { claude: parsed.renders.claude.map(decode).filter((t) => reproducible(t, "claude")), agy: parsed.renders.agy.map(decode).filter((t) => reproducible(t, "agy")) },
-    heads: parsed.presplit_heads.map(decode)
-  };
+  return { ok: true, heads: parsed.presplit_heads.map((t) => t.map((i) => lines[i]).join("\n")) };
 }
 function knownHostValues({ projectDir, pluginRoot: pluginRoot2, projectNames = [], roots = [], home = homedir10() }) {
   const names = [...projectNames];
@@ -20663,33 +20612,19 @@ function knownHostValues({ projectDir, pluginRoot: pluginRoot2, projectNames = [
   const allRoots = [resolve11(pluginRoot2), join32(home, ".gemini", "sterling-root"), ...roots].map(fwd9);
   return { names: [...new Set(names.filter(Boolean))], roots: [...new Set(allRoots.filter(Boolean))] };
 }
-function classifyHostFile(fileText, host, { pluginRoot: pluginRoot2, known, history }) {
+function classifyHostFile(fileText, host, { pluginRoot: pluginRoot2, known }) {
   const text = normalize7(fileText);
   if (host === "claude" && (text === "@AGENTS.md" || text === "@AGENTS.md\n")) return { pure: true };
   const combos = known.names.flatMap((name4) => host === "agy" ? known.roots.map((root) => ({ name: name4, root })) : [{ name: name4, root: null }]);
-  const matches = (tokenText) => reproducible(tokenText, host) && combos.some((v) => fill(tokenText, v) === text);
-  if (matches(tokenRender(readFileSync24(join32(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host))) return { pure: true };
-  const shipped = history ?? loadHostFileHistory(pluginRoot2);
-  if (!shipped.ok) return { pure: false, unverified: shipped.reason };
-  return shipped.renders[host].some(matches) ? { pure: true } : { pure: false };
+  const current = tokenRender(readFileSync24(join32(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host);
+  return { pure: combos.some((v) => fill(current, v) === text) };
 }
 var HOSTS = [
   { file: "CLAUDE.md", host: "claude", consequence: "Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists" },
   { file: "GEMINI.md", host: "agy", consequence: "agy loads it next to AGENTS.md, so its text is read twice and counts against agy's 24,000-byte limit" }
 ];
-function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, history, readFile = readFileSync24 }) {
+function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, readFile = readFileSync24 }) {
   const rows = [];
-  let shipped = history;
-  const loadHistory = () => {
-    if (!shipped) {
-      try {
-        shipped = loadHostFileHistory(pluginRoot2);
-      } catch (err) {
-        shipped = { ok: false, reason: `${HOST_FILE_HISTORY_REL} could not be read (${err?.code ?? err?.message ?? err})` };
-      }
-    }
-    return shipped;
-  };
   for (const { file, host, consequence } of HOSTS) {
     const path = join32(projectDir, file);
     const keep = (why, remedy = `Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete ${file}`) => {
@@ -20725,16 +20660,13 @@ function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, hi
     }
     let verdict;
     try {
-      verdict = classifyHostFile(text, host, { pluginRoot: pluginRoot2, known, history: loadHistory() });
+      verdict = classifyHostFile(text, host, { pluginRoot: pluginRoot2, known });
     } catch (err) {
-      verdict = { pure: false, unverified: `${HOST_TEMPLATE_REL} could not be rendered (${err?.message ?? err})` };
-    }
-    if (verdict.unverified) {
-      keep(`could not be verified as Sterling's generated text (${verdict.unverified}); it may be an older Sterling render`, `If it holds no rules of your own, delete ${file}; otherwise move them into AGENTS.md outside the sterling markers, then delete it`);
+      keep(`could not be compared with Sterling's render (${HOST_TEMPLATE_REL}: ${err?.message ?? err})`);
       continue;
     }
     if (!verdict.pure) {
-      keep("holds text that is not Sterling's generated layer");
+      keep("holds text that is not Sterling's generated layer", `It may be an older Sterling render: if it holds no rules of your own, delete ${file}; otherwise move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete ${file}`);
       continue;
     }
     let again;
@@ -21552,7 +21484,15 @@ if (agentsMdRefusal) {
   if (knowledge.refreshed) refresh.refreshed.push("Knowledge section");
   if (knowledge.kept) refresh.kept.push({ name: "Knowledge section", reason: knowledge.kept });
   refresh.text = knowledge.text;
-  const refusal3 = plannedAgentsMdRefusal(refresh.text, layerSection);
+  let planned = null;
+  let refusal3 = null;
+  try {
+    planned = applyLayer(refresh.text, layerSection);
+    refusal3 = plannedAgentsMdRefusal(planned);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    refusal3 = err.message;
+  }
   if (refusal3) {
     const detail = `${refusal3}; nothing in AGENTS.md was written and no CLAUDE.md or GEMINI.md was removed`;
     items.push({ item: "AGENTS.md", status: "manual", detail });
@@ -21560,7 +21500,7 @@ if (agentsMdRefusal) {
 \u26A0 ${detail}. Fix it, then rerun /sterling:init.`);
     layerState = { ok: false, reason: "the planned AGENTS.md was refused" };
   } else {
-    const withLayer = applyLayer(refresh.text, layerSection);
+    const withLayer = planned;
     if (withLayer !== refresh.text) refresh.refreshed.push("Sterling layer section");
     refresh.text = withLayer;
     if (withLayer !== agentsMdRaw) writeAtomic(agentsMdPath, withLayer);

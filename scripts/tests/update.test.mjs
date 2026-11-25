@@ -200,7 +200,7 @@ test('describe surfaces an annotated tag as the human-legible version; no tags s
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 
-function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, contractStatus = 0, head = HEAD_A, remoteHead = head, lsRemote = null, mergeBase = null } = {}) {
+function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, contractStatus = 0, contractStdout = null, retireStdout = '', head = HEAD_A, remoteHead = head, lsRemote = null, mergeBase = null } = {}) {
   const calls = [];
   let merged = false;
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -233,7 +233,10 @@ function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = n
     if (cmd === 'npm') return ok('npm output');
     // stamp-contract exits 2 on a refusal it will not auto-resolve
     if (args[0]?.endsWith('stamp-contract.mjs')) {
-      return { status: contractStatus, stdout: contractStatus ? '✗ comsoft: HAND_TUNED_REFUSED\n' : '7 already in sync, 0 refusal(s).\n', stderr: '' };
+      return { status: contractStatus, stdout: contractStdout ?? (contractStatus ? '✗ comsoft: HAND_TUNED_REFUSED\n' : '7 already in sync, 0 refusal(s).\n'), stderr: '' };
+    }
+    if (args[0]?.endsWith('retire-host-files.mjs')) {
+      return { status: 0, stdout: retireStdout, stderr: '' };
     }
     // node <script> --target <dir>
     if (args[0]?.endsWith('sync-agents.mjs')) {
@@ -937,6 +940,45 @@ function authoringCwd(role = 'authoring') {
   writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
   return cwd;
 }
+
+// Review loop 3 of #329 (ruling C): host files are checked for removal only after stamp-contract,
+// the last AGENTS.md writer; a stamp-contract refusal to update AGENTS.md itself fails the update.
+test('authoring role: retire-host-files runs after stamp-contract for the invoking project and its lines are relayed', async () => {
+  const cwd = authoringCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-retire-'));
+  try {
+    const removed = "Sterling layer: CLAUDE.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec, calls } = fakeExec({ retireStdout: `${removed}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dir }], invokingProject: dir, opts: {} });
+    assert.equal(report.exit, 0);
+    const stamp = calls.findIndex((c) => c.includes('stamp-contract.mjs'));
+    const retire = calls.findIndex((c) => c.includes('retire-host-files.mjs'));
+    assert.ok(stamp !== -1 && retire > stamp, `retirement runs after the contract step:\n${calls.join('\n')}`);
+    assert.match(calls[retire], new RegExp(`--target ${dir}$`));
+    assert.ok(lines.join('\n').includes(removed));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a stamp-contract refusal to update AGENTS.md (planned file over the cap) fails the update, is named, and no host file is checked for removal', async () => {
+  const cwd = authoringCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-retire-'));
+  try {
+    const contractStdout = `✗ dome (${join(dir, 'AGENTS.md')})\n    PLANNED_AGENTS_MD_REFUSED  AGENTS.md (write)…\n      AGENTS.md would be 24,310 bytes with the Sterling layer, over agy's 24,000-byte cap. Nothing in AGENTS.md was changed.\n`;
+    const { exec, calls } = fakeExec({ contractStatus: 2, contractStdout });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dir }], invokingProject: dir, opts: {} });
+    assert.equal(report.exit, 2);
+    assert.deepEqual(calls.filter((c) => c.includes('retire-host-files.mjs')), []);
+    assert.match(lines.join('\n'), /✗ dome: AGENTS\.md update REFUSED by stamp-contract \(PLANNED_AGENTS_MD_REFUSED .*24,310 bytes/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the invoking project, prints the loud line', async () => {
   const cwd = authoringCwd();

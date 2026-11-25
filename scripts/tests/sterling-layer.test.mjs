@@ -26,6 +26,7 @@ import {
   knownHostValues,
   readClaudeSessionBlock,
   readLayerSection,
+  retireAfterWriters,
   retireHostFiles,
   syncLayer,
 } from '../lib/sterling-layer.mjs';
@@ -50,6 +51,12 @@ function project({ agents } = {}) {
 }
 const validAgents = () => `# P\n\n- **Mine.** Keep me.\n\n${readLayerSection(repo)}\n`;
 const read = (dir, file) => readFileSync(join(dir, file), 'utf8');
+// The update sequence for one project: the layer pass, then retirement once every writer is done
+// (review loop 3 of #329 moved retirement out of syncLayer into retireAfterWriters).
+const syncThenRetire = (dir) => {
+  const r = syncLayer({ projectDir: dir, pluginRoot: repo });
+  return { ...r, lines: [...r.lines, ...retireAfterWriters({ projectDir: dir, pluginRoot: repo })] };
+};
 
 // ---- markers and the splice ----
 
@@ -107,13 +114,23 @@ test('applyLayer refuses a begin marker line missing its closing --> even with a
   assert.throws(() => applyLayer(broken, section), LayerMarkerError);
 });
 
-test('applyLayer ignores marker lines inside fenced code: an example is not the section, and a real section beside it is replaced alone', () => {
+// Review loop 3 of #329 (ruling B): a line naming a sterling marker anywhere else, fenced examples
+// included, refuses the file; the earlier "ignore a fenced example" behaviour is removed on purpose.
+test('applyLayer refuses a marker example inside fenced code, with or without a real section beside it', () => {
   const section = readLayerSection(repo);
   const begin = section.split('\n')[0];
   const example = `## How the markers look\n\n\`\`\`md\n${begin}\n(example)\n${LAYER_END}\n\`\`\`\n`;
-  assert.equal(applyLayer(example, section), `${example}\n${section}\n`, 'no real markers: appended, example kept');
-  const withReal = `${example}\n${section.replace('Sterling layer (generated)', 'OLD')}\n`;
-  assert.equal(applyLayer(withReal, section), `${example}\n${section}\n`, 'only the real section is replaced');
+  assert.throws(() => applyLayer(example, section), LayerMarkerError);
+  assert.throws(() => applyLayer(`${example}\n${section}\n`, section), LayerMarkerError);
+  assert.throws(() => applyLayer(`# P\n\nSee the sterling:begin line below.\n\n${section}\n`, section), LayerMarkerError, 'prose naming a marker refuses too');
+});
+
+test('ordinary inline code and HTML in project text never cause a refusal', () => {
+  const section = readLayerSection(repo);
+  const text = '# P\n\n- Use `<pre>` for preformatted output.\n- Start a comment with `<!--`.\n<!-- a one-line comment -->\n<pre>\nraw text\n</pre>\n<!-- an open comment\n';
+  assert.equal(applyLayer(text, section), `${text}\n${section}\n`);
+  const withSection = `${text}\n${section}\n`;
+  assert.equal(applyLayer(withSection, section), withSection);
 });
 
 test('applyLayer refuses a file whose code fence is never closed, since its markers cannot be told from code', () => {
@@ -201,12 +218,12 @@ test('classifyHostFile: a rule added on the project-name heading line, another p
 });
 
 // A real older render, checked from a plugin copy with no git: only the shipped history decides.
-function noGitPluginRoot({ history = true } = {}) {
+function noGitPluginRoot() {
   const root = tmp();
   mkdirSync(join(root, 'templates'));
   mkdirSync(join(root, 'bin'));
   cpSync(join(repo, 'templates', 'target-claude-md.md'), join(root, 'templates', 'target-claude-md.md'));
-  if (history) cpSync(join(repo, 'bin', 'host-file-history.json'), join(root, 'bin', 'host-file-history.json'));
+  cpSync(join(repo, 'bin', 'host-file-history.json'), join(root, 'bin', 'host-file-history.json'));
   return root;
 }
 const olderTemplate = () => {
@@ -223,17 +240,12 @@ const olderTemplate = () => {
   throw new Error('fixture: no older claude render differs from the current one');
 };
 
-test('classifyHostFile on an installed copy without git: an older render is pure through the shipped history; a missing history is reported as could-not-verify, not as project text', () => {
+// Review loop 3 of #329 (ruling A): only the current render (and the stub) is pure. Recognising an
+// older render through the shipped history is removed on purpose; such a file is kept.
+test('classifyHostFile: an older Sterling render is not pure, with or without the shipped history', () => {
   const dir = project();
   const older = claudeRender('demo', olderTemplate());
-  const withHistory = noGitPluginRoot();
-  assert.equal(existsSync(join(withHistory, '.git')), false);
-  assert.deepEqual(classifyHostFile(older, 'claude', { pluginRoot: withHistory, known: known(dir) }), { pure: true });
-  assert.deepEqual(classifyHostFile(`${older}- **Mine.**\n`, 'claude', { pluginRoot: withHistory, known: known(dir) }), { pure: false });
-  const without = noGitPluginRoot({ history: false });
-  const verdict = classifyHostFile(older, 'claude', { pluginRoot: without, known: known(dir) });
-  assert.equal(verdict.pure, false);
-  assert.match(verdict.unverified, /host-file-history\.json is missing/);
+  for (const root of [repo, noGitPluginRoot()]) assert.deepEqual(classifyHostFile(older, 'claude', { pluginRoot: root, known: known(dir) }), { pure: false });
 });
 
 // ---- retirement: only after the layer is verified, only a regular file, only Sterling's text ----
@@ -297,14 +309,13 @@ test('retireHostFiles keeps a CLAUDE.md that is a directory or a symbolic link, 
   assert.equal(read(unreadable, 'CLAUDE.md'), claudeRender());
 });
 
-test('retireHostFiles keeps a file it cannot verify and says "could not be verified", separately from project text', () => {
+test('retireHostFiles keeps an older Sterling render byte for byte, and the warning says it may be one the user can delete', () => {
   const dir = project();
   const older = claudeRender('demo', olderTemplate());
   writeFileSync(join(dir, 'CLAUDE.md'), older);
-  const { rows } = retireHostFiles({ projectDir: dir, pluginRoot: noGitPluginRoot({ history: false }), known: known(dir), layer: OK });
+  const { rows } = retireHostFiles({ projectDir: dir, pluginRoot: repo, known: known(dir), layer: OK });
   assert.deepEqual(rows.map((r) => r.status), ['kept']);
-  assert.match(rows[0].warning, /could not be verified as Sterling's generated text/);
-  assert.doesNotMatch(rows[0].warning, /holds text that is not/);
+  assert.match(rows[0].warning, /may be an older Sterling render: if it holds no rules of your own, delete CLAUDE\.md/);
   assert.equal(read(dir, 'CLAUDE.md'), older);
 });
 
@@ -316,7 +327,7 @@ test('syncLayer keeps a CLAUDE.md with a rule added on its project-name heading 
   const gemini = agyRender('demo', '/opt/elsewhere');
   writeFileSync(join(dir, 'CLAUDE.md'), claude);
   writeFileSync(join(dir, 'GEMINI.md'), gemini);
-  syncLayer({ projectDir: dir, pluginRoot: repo });
+  syncThenRetire(dir);
   assert.equal(read(dir, 'CLAUDE.md'), claude);
   assert.equal(read(dir, 'GEMINI.md'), gemini);
 });
@@ -326,14 +337,14 @@ test('syncLayer never removes a symbolic link named CLAUDE.md, even to a pure re
   const target = join(tmp(), 'pure.md');
   writeFileSync(target, claudeRender());
   symlinkSync(target, join(dir, 'CLAUDE.md'));
-  syncLayer({ projectDir: dir, pluginRoot: repo });
+  syncThenRetire(dir);
   assert.ok(lstatSync(join(dir, 'CLAUDE.md')).isSymbolicLink());
 });
 
 test('syncLayer keeps a pure CLAUDE.md when the project has no AGENTS.md', () => {
   const dir = project();
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  syncLayer({ projectDir: dir, pluginRoot: repo });
+  syncThenRetire(dir);
   assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
   assert.equal(existsSync(join(dir, 'AGENTS.md')), false);
 });
@@ -342,7 +353,7 @@ test('syncLayer on broken markers leaves AGENTS.md untouched and keeps a pure CL
   const broken = `# P\n\n${readLayerSection(repo).split('\n')[0]}\n\nno end\n`;
   const dir = project({ agents: broken });
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  syncLayer({ projectDir: dir, pluginRoot: repo });
+  syncThenRetire(dir);
   assert.equal(read(dir, 'AGENTS.md'), broken);
   assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
 });
@@ -352,7 +363,7 @@ test('syncLayer refuses an AGENTS.md that would pass agy\'s 24,000-byte cap: not
   const agents = `# P\n\n${rule.repeat(Math.ceil(20_412 / bytes(rule)))}`.slice(0, 20_412);
   const dir = project({ agents });
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  syncLayer({ projectDir: dir, pluginRoot: repo });
+  syncThenRetire(dir);
   assert.equal(read(dir, 'AGENTS.md'), agents, 'AGENTS.md unchanged');
   assert.equal(read(dir, 'CLAUDE.md'), claudeRender(), 'CLAUDE.md kept');
 });
@@ -361,7 +372,7 @@ test('syncLayer reports refusals and kept files with the prefixes /sterling:upda
   const rule = '- **Project rule.** A long project rule that this project keeps in its AGENTS.md file.\n';
   const dir = project({ agents: `# P\n\n${rule.repeat(260)}` });
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  const { lines, refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  const { lines, refused } = syncThenRetire(dir);
   assert.equal(refused, 1);
   assert.ok(lines.some((l) => /^✗ Sterling layer REFUSED: AGENTS\.md would be [\d,]+ bytes .*over agy's 24,000-byte cap/.test(l)), lines.join('\n'));
   assert.ok(lines.some((l) => /^⚠ Sterling layer: CLAUDE\.md was not checked for removal/.test(l)), lines.join('\n'));
@@ -373,7 +384,7 @@ test('syncLayer regenerates the section, preserves project rules outside the mar
   const tail = '\n\n- **Also mine.**\n\n\n';
   const dir = project({ agents: `${head}${section.replace('Sterling layer (generated)', 'STALE')}${tail}` });
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  const first = syncLayer({ projectDir: dir, pluginRoot: repo });
+  const first = syncThenRetire(dir);
   assert.equal(first.refused, 0);
   assert.equal(read(dir, 'AGENTS.md'), `${head}${section}${tail}`);
   assert.ok(first.lines.includes('Sterling layer: AGENTS.md regenerated'), first.lines.join('\n'));
@@ -401,50 +412,46 @@ test('a pre-split CLAUDE.md render whose project-fact tokens were left unfilled 
   assert.equal(read(dir, 'CLAUDE.md'), text);
 });
 
-test('the shipped history holds no render with a token its writer did not fill', () => {
+// Review loop 3 of #329 (ruling A): the shipped history authorises no deletion; it holds only the
+// pre-split heads init reads to carry a project's tail.
+test('the shipped history holds only pre-split heads, no render fingerprints', () => {
   const h = repoHistory();
-  const texts = (host) => h.renders[host].map((t) => t.map((i) => h.lines[i]).join('\n'));
-  for (const t of texts('claude')) assert.deepEqual([...new Set(t.match(/\{\{[A-Z_]+\}\}/g) ?? [])].filter((k) => k !== '{{PROJECT_NAME}}'), []);
-  for (const t of texts('agy')) assert.deepEqual([...new Set(t.match(/\{\{[A-Z_]+\}\}/g) ?? [])].filter((k) => k !== '{{PROJECT_NAME}}' && k !== '{{STERLING_ROOT}}'), []);
+  assert.deepEqual(Object.keys(h).sort(), ['lines', 'presplit_heads', 'version']);
+  assert.ok(h.presplit_heads.length > 0);
 });
 
-test('an older render for a project named Sterling or project is recognised: values are filled at the token positions, never substituted back into the file', () => {
-  const withHistory = noGitPluginRoot();
+test('the current render for a project named Sterling, project or CLAUDE is recognised: values are filled at the token positions, never substituted back into the file', () => {
   for (const name of ['Sterling', 'project', 'CLAUDE']) {
     const dir = project();
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: name }));
-    const older = claudeRender(name, olderTemplate());
-    assert.deepEqual(classifyHostFile(older, 'claude', { pluginRoot: withHistory, known: known(dir) }), { pure: true }, name);
+    assert.deepEqual(classifyHostFile(claudeRender(name), 'claude', { pluginRoot: repo, known: known(dir) }), { pure: true }, name);
   }
 });
 
-test('markers inside an HTML comment or a <pre> block are refused, never treated as the live section', () => {
-  const section = readLayerSection(repo);
-  for (const text of [
-    `# P\n\n<!--\nexample:\n${section}\n-->\n\n- **Mine.**\n`,
-    `# P\n\n<pre>\n${section}\n</pre>\n`,
-    `# P\n\n<!-- an unclosed comment\n\n- **Mine.**\n`,
-  ]) assert.throws(() => applyLayer(text, section), LayerMarkerError, text.slice(0, 40));
-  const inline = `# P\n\n<!-- one-line comment -->\n<code>x</code>\n`;
-  assert.equal(applyLayer(inline, section), `${inline}\n${section}\n`, 'a closed one-line comment or element is ordinary text');
+test('a GEMINI.md holding the agy render of an older template revision is kept: only the current render is removed', () => {
+  const sha = templateShas().find((h) => {
+    try {
+      return renderAgyText(gitShow(h), 't') !== renderAgyText(hostTemplate(), 't') && !gitShow(h).includes('{{CONVENTIONS_SECTION}}');
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(sha, 'fixture: an older revision with a different agy render');
+  const dir = project({ agents: validAgents() });
+  const gemini = renderAgyText(gitShow(sha), 't').replaceAll('{{PROJECT_NAME}}', 'demo').replaceAll('{{STERLING_ROOT}}', repo);
+  writeFileSync(join(dir, 'GEMINI.md'), gemini);
+  retireAfterWriters({ projectDir: dir, pluginRoot: repo });
+  assert.equal(read(dir, 'GEMINI.md'), gemini);
 });
 
-test('syncLayer leaves an AGENTS.md whose markers sit in an HTML comment byte-identical and keeps a pure CLAUDE.md', () => {
-  const agents = `# P\n\n<!--\n${readLayerSection(repo)}\n-->\n`;
-  const dir = project({ agents });
-  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  const { refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
-  assert.equal(refused, 1);
-  assert.equal(read(dir, 'AGENTS.md'), agents);
-  assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
-});
+
 
 test('syncLayer refuses an AGENTS.md with bytes that are not valid UTF-8: every byte kept, nothing removed', () => {
   const dir = project();
   const raw = Buffer.concat([Buffer.from('# P\n\nLatin-1 caf'), Buffer.from([0xe9]), Buffer.from('\n')]);
   writeFileSync(join(dir, 'AGENTS.md'), raw);
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  const { refused, lines } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  const { refused, lines } = syncThenRetire(dir);
   assert.equal(refused, 1, lines.join('\n'));
   assert.ok(readFileSync(join(dir, 'AGENTS.md')).equals(raw), 'AGENTS.md bytes unchanged');
   assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
@@ -456,7 +463,7 @@ test('syncLayer never follows or replaces a symlinked AGENTS.md: link, target an
   const outside = join(tmp(), 'AGENTS.md');
   writeFileSync(outside, '# Shared rules\n');
   symlinkSync(outside, join(dir, 'AGENTS.md'));
-  const { refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  const { refused } = syncThenRetire(dir);
   assert.equal(refused, 1);
   assert.ok(lstatSync(join(dir, 'AGENTS.md')).isSymbolicLink());
   assert.equal(readlinkSync(join(dir, 'AGENTS.md')), outside);
@@ -469,15 +476,37 @@ test('syncLayer refuses an AGENTS.md hard-linked to another file, leaving both u
   const other = join(tmp(), 'other.md');
   writeFileSync(other, '# Other\n');
   linkSync(other, join(dir, 'AGENTS.md'));
-  const { refused } = syncLayer({ projectDir: dir, pluginRoot: repo });
+  const { refused } = syncThenRetire(dir);
   assert.equal(refused, 1);
   assert.equal(readFileSync(other, 'utf8'), '# Other\n');
 });
 
-test('plannedAgentsMdRefusal judges the whole planned file with the layer in: a text that fits alone but not with the layer is refused', () => {
+// Review loop 3 of #329 (ruling C): each writer checks the exact bytes it writes.
+test('plannedAgentsMdRefusal judges exactly the bytes given: a file with a large stale section over the cap is refused even though the current layer would fit', () => {
   const section = readLayerSection(repo);
+  const stale = section.replace(LAYER_END, `${'- **Old generated rule.** Text a newer layer dropped.\n'.repeat(400)}${LAYER_END}`);
+  const text = `# P\n\n${stale}\n`;
+  assert.ok(bytes(text) > AGENTS_MD_AGY_CAP_BYTES && bytes(applyLayer(text, section)) < AGENTS_MD_AGY_CAP_BYTES, 'fixture');
+  assert.match(plannedAgentsMdRefusal(text), /over agy's 24,000-byte cap/);
+  assert.equal(plannedAgentsMdRefusal(applyLayer(text, section)), null);
   const filler = `# P\n\n${'- **Rule.** Project text.\n'.repeat(700)}`;
-  assert.ok(bytes(filler) < AGENTS_MD_AGY_CAP_BYTES && bytes(applyLayer(filler, section)) > AGENTS_MD_AGY_CAP_BYTES, 'fixture');
-  assert.match(plannedAgentsMdRefusal(filler, section), /over agy's 24,000-byte cap/);
-  assert.equal(plannedAgentsMdRefusal('# P\n', section), null);
+  assert.equal(plannedAgentsMdRefusal(filler), null, 'a file under the cap as written is accepted as written');
+});
+
+test('syncLayer alone removes no host file: retirement is retireAfterWriters, after every writer', () => {
+  const dir = project({ agents: validAgents() });
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  syncLayer({ projectDir: dir, pluginRoot: repo });
+  assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
+  assert.ok(retireAfterWriters({ projectDir: dir, pluginRoot: repo }).some((l) => /^Sterling layer: CLAUDE\.md removed/.test(l)));
+  assert.equal(existsSync(join(dir, 'CLAUDE.md')), false);
+});
+
+test('retireAfterWriters keeps a pure CLAUDE.md when AGENTS.md on disk is over agy\'s cap', () => {
+  const section = readLayerSection(repo);
+  const dir = project({ agents: `# P\n\n${'- **Rule.** Project text.\n'.repeat(700)}\n${section}\n` });
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  const lines = retireAfterWriters({ projectDir: dir, pluginRoot: repo });
+  assert.ok(lines.some((l) => /over agy's 24,000-byte cap/.test(l)), lines.join('\n'));
+  assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
 });
