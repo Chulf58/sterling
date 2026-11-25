@@ -19,7 +19,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative as relativePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -81,6 +81,8 @@ function makePluginRoot({ clone = false, head = HEAD_MAIN, mainBranch = true, bi
       writeFileSync(join(dir, '.git', 'refs', 'heads', 'main'), `${'0'.repeat(40)}\n`);
     }
   }
+  mkdirSync(join(dir, 'templates'), { recursive: true });
+  writeFileSync(join(dir, 'templates', 'claude-session-block.md'), `${CLAUDE_BLOCK_FIXTURE}\n`);
   const scriptDir = join(dir, bin ? 'bin' : 'scripts');
   mkdirSync(scriptDir, { recursive: true });
   writeFileSync(join(scriptDir, 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', syncOut, 'FIXTURE_SYNC_EXIT'));
@@ -118,6 +120,15 @@ function markerOf(project) {
 // value is never printed). Every other byte still has to match. Its presence and content are
 // asserted by the exactly-one check below in every case, and its content by scripts/tests/h1-sterling-root-line.test.mjs.
 const ROOT_LINE_BLOCK = `\n\n${sterlingRootLine(null)}`;
+// H1 appends the Claude Code layer block (templates/claude-session-block.md) to every Claude Code
+// session. The goldens pin the post-update sync's own bytes, so the fixture block is cut out of the
+// context here, and a test below pins that it was delivered.
+const CLAUDE_BLOCK_FIXTURE = 'FIXTURE CLAUDE CODE LAYER BLOCK';
+function withoutClaudeBlock(ctx) {
+  const parts = ctx.split(`\n\n${CLAUDE_BLOCK_FIXTURE}`);
+  assert.equal(parts.length, 2, 'H1 delivers the Claude Code layer block exactly once');
+  return parts.join('');
+}
 function withoutRootLine(ctx) {
   const parts = ctx.split(ROOT_LINE_BLOCK);
   assert.equal(parts.length, 2, 'H1 prints exactly one STERLING ROOT line');
@@ -127,7 +138,7 @@ function withoutRootLine(ctx) {
 // The goldens pin bytes from before H1 gained its Codex registration line. The fixture's user-level
 // Claude config registers a `codex` server, so that line stays out of ctx and the pinned bytes are
 // unchanged. CLAUDE_CONFIG_DIR is pinned to the same dir so a developer's own value cannot leak in.
-function runH1(project, plugin, env = {}) {
+function runH1(project, plugin, env = {}, { rawContext = false } = {}) {
   const log = join(tmp('sterling-pus-log-'), 'calls.log');
   const home = tmp('sterling-pus-home-');
   writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { codex: { command: 'codex', args: ['mcp-server'] } } }));
@@ -144,7 +155,7 @@ function runH1(project, plugin, env = {}) {
   return {
     code: r.status,
     sys: norm(out.systemMessage ?? ''),
-    ctx: withoutRootLine(norm(out.hookSpecificOutput?.additionalContext ?? '')),
+    ctx: rawContext ? norm(out.hookSpecificOutput?.additionalContext ?? '') : withoutClaudeBlock(withoutRootLine(norm(out.hookSpecificOutput?.additionalContext ?? ''))),
     calls: existsSync(log) ? norm(readFileSync(log, 'utf8')).trim().split('\n') : [],
     marker: markerOf(project),
   };
@@ -284,6 +295,15 @@ for (const [name, c] of Object.entries(CASES)) {
     assert.deepEqual(runH1(project, plugin, c.env), GOLDEN[name]);
   });
 }
+
+test('H1 delivers the Claude Code layer block on Claude Code, and says so loudly when the block cannot be read', () => {
+  const project = makeProject({ marker: '0.0.1' });
+  const plugin = makePluginRoot();
+  assert.equal(runH1(project, plugin, {}, { rawContext: true }).ctx.split(CLAUDE_BLOCK_FIXTURE).length, 2);
+  unlinkSync(join(plugin, 'templates', 'claude-session-block.md'));
+  const missing = runH1(project, plugin, {}, { rawContext: true }).ctx;
+  assert.match(missing, /STERLING LAYER \(Claude Code\): the Claude Code rules block could not be read/);
+});
 
 test('H1, older copy: refuses with one loud line, spawns nothing and leaves the marker', () => {
   const plugin = makePluginRoot();

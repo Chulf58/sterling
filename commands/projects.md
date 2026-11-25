@@ -24,7 +24,7 @@ Other projects' boards and notes that mention the old name are not rewritten.
 
 To delete a project's knowledge store (`<path>/.sterling`) while its folder stays, registered or not:
 
-1. Run the dry run: `node "${CLAUDE_PLUGIN_ROOT}/bin/list-projects.mjs" --remove <path>`. It changes nothing. It prints the exact directory to delete, the registry entry (or "not registered"), record counts by type and open board items, the other entries inside `.sterling`, the files init left outside it (AGENTS.md, CLAUDE.md, `.opencode`, launchers), the backup destination, and every reason `--apply` would refuse. It exits 0 only when `--apply` would proceed.
+1. Run the dry run: `node "${CLAUDE_PLUGIN_ROOT}/bin/list-projects.mjs" --remove <path>`. It changes nothing. It prints the exact directory to delete, the registry entry (or "not registered"), record counts by type and open board items, the other entries inside `.sterling`, the files init left outside it (AGENTS.md, a CLAUDE.md from an older Sterling, `.opencode`, launchers), the backup destination, and every reason `--apply` would refuse. It exits 0 only when `--apply` would proceed.
 2. Show the user that output and ask through the question form whether to delete. Do not run `--apply` without that answer.
 3. Run `node "${CLAUDE_PLUGIN_ROOT}/bin/list-projects.mjs" --remove <path> --apply`. It checks everything again, copies `.sterling` to `<backup_path>/removed-<name>-<UTC time>/`, verifies the copy, deletes `.sterling` and removes the registry entry. It prints each step's outcome as JSON and stops at the first failure; if the backup fails, nothing is deleted.
 

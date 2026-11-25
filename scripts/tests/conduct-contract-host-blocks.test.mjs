@@ -7,7 +7,6 @@
 // could not map.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -191,85 +190,25 @@ test("this repo's AGENTS.md: one host-neutral lane bullet names the sterling/rev
   assert.ok(!claudeMd.includes('openai/gpt-') && !claudeMd.includes('Codex runs through the MCP tool'), 'CLAUDE.md carries neither route');
 });
 
-test("a project's own Sterling bullet reaches the OpenCode render, and a project without CLAUDE.md gets the template", () => {
+test("the OpenCode layer is the template's opencode-only text plus the host tail: a project's CLAUDE.md, in any form, no longer feeds it (GitHub #329)", () => {
   const own = '- **Deploys go through the blue lane.** PROJECT-BULLET-QUARTZ: never push to prod by hand.';
-  const p = project(initRender().replace('## Plugin mechanics', `${own}\n\n## Plugin mechanics`));
+  const edited = project(`${initRender()}\n${own}\n`);
+  const crlf = project(initRender().replace(/\n/g, '\r\n'));
   const bare = project();
   try {
     const root = layer.sterlingRoot();
-    const out = layer.renderSterlingLayer(p.dir, root);
-    assert.ok(out.includes(own), 'the project bullet is injected verbatim');
+    const out = layer.renderSterlingLayer(bare.dir, root);
+    assert.equal(layer.renderSterlingLayer(edited.dir, root), out, 'an edited CLAUDE.md changes nothing');
+    assert.equal(layer.renderSterlingLayer(crlf.dir, root), out, 'a CRLF CLAUDE.md changes nothing');
+    assert.ok(!out.includes('PROJECT-BULLET-QUARTZ'));
+    assert.doesNotMatch(out, /^## Authority/m, 'the shared rules are in AGENTS.md, not injected again');
+    assert.match(out, /^## Sterling layer on OpenCode/m);
+    assert.match(out, /^## OpenCode host/m);
     assert.doesNotMatch(out, /STERLING LAYER HOST CHECK/);
-    assert.equal(bodyOf(layer.renderSterlingLayer(bare.dir, root)), bodyOf(out).replace(`${own}\n\n`, ''), 'no CLAUDE.md renders the template as init would have written it');
   } finally {
-    p.cleanup();
-    bare.cleanup();
-  }
-});
-
-test('a CRLF CLAUDE.md maps the same as its LF form', () => {
-  const lf = project(initRender());
-  const crlf = project(initRender().replace(/\n/g, '\r\n'));
-  try {
-    const root = layer.sterlingRoot();
-    assert.equal(layer.renderSterlingLayer(crlf.dir, root), layer.renderSterlingLayer(lf.dir, root));
-  } finally {
-    lf.cleanup();
+    edited.cleanup();
     crlf.cleanup();
-  }
-});
-
-test('what cannot be mapped is loud: a Claude-only phrase in a project bullet, an unknown /sterling: command, and a template block the project changed', () => {
-  const tuned = initRender().replace('plainly when it is time.** At a clean boundary', 'plainly when it is time.** At any clean boundary');
-  const p = project(`${tuned}\n- ask through AskUserQuestion, then run /clear and \`/sterling:nosuch\`\n`);
-  try {
-    const root = layer.sterlingRoot();
-    const out = layer.renderSterlingLayer(p.dir, root);
-    const check = out.slice(out.indexOf('STERLING LAYER HOST CHECK'));
-    assert.ok(out.startsWith('STERLING LAYER HOST CHECK'), 'the warning leads the layer, before the rules it qualifies');
-    for (const t of ['READY TO CLEAR', 'AskUserQuestion', '/clear']) assert.match(check, new RegExp(`Claude-only phrase.*${t.replace('/', '\\/')}`, 's'), `${t} is named`);
-    assert.match(check, /\/sterling:nosuch.*commands\/nosuch\.md/s, 'the unknown command is named with the file that is missing');
-    assert.match(check, /not found verbatim.*Say `READY TO CLEAR` plainly/s, 'the template block the project changed is named by its first line');
-  } finally {
-    p.cleanup();
-  }
-});
-
-test("a template bullet the project wrapped in its own host blocks is not flagged, and a bullet the project deleted is not flagged", () => {
-  const lead = '- **Say `READY TO CLEAR` plainly when it is time.**';
-  const tunedLine = `${lead} At any clean boundary, print it.`;
-  const fenced = ['<!-- claude-only -->', tunedLine, '<!-- /claude-only -->', '<!-- opencode-only -->', '- **On OpenCode, say `READY FOR NEW SESSION` plainly when it is time.** OWN-OPENCODE-WORDING.', '<!-- /opencode-only -->'].join('\n');
-  const base = initRender();
-  const line = base.split('\n').find((l) => l.startsWith(lead));
-  const wrapped = project(base.replace(line, fenced));
-  const deleted = project(base.replace(`${line}\n`, ''));
-  try {
-    const root = layer.sterlingRoot();
-    const out = layer.renderSterlingLayer(wrapped.dir, root);
-    assert.ok(out.includes('OWN-OPENCODE-WORDING') && !out.includes('READY TO CLEAR'));
-    assert.doesNotMatch(out, /STERLING LAYER HOST CHECK/);
-    assert.doesNotMatch(layer.renderSterlingLayer(deleted.dir, root), /STERLING LAYER HOST CHECK/);
-  } finally {
-    wrapped.cleanup();
-    deleted.cleanup();
-  }
-});
-
-test("a project's own host blocks in CLAUDE.md are rendered for OpenCode", () => {
-  const own = (oc) => ['<!-- claude-only -->', '- Run CLAUDE-OWN-ONLY via Claude.', '<!-- /claude-only -->', '<!-- opencode-only -->', oc, '<!-- /opencode-only -->'].join('\n');
-  const p = project(`${initRender()}\n${own('- On OpenCode, run OPENCODE-OWN-ONLY.')}\n`);
-  // Claude Code reads CLAUDE.md raw, so a project's opencode-only block must say it is for OpenCode.
-  const unmarked = project(`${initRender()}\n${own('- Run OPENCODE-OWN-ONLY.')}\n`);
-  try {
-    const root = layer.sterlingRoot();
-    const out = layer.renderSterlingLayer(p.dir, root);
-    assert.ok(out.includes('OPENCODE-OWN-ONLY') && !out.includes('CLAUDE-OWN-ONLY'));
-    for (const m of MARKERS) assert.ok(!out.includes(m));
-    assert.doesNotMatch(out, /STERLING LAYER HOST CHECK/);
-    assert.match(layer.renderSterlingLayer(unmarked.dir, root), /^STERLING LAYER HOST CHECK.*opencode-only block at CLAUDE\.md:\d+ does not open with "On OpenCode,"/s);
-  } finally {
-    p.cleanup();
-    unmarked.cleanup();
+    bare.cleanup();
   }
 });
 
@@ -284,21 +223,3 @@ test('stamp-contract reads the Claude render: no tracked bullet carries a fence 
   assert.equal(extractTemplateBlock(template(), '- **Say `READY TO CLEAR` plainly when it is time.**').block.includes('READY FOR NEW SESSION'), false);
 });
 
-test('swapBlocks refuses a pair with no claude lines instead of looping on it', () => {
-  // [].every() is true at every index, so an unguarded swap of an empty claude block splices
-  // forever. Run it in a child with a timeout: a hang fails the test instead of the suite.
-  const layerUrl = pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'layer.mjs')).href;
-  const script = `const { swapBlocks } = await import(${JSON.stringify(layerUrl)});
-try { swapBlocks(['a', 'b'], [{ claude: [], opencode: ['x'] }]); console.log('RETURNED'); }
-catch (err) { console.log('THREW ' + err.message); }`;
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10000 });
-  assert.equal(r.signal, null, `swapBlocks did not finish within the timeout (killed by ${r.signal})`);
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^THREW .*no claude lines/m);
-});
-
-test('swapBlocks still swaps every occurrence of a non-empty block', () => {
-  const lines = ['a', 'c1', 'c2', 'b', 'c1', 'c2'];
-  assert.deepEqual(layer.swapBlocks(lines, [{ claude: ['c1', 'c2'], opencode: ['o'] }, { claude: ['missing'], opencode: [] }]), ['missing']);
-  assert.deepEqual(lines, ['a', 'o', 'b', 'o']);
-});

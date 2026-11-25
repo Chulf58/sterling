@@ -17,14 +17,14 @@ import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, desc
 import { describeConflictRefusal, migrateProjectConfigCanonical, modelChoicesFromArgs } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
-import { setupAgy, formatAgyRows, renderGeminiMd } from './lib/agy-setup.mjs';
+import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
+import { syncLayer } from './lib/sterling-layer.mjs';
 import { hasCustomOutputs, syncCustomAgents } from './lib/custom-agent-render.mjs';
 import { isSterlingClone, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { identityRefusal as projectIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 import { storeRootFor } from './lib/worktree-root.mjs';
-import { claudeMdWarnings } from './lib/claude-md-extras.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -179,7 +179,7 @@ for (const r of opencodeSetup.rows ?? []) {
 
 // Sterling on Antigravity CLI (decision
 // antigravity-cli-agy-sterling-mcp-server-is-declared-per-agen): the .agents/agents/ roster,
-// GEMINI.md and their exclude block, whenever agy is installed, whichever host runs this.
+// and their exclude block, whenever agy is installed, whichever host runs this.
 // Lines start "Antigravity CLI (agy)", which /sterling:update's agent-status parser does not count.
 const agySetup = setupAgy({ projectDir: targetDir, pluginRoot });
 for (const line of formatAgyRows(agySetup)) console.log(line);
@@ -273,8 +273,8 @@ if (claudeHost) {
 }
 // An explicit non-false autoMemoryEnabled is a NOTICE (printed above), never a refusal:
 // counting it would fail every /sterling:update on the machine for one project's choice.
-// Project rules belong in AGENTS.md (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer):
-// name every CLAUDE.md and GEMINI.md bullet that is not Sterling's own, never edit a file.
-// A failure of this check prints one diagnostic line and keeps the sync's exit status.
-for (const line of claudeMdWarnings(pluginRoot, targetDir, () => renderGeminiMd({ pluginRoot, root: pluginRoot, projectName: 'project' }))) console.log(line);
+// Sterling's layer is a generated section of AGENTS.md (decision
+// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer): regenerate it,
+// and remove a CLAUDE.md or GEMINI.md that holds only Sterling's text; any other one is kept with a warning.
+for (const line of syncLayer({ projectDir: targetDir, pluginRoot })) console.log(line);
 process.exit(refused > 0 ? 2 : 0);

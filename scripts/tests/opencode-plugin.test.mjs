@@ -398,8 +398,8 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
     const ci = contextInput();
     await seeTurn(ctx, ci);
     const text = systemText(ci);
-    assert.match(text, /# CLAUDE\.md — fixture-proj \(Sterling layer\)/, 'template rendered with the project name');
-    assert.match(text, /## Authority \(the knowledge base is the source of truth\)/);
+    assert.match(text, /## Sterling layer on OpenCode/, 'the OpenCode rules heading leads the layer');
+    assert.doesNotMatch(text, /## Authority \(the knowledge base is the source of truth\)/, 'the shared rules come from AGENTS.md, not from this injection');
     assert.doesNotMatch(text, /\{\{PROJECT_NAME\}\}/);
     assert.match(text, /OpenCode host/);
     assert.match(text, /`question` tool/);
@@ -474,6 +474,9 @@ test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, e
   }
 });
 
+// Only the template's opencode-only blocks reach OpenCode, so a drifted line is placed in one.
+const ocBlock = (line) => `<!-- opencode-only -->\n${line}\n<!-- /opencode-only -->\n`;
+
 test('template drift is loud: invalid host blocks fail the render; an unmapped Claude-only phrase or command is flagged at the top of the layer', () => {
   const p = makeProject({ withGit: false });
   const fake = mkdtempSync(join(tmpdir(), 'sterling-oc-fake-root-'));
@@ -486,13 +489,13 @@ test('template drift is loud: invalid host blocks fail the render; an unmapped C
     const tpl = join(fake, 'templates', 'target-claude-md.md');
     writeFileSync(tpl, real.replace('<!-- /opencode-only -->', ''));
     assert.throws(() => server.renderSterlingLayer(p.dir, fake), /host blocks invalid.*fence/s);
-    writeFileSync(tpl, `${real}\n- run \`node "\${CLAUDE_PLUGIN_ROOT}/bin/new-thing.mjs"\`\n`);
+    writeFileSync(tpl, `${real}\n${ocBlock('- run `node "${CLAUDE_PLUGIN_ROOT}/bin/new-thing.mjs"`')}`);
     const rooted = server.renderSterlingLayer(p.dir, fake);
     assert.ok(rooted.includes(`\`node "${fake}/bin/new-thing.mjs"\``), 'any plugin-root reference becomes the resolved root');
     assert.doesNotMatch(rooted, /STERLING LAYER HOST CHECK/);
-    writeFileSync(tpl, `${real}\n- then print READY TO CLEAR and run /clear\n`);
+    writeFileSync(tpl, `${real}\n${ocBlock('- then print READY TO CLEAR and run /clear')}`);
     assert.match(server.renderSterlingLayer(p.dir, fake), /^STERLING LAYER HOST CHECK.*Claude-only phrase\(s\) left in the text: READY TO CLEAR, \/clear\./s);
-    writeFileSync(tpl, `${real}\n- drained by \`/sterling:nosuch\`\n`);
+    writeFileSync(tpl, `${real}\n${ocBlock('- drained by `/sterling:nosuch`')}`);
     assert.match(server.renderSterlingLayer(p.dir, fake), /^STERLING LAYER HOST CHECK.*\/sterling:nosuch.*commands\/nosuch\.md/s);
   } finally {
     p.cleanup();
@@ -511,7 +514,7 @@ test('a store that fails to open degrades the context loudly instead of taking t
     const ci = contextInput();
     await seeTurn(ctx, ci);
     const text = systemText(ci);
-    assert.match(text, /Sterling layer\)/, 'the layer is still injected');
+    assert.match(text, /Sterling layer on OpenCode/, 'the layer is still injected');
     assert.match(text, /STERLING STATUS: store unavailable \(simulated open failure\)/);
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /simulated open failure/);
     await cleanup?.();
@@ -621,7 +624,7 @@ test('rotation restore: the note stays in place for the old session, a child ses
     }
     const broken = await contextFor(ctx, 'ses_broken');
     assert.doesNotMatch(broken, /ROTATION RESTORE/);
-    assert.match(broken, /Sterling layer\)/, 'a failed session lookup costs only the restore');
+    assert.match(broken, /Sterling layer on OpenCode/, 'a failed session lookup costs only the restore');
     assert.equal(noteExists(p.dir), true);
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /server said no/);
     assert.match(await contextFor(ctx, 'ses_notime'), /ROTATION RESTORE/, 'an unreadable created time does not block a root session with a different id');
@@ -640,7 +643,7 @@ test('rotation restore: a malformed note gets its own notice naming the cause an
     writeFileSync(notePath, '{ not json');
     const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
     const first = await contextFor(ctx, 'ses_new');
-    assert.match(first, /Sterling layer\)/, 'a malformed note costs only the restore');
+    assert.match(first, /Sterling layer on OpenCode/, 'a malformed note costs only the restore');
     const noticeTexts = () => JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')).map((n) => n.text);
     const malformed = noticeTexts().filter((t) => /malformed/.test(t));
     assert.equal(malformed.length, 1);
@@ -684,7 +687,7 @@ test('rotation restore: a render failure after the note was consumed is logged a
     const { ctx, cleanup } = await setupPlugin(p.dir, { renderRestore: () => { throw new Error('render boom'); } }, { ses_new: { time: { created: after } } });
     const text = await contextFor(ctx, 'ses_new');
     assert.doesNotMatch(text, /ROTATION RESTORE/);
-    assert.match(text, /Sterling layer\)/, 'the layer survives the render failure');
+    assert.match(text, /Sterling layer on OpenCode/, 'the layer survives the render failure');
     assert.equal(noteExists(p.dir), false, 'consumed by design');
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /render failed after the note was consumed: render boom/);
     await cleanup?.();

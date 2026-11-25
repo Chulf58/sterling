@@ -17,6 +17,7 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
+import { readClaudeSessionBlock } from '../lib/sterling-layer.mjs';
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, storageLine, tddPostureLine, unsupportedAgentsLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { SUPPORTED_SCHEMA_VERSION, registryPath, resolveSentHandoffs } from '@sterling/store';
@@ -533,6 +534,19 @@ try {
   modeContext = `\n\n${projectModeLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
   // fail-open — a malformed config costs only this line
+}
+
+// Claude Code's own part of the Sterling layer (decision
+// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer): the shared
+// rules are a generated section of AGENTS.md, and this block, at most 2,000 bytes, carries the
+// rules that name Claude Code's hooks and tools. agy sessions never receive it.
+let claudeLayerContext = '';
+if (syncHost === 'claude') {
+  try {
+    claudeLayerContext = `\n\n${readClaudeSessionBlock(pluginRoot())}`;
+  } catch (err) {
+    claudeLayerContext = `\n\nSTERLING LAYER (Claude Code): the Claude Code rules block could not be read (${String(err?.message ?? err).split('\n')[0]}); only the AGENTS.md layer applies this session. Report it with /sterling:report-issue.`;
+  }
 }
 
 let handoffContext = '';
@@ -1485,7 +1499,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + claudeLayerContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

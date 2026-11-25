@@ -54,7 +54,7 @@ import { setupOpenCode } from './lib/opencode-install.mjs';
 import { setupAgy } from './lib/agy-setup.mjs';
 import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
-import { renderClaudeText } from './lib/agent-fences.mjs';
+import { applyLayer, readLayerSection, retireHostFiles, isPureSterlingHostFile, LayerMarkerError } from './lib/sterling-layer.mjs';
 import { renderStackTags, renderDomains, refreshAgentsMdFacts, describeAgentsMdRefresh, renderKnowledgeSection, refreshAgentsMdKnowledge } from './lib/agents-md-facts.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
@@ -637,18 +637,13 @@ try {
 } catch (err) {
   if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
 }
-const renderAgentsMd = (conventionsSection) => renderKnowledgeSection(
+const layerSection = assertNoDeadTerms('AGENTS.md (Sterling layer)', readLayerSection(pluginRoot));
+const renderAgentsMd = (conventionsSection) => applyLayer(renderKnowledgeSection(
   agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection),
   knowledgeProjected !== false,
-);
+), layerSection);
 const DEFAULT_CONVENTIONS = '(grows only via architecture-altering decision records — nothing yet)';
 const expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
-
-// CLAUDE.md is the template's CLAUDE render (decision sterling-layer-is-one-source-with-host-blocks):
-// claude-only lines kept, opencode-only blocks and every fence marker dropped. The OpenCode
-// plugin renders the same file for OpenCode from the template's block pairs.
-const expectedClaudeMd = assertNoDeadTerms('CLAUDE.md', renderClaudeText(readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8'), 'templates/target-claude-md.md')
-  .replaceAll('{{PROJECT_NAME}}', eff.projectName));
 
 const agentsMdPath = join(target, 'AGENTS.md');
 const claudeMdPath = join(target, 'CLAUDE.md');
@@ -797,24 +792,6 @@ function historicalHeadSegmentSets() {
   return { segmentSets, unavailableReason: null };
 }
 
-// Shared by every `manual` outcome — a non-matching head, an unverifiable head (git
-// unavailable), and a legacy file beside an existing AGENTS.md all leave the same preview behind.
-function writeMigrationPreview(rawClaudeText, tailForPreview) {
-  mkdirSync(join(target, '.sterling'), { recursive: true });
-  const previewRel = join('.sterling', 'agents-md-migration-preview.diff');
-  const previewPath = join(target, previewRel);
-  const oldTmp = `${previewPath}.old.tmp`;
-  const newTmp = `${previewPath}.new.tmp`;
-  writeFileSync(oldTmp, rawClaudeText);
-  const previewAgents = tailForPreview != null ? renderAgentsMd(tailForPreview) : expectedAgentsMd;
-  writeFileSync(newTmp, `${expectedClaudeMd}\n\n<!-- AGENTS.md would carry: -->\n\n${previewAgents}`);
-  const diff = spawnSync('diff', ['-u', oldTmp, newTmp], { encoding: 'utf8' });
-  writeFileSync(previewPath, diff.stdout || '(no textual diff produced)');
-  unlinkSync(oldTmp);
-  unlinkSync(newTmp);
-  return previewRel;
-}
-
 // Attempts the boundary match against every historical segment set (newest first) and, on a hit,
 // builds the would-be AGENTS.md/CLAUDE.md — used both to actually migrate and to detect an
 // interrupted-run continuation (AGENTS.md already holds exactly what this would produce).
@@ -836,7 +813,7 @@ function computeMigration(rawText) {
   const flagged = [];
   rawTail.split(/\r\n|\n/).forEach((line, i) => {
     for (const { re, label } of SENTINEL_VOCAB) {
-      if (re.test(line)) { flagged.push(`tail line ${i + 1} mentions ${label} — Sterling-bound text now sits in the tool-agnostic file; move it to CLAUDE.md by hand if it is a rule`); break; }
+      if (re.test(line)) { flagged.push(`tail line ${i + 1} mentions ${label} — Sterling-bound text sits among the project's rules in AGENTS.md; check it does not repeat the Sterling layer`); break; }
     }
   });
   return {
@@ -845,87 +822,66 @@ function computeMigration(rawText) {
     eol,
     flagged,
     agentsMd: spliceEol(renderAgentsMd(rawTail), rawTail, eol),
-    claudeMd: withEol(expectedClaudeMd, eol),
   };
 }
 
 const agentsMdExists = existsSync(agentsMdPath);
-const claudeMdExists = existsSync(claudeMdPath);
-const claudeMdRaw = claudeMdExists ? readFileSync(claudeMdPath, 'utf8') : '';
-// A "stub" CLAUDE.md is the already-migrated Sterling-layer render: its first line is the
-// `@AGENTS.md` import. Real-world gap (Dome Farmer): a project can carry BOTH a legacy full
-// CLAUDE.md AND a pre-existing AGENTS.md that is NOT the product of a real migration — most
-// often a gitignored Codex-derived copy of the old CLAUDE.md. Silently treating that as an
-// interrupted-run continuation would hide an un-migrated project.
-const claudeMdIsStub = claudeMdExists && claudeMdRaw.split(/\r?\n/, 1)[0] === '@AGENTS.md';
+const claudeMdRaw = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf8') : null;
+// A pre-split CLAUDE.md that carries project rules (and no AGENTS.md yet) donates its tail to the
+// new AGENTS.md; the file itself is then the project's to delete (retireHostFiles keeps and warns).
+const legacyClaude = !agentsMdExists && claudeMdRaw !== null && !isPureSterlingHostFile(claudeMdRaw, 'claude', pluginRoot);
+const migration = legacyClaude ? computeMigration(claudeMdRaw) : null;
 
-if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
-  const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
-  const result = computeMigration(claudeMdRaw);
-  if (result.matched && result.agentsMd === agentsMdRaw) {
-    // Interrupted-run continuation: the existing AGENTS.md is BYTE-IDENTICAL to what this
-    // migration would produce — not merely present, actually proven — so only CLAUDE.md needs
-    // rewriting (Sol re-check finding 4a).
-    writeAtomic(claudeMdPath, result.claudeMd);
-    items.push({ item: 'AGENTS.md', status: 'ok', detail: 'already present — byte-identical to what migration would write; treated as an interrupted run, resumed' });
-    items.push({ item: 'CLAUDE.md', status: 'migrated (resumed)', detail: 're-rendered as the Sterling layer (AGENTS.md migration already completed)' });
-  } else {
-    const previewRel = writeMigrationPreview(claudeMdRaw, result.matched ? result.rawTail : null);
-    const reason = `legacy CLAUDE.md beside an existing AGENTS.md — if AGENTS.md is a Codex-derived copy of CLAUDE.md (gitignored, header 'identical to CLAUDE.md'), delete it and rerun; if it is authored, merge by hand: ${previewRel}`;
-    items.push({ item: 'AGENTS.md', status: 'manual', detail: reason });
-    items.push({ item: 'CLAUDE.md', status: 'manual', detail: reason });
-  }
-} else if (!agentsMdExists && claudeMdExists) {
-  const result = computeMigration(claudeMdRaw);
-  if (result.matched) {
-    writeAtomic(agentsMdPath, result.agentsMd);
-    writeAtomic(claudeMdPath, result.claudeMd);
-    items.push({ item: 'AGENTS.md', status: result.flagged.length ? `migrated (${result.flagged.length} flagged)` : 'migrated', detail: result.flagged.length ? result.flagged.join('; ') : 'legacy CLAUDE.md tail carried below the historical boundary, original line endings preserved' });
-    items.push({ item: 'CLAUDE.md', status: 'migrated', detail: 're-rendered as the Sterling layer; project-owned tail moved to AGENTS.md' });
-  } else {
-    const previewRel = writeMigrationPreview(claudeMdRaw, null);
-    items.push({ item: 'AGENTS.md', status: 'manual', detail: `${result.reason} — nothing written; preview at ${previewRel}` });
-    items.push({ item: 'CLAUDE.md', status: 'manual', detail: 'left untouched pending AGENTS.md migration (see AGENTS.md row)' });
-  }
+if (migration?.matched) {
+  writeAtomic(agentsMdPath, migration.agentsMd);
+  items.push({ item: 'AGENTS.md', status: migration.flagged.length ? `migrated (${migration.flagged.length} flagged)` : 'migrated', detail: migration.flagged.length ? migration.flagged.join('; ') : 'legacy CLAUDE.md tail carried below the historical boundary, original line endings preserved' });
+} else if (!agentsMdExists) {
+  writeAtomic(agentsMdPath, expectedAgentsMd);
+  items.push({ item: 'AGENTS.md', status: 'created', detail: 'from templates/target-agents-md.md and templates/sterling-layer-agents.md' });
+  if (migration) warns.push(`\n⚠ CLAUDE.md was not recognized as an older Sterling render (${migration.reason}), so AGENTS.md was created fresh and CLAUDE.md was left alone.`);
 } else {
-  if (!agentsMdExists) {
-    writeAtomic(agentsMdPath, expectedAgentsMd);
-    items.push({ item: 'AGENTS.md', status: 'created', detail: 'from templates/target-agents-md.md' });
-  } else {
-    // Project-editable, never compared byte-for-byte; only the Stack tags and Domain stores lines
-    // follow .sterling/config.json, and only while they still hold a generated value (GitHub #158).
-    const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
-    const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
-    const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
-    // The Knowledge section follows the handoff setting the same way, never over a hand edit.
-    const knowledge = knowledgeProjected === null
-      ? { text: refresh.text, refreshed: false, kept: null }
-      : refreshAgentsMdKnowledge(refresh.text, knowledgeProjected);
-    if (knowledge.refreshed) refresh.refreshed.push('Knowledge section');
-    if (knowledge.kept) refresh.kept.push({ name: 'Knowledge section', reason: knowledge.kept });
-    refresh.text = knowledge.text;
-    if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
-    if (refresh.kept.length) {
-      items.push({ item: 'AGENTS.md', status: 'kept', detail: describeAgentsMdRefresh(refresh, facts) });
-      warns.push(`\n⚠ AGENTS.md: ${describeAgentsMdRefresh({ refreshed: [], kept: refresh.kept }, facts)}. Update ${refresh.kept.length > 1 ? 'those lines' : 'that line'} by hand.`);
-    } else if (refresh.refreshed.length) {
-      items.push({ item: 'AGENTS.md', status: 'refreshed', detail: describeAgentsMdRefresh(refresh, facts) });
-    } else if (refresh.absent.length) {
-      items.push({ item: 'AGENTS.md', status: 'ok', detail: `present — project-editable; no ${refresh.absent.join(' or ')} line to keep in step with .sterling/config.json` });
-    } else {
-      items.push({ item: 'AGENTS.md', status: 'ok', detail: 'present — project-editable; the Stack tags and Domain stores lines match .sterling/config.json' });
-    }
+  // Project-editable, never compared byte-for-byte; only the Stack tags and Domain stores lines
+  // follow .sterling/config.json, and only while they still hold a generated value (GitHub #158).
+  const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
+  const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
+  const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
+  // The Knowledge section follows the handoff setting the same way, never over a hand edit.
+  const knowledge = knowledgeProjected === null
+    ? { text: refresh.text, refreshed: false, kept: null }
+    : refreshAgentsMdKnowledge(refresh.text, knowledgeProjected);
+  if (knowledge.refreshed) refresh.refreshed.push('Knowledge section');
+  if (knowledge.kept) refresh.kept.push({ name: 'Knowledge section', reason: knowledge.kept });
+  refresh.text = knowledge.text;
+  // The Sterling layer section is regenerated in place; markers it cannot trust refuse the file.
+  let layerError = null;
+  try {
+    const withLayer = applyLayer(refresh.text, layerSection);
+    if (withLayer !== refresh.text) refresh.refreshed.push('Sterling layer section');
+    refresh.text = withLayer;
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    layerError = err.message;
   }
-
-  if (!claudeMdExists) {
-    writeAtomic(claudeMdPath, expectedClaudeMd);
-    items.push({ item: 'CLAUDE.md', status: 'created', detail: 'from templates/target-claude-md.md' });
-  } else if (normalize(claudeMdRaw) === normalize(expectedClaudeMd)) {
-    items.push({ item: 'CLAUDE.md', status: 'matches', detail: 'generated content, unmodified' });
+  if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
+  if (layerError) {
+    items.push({ item: 'AGENTS.md', status: 'manual', detail: layerError });
+    warns.push(`\n⚠ ${layerError}`);
+  } else if (refresh.kept.length) {
+    items.push({ item: 'AGENTS.md', status: 'kept', detail: describeAgentsMdRefresh(refresh, facts) });
+    warns.push(`\n⚠ AGENTS.md: ${describeAgentsMdRefresh({ refreshed: [], kept: refresh.kept }, facts)}. Update ${refresh.kept.length > 1 ? 'those lines' : 'that line'} by hand.`);
+  } else if (refresh.refreshed.length) {
+    items.push({ item: 'AGENTS.md', status: 'refreshed', detail: describeAgentsMdRefresh(refresh, facts) });
+  } else if (refresh.absent.length) {
+    items.push({ item: 'AGENTS.md', status: 'ok', detail: `present — project-editable; no ${refresh.absent.join(' or ')} line to keep in step with .sterling/config.json` });
   } else {
-    items.push({ item: 'CLAUDE.md', status: 'differs', detail: 'left untouched — merge the Sterling layer by hand (template: templates/target-claude-md.md)' });
+    items.push({ item: 'AGENTS.md', status: 'ok', detail: 'present — project-editable; the Stack tags and Domain stores lines match .sterling/config.json' });
   }
 }
+
+// CLAUDE.md and GEMINI.md from earlier versions: removed when they hold only Sterling's text, else kept with a warning.
+const retiredHostFiles = retireHostFiles({ projectDir: target, pluginRoot });
+items.push(...retiredHostFiles.rows);
+warns.push(...retiredHostFiles.warns);
 
 // S6 consumer cutover
 // (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): on an installed copy, a launcher that starts claude with --plugin-dir keeps

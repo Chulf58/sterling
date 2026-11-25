@@ -1,15 +1,13 @@
 // The Sterling layer for OpenCode (decision sterling-layer-is-one-source-with-host-blocks):
-// the project's CLAUDE.md rendered for OpenCode, plus the OpenCode host tail.
-// templates/target-claude-md.md is one source with claude-only / opencode-only blocks
-// (scripts/lib/agent-fences.mjs). Init writes its Claude render to CLAUDE.md, so a project's
-// CLAUDE.md holds the claude-only lines and none of the OpenCode text; this module swaps each
-// template claude-only block found in CLAUDE.md for its opencode-only partner. The project's
-// own bullets pass through, and what cannot be mapped is named at the top of the layer.
+// the template's opencode-only blocks, rendered, plus the OpenCode host tail. The shared Sterling
+// rules are a generated section of the project's AGENTS.md, which OpenCode reads itself
+// (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer),
+// so only what is specific to OpenCode is injected here.
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
-import { FENCE_KINDS, NO_COUNTERPART_MARKER, renderClaudeText, renderOpenCodeFullText, validateFences } from '../../../scripts/lib/agent-fences.mjs';
+import { FENCE_KINDS, NO_COUNTERPART_MARKER, validateFences } from '../../../scripts/lib/agent-fences.mjs';
 
 /**
  * The OpenCode host section appended after the rendered layer. `pluginRoot`
@@ -22,7 +20,7 @@ export function opencodeHostTail(pluginRoot) {
   return [
     '## OpenCode host',
     '',
-    "This session runs on OpenCode, not Claude Code. The layer above is this project's CLAUDE.md rendered for OpenCode: each Claude-only rule Sterling ships is replaced by its OpenCode text. The other differences:",
+    "This session runs on OpenCode, not Claude Code. The OpenCode rules above are Sterling's OpenCode text; the shared Sterling layer is in AGENTS.md. The other differences:",
     '',
     install,
     '- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling through the plugin shim in its config dir. Sterling\'s commands are registered as OpenCode slash commands under the same names (`/sterling:<name>`), except `sterling:dashboard`, which does not exist here: open the dashboard with `/sterling` or <leader>k. Each command this layer names also points at its file under the commands directory. .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here.',
@@ -46,13 +44,11 @@ export function defaultTemplatePath(moduleUrl = import.meta.url) {
   return join(sterlingRoot(moduleUrl), 'templates', 'target-claude-md.md');
 }
 
-// The template's opencode-only text names the Sterling root by this token; the render
-// replaces it with the resolved root. CLAUDE.md never holds it: the Claude render drops
-// those blocks.
+// The template's opencode-only text names the Sterling root by this token; the render replaces it with the resolved root.
 const ROOT_TOKEN = '{{STERLING_ROOT}}';
 // Left in the layer after rendering, any of these gives the OpenCode model a Claude Code
 // instruction it cannot carry out.
-const CLAUDE_ONLY_RESIDUE = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
+const CLAUDE_ONLY_RESIDUE = ['READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const CLAUDE_OPEN = FENCE_KINDS['claude-only'].open;
 const CLAUDE_CLOSE = FENCE_KINDS['claude-only'].close;
 const OPENCODE_CLOSE = FENCE_KINDS['opencode-only'].close;
@@ -86,79 +82,32 @@ export function hostBlockPairs(templateText, label = 'templates/target-claude-md
   return pairs;
 }
 
-// Replace every whole-line occurrence of each pair's claude lines with its opencode lines.
-// Returns the first line of each pair that was found nowhere. A pair with no claude lines
-// throws: [].every() is true at every index, so it would splice forever (validateFences
-// refuses such a block, so reaching this is a caller bug).
-export function swapBlocks(lines, pairs) {
-  const unmatched = [];
-  for (const { claude, opencode } of pairs) {
-    if (!claude.length) throw new Error('Sterling layer: a host block pair has no claude lines, so it cannot be swapped');
-    let found = false;
-    for (let i = 0; i + claude.length <= lines.length; i++) {
-      if (!claude.every((l, k) => lines[i + k] === l)) continue;
-      lines.splice(i, claude.length, ...opencode);
-      i += opencode.length - 1;
-      found = true;
-    }
-    if (!found) unmatched.push(claude[0]);
-  }
-  return unmatched;
-}
+const OPENCODE_OPEN = FENCE_KINDS['opencode-only'].open;
 
-const clip = (s) => (s.length > 90 ? `${s.slice(0, 90)}…` : s);
-// A bullet is known by its bold lead; any other line by its first 40 characters.
-const leadOf = (line) => /^- \*\*.*?\*\*/.exec(line)?.[0] ?? line.slice(0, 40);
-
-// The project's lines outside every host block it wrote itself (fences validated by the
-// OpenCode render before this runs). A template block whose lead shows up here was kept
-// in the project's own wording, unfenced, so its Claude-only text reached OpenCode as is.
-function unfencedText(source) {
-  const markers = new Map(Object.values(FENCE_KINDS).flatMap((f) => [[f.open, true], [f.close, false]]));
+// The lines of every opencode-only block, in template order.
+function opencodeLines(templateText) {
+  const out = [];
   let inside = false;
-  const out = [];
-  for (const line of source.replace(/\r\n/g, '\n').split('\n')) {
-    if (markers.has(line)) inside = markers.get(line);
-    else if (!inside) out.push(line);
+  for (const line of templateText.replace(/\r\n/g, '\n').split('\n')) {
+    if (line === OPENCODE_OPEN) inside = true;
+    else if (line === OPENCODE_CLOSE) inside = false;
+    else if (inside) out.push(line);
   }
-  return out.join('\n');
-}
-
-// Claude Code reads CLAUDE.md raw, so an opencode-only block a project writes there reaches
-// the Claude model too. Each one opens with an explicit "On OpenCode," (the same rule as
-// commands and skills) so the Claude model cannot take it as its own instruction.
-const ON_OPENCODE = /^(?:- )?(?:\*\*)?On OpenCode,/;
-function unmarkedOpenCodeBlocks(source) {
-  const lines = source.replace(/\r\n/g, '\n').split('\n');
-  const out = [];
-  lines.forEach((line, i) => {
-    if (line !== FENCE_KINDS['opencode-only'].open) return;
-    const first = lines.slice(i + 1).find((l) => l.trim() !== '') ?? '';
-    if (!ON_OPENCODE.test(first)) out.push(`CLAUDE.md:${i + 1}`);
-  });
   return out;
 }
 
 /**
- * The layer for OpenCode: the project's CLAUDE.md (or, without one, the template as init
- * would write it) with its own host blocks rendered, the template's claude-only blocks
- * swapped for their OpenCode text, the Sterling root filled in and each /sterling:<name>
- * pointed at its command file, then the OpenCode host tail. Whatever is left that only
- * Claude Code can act on is listed in a STERLING LAYER HOST CHECK block at the top.
+ * The layer for OpenCode: the template's opencode-only blocks with the Sterling root filled in and
+ * each /sterling:<name> pointed at its command file, then the OpenCode host tail. Whatever is left
+ * that only Claude Code can act on is listed in a STERLING LAYER HOST CHECK block at the top.
  */
 export function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join(pluginRoot, 'templates', 'target-claude-md.md')) {
   const projectName = loadConfig(projectDir)?.project_name ?? basename(projectDir);
-  const named = (s) => s.replaceAll('{{PROJECT_NAME}}', () => projectName);
   const templateText = readFileSync(templatePath, 'utf8');
-  const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
-  const claudeMdPath = join(projectDir, 'CLAUDE.md');
-  const source = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf8') : named(renderClaudeText(templateText, templatePath));
-  const lines = renderOpenCodeFullText(source, 'CLAUDE.md').split('\n');
-  const plain = unfencedText(source);
-  const unmatched = swapBlocks(lines, pairs).filter((first) => plain.includes(leadOf(first)));
+  hostBlockPairs(templateText);
   const missingCommands = [];
-  const text = lines
-    .join('\n')
+  const rules = opencodeLines(templateText).join('\n')
+    .replaceAll('{{PROJECT_NAME}}', () => projectName)
     .replaceAll(ROOT_TOKEN, () => pluginRoot)
     .replaceAll('${CLAUDE_PLUGIN_ROOT}', () => pluginRoot)
     .replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
@@ -167,16 +116,12 @@ export function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), tem
       missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
       return whole;
     });
-  const residue = CLAUDE_ONLY_RESIDUE.filter((t) => text.includes(t));
+  const residue = CLAUDE_ONLY_RESIDUE.filter((t) => rules.includes(t));
   const problems = [
     ...(residue.length ? [`Claude-only phrase(s) left in the text: ${residue.join(', ')}.`] : []),
     ...missingCommands,
-    ...unmarkedOpenCodeBlocks(source).map((at) => `The opencode-only block at ${at} does not open with "On OpenCode,". Claude Code reads CLAUDE.md raw, so the Claude model could take it as its own instruction; start its first line with "On OpenCode,".`),
-    ...(unmatched.length
-      ? [`Claude-only template block(s) not found verbatim in CLAUDE.md: the project keeps its own wording of them, so their Claude Code text was not swapped for OpenCode's: ${unmatched.map((l) => `"${clip(l)}"`).join('; ')}. Restore the template wording, or wrap the project's version in claude-only / opencode-only blocks.`]
-      : []),
   ];
-  const body = `${text.trimEnd()}\n\n${opencodeHostTail(pluginRoot)}`;
+  const body = `## Sterling layer on OpenCode\n\nThe shared Sterling rules are in the "Sterling layer (generated)" section of AGENTS.md. These rules are OpenCode's own.\n\n${rules.trim()}\n\n${opencodeHostTail(pluginRoot)}`;
   if (!problems.length) return body;
-  return `STERLING LAYER HOST CHECK: parts of this project's CLAUDE.md could not be rendered for OpenCode and are injected unchanged. Read them as Claude Code instructions, apply the OpenCode host section at the end, and tell the user.\n${problems.map((p) => `- ${p}`).join('\n')}\n\n${body}`;
+  return `STERLING LAYER HOST CHECK: parts of the OpenCode text could not be rendered and are injected unchanged. Read them as Claude Code instructions, apply the OpenCode host section at the end, and tell the user.\n${problems.map((p) => `- ${p}`).join('\n')}\n\n${body}`;
 }
