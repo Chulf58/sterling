@@ -661,7 +661,8 @@ test('cloneAgentSync: a refusal is a failed sync that says what was refused, and
   const a = recordingSteps({ 'sync-agents.mjs': { status: 2, error: null, out, tail: out.split('\n').join(' | ') } });
   const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep: a.runStep });
   assert.equal(r.outcome, 'failed');
-  assert.deepEqual(a.calls, [`sync-agents.mjs --target ${project}`]);
+  // stamp-contract does not run after the refusal; retire-host-files, with its own on-disk checks, always runs last.
+  assert.deepEqual(a.calls, [`sync-agents.mjs --target ${project}`, `retire-host-files.mjs --target ${project}`]);
   assert.match(r.warning, /^✗ Sterling clone: agent sync FAILED — sync-agents REFUSED \(exit 2\): refused_local_modification: reviewer\. agents synced — RESTART to load them/);
   assert.ok(r.context.includes('sync-agents DID change agents before the failure (refreshed: implementor): RESTART REQUIRED'), r.context);
 
@@ -1377,14 +1378,20 @@ const LAYER_KEPT = "⚠ Sterling layer: CLAUDE.md holds text that is not Sterlin
 const LAYER_REMOVED = "Sterling layer: GEMINI.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
 const LAYER_REFUSED = "✗ Sterling layer REFUSED: AGENTS.md would be 27,738 bytes with the Sterling layer, over agy's 24,000-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed.";
 
-test('postUpdateSync: a kept CLAUDE.md and a removed GEMINI.md from the layer step are named in the banner and the context, and the marker advances', async () => {
+test('postUpdateSync: a kept CLAUDE.md and a removed GEMINI.md from the retire step are named in the banner and the context, and the marker advances', async () => {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '0.0.1', store: false });
-  const out = `up_to_date: implementor\nSterling layer: AGENTS.md up to date\n${LAYER_KEPT}\n${LAYER_REMOVED}\n`;
-  const runStep = async (root, name) =>
-    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  const out = 'up_to_date: implementor\nSterling layer: AGENTS.md up to date\n';
+  const calls = [];
+  const runStep = async (root, name) => {
+    calls.push(name);
+    if (name === 'sync-agents.mjs') return { status: 0, error: null, out, tail: out };
+    if (name === 'retire-host-files.mjs') return { status: 0, error: null, out: `${LAYER_KEPT}\n${LAYER_REMOVED}\n`, tail: '' };
+    return { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  };
   const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
   assert.equal(r.outcome, 'synced');
+  assert.deepEqual(calls, ['sync-agents.mjs', 'stamp-contract.mjs', 'retire-host-files.mjs'], 'the receipts come from the retire step');
   for (const line of [LAYER_KEPT, LAYER_REMOVED]) {
     assert.ok(r.warning.includes(line), `banner names: ${line}\n${r.warning}`);
     assert.ok(r.context.includes(line), `context names: ${line}\n${r.context}`);
@@ -1398,7 +1405,7 @@ test('postUpdateSync: a layer refusal (sync-agents exit 2) is a failed sync nami
   const project = makeProject({ marker: '0.0.1', store: false });
   const out = `up_to_date: implementor\n${LAYER_REFUSED}\n${LAYER_KEPT.replace("holds text that is not Sterling's generated layer", 'was not checked for removal because the Sterling layer is not verified in AGENTS.md')}\n`;
   const runStep = async (root, name) =>
-    name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail: 'refused' } : assert.fail('stamp-contract must not run after a refused sync');
+    name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail: 'refused' } : name === 'retire-host-files.mjs' ? { status: 0, error: null, out: '', tail: '' } : assert.fail('stamp-contract must not run after a refused sync');
   const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
   assert.equal(r.outcome, 'failed');
   assert.match(r.warning, /REFUSED the Sterling layer in AGENTS\.md/);
@@ -1451,7 +1458,7 @@ test('postUpdateSync: a partial agent refresh plus a layer refusal and an agent 
   const agentRefusal = 'refused_local_modification: reviewer';
   const out = `refreshed: implementor\n${agentRefusal}\n${LAYER_REFUSED}\n\nRESTART REQUIRED — project subagents load at session start.\n`;
   const runStep = async (root, name) =>
-    name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail: out.trim().split('\n').slice(-4).join(' | ') } : assert.fail('stamp-contract must not run after a refused sync');
+    name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail: out.trim().split('\n').slice(-4).join(' | ') } : name === 'retire-host-files.mjs' ? { status: 0, error: null, out: '', tail: '' } : assert.fail('stamp-contract must not run after a refused sync');
   const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
   assert.equal(r.outcome, 'failed');
   assert.match(r.warning, /RESTART|restart/, `the restart is owed:\n${r.warning}`);
@@ -1472,7 +1479,7 @@ test('postUpdateSync: refusal reasons that sit far above the tail are still name
   const out = `${agentRefusal}\n${LAYER_REFUSED}\n${noise.join('\n')}\n`;
   const tail = out.trim().split('\n').slice(-8).join(' | ');
   assert.ok(!tail.includes('refused_local_modification') && !tail.includes('Sterling layer REFUSED'), 'fixture: both refusals are outside the tail');
-  const runStep = async (root, name) => (name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail } : assert.fail(`${name} must not run after a refused sync`));
+  const runStep = async (root, name) => (name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail } : name === 'retire-host-files.mjs' ? { status: 0, error: null, out: '', tail: '' } : assert.fail(`${name} must not run after a refused sync`));
   const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
   assert.equal(r.outcome, 'failed');
   assert.ok(r.warning.includes(agentRefusal), r.warning);
@@ -1481,7 +1488,7 @@ test('postUpdateSync: refusal reasons that sit far above the tail are still name
   assert.equal(markerOf(project), '0.0.1\n');
 });
 
-test('postUpdateSync: a stamp-contract refusal to update AGENTS.md (planned file over the cap) fails the sync, names the reason, runs no retirement and leaves the marker', async () => {
+test('postUpdateSync: a stamp-contract refusal to update AGENTS.md (planned file over the cap) fails the sync, names the reason and leaves the marker; the retire step still runs last', async () => {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '0.0.1', store: false });
   const contractOut = `✗ p (${project}/AGENTS.md)\n    inserted  - **Lint and tests before done.**…\n    PLANNED_AGENTS_MD_REFUSED  AGENTS.md (write)…\n      AGENTS.md would be 24,310 bytes with the Sterling layer, over agy's 24,000-byte cap. Nothing in AGENTS.md was changed.\n\nINSERTS APPLIED — 1 project(s) processed, 0 already in sync, 1 refusal(s).\n`;
@@ -1490,12 +1497,12 @@ test('postUpdateSync: a stamp-contract refusal to update AGENTS.md (planned file
     calls.push(name);
     if (name === 'sync-agents.mjs') return { status: 0, error: null, out: 'up_to_date: implementor\n', tail: '' };
     if (name === 'stamp-contract.mjs') return { status: 2, error: null, out: contractOut, tail: contractOut.trim().split('\n').slice(-2).join(' | ') };
-    return assert.fail(`${name} must not run after a stamp-contract safety refusal`);
+    return { status: 0, error: null, out: '', tail: '' };
   };
   const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
   assert.equal(r.outcome, 'failed');
-  assert.match(r.warning, /stamp-contract REFUSED to update AGENTS\.md \(PLANNED_AGENTS_MD_REFUSED .*24,310 bytes/);
-  assert.deepEqual(calls, ['sync-agents.mjs', 'stamp-contract.mjs']);
+  assert.match(r.warning, /stamp-contract could not update AGENTS\.md \(PLANNED_AGENTS_MD_REFUSED .*24,310 bytes/);
+  assert.deepEqual(calls, ['sync-agents.mjs', 'stamp-contract.mjs', 'retire-host-files.mjs']);
   assert.equal(markerOf(project), '0.0.1\n');
 });
 
@@ -1515,4 +1522,82 @@ test('runPostUpdateSteps: retire-host-files runs last, after stamp-contract, and
     assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`, `retire-host-files.mjs --target ${project}`]);
     assert.deepEqual(r.layer, [removed]);
   }
+});
+
+// Review loop 4 of #329. R1: the retire step runs after the writers whatever their outcome. R2:
+// write and safety refusals from stamp-contract (one classifier, scripts/lib/stamp-outcome.mjs),
+// a crash and a zero-project run fail the sync. R4: OpenCode and agy refusal rows are reasons. R5: a
+// Sterling source tree removes nothing and names a retained host file. R8: receipts of a retire step
+// that exits non-zero are still relayed.
+const stepsWith = (results) => {
+  const calls = [];
+  const runStep = async (root, name) => {
+    calls.push(name);
+    return results[name] ?? { status: 0, error: null, out: name === 'stamp-contract.mjs' ? 'stamp-contract: 1 already in sync — 1 project(s) processed' : '', tail: '' };
+  };
+  return { calls, runStep };
+};
+
+test('postUpdateSync: a WRITE_FAILED_REFUSED from stamp-contract fails the sync and is named; the marker is not advanced', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const contractOut = `✗ p (${project}/AGENTS.md)\n    WRITE_FAILED_REFUSED  AGENTS.md (write)…\n      ${project}/AGENTS.md could not be written (EACCES: permission denied). Nothing in it was changed; make the file writable and re-run.\n\nINSERTS APPLIED — 1 project(s) processed, 0 already in sync, 1 refusal(s).\n`;
+  const { calls, runStep } = stepsWith({ 'stamp-contract.mjs': { status: 2, error: null, out: contractOut, tail: '' } });
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.match(r.warning, /stamp-contract could not update AGENTS\.md \(WRITE_FAILED_REFUSED .*EACCES/);
+  assert.deepEqual(calls, ['sync-agents.mjs', 'stamp-contract.mjs', 'retire-host-files.mjs']);
+  assert.equal(markerOf(project), '0.0.1\n');
+});
+
+test('postUpdateSync: a stamp-contract crash and a zero-project run both fail the sync; the retire step still runs and its receipts are relayed', async () => {
+  for (const contract of [{ status: 1, error: null, out: 'TypeError: boom', tail: 'TypeError: boom' }, { status: 0, error: null, out: 'stamp-contract: — 0 project(s) processed', tail: '' }]) {
+    const plugin = makePluginRoot();
+    const project = makeProject({ marker: '0.0.1', store: false });
+    const { calls, runStep } = stepsWith({ 'stamp-contract.mjs': contract, 'retire-host-files.mjs': { status: 0, error: null, out: `${LAYER_REMOVED}\n`, tail: '' } });
+    const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+    assert.equal(r.outcome, 'failed', contract.out);
+    assert.deepEqual(calls, ['sync-agents.mjs', 'stamp-contract.mjs', 'retire-host-files.mjs']);
+    assert.ok(r.warning.includes(LAYER_REMOVED), r.warning);
+    assert.equal(markerOf(project), '0.0.1\n');
+  }
+});
+
+test('postUpdateSync: OpenCode and agy refusal rows far above the tail are named next to agent and layer refusals', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const oc = 'OpenCode refused: .opencode/opencode.json — not valid JSON';
+  const agy = 'Antigravity CLI (agy) refused: .agents/agents/, GEMINI.md, .git/info/exclude (agy) — git ls-files failed';
+  const noise = Array.from({ length: 25 }, (_, i) => `OpenCode up to date: .opencode/agents/role-${i}.md`);
+  const out = `${oc}\n${agy}\nrefused_local_modification: reviewer\n${noise.join('\n')}\nexit-1-looking line\n`;
+  const tail = out.trim().split('\n').slice(-8).join(' | ');
+  assert.ok(!tail.includes('refused'), 'fixture: every refusal is outside the tail');
+  const { runStep } = stepsWith({ 'sync-agents.mjs': { status: 2, error: null, out, tail } });
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'failed');
+  for (const line of [oc, agy, 'refused_local_modification: reviewer']) assert.ok(r.warning.includes(line), `${line}\n${r.warning}`);
+});
+
+test('postUpdateSync: the retire step\'s receipts are relayed even when it exits non-zero, and the sync fails', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const failedLine = "⚠ Sterling layer: GEMINI.md holds only Sterling's generated text but could not be removed (EPERM), so it was kept.";
+  const { runStep } = stepsWith({ 'retire-host-files.mjs': { status: 1, error: null, out: `${LAYER_REMOVED.replace('GEMINI', 'CLAUDE')}\n${failedLine}\n`, tail: failedLine } });
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.ok(r.warning.includes(LAYER_REMOVED.replace('GEMINI', 'CLAUDE')), `the receipt of the removed file is kept:\n${r.warning}`);
+  assert.ok(r.warning.includes(failedLine), r.warning);
+  assert.match(r.warning, /retire-host-files exited 1/);
+  assert.equal(markerOf(project), '0.0.1\n');
+});
+
+test('runPostUpdateSteps: a Sterling source tree runs no retire step and names a retained CLAUDE.md with the follow-up command', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  writeFileSync(join(plugin, 'CLAUDE.md'), '# Sterling\n');
+  const { calls, runStep } = stepsWith({});
+  const r = await runPostUpdateSteps(plugin, plugin, runStep);
+  assert.equal(r.ok, true);
+  assert.deepEqual(calls, ['sync-agents.mjs']);
+  assert.equal(r.layer.length, 1);
+  assert.match(r.layer[0], /^⚠ Sterling layer: CLAUDE\.md kept — this project is a Sterling source tree, so the post-update sync removes no host file\..*bin\/retire-host-files\.mjs" --target ".*" or \/sterling:update\.$/);
 });

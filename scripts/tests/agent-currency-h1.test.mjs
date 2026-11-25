@@ -956,6 +956,12 @@ function makeSyncable(clone, { git = true, head = 'ref: refs/heads/main\n', vers
       `appendFileSync(process.env.FIXTURE_LOG, 'stamp-contract ' + process.argv.slice(2).join(' ') + '\\n');\n` +
       `process.stdout.write('stamp-contract: 1 already in sync — 1 project(s) processed\\n');\n`
   );
+  // The post-update sync's last step (GitHub #329): this one removes nothing and logs its call.
+  writeFileSync(
+    join(scripts, 'retire-host-files.mjs'),
+    `import { appendFileSync } from 'node:fs';\n` +
+      `appendFileSync(process.env.FIXTURE_LOG, 'retire-host-files ' + process.argv.slice(2).join(' ') + '\\n');\n`
+  );
   return clone;
 }
 
@@ -1002,7 +1008,7 @@ test('CLONE: stale agents are synced at session start for this project, the resu
     const r = h1Logged(dir, clone);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
-    assert.deepEqual(r.calls, [`sync-agents --target ${dir}`, `stamp-contract --apply-inserts --project ${dir}`], 'the same two steps an installed copy runs, scoped to this project');
+    assert.deepEqual(r.calls, [`sync-agents --target ${dir}`, `stamp-contract --apply-inserts --project ${dir}`, `retire-host-files --target ${dir}`], 'the same three steps an installed copy runs, scoped to this project');
     assert.match(installedBytes(agentsDir, 'coder.md'), /Fixture body v2 for coder\./, 'the stale agent now carries the clone template');
     assert.equal(installedBytes(agentsDir, 'librarian.md'), librarianBefore, 'the current agent is not rewritten');
     assert.ok(messageOf(r).includes(`⚠ Sterling clone: installed agents were behind its templates (coder.md) — ${RESTART_SHORT}. `), messageOf(r));
@@ -1058,7 +1064,7 @@ test('CLONE: a locally modified agent is refused loudly and never overwritten; t
     const r = h1Logged(dir, clone);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
-    assert.deepEqual(r.calls, [`sync-agents --target ${dir}`], 'a refusal stops before the contract step, as on an installed copy');
+    assert.deepEqual(r.calls, [`sync-agents --target ${dir}`, `retire-host-files --target ${dir}`], 'a refusal stops before the contract step, as on an installed copy; the retire step, with its own on-disk checks, always runs last');
     assert.equal(installedBytes(agentsDir, 'test-writer.md'), edited, 'the hand-edited agent is byte-identical after the refusal');
     assert.match(installedBytes(agentsDir, 'coder.md'), /Fixture body v2 for coder\./, 'the unmodified stale agent was still refreshed');
     assert.match(messageOf(r), /✗ Sterling clone: agent sync FAILED — sync-agents REFUSED \(exit 2/, messageOf(r));
@@ -1071,7 +1077,7 @@ test('CLONE: a locally modified agent is refused loudly and never overwritten; t
     assert.equal(existsSync(join(dir, '.sterling', 'synced-version')), false);
 
     const again = h1Logged(dir, clone);
-    assert.deepEqual(again.calls, [`sync-agents --target ${dir}`], 'the next session start retries');
+    assert.deepEqual(again.calls, [`sync-agents --target ${dir}`, `retire-host-files --target ${dir}`], 'the next session start retries');
     assert.match(messageOf(again), /✗ Sterling clone: agent sync FAILED — sync-agents REFUSED/);
     assert.doesNotMatch(messageOf(again), /RESTART to load them/, 'nothing changed on the retry, so no restart is claimed');
     assert.equal(installedBytes(agentsDir, 'test-writer.md'), edited, 'still never overwritten');
@@ -1181,7 +1187,7 @@ test('CLONE: inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1)
   assert.doesNotMatch(messageOf(r) + contextOf(r), /CLONE AGENT SYNC|Sterling clone:/);
 
   const control = staleCloneRun();
-  assert.equal(control.r.calls.length, 2, 'CONTROL: the same fixture without the worker flag does sync');
+  assert.equal(control.r.calls.length, 3, 'CONTROL: the same fixture without the worker flag does sync (sync-agents, stamp-contract, retire-host-files)');
 });
 
 test('INSTALLED-COPY CONTROL: the same stale fixture without .git and with an equal marker still only warns; nothing is spawned or rewritten', () => {

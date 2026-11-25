@@ -35,6 +35,7 @@ import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './con
 import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
 import { refreshAgentsMdKnowledge } from './agents-md-facts.mjs';
 import { LayerMarkerError, readAgentsMd, writeAgentsMdChecked } from './sterling-layer.mjs';
+import { stampFailures, stampProcessedNothing } from './stamp-outcome.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
 import { identityRefusal as projectIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
@@ -799,15 +800,17 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // any persisted schedule. One target's failure never stops another's refresh.
   // This guarantees convergence when refresh runs, not freshness between runs.
   // Returns the number of targets whose refresh failed or was refused.
-  // Projects whose AGENTS.md writers in the refresh ran without a refusal: their CLAUDE.md /
-  // GEMINI.md are checked for removal only after the contract step, the last AGENTS.md writer
-  // (decision project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer).
+  // Every refreshed project: its CLAUDE.md / GEMINI.md are checked for removal after the contract
+  // step, the last AGENTS.md writer, whatever the writers' outcome (review loop 4 of #329). The
+  // check itself is on disk: only Sterling's current render or the stub, with the layer verified
+  // in AGENTS.md, is removed, so a writer failure cannot make it lose project text.
   const retireQueue = [];
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report.projects.push(entry);
+      retireQueue.push(p);
       // The workflow settings (config.workflow, or a legacy config.mode through the one
       // transform) are read so an invalid value is refused here, before anything is synced.
       try {
@@ -924,14 +927,28 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
         if (knowledge?.refreshed) {
           const refusal = writeAgentsMdChecked(p.repo_path, knowledge.text);
-          log(refusal ? `      ⚠ AGENTS.md Knowledge section not rewritten: ${refusal}` : `      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+          if (refusal) {
+            // A writer refusal is a failed project refresh (exit 2), with its reason.
+            log(`      ✗ AGENTS.md Knowledge section REFUSED: ${refusal}`);
+            entry.knowledge = 'refused';
+            fail(2);
+            failed = true;
+          } else {
+            log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+          }
         }
         if (knowledge?.kept) log(`      ⚠ AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
       } catch (err) {
-        if (!(err instanceof LayerMarkerError) && !isProjectReadRefusal(err)) throw err;
-        log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
+        if (err instanceof LayerMarkerError) {
+          log(`      ✗ AGENTS.md Knowledge section REFUSED: ${err.message}`);
+          entry.knowledge = 'refused';
+          fail(2);
+          failed = true;
+        } else {
+          if (!isProjectReadRefusal(err)) throw err;
+          log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
+        }
       }
-      if (r.status === 0 && !failed && !layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) retireQueue.push(p);
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):
       // refresh the project's committed architecture.md / rulings.md /
@@ -1010,37 +1027,34 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
-  // stamp-contract refusals that mean AGENTS.md itself could not be safely updated (an unsafe file,
-  // untrusted markers, a planned file over agy's cap): a failed instruction-file update, never
-  // tolerated wording drift. Returns the refusal lines of `repo`'s block in stamp-contract's output.
-  const SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
-  const stampSafetyRefusals = (out, repo) => {
-    const lines = String(out ?? '').split('\n');
-    const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${join(repo, 'AGENTS.md')})`));
-    if (at === -1) return [];
-    const found = [];
-    for (let i = at + 1; i < lines.length && /^\s/.test(lines[i]); i++) {
-      if (SAFETY_REFUSAL.test(lines[i])) found.push([lines[i].trim(), /^\s{6}/.test(lines[i + 1] ?? '') ? lines[i + 1].trim() : ''].filter(Boolean).join(' — '));
-    }
-    return found;
-  };
-  const retireAfterWriters = (contractOut = '') => {
+  // The last step of a refresh: retire-host-files for every queued project (the clone itself
+  // excepted). Its receipts are relayed whatever its exit code, so a file removed before a later
+  // unlink failed is still named.
+  const retireAfterWriters = () => {
     for (const p of retireQueue.splice(0)) {
       if (normPath(p.repo_path) === normPath(cwd)) continue;
-      const refused = stampSafetyRefusals(contractOut, p.repo_path);
-      if (refused.length) {
-        log(`  ✗ ${p.name}: AGENTS.md update REFUSED by stamp-contract (${refused.join('; ')}); no CLAUDE.md or GEMINI.md was removed`);
-        fail(2);
-        continue;
-      }
       const r = exec(nodeBin, [join(cwd, 'scripts', 'retire-host-files.mjs'), '--target', p.repo_path], { cwd });
-      if (r.status !== 0) {
-        log(`  ✗ ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout}${r.stderr}`.trim().split('\n').slice(-3).join(' | ')}; no CLAUDE.md or GEMINI.md was removed`);
-        fail(1);
-        continue;
-      }
-      const lines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
+      const lines = `${r.stdout ?? ''}`.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
       if (lines.length) log(`  • ${p.name}:\n${lines.map((l) => `      ${l}`).join('\n')}`);
+      if (r.status !== 0) {
+        log(`  ✗ ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split('\n').slice(-3).join(' | ')}`);
+        fail(r.status === 2 ? 2 : 1);
+      }
+    }
+  };
+  // A stamp-contract run's verdict for the projects it touched (scripts/lib/stamp-outcome.mjs): a
+  // write or safety refusal fails that project (exit 2); a crash fails the update (exit 1).
+  const judgeContract = (contract, projects) => {
+    const status = report.steps[report.steps.length - 1]?.status;
+    if (status !== 0 && status !== 2) {
+      log(`✗ stamp-contract crashed (exit ${status}) — instruction files were not checked; see its output above.`);
+      fail(1);
+    }
+    for (const p of projects) {
+      const failures = stampFailures(contract.out, join(p.repo_path, 'AGENTS.md'));
+      if (!failures.length) continue;
+      log(`✗ ${p.name}: stamp-contract could not update AGENTS.md (${failures.join('; ')})`);
+      fail(2);
     }
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
@@ -1128,16 +1142,17 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         tolerate: true,
       });
       report.contract_drift = !contract.ok;
-      // stamp-contract skips an unregistered or missing path and exits 0 with "0 project(s)
-      // processed": a green that checked nothing is exactly what P5 forbids.
-      if (contract.ok && /—\s*0 project\(s\) processed/.test(contract.out)) {
+      judgeContract(contract, [project]);
+      // stamp-contract skips an unregistered or missing path and exits 0 or 2 with "0 project(s)
+      // processed": a run that checked nothing is exactly what P5 forbids.
+      if (stampProcessedNothing(contract.out)) {
         report.contract_unchecked = true;
         log(`✗ stamp-contract checked NOTHING for ${project.repo_path} (0 project(s) processed) — the project is not reachable through the registry stamp-contract reads. Fix the registration and rerun.`);
         fail(1);
       }
       if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
-      retireAfterWriters(contract.out);
     }
+    retireAfterWriters();
     log('RESTART THE SESSION if agents changed — subagents load at CLI start.');
     return report;
   }
@@ -1611,7 +1626,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       tolerate: true,
     });
     report.contract_drift = !contract.ok;
-    retireAfterWriters(contract.out);
+    judgeContract(contract, projectList);
+    retireAfterWriters();
   } else {
     retireAfterWriters();
   }

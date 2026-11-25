@@ -20623,7 +20623,7 @@ var HOSTS = [
   { file: "CLAUDE.md", host: "claude", consequence: "Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists" },
   { file: "GEMINI.md", host: "agy", consequence: "agy loads it next to AGENTS.md, so its text is read twice and counts against agy's 24,000-byte limit" }
 ];
-function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, readFile = readFileSync24 }) {
+function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, readFile = readFileSync24, unlink = unlinkSync8 }) {
   const rows = [];
   for (const { file, host, consequence } of HOSTS) {
     const path = join32(projectDir, file);
@@ -20682,7 +20682,12 @@ function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, re
       keep("changed while it was being checked", "Rerun to check it again");
       continue;
     }
-    unlinkSync8(path);
+    try {
+      unlink(path);
+    } catch (err) {
+      rows.push({ item: file, status: "failed", detail: `could not be removed (${err?.code ?? err?.message ?? err})`, warning: `${file} holds only Sterling's generated text but could not be removed (${err?.code ?? err?.message ?? err}), so it was kept. ${consequence}. Delete ${file} by hand.` });
+      continue;
+    }
     rows.push({ item: file, status: "removed", detail: "held only Sterling's generated text; the layer now lives in AGENTS.md" });
   }
   return { rows };

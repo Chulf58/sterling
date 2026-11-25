@@ -17030,6 +17030,30 @@ function writeAgentsMdChecked(projectDir, text) {
   return null;
 }
 
+// scripts/lib/stamp-outcome.mjs
+var STAMP_FAILURE_CODES = ["WRITE_FAILED_REFUSED", "PLANNED_AGENTS_MD_REFUSED", "AGENTS_MD_REFUSED", "LAYER_MARKERS_REFUSED"];
+var FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join("|")})\\s`);
+var DETAIL_LINE = /^\s{6}\S/;
+function stampFailures(out, agentsMdPath = null) {
+  const lines = String(out ?? "").split("\n");
+  let from = 0;
+  let to = lines.length;
+  if (agentsMdPath !== null) {
+    const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${agentsMdPath})`));
+    if (at === -1) return [];
+    from = at + 1;
+    to = from;
+    while (to < lines.length && /^\s/.test(lines[to])) to++;
+  }
+  const found = [];
+  for (let i = from; i < to; i++) {
+    if (!FAILURE_LINE.test(lines[i])) continue;
+    found.push([lines[i].trim(), DETAIL_LINE.test(lines[i + 1] ?? "") ? lines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 "));
+  }
+  return found;
+}
+var stampProcessedNothing = (out) => /—\s*0 project\(s\) processed/.test(String(out ?? ""));
+
 // scripts/lib/update.mjs
 init_dist();
 
@@ -18074,6 +18098,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report2.projects.push(entry);
+      retireQueue.push(p);
       try {
         readProjectWorkflow(p.repo_path);
       } catch (err) {
@@ -18160,14 +18185,27 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
         if (knowledge?.refreshed) {
           const refusal2 = writeAgentsMdChecked(p.repo_path, knowledge.text);
-          log(refusal2 ? `      \u26A0 AGENTS.md Knowledge section not rewritten: ${refusal2}` : `      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? "on" : "off"})`);
+          if (refusal2) {
+            log(`      \u2717 AGENTS.md Knowledge section REFUSED: ${refusal2}`);
+            entry.knowledge = "refused";
+            fail(2);
+            failed = true;
+          } else {
+            log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? "on" : "off"})`);
+          }
         }
         if (knowledge?.kept) log(`      \u26A0 AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
       } catch (err) {
-        if (!(err instanceof LayerMarkerError) && !isProjectReadRefusal(err)) throw err;
-        log(`      \u26A0 AGENTS.md Knowledge section not checked: ${err.message}`);
+        if (err instanceof LayerMarkerError) {
+          log(`      \u2717 AGENTS.md Knowledge section REFUSED: ${err.message}`);
+          entry.knowledge = "refused";
+          fail(2);
+          failed = true;
+        } else {
+          if (!isProjectReadRefusal(err)) throw err;
+          log(`      \u26A0 AGENTS.md Knowledge section not checked: ${err.message}`);
+        }
       }
-      if (r.status === 0 && !failed && !layerLines.some((l) => l.startsWith("\u2717 Sterling layer REFUSED:"))) retireQueue.push(p);
       if (!withHandoff) {
         entry.handoff = "not_run";
       } else if (!handoffEnabled) {
@@ -18228,35 +18266,30 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
     }
     return failures;
   };
-  const SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
-  const stampSafetyRefusals = (out, repo) => {
-    const lines = String(out ?? "").split("\n");
-    const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${join21(repo, "AGENTS.md")})`));
-    if (at === -1) return [];
-    const found = [];
-    for (let i = at + 1; i < lines.length && /^\s/.test(lines[i]); i++) {
-      if (SAFETY_REFUSAL.test(lines[i])) found.push([lines[i].trim(), /^\s{6}/.test(lines[i + 1] ?? "") ? lines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 "));
-    }
-    return found;
-  };
-  const retireAfterWriters = (contractOut = "") => {
+  const retireAfterWriters = () => {
     for (const p of retireQueue.splice(0)) {
       if (normPath(p.repo_path) === normPath(cwd)) continue;
-      const refused = stampSafetyRefusals(contractOut, p.repo_path);
-      if (refused.length) {
-        log(`  \u2717 ${p.name}: AGENTS.md update REFUSED by stamp-contract (${refused.join("; ")}); no CLAUDE.md or GEMINI.md was removed`);
-        fail(2);
-        continue;
-      }
       const r = exec(nodeBin, [join21(cwd, "scripts", "retire-host-files.mjs"), "--target", p.repo_path], { cwd });
-      if (r.status !== 0) {
-        log(`  \u2717 ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout}${r.stderr}`.trim().split("\n").slice(-3).join(" | ")}; no CLAUDE.md or GEMINI.md was removed`);
-        fail(1);
-        continue;
-      }
-      const lines = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
+      const lines = `${r.stdout ?? ""}`.split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
       if (lines.length) log(`  \u2022 ${p.name}:
 ${lines.map((l) => `      ${l}`).join("\n")}`);
+      if (r.status !== 0) {
+        log(`  \u2717 ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout ?? ""}${r.stderr ?? ""}`.trim().split("\n").slice(-3).join(" | ")}`);
+        fail(r.status === 2 ? 2 : 1);
+      }
+    }
+  };
+  const judgeContract = (contract, projects2) => {
+    const status = report2.steps[report2.steps.length - 1]?.status;
+    if (status !== 0 && status !== 2) {
+      log(`\u2717 stamp-contract crashed (exit ${status}) \u2014 instruction files were not checked; see its output above.`);
+      fail(1);
+    }
+    for (const p of projects2) {
+      const failures = stampFailures(contract.out, join21(p.repo_path, "AGENTS.md"));
+      if (!failures.length) continue;
+      log(`\u2717 ${p.name}: stamp-contract could not update AGENTS.md (${failures.join("; ")})`);
+      fail(2);
     }
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
@@ -18335,14 +18368,15 @@ AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_
         tolerate: true
       });
       report2.contract_drift = !contract.ok;
-      if (contract.ok && /—\s*0 project\(s\) processed/.test(contract.out)) {
+      judgeContract(contract, [project]);
+      if (stampProcessedNothing(contract.out)) {
         report2.contract_unchecked = true;
         log(`\u2717 stamp-contract checked NOTHING for ${project.repo_path} (0 project(s) processed) \u2014 the project is not reachable through the registry stamp-contract reads. Fix the registration and rerun.`);
         fail(1);
       }
       if (report2.contract_drift) log("CONTRACT DRIFT in the invoking project \u2014 see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.");
-      retireAfterWriters(contract.out);
     }
+    retireAfterWriters();
     log("RESTART THE SESSION if agents changed \u2014 subagents load at CLI start.");
     return report2;
   }
@@ -18653,7 +18687,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
       tolerate: true
     });
     report2.contract_drift = !contract.ok;
-    retireAfterWriters(contract.out);
+    judgeContract(contract, projectList);
+    retireAfterWriters();
   } else {
     retireAfterWriters();
   }

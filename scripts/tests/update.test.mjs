@@ -507,15 +507,16 @@ test('fan-out: config migration lines are relayed once with the warning mark and
 
 // The Sterling layer in AGENTS.md (GitHub #329, review finding 6): sync-agents' layer lines are
 // relayed on success, never dropped, and a layer refusal fails the project with its reason.
-test('fan-out: Sterling layer lines (a kept CLAUDE.md, a removed GEMINI.md) are relayed once each; routine layer lines are not', async () => {
+test('fan-out: the retire step\'s receipts (a kept CLAUDE.md, a removed GEMINI.md) are relayed once each; routine layer lines are not', async () => {
   const cwd = scratchCwd();
   try {
     const kept = "⚠ Sterling layer: CLAUDE.md holds text that is not Sterling's generated layer, so it was kept. Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists. Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete CLAUDE.md.";
     const removed = "Sterling layer: GEMINI.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
-    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: `up_to_date: scout\nSterling layer: AGENTS.md regenerated\n${kept}\n${removed}\n` });
+    const { exec, calls } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\nSterling layer: AGENTS.md regenerated\n', retireStdout: `${kept}\n${removed}\n` });
     const lines = [];
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
     assert.equal(report.exit, 0);
+    assert.ok(calls.some((c) => c.includes('retire-host-files.mjs --target /tmp/dome')), 'the receipts come from the retire step');
     assert.equal(report.projects[0].changed, 0, 'layer lines are not agent changes');
     const log = lines.join('\n');
     for (const line of [kept, removed]) assert.equal(log.split(line).length - 1, 1, `relayed exactly once: ${line}\n${log}`);
@@ -580,10 +581,13 @@ test('fan-out: the Knowledge refresh never follows a symlinked AGENTS.md — lin
     symlinkSync(join(outside, 'AGENTS.md'), join(dir, 'AGENTS.md'));
     const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\n' });
     const lines = [];
-    await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
     assert.equal(readFileSync(join(outside, 'AGENTS.md'), 'utf8'), agents);
     assert.ok(lstatSync(join(dir, 'AGENTS.md')).isSymbolicLink());
-    assert.match(lines.join('\n'), /Knowledge section not checked: AGENTS\.md is not a plain file in the project/);
+    // A Knowledge writer refusal is a failed project refresh (review loop 4 of #329, ruling R2).
+    assert.match(lines.join('\n'), /✗ AGENTS\.md Knowledge section REFUSED: AGENTS\.md is not a plain file in the project/);
+    assert.equal(report.exit, 2);
+    assert.equal(report.projects[0].knowledge, 'refused');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
@@ -963,7 +967,7 @@ test('authoring role: retire-host-files runs after stamp-contract for the invoki
   }
 });
 
-test('authoring role: a stamp-contract refusal to update AGENTS.md (planned file over the cap) fails the update, is named, and no host file is checked for removal', async () => {
+test('authoring role: a stamp-contract refusal to update AGENTS.md (planned file over the cap) fails the update and is named; the retire step still runs last', async () => {
   const cwd = authoringCwd();
   const dir = mkdtempSync(join(tmpdir(), 'sterling-update-retire-'));
   try {
@@ -972,11 +976,71 @@ test('authoring role: a stamp-contract refusal to update AGENTS.md (planned file
     const lines = [];
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dir }], invokingProject: dir, opts: {} });
     assert.equal(report.exit, 2);
-    assert.deepEqual(calls.filter((c) => c.includes('retire-host-files.mjs')), []);
-    assert.match(lines.join('\n'), /✗ dome: AGENTS\.md update REFUSED by stamp-contract \(PLANNED_AGENTS_MD_REFUSED .*24,310 bytes/);
+    assert.equal(calls.filter((c) => c.includes('retire-host-files.mjs')).length, 1, 'retirement runs on its own on-disk checks');
+    assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > calls.findIndex((c) => c.includes('stamp-contract.mjs')));
+    assert.match(lines.join('\n'), /✗ dome: stamp-contract could not update AGENTS\.md \(PLANNED_AGENTS_MD_REFUSED .*24,310 bytes/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Review loop 4 of #329 (ruling R2): a write refusal, a crash and a zero-project run of
+// stamp-contract on the target each fail the update; the retire step still runs last (R1).
+for (const [label, contract, exit, pattern] of [
+  ['a WRITE_FAILED_REFUSED', (dir) => ({ contractStatus: 2, contractStdout: `✗ dome (${join(dir, 'AGENTS.md')})\n    WRITE_FAILED_REFUSED  AGENTS.md (write)…\n      AGENTS.md could not be written (EACCES: permission denied).\n` }), 2, /✗ dome: stamp-contract could not update AGENTS\.md \(WRITE_FAILED_REFUSED .*EACCES/],
+  ['a crash', () => ({ contractStatus: 1, contractStdout: 'TypeError: boom\n' }), 1, /✗ stamp-contract crashed \(exit 1\)/],
+  ['a zero-project run', () => ({ contractStatus: 0, contractStdout: 'stamp-contract: — 0 project(s) processed\n' }), 1, /stamp-contract checked NOTHING/],
+]) {
+  test(`authoring role: ${label} from stamp-contract fails the update (exit ${exit}); the retire step still runs last`, async () => {
+    const cwd = authoringCwd();
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-update-retire-'));
+    try {
+      const { exec, calls } = fakeExec(contract(dir));
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dir }], invokingProject: dir, opts: {} });
+      assert.equal(report.exit, exit, lines.join('\n'));
+      assert.match(lines.join('\n'), pattern);
+      assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > calls.findIndex((c) => c.includes('stamp-contract.mjs')));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('already current: the refresh runs the retire step for each project and relays its receipts', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const removed = "Sterling layer: CLAUDE.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec, calls } = fakeExec({ behind: 0, retireStdout: `${removed}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 0, lines.join('\n'));
+    assert.ok(calls.some((c) => c.includes('retire-host-files.mjs --target /tmp/dome')), calls.join('\n'));
+    assert.ok(lines.join('\n').includes(removed));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('the retire step\'s receipts are relayed even when it exits non-zero, and the update fails', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const removed = "Sterling layer: CLAUDE.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec } = fakeExec({ behind: 0, retireStdout: `${removed}\n` });
+    const failing = (cmd, args, o) => (args[0]?.endsWith('retire-host-files.mjs') ? { ...exec(cmd, args, o), status: 1 } : exec(cmd, args, o));
+    const lines = [];
+    const report = await runUpdate({ cwd, exec: failing, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    const log = lines.join('\n');
+    assert.ok(log.includes(removed), `the receipt of the removed file is kept:\n${log}`);
+    assert.match(log, /✗ Dome: retire-host-files failed \(exit 1\)/);
+    assert.doesNotMatch(log, /no CLAUDE\.md or GEMINI\.md was removed/);
+    assert.equal(report.exit, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 

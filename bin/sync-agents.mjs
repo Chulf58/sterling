@@ -11999,6 +11999,10 @@ function capRefusal(text) {
   if (n <= AGENTS_MD_AGY_CAP_BYTES) return null;
   return `AGENTS.md would be ${n.toLocaleString("en-US")} bytes with the Sterling layer, over agy's ${AGENTS_MD_AGY_CAP_BYTES.toLocaleString("en-US")}-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed. Shorten the project's own text in AGENTS.md by at least ${(n - AGENTS_MD_AGY_CAP_BYTES).toLocaleString("en-US")} bytes (move detail into a linked doc), then rerun`;
 }
+var HOSTS = [
+  { file: "CLAUDE.md", host: "claude", consequence: "Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists" },
+  { file: "GEMINI.md", host: "agy", consequence: "agy loads it next to AGENTS.md, so its text is read twice and counts against agy's 24,000-byte limit" }
+];
 var LAYER_LINE = "Sterling layer:";
 var LAYER_WARN = "\u26A0 Sterling layer:";
 var LAYER_REFUSED = "\u2717 Sterling layer REFUSED:";
@@ -12036,6 +12040,16 @@ function syncLayer({ projectDir, pluginRoot: pluginRoot2 }) {
     }
   }
   return { lines, refused: refused2 };
+}
+function retainedHostFiles(projectDir) {
+  return HOSTS.map((h) => h.file).filter((file) => {
+    try {
+      lstatSync6(join16(projectDir, file));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 // scripts/lib/custom-agent-render.mjs
@@ -12767,6 +12781,8 @@ if (claudeHost) {
 }
 var layerSync = syncLayer({ projectDir: targetDir, pluginRoot });
 for (const line of layerSync.lines) console.log(line);
+var retainedHost = retainedHostFiles(targetDir);
+if (retainedHost.length) console.log(`\u26A0 host files retained: ${retainedHost.join(" and ")} \u2014 sync-agents removes none. If ${retainedHost.length > 1 ? "one holds" : "it holds"} only Sterling's generated text, run node "${pluginRoot}/bin/retire-host-files.mjs" --target "${targetDir}" or /sterling:update.`);
 refused += layerSync.refused;
 process.exit(refused > 0 ? 2 : 0);
 /*! Bundled license information:

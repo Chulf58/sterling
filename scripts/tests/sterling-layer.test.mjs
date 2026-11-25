@@ -55,7 +55,7 @@ const read = (dir, file) => readFileSync(join(dir, file), 'utf8');
 // (review loop 3 of #329 moved retirement out of syncLayer into retireAfterWriters).
 const syncThenRetire = (dir) => {
   const r = syncLayer({ projectDir: dir, pluginRoot: repo });
-  return { ...r, lines: [...r.lines, ...retireAfterWriters({ projectDir: dir, pluginRoot: repo })] };
+  return { ...r, lines: [...r.lines, ...retireAfterWriters({ projectDir: dir, pluginRoot: repo }).lines] };
 };
 
 // ---- markers and the splice ----
@@ -218,12 +218,12 @@ test('classifyHostFile: a rule added on the project-name heading line, another p
 });
 
 // A real older render, checked from a plugin copy with no git: only the shipped history decides.
-function noGitPluginRoot() {
+function noGitPluginRoot({ history = true } = {}) {
   const root = tmp();
   mkdirSync(join(root, 'templates'));
   mkdirSync(join(root, 'bin'));
   cpSync(join(repo, 'templates', 'target-claude-md.md'), join(root, 'templates', 'target-claude-md.md'));
-  cpSync(join(repo, 'bin', 'host-file-history.json'), join(root, 'bin', 'host-file-history.json'));
+  if (history) cpSync(join(repo, 'bin', 'host-file-history.json'), join(root, 'bin', 'host-file-history.json'));
   return root;
 }
 const olderTemplate = () => {
@@ -245,7 +245,9 @@ const olderTemplate = () => {
 test('classifyHostFile: an older Sterling render is not pure, with or without the shipped history', () => {
   const dir = project();
   const older = claudeRender('demo', olderTemplate());
-  for (const root of [repo, noGitPluginRoot()]) assert.deepEqual(classifyHostFile(older, 'claude', { pluginRoot: root, known: known(dir) }), { pure: false });
+  for (const root of [repo, noGitPluginRoot(), noGitPluginRoot({ history: false })]) assert.deepEqual(classifyHostFile(older, 'claude', { pluginRoot: root, known: known(dir) }), { pure: false });
+  // With no shipped archive at all, the current render is still recognised: deletion never reads the archive.
+  assert.deepEqual(classifyHostFile(claudeRender(), 'claude', { pluginRoot: noGitPluginRoot({ history: false }), known: known(dir) }), { pure: true });
 });
 
 // ---- retirement: only after the layer is verified, only a regular file, only Sterling's text ----
@@ -498,7 +500,7 @@ test('syncLayer alone removes no host file: retirement is retireAfterWriters, af
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
   syncLayer({ projectDir: dir, pluginRoot: repo });
   assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
-  assert.ok(retireAfterWriters({ projectDir: dir, pluginRoot: repo }).some((l) => /^Sterling layer: CLAUDE\.md removed/.test(l)));
+  assert.ok(retireAfterWriters({ projectDir: dir, pluginRoot: repo }).lines.some((l) => /^Sterling layer: CLAUDE\.md removed/.test(l)));
   assert.equal(existsSync(join(dir, 'CLAUDE.md')), false);
 });
 
@@ -506,7 +508,45 @@ test('retireAfterWriters keeps a pure CLAUDE.md when AGENTS.md on disk is over a
   const section = readLayerSection(repo);
   const dir = project({ agents: `# P\n\n${'- **Rule.** Project text.\n'.repeat(700)}\n${section}\n` });
   writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
-  const lines = retireAfterWriters({ projectDir: dir, pluginRoot: repo });
+  const { lines } = retireAfterWriters({ projectDir: dir, pluginRoot: repo });
   assert.ok(lines.some((l) => /over agy's 24,000-byte cap/.test(l)), lines.join('\n'));
   assert.equal(read(dir, 'CLAUDE.md'), claudeRender());
+});
+
+// Review loop 4 of #329. R8: when a later unlink fails, the receipt of a file already removed is
+// kept and the failure is counted. R7: retire-host-files refuses a bad target with exit 2.
+test('retireAfterWriters keeps the receipt of CLAUDE.md when the later GEMINI.md unlink fails, and counts the failure', () => {
+  const dir = project({ agents: validAgents() });
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  writeFileSync(join(dir, 'GEMINI.md'), agyRender());
+  const unlink = (path) => {
+    if (path.endsWith('GEMINI.md')) throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    rmSync(path);
+  };
+  const { lines, failed } = retireAfterWriters({ projectDir: dir, pluginRoot: repo, unlink });
+  assert.equal(failed, 1);
+  assert.ok(lines.some((l) => /^Sterling layer: CLAUDE\.md removed/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /^⚠ Sterling layer: GEMINI\.md holds only Sterling's generated text but could not be removed \(EPERM\)/.test(l)), lines.join('\n'));
+  assert.equal(existsSync(join(dir, 'CLAUDE.md')), false);
+  assert.equal(read(dir, 'GEMINI.md'), agyRender());
+});
+
+const retireCli = (...args) => spawnSync(process.execPath, [join(repo, 'scripts', 'retire-host-files.mjs'), ...args], { encoding: 'utf8', env: { ...process.env, OPENCODE: '', OPENCODE_SESSION_ID: '' } });
+
+test('retire-host-files refuses an option as the target, a missing target and a file target (exit 2), and accepts a symlinked project root', () => {
+  const file = join(tmp(), 'a-file');
+  writeFileSync(file, 'x');
+  for (const [args, why] of [[['--target', '--verbose'], /is an option, not a project directory/], [['--target', join(tmp(), 'missing')], /does not exist/], [['--target', file], /is not a directory/], [['--target'], /exactly one --target/]]) {
+    const r = retireCli(...args);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, why);
+  }
+  const dir = project({ agents: validAgents() });
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  const link = join(tmp(), 'linked-project');
+  symlinkSync(dir, link);
+  const r = retireCli('--target', link);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^Sterling layer: CLAUDE\.md removed/m);
+  assert.equal(existsSync(join(dir, 'CLAUDE.md')), false);
 });

@@ -24441,6 +24441,30 @@ init_atomic_write();
 var AGENTS_MD_AGY_CAP_BYTES = 24e3;
 var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
 
+// scripts/lib/stamp-outcome.mjs
+var STAMP_FAILURE_CODES = ["WRITE_FAILED_REFUSED", "PLANNED_AGENTS_MD_REFUSED", "AGENTS_MD_REFUSED", "LAYER_MARKERS_REFUSED"];
+var FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join("|")})\\s`);
+var DETAIL_LINE = /^\s{6}\S/;
+function stampFailures(out, agentsMdPath = null) {
+  const lines = String(out ?? "").split("\n");
+  let from = 0;
+  let to = lines.length;
+  if (agentsMdPath !== null) {
+    const at = lines.findIndex((l) => /^[✗•] /.test(l) && l.includes(`(${agentsMdPath})`));
+    if (at === -1) return [];
+    from = at + 1;
+    to = from;
+    while (to < lines.length && /^\s/.test(lines[to])) to++;
+  }
+  const found = [];
+  for (let i = from; i < to; i++) {
+    if (!FAILURE_LINE.test(lines[i])) continue;
+    found.push([lines[i].trim(), DETAIL_LINE.test(lines[i + 1] ?? "") ? lines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 "));
+  }
+  return found;
+}
+var stampProcessedNothing = (out) => /—\s*0 project\(s\) processed/.test(String(out ?? ""));
+
 // scripts/lib/update.mjs
 init_dist();
 
@@ -25499,44 +25523,52 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
   });
 }
 var LAYER_RELAY_LINE = /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/;
-var SYNC_REFUSAL_LINE = /^(✗ Sterling layer REFUSED:|refused[a-z_]*: |foreign_file: |retired_(but_modified|delete_failed|identity_mismatch|read_failed|scan_failed|unrecognized): |unsupported_but_modified: |conductor activation: refused)/;
-var STAMP_SAFETY_REFUSAL = /\b(PLANNED_AGENTS_MD_REFUSED|AGENTS_MD_REFUSED|LAYER_MARKERS_REFUSED)\b/;
+var SYNC_REFUSAL_LINE = /^(✗ Sterling layer REFUSED:|refused[a-z_]*: |foreign_file: |retired_(but_modified|delete_failed|identity_mismatch|read_failed|scan_failed|unrecognized): |unsupported_but_modified: |conductor activation: refused|OpenCode refused: |Antigravity CLI \(agy\) refused: )/;
 async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   const migrated = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
   const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l));
+  const { result, retire } = await writerSteps({ root, project, runStep, host, sync, migrated, layer });
+  if (!retire) return result;
+  const retired = await runStep(root, "retire-host-files.mjs", ["--target", project]);
+  layer.push(...(retired.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l)));
+  const why = retired.error ? `retire-host-files did not run (${retired.error})` : retired.status !== 0 ? `retire-host-files exited ${retired.status}: ${retired.tail}` : null;
+  if (!why) return result;
+  return { ...result, ok: false, detail: result.ok ? why : `${result.detail}; ${why}` };
+}
+async function writerSteps({ root, project, runStep, host, sync, migrated, layer }) {
+  const done = (result) => ({ result, retire: true });
   const layerRefusals = layer.filter((l) => l.startsWith("\u2717 Sterling layer REFUSED:"));
-  if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
+  if (sync.error) return done({ ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` });
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out ?? "") || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out ?? "") || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out ?? "");
   if (sync.status === 2) {
     const reasons = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => SYNC_REFUSAL_LINE.test(l));
     const detail = reasons.length ? `sync-agents REFUSED${layerRefusals.length ? " the Sterling layer in AGENTS.md" : ""} (exit 2): ${reasons.join(" | ")}` : `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}`;
-    return { ok: false, restart, migrated, layer, detail };
+    return done({ ok: false, restart, migrated, layer, detail });
   }
-  if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
+  if (sync.status !== 0) return done({ ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` });
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
-  if (openCodeSkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  if (openCodeSkip) return done({ ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` });
   const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
-  if (agySkip) return { ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
-  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer };
-  const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
-  if (contract.error) return { ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` };
-  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, migrated, layer, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
-  if (/—\s*0 project\(s\) processed/.test(contract.out)) {
-    const refusals = contract.out.split("\n").filter((l) => l.startsWith("\u2717")).map((l) => l.trim());
-    if (refusals.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
-    return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
+  if (agySkip) return done({ ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` });
+  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) {
+    const retained = ["CLAUDE.md", "GEMINI.md"].filter((f) => existsSync27(join39(project, f)));
+    if (retained.length) layer.push(`\u26A0 Sterling layer: ${retained.join(" and ")} kept \u2014 this project is a Sterling source tree, so the post-update sync removes no host file. If ${retained.length > 1 ? "one holds" : "it holds"} only Sterling's generated text, run node "${root}/bin/retire-host-files.mjs" --target "${project}" or /sterling:update.`);
+    return { result: { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer }, retire: false };
   }
-  const contractLines = contract.out.split("\n");
-  const safety = contractLines.map((l, i) => STAMP_SAFETY_REFUSAL.test(l) ? [l.trim(), /^\s{6}/.test(contractLines[i + 1] ?? "") ? contractLines[i + 1].trim() : ""].filter(Boolean).join(" \u2014 ") : null).filter(Boolean);
-  if (safety.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract REFUSED to update AGENTS.md (${safety.join("; ")}); no CLAUDE.md or GEMINI.md was removed` };
-  const retire = await runStep(root, "retire-host-files.mjs", ["--target", project]);
-  if (retire.error) return { ok: false, restart, migrated, layer, detail: `retire-host-files did not run (${retire.error})` };
-  if (retire.status !== 0) return { ok: false, restart, migrated, layer, detail: `retire-host-files exited ${retire.status}: ${retire.tail}` };
-  layer.push(...(retire.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l)));
+  const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
+  if (contract.error) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` });
+  if (contract.status !== 0 && contract.status !== 2) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` });
+  if (stampProcessedNothing(contract.out)) {
+    const refusals = contract.out.split("\n").filter((l) => l.startsWith("\u2717")).map((l) => l.trim());
+    if (refusals.length) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` });
+    return done({ ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` });
+  }
+  const failures = stampFailures(contract.out);
+  if (failures.length) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract could not update AGENTS.md (${failures.join("; ")})` });
   const inserted = contract.out.split("\n").map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l)).filter(Boolean).map((m) => `${m[1]} ${m[2].trim()}`);
   const kept = contract.out.split("\n").map((l) => /^\s*SIMILAR_BULLET_KEPT {2}(.+)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated, layer };
+  return done({ ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated, layer });
 }
 function postUpdateApplies(root, project) {
   return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync27(join39(storeRootFor(project), ".sterling", "config.json"));

@@ -18,7 +18,7 @@ import { describeConflictRefusal, migrateProjectConfigCanonical, modelChoicesFro
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
-import { syncLayer } from './lib/sterling-layer.mjs';
+import { retainedHostFiles, syncLayer } from './lib/sterling-layer.mjs';
 import { hasCustomOutputs, syncCustomAgents } from './lib/custom-agent-render.mjs';
 import { isSterlingClone, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
@@ -281,5 +281,9 @@ if (claudeHost) {
 // those callers relay.
 const layerSync = syncLayer({ projectDir: targetDir, pluginRoot });
 for (const line of layerSync.lines) console.log(line);
+// sync-agents itself removes no host file; a retained one is named once, with the step that does.
+// The prefix is not one /sterling:update or the post-update sync relays: they run that step next.
+const retainedHost = retainedHostFiles(targetDir);
+if (retainedHost.length) console.log(`⚠ host files retained: ${retainedHost.join(' and ')} — sync-agents removes none. If ${retainedHost.length > 1 ? 'one holds' : 'it holds'} only Sterling's generated text, run node "${pluginRoot}/bin/retire-host-files.mjs" --target "${targetDir}" or /sterling:update.`);
 refused += layerSync.refused;
 process.exit(refused > 0 ? 2 : 0);

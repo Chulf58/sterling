@@ -334,9 +334,10 @@ const HOSTS = [
  * Sterling section is verified in AGENTS.md and the file is a regular file holding nothing but
  * Sterling's render; it is re-read just before the unlink and kept if it changed. Every other
  * case keeps the file. Rows: { item, status: 'removed' | 'kept', detail }; a kept row also
- * carries `warning`, the sentence the user needs. `readFile` is a test seam.
+ * carries `warning`, the sentence the user needs; a `failed` row is a pure file whose unlink failed.
+ * `readFile` and `unlink` are test seams.
  */
-export function retireHostFiles({ projectDir, pluginRoot, known, layer, readFile = readFileSync }) {
+export function retireHostFiles({ projectDir, pluginRoot, known, layer, readFile = readFileSync, unlink = unlinkSync }) {
   const rows = [];
   for (const { file, host, consequence } of HOSTS) {
     const path = join(projectDir, file);
@@ -395,7 +396,14 @@ export function retireHostFiles({ projectDir, pluginRoot, known, layer, readFile
       keep('changed while it was being checked', 'Rerun to check it again');
       continue;
     }
-    unlinkSync(path);
+    // A failed unlink is recorded and the loop goes on, so the receipt of a file already removed
+    // is never lost; the row is `failed`, and callers exit non-zero on it.
+    try {
+      unlink(path);
+    } catch (err) {
+      rows.push({ item: file, status: 'failed', detail: `could not be removed (${err?.code ?? err?.message ?? err})`, warning: `${file} holds only Sterling's generated text but could not be removed (${err?.code ?? err?.message ?? err}), so it was kept. ${consequence}. Delete ${file} by hand.` });
+      continue;
+    }
     rows.push({ item: file, status: 'removed', detail: "held only Sterling's generated text; the layer now lives in AGENTS.md" });
   }
   return { rows };
@@ -455,11 +463,26 @@ export function syncLayer({ projectDir, pluginRoot }) {
  * cap) and only then retire CLAUDE.md / GEMINI.md that hold Sterling's current render.
  * Returns printable lines with the LAYER_* prefixes.
  */
-export function retireAfterWriters({ projectDir, pluginRoot, roots = [] }) {
+export function retireAfterWriters({ projectDir, pluginRoot, roots = [], unlink }) {
   const layer = verifyLayerOnDisk(projectDir, readLayerSection(pluginRoot));
   const known = knownHostValues({ projectDir, pluginRoot, roots });
-  return retireHostFiles({ projectDir, pluginRoot, known, layer }).rows.map((row) =>
-    row.status === 'removed' ? `${LAYER_LINE} ${row.item} removed — ${row.detail}` : `${LAYER_WARN} ${row.warning}`);
+  const rows = retireHostFiles({ projectDir, pluginRoot, known, layer, ...(unlink ? { unlink } : {}) }).rows;
+  return {
+    lines: rows.map((row) => (row.status === 'removed' ? `${LAYER_LINE} ${row.item} removed — ${row.detail}` : `${LAYER_WARN} ${row.warning}`)),
+    failed: rows.filter((row) => row.status === 'failed').length,
+  };
+}
+
+/** The CLAUDE.md / GEMINI.md present in `projectDir` (a symlink or directory counts). */
+export function retainedHostFiles(projectDir) {
+  return HOSTS.map((h) => h.file).filter((file) => {
+    try {
+      lstatSync(join(projectDir, file));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
