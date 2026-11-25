@@ -806,6 +806,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // check itself is on disk: only Sterling's current render or the stub, with the layer verified
   // in AGENTS.md, is removed, so a writer failure cannot make it lose project text.
   const retireQueue = [];
+  // The projects the contract step stamps and judges: one explicit set, those of this refresh that
+  // passed the pre-write checks (workflow, identity, handoff setting). See stampTargets.
+  const stampQueue = [];
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
@@ -867,6 +870,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         failures++;
         continue;
       }
+      // Past the pre-write checks: the contract step may stamp this project (stampTargets below).
+      stampQueue.push(p);
       let failed = false;
       const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
@@ -1038,7 +1043,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // unlink failed is still named.
   const retireAfterWriters = () => {
     for (const p of retireQueue.splice(0)) {
-      if (normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path)) continue;
+      if (isSourceTree(p)) continue;
       const r = exec(nodeBin, [join(cwd, 'scripts', 'retire-host-files.mjs'), '--target', p.repo_path], { cwd });
       const lines = `${r.stdout ?? ''}`.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
       if (lines.length) log(`  • ${p.name}:\n${lines.map((l) => `      ${l}`).join('\n')}`);
@@ -1079,15 +1084,30 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
   // It runs on the already-current path too, so a project whose stamp failed after the completion
   // marker was written is stamped again on the next run (review loop 5 of #329).
+  // stamp-contract gets the targets as repeated --project flags and the verdict is read for exactly
+  // those (review loop 7 of #329): a project refused by the pre-write checks, the clone and any
+  // other Sterling source tree (hand-maintained instruction files) are never stamped, and with no
+  // target it does not run at all, since without --project it would stamp the whole registry.
   // Returns the number of projects whose stamp failed.
-  const stampSiblings = (projects) => {
-    if (!existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
-    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts'], {
+  const stampSiblings = () => {
+    const targets = stampTargets();
+    if (!targets.length || !existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
+    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', ...targets.flatMap((p) => ['--project', p.repo_path])], {
       show: true,
       tolerate: true,
     });
     report.contract_drift = !contract.ok;
-    return judgeContract(contract, projects);
+    return judgeContract(contract, targets);
+  };
+  const isSourceTree = (p) => normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path);
+  // Drains stampQueue: the queued projects the contract step may stamp, each source tree named once.
+  const stampTargets = () => {
+    const targets = [];
+    for (const p of stampQueue.splice(0)) {
+      if (!isSourceTree(p)) targets.push(p);
+      else log(`  • ${p.name}: a Sterling source tree — its contract files are hand-maintained, not stamped`);
+    }
+    return targets;
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`\n▸ ${label}`);
@@ -1165,8 +1185,13 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       for (const line of lines) log(`      ${line}`);
     }
     warnIfLauncherNamesOldBundle(project.repo_path, log);
-    if (normPath(project.repo_path) === normPath(cwd)) {
-      log("▸ the clone's contract files are hand-maintained — not checked");
+    // The same target set as stampSiblings: a project refused before any write, the clone and any
+    // other Sterling source tree get no stamp.
+    const stampable = stampQueue.splice(0).includes(project);
+    if (isSourceTree(project)) {
+      log(`▸ ${normPath(project.repo_path) === normPath(cwd) ? "the clone's" : "this Sterling source tree's"} contract files are hand-maintained — not checked`);
+    } else if (!stampable) {
+      log('▸ contract text not stamped: the project was refused above, before any write');
     } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
       // --apply-inserts: see the sibling-projects step below.
       const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path], {
@@ -1380,7 +1405,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       } else if (list.length) {
         log(`\n▸ already current at ${before.head_short}; refreshing ${list.length} registered project(s) — each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
-        failures += stampSiblings(list);
+        failures += stampSiblings();
         retireAfterWriters();
         if (report.contract_drift) log('CONTRACT DRIFT in a sibling project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.');
       }
@@ -1645,7 +1670,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   await reportProjectHygiene(projectList);
 
   // The contract step (stampSiblings above), then host-file retirement after every writer.
-  if (opts.projects !== false) refreshFailures += stampSiblings(projectList);
+  refreshFailures += stampSiblings();
   retireAfterWriters();
 
   log(

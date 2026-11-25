@@ -1,13 +1,14 @@
 // stamp-contract's output, classified once for /sterling:update and the post-update sync (GitHub
 // #329). A write or safety refusal means AGENTS.md could not be updated: a failed instruction-file
 // update, never tolerated wording drift. A project stamp-contract could not check at all (no
-// AGENTS.md, a missing path) fails the same way. Every other *_REFUSED action (hand-tuned text, a
+// AGENTS.md) fails the same way. A skipped project (a stale registry path, a Sterling source tree)
+// is printed as a `– ` line and is not a failure. Every other *_REFUSED action (hand-tuned text, a
 // missing anchor, a duplicate) is drift, which both callers tolerate. Builtins only (bundled into
 // hooks).
 
 export const STAMP_FAILURE_CODES = ['WRITE_FAILED_REFUSED', 'PLANNED_AGENTS_MD_REFUSED', 'AGENTS_MD_REFUSED', 'LAYER_MARKERS_REFUSED'];
 /** Project statuses stamp-contract prints as `✗ <project> (<AGENTS.md path>): <status> (<detail>)`: nothing in it was checked. */
-export const STAMP_UNCHECKED_STATUSES = ['not_migrated', 'missing_path'];
+export const STAMP_UNCHECKED_STATUSES = ['not_migrated'];
 const FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join('|')})\\s`);
 const UNCHECKED_LINE = new RegExp(`^✗ .*\\): (${STAMP_UNCHECKED_STATUSES.join('|')}) \\((.*)\\)$`);
 const DETAIL_LINE = /^\s{6}\S/;

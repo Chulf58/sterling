@@ -366,6 +366,25 @@ test('postUpdateSync: stamp-contract exit 2 with 0 projects processed and a refu
   assert.equal(markerOf(project), '0.0.1\n');
 });
 
+// Review loop 7 of #329: stamp-contract prints a skipped project (a stale registry path) on a `– `
+// line, not a ✗ refusal; for the session's own project that is still a run that checked nothing,
+// and the failure names the skip line.
+test('postUpdateSync: stamp-contract exit 0 with 0 projects processed and a skip line is a failed step naming the skip, and the marker is not advanced', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const skip = `– p (${project}/AGENTS.md): skipped — the registered path does not exist (a stale registry entry); nothing stamped`;
+  const contractOut = `${skip}\n\nINSERTS APPLIED — 0 project(s) processed, 0 already in sync, 0 refusal(s).\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs'
+      ? { status: 0, error: null, out: 'up_to_date: implementor', tail: 'up_to_date: implementor' }
+      : { status: 0, error: null, out: contractOut, tail: contractOut.trim().split('\n').slice(-8).join(' | ') };
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.match(r.warning, /checked NOTHING/);
+  assert.ok(r.warning.includes('skipped — the registered path does not exist'), r.warning);
+  assert.equal(markerOf(project), '0.0.1\n');
+});
+
 test('postUpdateSync: stamp-contract exit 2 with some projects processed is still tolerated drift and the marker advances', async () => {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '0.0.1', store: false });

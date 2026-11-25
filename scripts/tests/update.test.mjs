@@ -940,11 +940,13 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
       writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
       const { exec, calls } = fakeExec({ behind: 1, contractStatus });
       const lines = [];
-      const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [], opts: {} });
+      // Review loop 7 of #329: stamp-contract runs only with an explicit target set (one --project
+      // per refreshed project), so the fixture registers one project.
+      const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
       const out = lines.join('\n');
 
       assert.ok(calls.some((c) => c.includes('stamp-contract.mjs')), 'the dry run runs either way');
-      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
+      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/p$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
       assert.equal(report.contract_drift, expectDrift, 'the report carries the verdict for callers');
       assert.equal(report.exit, 0, "a sibling's CLAUDE.md never blocks this clone's update");
       assert.equal(/CONTRACT DRIFT/.test(out), expectDrift, 'the summary names drift only when there is drift');
@@ -1072,7 +1074,7 @@ test('already current: stamp-contract runs for the registered projects, so a not
     const lines = [];
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'legacy', repo_path: '/tmp/legacy' }], opts: {} });
     const log = lines.join('\n');
-    const stamp = calls.findIndex((c) => /stamp-contract\.mjs --apply-inserts$/.test(c));
+    const stamp = calls.findIndex((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/legacy$/.test(c));
     assert.ok(stamp !== -1, `the already-current refresh runs stamp-contract, inserts only:\n${calls.join('\n')}`);
     assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > stamp, 'retirement stays the last step');
     assert.equal(report.exit, 2, log);
@@ -1081,6 +1083,86 @@ test('already current: stamp-contract runs for the registered projects, so a not
     assert.match(log, /1 project\(s\) failed their refresh/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Review loop 7 of #329: the contract step stamps and judges ONE explicit target set, passed as
+// --project flags: the refreshed projects that passed the pre-write checks, minus any Sterling
+// source tree. A project refused before any write (here an invalid handoff setting) and a second
+// registered Sterling checkout are not stamped, on the full path and on the already-current path.
+function stampSetFixture() {
+  const refused = mkdtempSync(join(tmpdir(), 'sterling-update-refused-'));
+  mkdirSync(join(refused, '.sterling'));
+  writeFileSync(join(refused, '.sterling', 'config.json'), JSON.stringify({ handoff: { enabled: 'yes' } }));
+  const checkout = mkdtempSync(join(tmpdir(), 'sterling-update-second-checkout-'));
+  mkdirSync(join(checkout, '.claude-plugin'));
+  writeFileSync(join(checkout, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+  mkdirSync(join(checkout, 'scripts'));
+  writeFileSync(join(checkout, 'scripts', 'architecture-projection.mjs'), '');
+  const projects = [{ name: 'refused', repo_path: refused }, { name: 'checkout', repo_path: checkout }, { name: 'dome', repo_path: '/tmp/dome' }];
+  return { projects, refused, checkout };
+}
+for (const [label, behind] of [['full path', 1], ['already current', 0]]) {
+  test(`${label}: stamp-contract gets exactly the projects that passed the pre-write checks and are not a Sterling source tree, as --project flags`, async () => {
+    const cwd = contractCwd();
+    const f = stampSetFixture();
+    try {
+      if (!behind) seedUpdateMarker(cwd, HEAD_A);
+      const { exec, calls } = fakeExec({ behind, changed: ['packages/store/src/index.ts'] });
+      const lines = [];
+      await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: f.projects, opts: {} });
+      const log = lines.join('\n');
+      const stamps = calls.filter((c) => c.includes('stamp-contract.mjs'));
+      assert.equal(stamps.length, 1, calls.join('\n'));
+      assert.match(stamps[0], /stamp-contract\.mjs --apply-inserts --project \/tmp\/dome$/, 'the one target, explicitly');
+      assert.match(log, /✗ refused: REFUSED — handoff setting/, 'fixture: the project was refused before any write');
+      assert.match(log, /• checkout: a Sterling source tree — its contract files are hand-maintained, not stamped/);
+      assert.ok(!calls.some((c) => c.includes(`retire-host-files.mjs --target ${f.checkout}`)), 'no host file is retired in a source tree');
+    } finally {
+      for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+test('full path: with no project left to stamp, stamp-contract does not run (without --project it would stamp the whole registry)', async () => {
+  const cwd = contractCwd();
+  const f = stampSetFixture();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'] });
+    await runUpdate({ cwd, exec, log: () => {}, projects: f.projects.slice(0, 2), opts: {} });
+    assert.deepEqual(calls.filter((c) => c.includes('stamp-contract.mjs')), []);
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a second registered Sterling checkout as the invoking project is synced, but stamp-contract is not run on it', async () => {
+  const cwd = authoringCwd();
+  const f = stampSetFixture();
+  try {
+    const { exec, calls } = fakeExec();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'checkout', repo_path: f.checkout }], invokingProject: f.checkout, opts: {} });
+    assert.equal(report.exit, 0, lines.join('\n'));
+    assert.equal(calls.filter((c) => c.includes('stamp-contract')).length, 0, calls.join('\n'));
+    assert.match(lines.join('\n'), /this Sterling source tree's contract files are hand-maintained — not checked/);
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: an invoking project refused before any write gets no stamp', async () => {
+  const cwd = authoringCwd();
+  const f = stampSetFixture();
+  try {
+    const { exec, calls } = fakeExec();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'refused', repo_path: f.refused }], invokingProject: f.refused, opts: {} });
+    assert.equal(report.exit, 2, lines.join('\n'));
+    assert.equal(calls.filter((c) => c.includes('stamp-contract')).length, 0, calls.join('\n'));
+    assert.match(lines.join('\n'), /contract text not stamped: the project was refused above, before any write/);
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
   }
 });
 

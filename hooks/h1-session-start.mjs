@@ -17697,7 +17697,7 @@ import { join as join29, resolve as resolve13 } from "node:path";
 
 // scripts/lib/stamp-outcome.mjs
 var STAMP_FAILURE_CODES = ["WRITE_FAILED_REFUSED", "PLANNED_AGENTS_MD_REFUSED", "AGENTS_MD_REFUSED", "LAYER_MARKERS_REFUSED"];
-var STAMP_UNCHECKED_STATUSES = ["not_migrated", "missing_path"];
+var STAMP_UNCHECKED_STATUSES = ["not_migrated"];
 var FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join("|")})\\s`);
 var UNCHECKED_LINE = new RegExp(`^\u2717 .*\\): (${STAMP_UNCHECKED_STATUSES.join("|")}) \\((.*)\\)$`);
 var DETAIL_LINE = /^\s{6}\S/;
@@ -17844,7 +17844,7 @@ async function writerSteps({ root, project, runStep, host, sync, migrated, layer
   if (contract.error) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` });
   if (contract.status !== 0 && contract.status !== 2) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` });
   if (stampProcessedNothing(contract.out)) {
-    const refusals = contract.out.split("\n").filter((l) => l.startsWith("\u2717")).map((l) => l.trim());
+    const refusals = contract.out.split("\n").filter((l) => l.startsWith("\u2717") || l.startsWith("\u2013 ")).map((l) => l.trim());
     if (refusals.length) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` });
     return done({ ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` });
   }

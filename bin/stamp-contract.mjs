@@ -6477,166 +6477,6 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   return { worktree, mainRoot };
 }
 
-// scripts/lib/sterling-layer.mjs
-import { existsSync as existsSync4, lstatSync as lstatSync3, readFileSync as readFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
-
-// scripts/lib/agent-fences.mjs
-var FENCE_KINDS = {
-  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
-  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
-  "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
-  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
-  "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
-};
-var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode|agy)[\s_-]*only/i;
-var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
-var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
-function classify(line) {
-  for (const [kind, { open, close }] of Object.entries(FENCE_KINDS)) {
-    if (line === open) return { kind, role: "open" };
-    if (line === close) return { kind, role: "close" };
-  }
-  return null;
-}
-function malformedMarkers(text, label) {
-  const lines = text.split("\n");
-  const out = [];
-  for (const m of text.matchAll(COMMENT_RE)) {
-    if (!FENCE_WORD_RE.test(m[0])) continue;
-    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
-    if (EXACT_MARKERS.has(m[0]) && lines[lineIndex] === m[0]) continue;
-    out.push({
-      kind: "fence_malformed",
-      detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} names a fence but is not exactly a marker line (${Object.values(FENCE_KINDS).map((f) => `'${f.open}'/'${f.close}'`).join(", ")}) \u2014 case, spacing and line breaks must match`
-    });
-  }
-  return out;
-}
-var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
-var COUNTERPART_HOSTS = ["claude", "opencode", "agy"];
-var HOST_OF_KIND = { "claude-only": "claude", "opencode-only": "opencode", "agy-only": "agy" };
-var GENERAL_MARKER_RE = /^<!-- no-counterpart: ([a-z]+(?:, [a-z]+)*) -->$/;
-var COUNTERPART_COMMENT_RE = /<!--\s*no[-_ ][\s\S]*?counterpart[\s\S]*?(?:-->|$)/gi;
-function noCounterpartHosts(line) {
-  if (line === NO_COUNTERPART_MARKER) return ["opencode"];
-  const m = GENERAL_MARKER_RE.exec(line);
-  return m ? m[1].split(", ") : null;
-}
-var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
-function counterpartViolations(text, lines, label) {
-  const out = [];
-  for (const m of text.matchAll(COUNTERPART_COMMENT_RE)) {
-    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
-    const hosts = lines[lineIndex] === m[0] ? noCounterpartHosts(m[0]) : null;
-    if (!hosts) {
-      out.push({ kind: "fence_counterpart_malformed", detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} is not '${NO_COUNTERPART_MARKER}' or '<!-- no-counterpart: host, host -->' on a line of its own` });
-      continue;
-    }
-    const bad = hosts.filter((h) => !COUNTERPART_HOSTS.includes(h));
-    if (bad.length || new Set(hosts).size !== hosts.length) {
-      out.push({ kind: "fence_counterpart_host", detail: `${label}:${lineIndex + 1}: no-counterpart hosts must be distinct names from ${COUNTERPART_HOSTS.join(", ")}; got ${hosts.join(", ")}` });
-    }
-  }
-  return out;
-}
-function unaccountedHosts(hostBlocks, lines, label) {
-  const out = [];
-  let run = [];
-  const flush = () => {
-    if (!run.length) return;
-    const covered = new Set(run.flatMap((b) => [b.host, ...b.noCounterpart]));
-    const missing = COUNTERPART_HOSTS.filter((h) => !covered.has(h));
-    if (missing.length) {
-      out.push({ kind: "fence_host_unaccounted", detail: `${label}:${run[0].start}: this host block has no counterpart for ${missing.join(", ")}; add a ${missing.map((h) => `${h}-only`).join(" / ")} block, or '<!-- no-counterpart: ${missing.join(", ")} -->' as the first line inside one of the run's blocks` });
-    }
-    run = [];
-  };
-  for (const block of hostBlocks) {
-    const prev = run[run.length - 1];
-    if (prev && !lines.slice(prev.end, block.start - 1).every((l) => l.trim() === "")) flush();
-    run.push(block);
-  }
-  flush();
-  return out;
-}
-function validateFences(text, label, { allHosts = false } = {}) {
-  const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
-  violations.push(...counterpartViolations(text.replace(/\r\n/g, "\n"), splitLines(text), label));
-  let openFence = null;
-  const hostBlocks = [];
-  const lines = splitLines(text);
-  lines.forEach((line, index) => {
-    const at = `${label}:${index + 1}`;
-    const marker = classify(line);
-    if (!marker) return;
-    if (marker.role === "open") {
-      if (openFence) {
-        violations.push({ kind: "fence_nested", detail: `${at}: '${line}' opens inside the ${openFence.kind} fence opened at line ${openFence.line} \u2014 fences never nest` });
-      } else {
-        openFence = { kind: marker.kind, line: index + 1 };
-      }
-    } else if (!openFence) {
-      violations.push({ kind: "fence_unopened", detail: `${at}: '${line}' closes a fence that was never opened` });
-    } else if (openFence.kind !== marker.kind) {
-      violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
-    } else {
-      const host = HOST_OF_KIND[marker.kind];
-      if (host) {
-        const body = lines.slice(openFence.line, index).filter((l) => !noCounterpartHosts(l));
-        if (!body.some((l) => l.trim() !== "")) {
-          violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
-        }
-        hostBlocks.push({ host, start: openFence.line, end: index + 1, noCounterpart: noCounterpartHosts(lines[openFence.line]) ?? [] });
-        lines.slice(openFence.line, index).forEach((l, i) => {
-          const hosts = noCounterpartHosts(l);
-          if (!hosts) return;
-          if (i !== 0) {
-            violations.push({ kind: "fence_counterpart_misplaced", detail: `${label}:${openFence.line + i + 1}: a no-counterpart marker must be the first line inside its ${marker.kind} block` });
-          } else if (hosts.includes(host)) {
-            violations.push({ kind: "fence_counterpart_self", detail: `${label}:${openFence.line + 1}: a ${marker.kind} block cannot declare that ${host} has no counterpart for itself` });
-          }
-        });
-      }
-      if (marker.kind === "claude-only") {
-        const first = lines[openFence.line];
-        const next = lines.slice(index + 1).find((l) => l.trim() !== "");
-        if (!(noCounterpartHosts(first) ?? []).includes("opencode") && next !== FENCE_KINDS["opencode-only"].open) {
-          violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
-        }
-      }
-      openFence = null;
-    }
-  });
-  if (openFence) {
-    violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
-  }
-  if (allHosts) violations.push(...unaccountedHosts(hostBlocks, lines, label));
-  return violations;
-}
-function render(text, label, keepKinds) {
-  const violations = validateFences(text, label);
-  if (violations.length) {
-    throw new Error(`agent fences invalid in ${label} \u2014 refusing to render (P5):
-  ${violations.map((v) => `[${v.kind}] ${v.detail}`).join("\n  ")}`);
-  }
-  const out = [];
-  let inside = null;
-  for (const line of splitLines(text)) {
-    const marker = classify(line);
-    if (noCounterpartHosts(line)) continue;
-    if (marker) {
-      inside = marker.role === "open" ? marker.kind : null;
-      continue;
-    }
-    if (inside && !keepKinds.includes(inside)) continue;
-    out.push(line);
-  }
-  return out.join("\n");
-}
-function renderClaudeText(text, label) {
-  return render(text, label, ["sterling-only", "claude-only"]);
-}
-
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
 import { join as join9, resolve as resolve5 } from "node:path";
@@ -6805,7 +6645,189 @@ function containedPath(root, rel, leaf) {
     throw e;
   }
 }
+function existsContained(root, rel, leaf) {
+  return lstatOrNull(containedPath(root, rel, leaf)) !== null;
+}
+function readContained(root, rel) {
+  return readFileSync3(containedPath(root, rel, "file"), "utf8");
+}
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/sterling-source-tree.mjs
+var MANIFEST = ".claude-plugin/plugin.json";
+var SENTINEL = "scripts/architecture-projection.mjs";
+function isSterlingSourceTree(dir) {
+  if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
+  return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
+}
+function looksLikeSterlingSourceTree(dir) {
+  try {
+    return isSterlingSourceTree(dir);
+  } catch (err) {
+    if (err instanceof ContainmentError || err instanceof SyntaxError || err instanceof TypeError || typeof err?.code === "string") return false;
+    throw err;
+  }
+}
+
+// scripts/lib/sterling-layer.mjs
+import { existsSync as existsSync4, lstatSync as lstatSync3, readFileSync as readFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
+
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS = {
+  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+  "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+  "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
+};
+var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode|agy)[\s_-]*only/i;
+var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
+function classify(line) {
+  for (const [kind, { open, close }] of Object.entries(FENCE_KINDS)) {
+    if (line === open) return { kind, role: "open" };
+    if (line === close) return { kind, role: "close" };
+  }
+  return null;
+}
+function malformedMarkers(text, label) {
+  const lines = text.split("\n");
+  const out = [];
+  for (const m of text.matchAll(COMMENT_RE)) {
+    if (!FENCE_WORD_RE.test(m[0])) continue;
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    if (EXACT_MARKERS.has(m[0]) && lines[lineIndex] === m[0]) continue;
+    out.push({
+      kind: "fence_malformed",
+      detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} names a fence but is not exactly a marker line (${Object.values(FENCE_KINDS).map((f) => `'${f.open}'/'${f.close}'`).join(", ")}) \u2014 case, spacing and line breaks must match`
+    });
+  }
+  return out;
+}
+var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
+var COUNTERPART_HOSTS = ["claude", "opencode", "agy"];
+var HOST_OF_KIND = { "claude-only": "claude", "opencode-only": "opencode", "agy-only": "agy" };
+var GENERAL_MARKER_RE = /^<!-- no-counterpart: ([a-z]+(?:, [a-z]+)*) -->$/;
+var COUNTERPART_COMMENT_RE = /<!--\s*no[-_ ][\s\S]*?counterpart[\s\S]*?(?:-->|$)/gi;
+function noCounterpartHosts(line) {
+  if (line === NO_COUNTERPART_MARKER) return ["opencode"];
+  const m = GENERAL_MARKER_RE.exec(line);
+  return m ? m[1].split(", ") : null;
+}
+var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
+function counterpartViolations(text, lines, label) {
+  const out = [];
+  for (const m of text.matchAll(COUNTERPART_COMMENT_RE)) {
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    const hosts = lines[lineIndex] === m[0] ? noCounterpartHosts(m[0]) : null;
+    if (!hosts) {
+      out.push({ kind: "fence_counterpart_malformed", detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} is not '${NO_COUNTERPART_MARKER}' or '<!-- no-counterpart: host, host -->' on a line of its own` });
+      continue;
+    }
+    const bad = hosts.filter((h) => !COUNTERPART_HOSTS.includes(h));
+    if (bad.length || new Set(hosts).size !== hosts.length) {
+      out.push({ kind: "fence_counterpart_host", detail: `${label}:${lineIndex + 1}: no-counterpart hosts must be distinct names from ${COUNTERPART_HOSTS.join(", ")}; got ${hosts.join(", ")}` });
+    }
+  }
+  return out;
+}
+function unaccountedHosts(hostBlocks, lines, label) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const covered = new Set(run.flatMap((b) => [b.host, ...b.noCounterpart]));
+    const missing = COUNTERPART_HOSTS.filter((h) => !covered.has(h));
+    if (missing.length) {
+      out.push({ kind: "fence_host_unaccounted", detail: `${label}:${run[0].start}: this host block has no counterpart for ${missing.join(", ")}; add a ${missing.map((h) => `${h}-only`).join(" / ")} block, or '<!-- no-counterpart: ${missing.join(", ")} -->' as the first line inside one of the run's blocks` });
+    }
+    run = [];
+  };
+  for (const block of hostBlocks) {
+    const prev = run[run.length - 1];
+    if (prev && !lines.slice(prev.end, block.start - 1).every((l) => l.trim() === "")) flush();
+    run.push(block);
+  }
+  flush();
+  return out;
+}
+function validateFences(text, label, { allHosts = false } = {}) {
+  const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
+  violations.push(...counterpartViolations(text.replace(/\r\n/g, "\n"), splitLines(text), label));
+  let openFence = null;
+  const hostBlocks = [];
+  const lines = splitLines(text);
+  lines.forEach((line, index) => {
+    const at = `${label}:${index + 1}`;
+    const marker = classify(line);
+    if (!marker) return;
+    if (marker.role === "open") {
+      if (openFence) {
+        violations.push({ kind: "fence_nested", detail: `${at}: '${line}' opens inside the ${openFence.kind} fence opened at line ${openFence.line} \u2014 fences never nest` });
+      } else {
+        openFence = { kind: marker.kind, line: index + 1 };
+      }
+    } else if (!openFence) {
+      violations.push({ kind: "fence_unopened", detail: `${at}: '${line}' closes a fence that was never opened` });
+    } else if (openFence.kind !== marker.kind) {
+      violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
+    } else {
+      const host = HOST_OF_KIND[marker.kind];
+      if (host) {
+        const body = lines.slice(openFence.line, index).filter((l) => !noCounterpartHosts(l));
+        if (!body.some((l) => l.trim() !== "")) {
+          violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
+        }
+        hostBlocks.push({ host, start: openFence.line, end: index + 1, noCounterpart: noCounterpartHosts(lines[openFence.line]) ?? [] });
+        lines.slice(openFence.line, index).forEach((l, i) => {
+          const hosts = noCounterpartHosts(l);
+          if (!hosts) return;
+          if (i !== 0) {
+            violations.push({ kind: "fence_counterpart_misplaced", detail: `${label}:${openFence.line + i + 1}: a no-counterpart marker must be the first line inside its ${marker.kind} block` });
+          } else if (hosts.includes(host)) {
+            violations.push({ kind: "fence_counterpart_self", detail: `${label}:${openFence.line + 1}: a ${marker.kind} block cannot declare that ${host} has no counterpart for itself` });
+          }
+        });
+      }
+      if (marker.kind === "claude-only") {
+        const first = lines[openFence.line];
+        const next = lines.slice(index + 1).find((l) => l.trim() !== "");
+        if (!(noCounterpartHosts(first) ?? []).includes("opencode") && next !== FENCE_KINDS["opencode-only"].open) {
+          violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
+        }
+      }
+      openFence = null;
+    }
+  });
+  if (openFence) {
+    violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
+  }
+  if (allHosts) violations.push(...unaccountedHosts(hostBlocks, lines, label));
+  return violations;
+}
+function render(text, label, keepKinds) {
+  const violations = validateFences(text, label);
+  if (violations.length) {
+    throw new Error(`agent fences invalid in ${label} \u2014 refusing to render (P5):
+  ${violations.map((v) => `[${v.kind}] ${v.detail}`).join("\n  ")}`);
+  }
+  const out = [];
+  let inside = null;
+  for (const line of splitLines(text)) {
+    const marker = classify(line);
+    if (noCounterpartHosts(line)) continue;
+    if (marker) {
+      inside = marker.role === "open" ? marker.kind : null;
+      continue;
+    }
+    if (inside && !keepKinds.includes(inside)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+function renderClaudeText(text, label) {
+  return render(text, label, ["sterling-only", "claude-only"]);
+}
 
 // scripts/lib/sterling-layer.mjs
 var LAYER_END = "<!-- sterling:end generated -->";
@@ -7282,10 +7304,14 @@ var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir }
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
   if (!existsSync5(repo)) {
-    record({ project: projectLabel, status: "missing_path", file: join11(repo, "AGENTS.md"), detail: repo });
+    console.log(`\u2013 ${projectLabel} (${join11(repo, "AGENTS.md")}): skipped \u2014 the registered path does not exist (a stale registry entry); nothing stamped`);
     continue;
   }
   if (realpathSync5(repo) === selfPath) continue;
+  if (looksLikeSterlingSourceTree(repo)) {
+    console.log(`\u2013 ${projectLabel} (${join11(repo, "AGENTS.md")}): skipped \u2014 a Sterling source tree, whose instruction files are hand-maintained; nothing stamped`);
+    continue;
+  }
   const agentsMd = join11(repo, "AGENTS.md");
   let agentsFile;
   try {

@@ -39,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
+import { looksLikeSterlingSourceTree } from './lib/sterling-source-tree.mjs';
 import { LayerMarkerError, layerLineRange, plannedAgentsMdRefusal, readAgentsMd } from './lib/sterling-layer.mjs';
 import {
   AGENTS_TEMPLATE_REL,
@@ -258,11 +259,18 @@ function stampDirs(p) {
 const work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
 for (const { p, dir: repo } of work) {
   const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
+  // A registered path that no longer exists is a stale registry entry, not a failure of this run:
+  // one explicit skip line, never counted as a refusal or by scripts/lib/stamp-outcome.mjs.
   if (!existsSync(repo)) {
-    record({ project: projectLabel, status: 'missing_path', file: join(repo, 'AGENTS.md'), detail: repo });
+    console.log(`– ${projectLabel} (${join(repo, 'AGENTS.md')}): skipped — the registered path does not exist (a stale registry entry); nothing stamped`);
     continue;
   }
   if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own contract files are hand-maintained in sync with the templates
+  // Any other Sterling checkout's instruction files are hand-maintained too (review loop 7 of #329).
+  if (looksLikeSterlingSourceTree(repo)) {
+    console.log(`– ${projectLabel} (${join(repo, 'AGENTS.md')}): skipped — a Sterling source tree, whose instruction files are hand-maintained; nothing stamped`);
+    continue;
+  }
   const agentsMd = join(repo, 'AGENTS.md');
   // AGENTS.md is read only as a plain, singly linked, lossless UTF-8 file inside the project
   // (readAgentsMd): a symlink or hard link would carry the stamp into another file.

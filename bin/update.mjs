@@ -17040,7 +17040,7 @@ function writeAgentsMdChecked(projectDir, text) {
 
 // scripts/lib/stamp-outcome.mjs
 var STAMP_FAILURE_CODES = ["WRITE_FAILED_REFUSED", "PLANNED_AGENTS_MD_REFUSED", "AGENTS_MD_REFUSED", "LAYER_MARKERS_REFUSED"];
-var STAMP_UNCHECKED_STATUSES = ["not_migrated", "missing_path"];
+var STAMP_UNCHECKED_STATUSES = ["not_migrated"];
 var FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join("|")})\\s`);
 var UNCHECKED_LINE = new RegExp(`^\u2717 .*\\): (${STAMP_UNCHECKED_STATUSES.join("|")}) \\((.*)\\)$`);
 var DETAIL_LINE = /^\s{6}\S/;
@@ -18108,6 +18108,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
     }
   };
   const retireQueue = [];
+  const stampQueue = [];
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
@@ -18159,6 +18160,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         failures++;
         continue;
       }
+      stampQueue.push(p);
       let failed = false;
       const r = exec(nodeBin, [join21(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
@@ -18286,7 +18288,7 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
   };
   const retireAfterWriters = () => {
     for (const p of retireQueue.splice(0)) {
-      if (normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path)) continue;
+      if (isSourceTree(p)) continue;
       const r = exec(nodeBin, [join21(cwd, "scripts", "retire-host-files.mjs"), "--target", p.repo_path], { cwd });
       const lines = `${r.stdout ?? ""}`.split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
       if (lines.length) log(`  \u2022 ${p.name}:
@@ -18313,14 +18315,24 @@ ${lines.map((l) => `      ${l}`).join("\n")}`);
     }
     return failed;
   };
-  const stampSiblings = (projects2) => {
-    if (!existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) return 0;
-    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
+  const stampSiblings = () => {
+    const targets = stampTargets();
+    if (!targets.length || !existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) return 0;
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", ...targets.flatMap((p) => ["--project", p.repo_path])], {
       show: true,
       tolerate: true
     });
     report2.contract_drift = !contract.ok;
-    return judgeContract(contract, projects2);
+    return judgeContract(contract, targets);
+  };
+  const isSourceTree = (p) => normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path);
+  const stampTargets = () => {
+    const targets = [];
+    for (const p of stampQueue.splice(0)) {
+      if (!isSourceTree(p)) targets.push(p);
+      else log(`  \u2022 ${p.name}: a Sterling source tree \u2014 its contract files are hand-maintained, not stamped`);
+    }
+    return targets;
   };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`
@@ -18390,8 +18402,11 @@ AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_
       for (const line of lines) log(`      ${line}`);
     }
     warnIfLauncherNamesOldBundle(project.repo_path, log);
-    if (normPath(project.repo_path) === normPath(cwd)) {
-      log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
+    const stampable = stampQueue.splice(0).includes(project);
+    if (isSourceTree(project)) {
+      log(`\u25B8 ${normPath(project.repo_path) === normPath(cwd) ? "the clone's" : "this Sterling source tree's"} contract files are hand-maintained \u2014 not checked`);
+    } else if (!stampable) {
+      log("\u25B8 contract text not stamped: the project was refused above, before any write");
     } else if (existsSync12(join21(cwd, "scripts", "stamp-contract.mjs"))) {
       const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join21(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
         show: true,
@@ -18541,7 +18556,7 @@ ${lines.join("\n")}`);
         log(`
 \u25B8 already current at ${before.head_short}; refreshing ${list.length} registered project(s) \u2014 each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
-        failures += stampSiblings(list);
+        failures += stampSiblings();
         retireAfterWriters();
         if (report2.contract_drift) log("CONTRACT DRIFT in a sibling project \u2014 see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.");
       }
@@ -18713,7 +18728,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false) refreshFailures += stampSiblings(projectList);
+  refreshFailures += stampSiblings();
   retireAfterWriters();
   log(
     `

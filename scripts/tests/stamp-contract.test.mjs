@@ -522,7 +522,7 @@ function sectionFixture(name, mutateAgents, mutateClaude = (text) => text) {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   };
-  return { regDb, complete, read, cleanup };
+  return { regDb, dir, complete, read, cleanup };
 }
 
 test('stamp-contract: an AGENTS.md with no Domains section gains the whole section before Conventions; a dry run writes nothing and a second run changes nothing', () => {
@@ -545,6 +545,55 @@ test('stamp-contract: an AGENTS.md with no Domains section gains the whole secti
     assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
     assert.ok(!/inserted|updated|renamed/.test(again.stdout), `a second run has nothing to do:\n${again.stdout}`);
     assert.deepEqual(f.read(), f.complete, 'a second run changes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 7 of #329: a second registered Sterling checkout (not the one running stamp-contract)
+// has hand-maintained instruction files too, so it gets no automatic insert; it is named on one
+// skip line that is not a refusal and not a failure for the shared classifier.
+test('stamp-contract: a second registered Sterling source checkout gets no insert — AGENTS.md byte-identical, one skip line, exit 0', () => {
+  const f = sectionFixture('second-checkout', (agents) => agents.replace(DOMAINS_SECTION, ''));
+  try {
+    mkdirSync(join(f.dir, '.claude-plugin'));
+    writeFileSync(join(f.dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(f.dir, 'scripts'));
+    writeFileSync(join(f.dir, 'scripts', 'architecture-projection.mjs'), '');
+    const before = f.read();
+    assert.ok(!before.agents.includes('## Domains'), 'fixture sanity: an insert would be due in an ordinary project');
+    for (const args of [['--apply-inserts'], ['--apply-inserts', '--project', f.dir]]) {
+      const r = runStampContract(f.regDb, args);
+      assert.equal(r.status, 0, `${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /^– second-checkout \(.*AGENTS\.md\): skipped — a Sterling source tree, whose instruction files are hand-maintained; nothing stamped$/m);
+      assert.doesNotMatch(r.stdout, /section_inserted|^✗/m);
+      assert.deepEqual(stampFailures(r.stdout, join(f.dir, 'AGENTS.md')), []);
+      assert.deepEqual(f.read(), before, 'nothing written');
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 7 of #329: a registered path that no longer exists is a stale registry entry, not a
+// failure of the run: one explicit skip line, no ✗ refusal line, exit 0, nothing for the classifier.
+test('stamp-contract: a stale registry entry (path gone) beside a healthy project is one skip line, never a refusal', () => {
+  const f = sectionFixture('healthy', (agents) => agents);
+  const gone = join(tmpdir(), `sterling-stamp-gone-${process.pid}-${Date.now()}`);
+  try {
+    const registry = new ProjectRegistry(f.regDb);
+    try {
+      registry.register({ repo_path: gone, name: 'stale', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    } finally {
+      registry.close();
+    }
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /^– stale \(.*AGENTS\.md\): skipped — the registered path does not exist \(a stale registry entry\); nothing stamped$/m);
+    assert.doesNotMatch(r.stdout, /^✗/m, 'no refusal line');
+    assert.deepEqual(stampFailures(r.stdout, join(gone, 'AGENTS.md')), []);
+    assert.deepEqual(stampFailures(r.stdout), []);
+    assert.deepEqual(f.read(), f.complete, 'the healthy project is in sync and untouched');
   } finally {
     f.cleanup();
   }

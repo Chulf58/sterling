@@ -265,7 +265,8 @@ async function writerSteps({ root, project, runStep, host, sync, migrated, layer
   if (stampProcessedNothing(contract.out)) {
     // Exit 0 or 2: either way nothing was checked. A refusal that processed nothing
     // (e.g. not_migrated, no AGENTS.md) is not drift in a synced project; its reason is named.
-    const refusals = contract.out.split('\n').filter((l) => l.startsWith('✗')).map((l) => l.trim());
+    // A skip line (`– `: a stale registry path, a Sterling source tree) names why as well.
+    const refusals = contract.out.split('\n').filter((l) => l.startsWith('✗') || l.startsWith('– ')).map((l) => l.trim());
     if (refusals.length) return done({ ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join('; ')})` });
     return done({ ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) — the project is not reachable through the project registry; run /sterling:init here to register it` });
   }
