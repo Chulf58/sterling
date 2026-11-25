@@ -4823,7 +4823,8 @@ export class SterlingTools {
         // stale_research item, keyed on the finding. The text carries no age
         // number, so a daily re-read leaves the open item byte-identical.
         let mintFailed: MintFailure | undefined;
-        if (sourceAge > threshold) {
+        // Only a project-held finding mints: a domain-held one is shared by every mounting project, so its item would land in each consumer's queue (GitHub #283, #284, #297, #298, #301; same gate as #114 below).
+        if (sourceAge > threshold && this.store.projectStoreHolds(record.id)) {
           const f = record as unknown as { id: string; slug?: string; question: string; volatility_hint?: string };
           mintFailed = this.mintAtRead({
             reason: 'stale_research',
@@ -9042,6 +9043,15 @@ export class SterlingTools {
     // call. Without it the merge silently discarded the field and reported a new
     // version — the failure that makes a "fix" look applied when it never landed.
     this.refuseUnknownFields(old.type, overrides);
+    // An update that changes nothing must not bump the version: a concurrent
+    // writer holding the old version would get a conflict it did not cause
+    // (GitHub #334). A resolves claim or a relation removal is itself the
+    // operation, so those calls stay legal with an empty patch.
+    if (Object.keys(overrides).length === 0 && !resolves?.length && !relationRemoval) {
+      throw new Error(
+        `${toolName}: no fields to update on '${old.id}' — pass at least one field to change; an empty update would bump the version (${old.version}) without changing the record. Nothing was written.`
+      );
+    }
     // links[].target_id THROUGH THE LADDER (board 2e71d464): a caller-supplied
     // `links` array in this update's own body may cite a slug or 8-char prefix
     // the same way knowledge_get already resolves; `old.links` (spread into

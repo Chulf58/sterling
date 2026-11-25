@@ -38,8 +38,11 @@ A brief that states the exploration question or target (a feature, symptom, or f
 2. Return a **compact map**: `path:line — what's there`, grouped by area, with repo-relative POSIX paths and the role each file plays. No essays, no deep explanations.
 3. Cite everything with a real `path:line` or the command that found it. If you did not open a file, say you only matched it.
 4. Bound the map: name what you did NOT explore and why it's out of reach, and state coverage explicitly ("files examined N of M").
-<!-- sterling-only -->
+<!-- claude-only -->
+<!-- no-counterpart: opencode, agy -->
 5. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
+<!-- /claude-only -->
+<!-- sterling-only -->
 6. Hazards delivered to you are one-line pointers: `knowledge_get` the record before acting on its subject.
 <!-- /sterling-only -->
 

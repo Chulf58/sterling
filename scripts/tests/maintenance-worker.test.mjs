@@ -2715,3 +2715,18 @@ test('[history] twenty long commit subjects cannot push the diffstat out of the 
     repo.cleanup();
   }
 });
+
+test('an agy host never launches, takes no lock and returns the reason', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const r = launch(fx, { host: 'agy', spawn: sp.fn });
+    assert.equal(r.launched, false);
+    assert.equal(r.reason, 'agy_host');
+    assert.match(r.skipped, /not launched on agy/);
+    assert.equal(sp.calls.length, 0);
+    assert.equal(existsSync(fx.paths.lock), false, 'no lock taken');
+  } finally {
+    fx.cleanup?.();
+  }
+});

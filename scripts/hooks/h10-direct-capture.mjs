@@ -611,7 +611,7 @@ try {
     // failed launch goes to .sterling/maintenance-worker.log, and real breakage
     // shows once on H1's session-start line (decision
     // maintenance-worker-notices-session-start-only-and-no-sliver-launch).
-    maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: 'stop', spawn });
+    maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: 'stop', spawn, host: input.host });
     let advisoryText = '';
     const advisorySpends = [];
     if (!input.stop_hook_active) {

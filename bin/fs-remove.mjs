@@ -7,9 +7,9 @@ var __export = (target2, all) => {
 };
 
 // scripts/fs-remove.mjs
-import { rmSync as rmSync4, existsSync as existsSync4 } from "node:fs";
-import { join as join9 } from "node:path";
 import { randomUUID as randomUUID4 } from "node:crypto";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync5, realpathSync as realpathSync5 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -6235,7 +6235,7 @@ function parseStoreFence(value) {
 }
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync5, existsSync as existsSync3, mkdtempSync, rmSync as rmSync3 } from "node:fs";
+import { readFileSync as readFileSync5, existsSync as existsSync4, mkdtempSync, rmSync as rmSync3 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // packages/store/dist/index.js
@@ -12987,10 +12987,55 @@ function arg(name, argv = process.argv.slice(2)) {
   return found.length ? found[0] : void 0;
 }
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync3, realpathSync as realpathSync3, statSync as statSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve4 } from "node:path";
+
 // scripts/hooks/lib/store-backend.mjs
 import { join as join8 } from "node:path";
 var CONFIG_REL2 = join8(".sterling", "config.json");
 var STORE_DB_REL = join8(".sterling", "sterling.db");
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git2 = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git2(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve4(cwd, gitDir));
+  const commonReal = real(resolve4(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git2(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve4(commonReal, settings.worktree));
+  else if (basename2(commonReal) === ".git") mainRoot = dirname5(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target2)) {
+  if (!linkedWorktree) return target2;
+  const configRel = join9(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync3(join9(linkedWorktree.mainRoot, configRel)) && existsSync3(join9(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
 
 // scripts/lib/project.mjs
 function fail(message, code = 1) {
@@ -13015,10 +13060,10 @@ function resolveProject(cwd) {
     fail(named(e));
   }
   if (route?.storage === "postgres") return { storage: "postgres", dbPath, config: route.config };
-  if (!existsSync3(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
+  if (!existsSync4(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
   let config;
   try {
-    config = route ? route.config : parseConfig(existsSync3(configPath) ? JSON.parse(readFileSync5(configPath, "utf8")) : {});
+    config = route ? route.config : parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync5(configPath, "utf8")) : {});
   } catch (e) {
     fail(`malformed .sterling/config.json \u2014 failing loud, never half-applying (P5): ${e.message}`);
   }
@@ -13039,22 +13084,161 @@ function openProject(cwd = process.cwd()) {
   return { cwd, store: openRouted(cwd).store, config };
 }
 
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync4, readFileSync as readFileSync6, readdirSync, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
+import { join as join10, resolve as resolve5 } from "node:path";
+var ContainmentError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ContainmentError";
+  }
+};
+var lstatOrNull = (p) => {
+  try {
+    return lstatSync4(p);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+};
+function containedPath(root, rel, leaf) {
+  const segments = rel.split("/").filter(Boolean);
+  if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
+  let cursor = resolve5(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join10(cursor, part);
+    const st = lstatOrNull(cursor);
+    if (!st) break;
+    const isLeaf = index === segments.length - 1;
+    const wantDir = !isLeaf || leaf === "dir";
+    if (st.isSymbolicLink()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} is a symlink \u2014 refusing to follow it out of the project`);
+    if (wantDir && !st.isDirectory()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} exists but is not a directory`);
+    if (!wantDir && !st.isFile()) throw new ContainmentError(`${rel} exists but is not a regular file`);
+  }
+  try {
+    return resolveStoreWritePath(root, ...segments);
+  } catch (e) {
+    if (e instanceof StorePathContainmentError) throw new ContainmentError(`${rel}: ${e.message.replace(/^resolveStoreWritePath: /, "")}`);
+    throw e;
+  }
+}
+function existsContained(root, rel, leaf) {
+  return lstatOrNull(containedPath(root, rel, leaf)) !== null;
+}
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+function unlinkContained(root, rel) {
+  unlinkSync(containedPath(root, rel, "file"));
+}
+
+// scripts/hooks/lib/reconcile-origins.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { lstatSync as lstatSync5, readFileSync as readFileSync7, readlinkSync, realpathSync as realpathSync4 } from "node:fs";
+import { basename as basename3, join as join11, resolve as resolve6 } from "node:path";
+var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+function git(root, args, input) {
+  const r = spawnSync2("git", ["-C", root, ...args], { input, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  return { ok: !r.error && r.status === 0, status: r.status, out: r.stdout ? r.stdout.toString("utf8") : "", err: r.error?.message ?? (r.stderr ? r.stderr.toString("utf8").trim() : "") };
+}
+var realOr = (p) => {
+  try {
+    return realpathSync4(p);
+  } catch {
+    return p;
+  }
+};
+function headCommit(root) {
+  const r = git(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+  const head = r.out.trim();
+  return r.ok && HEX.test(head) ? head : null;
+}
+function checkoutIdentity(root, storeRoot2) {
+  const head = headCommit(root);
+  const r = git(root, ["rev-parse", "--absolute-git-dir", "--git-common-dir", "--show-toplevel", "--show-prefix"]);
+  if (!head || !r.ok) return null;
+  const [gitDir, commonDir, top2, prefix = ""] = r.out.split("\n");
+  const common = realOr(resolve6(root, commonDir));
+  const sameTop = storeRoot2 && realOr(top2) === realOr(storeRoot2);
+  let checkout;
+  if (sameTop) checkout = { kind: "store" };
+  else {
+    const branch = git(root, ["symbolic-ref", "-q", "HEAD"]).out.trim();
+    checkout = { kind: "checkout", worktree: realOr(gitDir) === common ? "main" : basename3(gitDir), ...branch ? { branch } : {} };
+  }
+  return { head, prefix: prefix.trim(), checkout };
+}
+function workingState(root, rel) {
+  let st;
+  try {
+    st = lstatSync5(join11(root, rel));
+  } catch (e) {
+    return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
+  }
+  let mode;
+  let bytes;
+  let filters = true;
+  try {
+    if (st.isSymbolicLink()) {
+      mode = "120000";
+      bytes = Buffer.from(readlinkSync(join11(root, rel)));
+      filters = false;
+    } else if (st.isFile()) {
+      mode = st.mode & 73 ? "100755" : "100644";
+      bytes = readFileSync7(join11(root, rel));
+    } else return { kind: "unreadable" };
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const r = git(root, ["hash-object", "--stdin", ...filters ? [`--path=${rel}`] : ["--no-filters"]], bytes);
+  const blob = r.out.trim();
+  return r.ok && HEX.test(blob) ? { kind: "file", mode, blob } : { kind: "unreadable" };
+}
+function observePaths(root, paths2, storeRoot2) {
+  const id = checkoutIdentity(root, storeRoot2);
+  if (!id) return null;
+  const observations = [...new Set(paths2)].sort().map((path) => ({ path, checkout: id.checkout, commit: id.head, state: workingState(root, path) }));
+  return { head: id.head, checkout: id.checkout, observations };
+}
+
 // scripts/fs-remove.mjs
 var target = arg("--target") ?? process.cwd();
 var paths = process.argv.slice(2).filter((a) => !a.startsWith("--") && a !== target);
 if (!paths.length) fail("usage: fs-remove.mjs <repo-relative path>... [--target <dir>]");
-var { store } = openProject(target);
+var GIT_LOCATION_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE"];
+var setLocationVars = GIT_LOCATION_ENV.filter((k) => process.env[k] !== void 0);
+if (setLocationVars.length) {
+  fail(`fs-remove REFUSED: ${setLocationVars.join(", ")} set in the environment alter git's checkout discovery; unset them and rerun. Nothing was removed.`, 2);
+}
+var top = spawnSync3("git", ["rev-parse", "--show-toplevel"], { cwd: target, encoding: "utf8", timeout: 3e4, env: { ...process.env, LC_ALL: "C" } });
+var notGit = !top.error && top.status === 128 && /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(top.stderr ?? "");
+if (!notGit) {
+  if (top.error || top.status !== 0) {
+    const why = top.error?.message ?? (String(top.stderr ?? "").trim() || `git exited ${top.status}`);
+    fail(`fs-remove REFUSED: cannot establish the git checkout root of ${target} (${why}). Nothing was removed.`, 2);
+  }
+  if (realpathSync5(top.stdout.trim()) !== realpathSync5(target)) {
+    fail(`fs-remove REFUSED: --target ${target} is inside the checkout ${top.stdout.trim()}; pass the checkout root with checkout-relative paths. Nothing was removed.`, 2);
+  }
+}
+var storeRoot = resolveStoreRoot(target);
+var { store } = openProject(storeRoot);
 var now = (/* @__PURE__ */ new Date()).toISOString();
 var removed = [];
 try {
   for (const p of paths) {
     const rel = normalizeRepoPath(p);
-    if (!existsSync4(join9(target, rel))) fail(`fs-remove REFUSED: '${rel}' does not exist`, 2);
+    try {
+      containedPath(target, rel, "file");
+      if (!existsContained(target, rel, "file")) fail(`fs-remove REFUSED: '${rel}' does not exist`, 2);
+    } catch (e) {
+      if (e instanceof ContainmentError) fail(`fs-remove REFUSED: ${e.message}; nothing was removed`, 2);
+      throw e;
+    }
   }
   for (const p of paths) {
     const rel = normalizeRepoPath(p);
-    rmSync4(join9(target, rel));
+    unlinkContained(target, rel);
     removed.push(rel);
+    const seen = observePaths(target, [rel], storeRoot);
     for (const article of store.query({ types: ["feature_article"], file_keys: [rel], cap: 100 })) {
       store.enqueueSystemTodo({
         id: randomUUID4(),
@@ -13071,7 +13255,8 @@ try {
         source: "system",
         system_reason: "reconcile_needed",
         file_keys: [rel],
-        feature_link: article.id
+        feature_link: article.id,
+        ...seen ? { observations: seen.observations } : {}
       }, { operation_id: randomUUID4() });
     }
   }

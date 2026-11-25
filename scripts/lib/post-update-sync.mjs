@@ -337,37 +337,60 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
 
 // The "config migration: ..." lines sync-agents prints, by what each one did. A retired-key drop
 // ("models.<key> dropped (...)", one level deep; models.implementor.hard_task is not one) changes
-// no model, because the key was ignored already. The Overpass defaults reset changes routing: it
-// removes tier overrides and turns the conductor bypass on. Anything else (model defaults added,
-// the implementor-hard move) changes what the model pins say.
+// no model, because the key was ignored already. An `overpass.<key> removed/set` line is the canonical
+// conversion (config-migration.mjs): the legacy enabled, conductor_bypass and roles settings move into
+// per-agent config.models entries (`overpass/<tier>` with its effort) and routing is kept; the old
+// Overpass defaults reset no longer runs. Anything else (model entries set, the implementor-hard move)
+// changes what the model pins say.
 const RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
-const OVERPASS_RESET_LINE = /^config migration: overpass\./;
+const OVERPASS_CONVERSION_LINE = /^config migration: overpass\./;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const strip = (l) => l.replace(/^config migration: /, '');
+// Only models.* lines can change a model pin; the workflow and mode receipts of the same migration
+// (shape) are reported on their own line. The conversion is told from what the migration wrote: when
+// overpass.* settings were removed AND overpass/<tier> models entries were written, they are one
+// conversion; when none were written (Overpass off, or hobby mode, which carries none) it is a removal.
+const MODELS_LINE = /^config migration: models\./;
+const OVERPASS_ENTRY_LINE = /^config migration: models\.[^\s.]+ set to \{"model":"overpass\//;
 function splitMigrated(migrated) {
+  const hasOverpassKeys = migrated.some((l) => OVERPASS_CONVERSION_LINE.test(l));
+  const converted = hasOverpassKeys && migrated.some((l) => OVERPASS_ENTRY_LINE.test(l));
+  const inConversion = (l) => OVERPASS_CONVERSION_LINE.test(l) || (converted && OVERPASS_ENTRY_LINE.test(l));
   return {
     retired: migrated.filter((l) => RETIRED_KEY_LINE.test(l)),
-    overpass: migrated.filter((l) => OVERPASS_RESET_LINE.test(l)),
-    other: migrated.filter((l) => !RETIRED_KEY_LINE.test(l) && !OVERPASS_RESET_LINE.test(l)),
+    overpass: migrated.filter(inConversion),
+    overpassActive: converted,
+    other: migrated.filter((l) => MODELS_LINE.test(l) && !RETIRED_KEY_LINE.test(l) && !inConversion(l)),
+    shape: migrated.filter((l) => !MODELS_LINE.test(l) && !OVERPASS_CONVERSION_LINE.test(l)),
   };
 }
 
 /** The banner clauses for config migrations, one per kind; the values are in the model-facing context. */
 function migratedWarning(migrated) {
-  const { retired, overpass, other } = splitMigrated(migrated);
+  const { retired, overpass, overpassActive, other, shape } = splitMigrated(migrated);
   return (
     (retired.length ? `.sterling/config.json lost ${plural(retired.length, 'retired models key')} (ignored before, so no model changed). ` : '') +
-    (overpass.length ? `.sterling/config.json had its Overpass settings reset to the defaults (tier overrides removed, conductor bypass on), which changes model routing. ` : '') +
-    (other.length ? `.sterling/config.json had ${plural(other.length, 'other config migration step')} applied (model defaults or the implementor-hard move), which can change model pins. ` : '')
+    (overpass.length
+      ? overpassActive
+        ? `.sterling/config.json had its legacy Overpass settings converted to per-agent models entries (${plural(overpass.length, 'step')}); the tiers, efforts and conductor bypass in use are kept, so routing is unchanged. `
+        : `.sterling/config.json had legacy Overpass settings removed (${plural(overpass.length, 'step')}); no Overpass models entries were written, so routing is unchanged. `
+      : '') +
+    (shape.length ? `.sterling/config.json had ${plural(shape.length, 'settings-shape step')} applied (workflow and mode only, not model settings). ` : '') +
+    (other.length ? `.sterling/config.json had ${plural(other.length, 'other config migration step')} applied (model entries or the implementor-hard move), which can change model pins. ` : '')
   );
 }
 
 /** The model-facing receipt: each migration line, so the user can set a successor or an override by hand. */
 function migratedContext(migrated) {
-  const { retired, overpass, other } = splitMigrated(migrated);
+  const { retired, overpass, overpassActive, other, shape } = splitMigrated(migrated);
   return (
     (retired.length ? ` sync-agents removed ${plural(retired.length, 'retired models key')} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join('; ')}.` : '') +
-    (overpass.length ? ` sync-agents reset the Overpass settings in .sterling/config.json, which changes model routing (config.overpass.roles overrides are gone and the conductor bypass is on); tell the user, because the old values are no longer in the file: ${overpass.map(strip).join('; ')}.` : '') +
+    (overpass.length
+      ? overpassActive
+        ? ` sync-agents converted the legacy Overpass settings in .sterling/config.json (overpass.enabled, overpass.conductor_bypass, overpass.roles) into per-agent config.models entries: a role on Overpass has model \`overpass/<tier>\` with its effort, and the conductor keeps its direct model when models.conductor is unset. The tiers and bypass the project ran on are carried, so routing did not change and nothing needs restoring; tell the user what moved, because the old keys are no longer in the file: ${overpass.map(strip).join('; ')}.`
+        : ` sync-agents removed legacy Overpass settings from .sterling/config.json without writing any Overpass models entries (Overpass was off or not used in this mode), so routing is unchanged; tell the user, because the values are no longer in the file: ${overpass.map(strip).join('; ')}.`
+      : '') +
+    (shape.length ? ` sync-agents moved the settings shape in .sterling/config.json (workflow and mode, not model settings); tell the user: ${shape.map(strip).join('; ')}.` : '') +
     (other.length ? ` sync-agents applied ${plural(other.length, 'other config migration step')} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join('; ')}.` : '')
   );
 }

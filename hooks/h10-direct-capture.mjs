@@ -15223,6 +15223,7 @@ var WORKER_DISALLOWED_TOOLS = [
 ];
 var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_move", "knowledge_link"];
 var WORKER_HOSTS = ["claude", "opencode"];
+var AGY_NO_WORKER_TEXT = "worker: not launched on agy \u2014 drain the worker lanes yourself";
 var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
@@ -15480,6 +15481,7 @@ function failDetail(reason) {
   return `launch FAILED (${reason}) \u2014 the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
+  if (opts.host === "agy") return { launched: false, reason: "agy_host", skipped: AGY_NO_WORKER_TEXT };
   opts = { ...opts, root: storeRootFor(opts.root) };
   const result = launchWorker(opts);
   if (result.detail) {
@@ -16303,7 +16305,7 @@ try {
     process.exit(2);
   };
   const releaseWithPressure = () => {
-    maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: "stop", spawn });
+    maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: "stop", spawn, host: input.host });
     let advisoryText = "";
     const advisorySpends = [];
     if (!input.stop_hook_active) {

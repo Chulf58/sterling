@@ -328,10 +328,11 @@ test('implementor-hard: registered, the implementor\'s grant and required inputs
   const base = readFileSync(join(TPL, 'implementor.md'), 'utf8');
   const hard = readFileSync(join(TPL, 'implementor-hard.md'), 'utf8');
   assert.match(fmOf(hard), /^name: implementor-hard$/m);
-  const strip = (fm) => fm.replace(/^name: .*$/m, '').replace(/^description: .*$/m, '');
+  // implementor-hard fences its description per host (GitHub #330): drop the marker lines and every description copy.
+  const strip = (fm) => fm.replace(/^name: .*$/m, '').replace(/^<!-- \/?(claude|opencode|agy)-only -->$/gm, '').replace(/^description: .*$/gm, '').replace(/\n{2,}/g, '\n');
   assert.equal(strip(fmOf(hard)), strip(fmOf(base)), 'same model/effort tokens, disallowedTools and required_inputs');
   const bodyOf = (text) => text.replace(/^---[\s\S]*?\n---/, '');
-  const extra = '\nYou are the hard-task implementor: you are dispatched instead of the implementor only on evidence that the implementor tier was not enough (a Sonnet lane on this work already needed a fix round, two attempts produced no new information, or lanes returned contradictory evidence), so that you can run on a stronger model. Resuming a hard lane may stay on hard. Everything below is the implementor\'s contract, unchanged.\n';
+  const extra = '\nYou are the hard-task implementor: you are dispatched instead of the implementor only on evidence that the implementor tier was not enough (an implementor lane on this work already needed a fix round, two attempts produced no new information, or lanes returned contradictory evidence), so that you can run on a stronger model. Resuming a hard lane may stay on hard. Everything below is the implementor\'s contract, unchanged.\n';
   assert.equal(bodyOf(hard).split(extra).length, 2, 'the hard-task paragraph is there exactly once');
   assert.equal(bodyOf(hard).replace(extra, ''), bodyOf(base), 'the rest of the body is the implementor\'s, word for word');
 });
@@ -344,7 +345,9 @@ test('implementor-hard criteria: the conductor template, the delegation skill an
   const conductor = readFileSync(join(TPL, 'conductor.md'), 'utf8');
   const skill = readFileSync(join(TPL, '..', 'skills', 'delegating-to-subagents', 'SKILL.md'), 'utf8');
   const hard = readFileSync(join(TPL, 'implementor-hard.md'), 'utf8');
-  assert.equal(conductor.split(evidence).length - 1, 1, 'conductor.md carries the evidence cases once, in the roster bullet');
+  const neutral = evidence.replace('a Sonnet lane', 'an implementor lane');
+  assert.equal(conductor.split(evidence).length - 1, 1, 'conductor.md carries the Claude evidence cases once, in the Claude roster bullet');
+  assert.equal(conductor.split(neutral).length - 1, 2, 'conductor.md carries the model-neutral evidence cases in the OpenCode and agy roster bullets');
   assert.equal(skill.split(evidence).length - 1, 2, 'the delegation skill carries them in both its Claude and OpenCode roster paragraphs');
   assert.ok(hard.includes('only on evidence that the implementor tier was not enough'), 'implementor-hard.md says it is dispatched only on evidence');
   for (const [name, text] of [['conductor.md', conductor], ['SKILL.md', skill], ['implementor-hard.md', hard]]) {

@@ -780,7 +780,7 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
   let state = null;
   for (;;) {
     const page = after ? `, after:"${after}"` : '';
-    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid baseRefName mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query, deadline)?.repository?.pullRequest;
     if (
       !pull ||
@@ -796,7 +796,7 @@ export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
     if (!state) {
       const rollup = readCheckRollup(pull);
       const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === 'Bot', commit: r?.commit?.oid ?? null }));
-      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
+      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, review_decision_read: pull.reviewDecision !== undefined, base_ref: typeof pull.baseRefName === 'string' && pull.baseRefName !== '' ? pull.baseRefName : null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
@@ -861,7 +861,7 @@ export function fetchSettledMergeState(cwd, repo, number, { retryDelayMs = 3000,
  * ones included; UNKNOWN says to retry shortly. A check rollup the answer did
  * not carry (check_rollup_error) blocks in every state, like an unknown state:
  * it never reads as "no checks". */
-export function mergeBlockers(state) {
+export function mergeBlockers(state, { waiveBehind = false } = {}) {
   const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
   const blockers = unresolved.map((t) => `unresolved review thread ${t.id}${t.path ? ` on ${t.path}` : ''}${t.url ? ` (${t.url})` : ''}`);
   const status = state.merge_state_status;
@@ -876,6 +876,13 @@ export function mergeBlockers(state) {
     else if (status === 'UNKNOWN') blockers.push('mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)');
     else if (status === 'BLOCKED' && unresolved.length > 0) blockers.push('mergeStateStatus is BLOCKED');
     else if (status === 'BLOCKED') blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? 'none'}) with no unresolved thread: a ruleset or required check blocks the merge`);
+    // MERGE-QUEUE EXCEPTION (GitHub #323): a caller holding positive queue
+    // evidence waives only BEHIND, and only when reviewDecision was read and is
+    // APPROVED or explicitly null (no review required); any other, unknown or
+    // omitted value keeps it.
+    else if (status === 'BEHIND' && waiveBehind && state.review_decision_read === true && (state.review_decision === null || state.review_decision === 'APPROVED')) {
+      // waived: nothing blocks on being behind
+    }
     else blockers.push(`mergeStateStatus is ${status}`);
   }
   if (state.check_rollup_error) blockers.push(state.check_rollup_error);

@@ -558,6 +558,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "Before a non-trivial design settles, put it to **Astra** (`gpt-6-astra`) — user-stated 2026-09-19: *\"do add that AStra is also for solution sparring between fable and Astra\"*. Non-trivial means a new mechanism, persistent state, a deletion boundary, anything hard to unship — never a rename or a settled-shape fix. Put the problem, **your own proposal**, and **your own objections** — naming the weak point lets the partner attack it directly — and ask where it disagrees. Stage retrieval first and carry the governing records into the prompt. Put the consult to `gpt-6-astra` through the `codex` MCP tool, never a shelled `codex exec` — the call shape is in `CLAUDE.md`'s \"Codex runs through the MCP tool, never the shell\" bullet, user-ruled 2026-09-20 so every lane's model, sandbox and effort are explicit at the call site rather than inherited. Astra is **advisory, never gating**. When Astra is unavailable or capped, say so and put the same brief (the problem, your own proposal, your own objections) to Sol through the `codex` MCP tool (`gpt-5.6-sol`, the model this route reaches, decision `claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4`). When the openai provider is unavailable, put it to Opus 5.5 instead: the `sparring` agent with `model: \"claude-opus-5-5\"` pinned at the call. The order is Astra, then Sol, then Opus 5.5 (user-ruled 2026-11-18 through the question form, \"Astra → Sol → Opus 5.5 (Recommended)\", replacing the Fable fallback of 2026-10-01; decision `sparring-steps-down-astra-sol-opus-5-5-replaces-fable`; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22). Astra stays the default because it keeps the sparring cross-family; Sol and Opus 5.5 are step-downs, never the first call. With none available, say so and proceed. A dropped `codex` server counts as unavailable only after the reconnect-and-retry step in the Sol review paragraph above. Agree → adopt without asking. Disagree → **your solution stands and gets built**, recorded in the decision (user-ruled 2026-09-06: *\"you are the stronger model compared to Codex, if there are disagreement, then go with your solution\"*). Summarize each consult: question, partner position, action taken.",
     after: "Before a non-trivial design settles, put it to a sparring partner — user-stated 2026-09-19: *\"do add that AStra is also for solution sparring between fable and Astra\"*. Non-trivial means a new mechanism, persistent state, a deletion boundary, anything hard to unship — never a rename or a settled-shape fix. Put the problem, **your own proposal**, and **your own objections** — naming the weak point lets the partner attack it directly — and ask where it disagrees. Stage retrieval first and carry the governing records into the prompt. The consult is a dispatch of the `sparring` agent (on OpenCode `sterling/sparring`, with no `model`), which runs on the one model selected for that agent; Codex is not used (decision `decommission-the-codex-model-setting-codex-is-no-longer-used`). The partner is **advisory, never gating**. If the dispatch fails, say so and proceed. Agree → adopt without asking. Disagree → **your solution stands and gets built**, recorded in the decision (user-ruled 2026-09-06: *\"you are the stronger model compared to Codex, if there are disagreement, then go with your solution\"*). Summarize each consult: question, partner position, action taken.",
   },
+  {
+    commit: 'GitHub #330',
+    date: '2026-11-25',
+    reason: "the Claude render no longer names OpenCode's background flag; each host's line is fenced",
+    before: "(`background: true` on OpenCode, `run_in_background` on Claude Code)",
+    after: "(`run_in_background`)",
+  },
+  {
+    commit: 'GitHub #330',
+    date: '2026-11-25',
+    reason: "the Claude render no longer names the OpenCode agent name; each host's line is fenced",
+    before: "(on OpenCode `sterling/reviewer`, with no `model`)",
+    after: "(with no `model`)",
+  },
+  {
+    commit: 'GitHub #330',
+    date: '2026-11-25',
+    reason: "the Claude render no longer names the OpenCode agent name; each host's line is fenced",
+    before: "(on OpenCode `sterling/sparring`, with no `model`)",
+    after: "(with no `model`)",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
@@ -759,6 +780,13 @@ export const LIBRARIAN_WORDING_EDITS = [
     reason: "rubric item 2 says how to apply a drafts file: through knowledge_apply_drafts, never by reading the file, and stop without re-running on a refused op",
     before: "so a drafted fix to a stale `files[].role` no longer needs a full-array retransmit under the truncation hazard.",
     after: "so a drafted fix to a stale `files[].role` no longer needs a full-array retransmit under the truncation hazard. **A work order that names a drafts file** (`.sterling/drafts/<name>.json`, a JSON array of `update`/`append`/`edit`/`array_remove` ops) is applied with `knowledge_apply_drafts { path: \"<name>.json\" }`, never by reading the file and re-sending its values: a file reader can cut a line at 2,000 characters, and the server reads the file whole. Each op runs through the same code as its single-op tool. In the receipt, each op's `written` gives the stored length of every field it touched; compare it with the work order when the order gives lengths. A malformed file writes nothing. When every op applied, the server deletes the file (`file_removed: true`); `file_removed: false` means the writes stand but the delete failed, so report its `file_remove_error`. A refused op stops the run, the ops before it stay written and the file is kept: STOP and report which ops landed and the refusal; never re-run the file, because it would apply those ops again.",
+  },
+  {
+    commit: 'GitHub #330',
+    date: '2026-11-25',
+    reason: "the maintenance-worker sentence no longer names the claude -p launch, a host-specific command shown to every host",
+    before: "You may run as the background maintenance worker (`claude -p --agent librarian`).",
+    after: "You may run as the background maintenance worker.",
   },
 ];
 

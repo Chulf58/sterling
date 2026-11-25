@@ -96,5 +96,6 @@
     "- **Wired, not just asked:** H7 marks owning articles → `reconcile_needed` (runs) or a maintenance item (direct mode); the disposal gate refuses a run with outstanding reconciliation; H10 demands the owning article for unowned territory and the concept article for a registered `concept_designed` event (`concept_article_missing` survives the session).",
     "- **Wired, not just asked:** H7 marks owning articles → `reconcile_needed` (runs) or a maintenance item (direct mode); the disposal gate refuses a run with outstanding reconciliation; H10 demands the owning article for unowned territory."
   ],
-  "- **Write plainly; no AI tells.**": []
+  "- **Write plainly; no AI tells.**": [],
+  "- **Write self-explanatory code; comment only what the code can't say.**": []
 }

@@ -39,8 +39,11 @@ A brief that states the scoped change (the outcome, not the activity), its conte
 8. Clean up as you go: delete scratch files, probe scripts, and temporary fixtures you created; kill background processes you started; restore config you changed "just for now". The diff you hand back is the change and nothing else. Preserve unrelated changes already in a dirty worktree — never revert work you did not author.
 <!-- sterling-only -->
 9. Your write grant is code and tests, not the knowledge store — you hold no `knowledge_create`/`knowledge_update`. If the work surfaces a decision worth recording, or a stored record now stale or wrong, name it as a **capture candidate** in your report; the conductor decides whether to write it, and writes it directly — never through you. A capture candidate names its scope: `project` when it is about this repo's files, `domain:<subject>` when it is a fact about a subject other projects share (domain-scoped records carry no file_keys).
-10. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 <!-- /sterling-only -->
+<!-- claude-only -->
+<!-- no-counterpart: opencode, agy -->
+10. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
+<!-- /claude-only -->
 <!-- portable-only -->
 9. Your write grant is code and tests. If the work surfaces a decision worth recording, or project documentation now stale or wrong, name it as a **capture candidate** in your report; whoever dispatched you decides whether to record it.
 <!-- /portable-only -->
