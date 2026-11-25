@@ -501,6 +501,42 @@ test('fan-out: config migration lines are relayed once with the warning mark and
   }
 });
 
+// The Sterling layer in AGENTS.md (GitHub #329, review finding 6): sync-agents' layer lines are
+// relayed on success, never dropped, and a layer refusal fails the project with its reason.
+test('fan-out: Sterling layer lines (a kept CLAUDE.md, a removed GEMINI.md) are relayed once each; routine layer lines are not', async () => {
+  const cwd = scratchCwd();
+  try {
+    const kept = "⚠ Sterling layer: CLAUDE.md holds text that is not Sterling's generated layer, so it was kept. Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists. Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete CLAUDE.md.";
+    const removed = "Sterling layer: GEMINI.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: `up_to_date: scout\nSterling layer: AGENTS.md regenerated\n${kept}\n${removed}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 0);
+    assert.equal(report.projects[0].changed, 0, 'layer lines are not agent changes');
+    const log = lines.join('\n');
+    for (const line of [kept, removed]) assert.equal(log.split(line).length - 1, 1, `relayed exactly once: ${line}\n${log}`);
+    assert.ok(!log.includes('AGENTS.md regenerated'), log);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('fan-out: a Sterling layer refusal (sync-agents exit 2) fails the project and shows the refusal', async () => {
+  const cwd = scratchCwd();
+  try {
+    const refused = "✗ Sterling layer REFUSED: AGENTS.md would be 27,738 bytes with the Sterling layer, over agy's 24,000-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed.";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 2, syncStdout: `up_to_date: scout\n${refused}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 2);
+    const log = lines.join('\n');
+    assert.match(log, /Dome: agent sync REFUSED .*Sterling layer refusal in AGENTS\.md/);
+    assert.ok(log.includes(refused), log);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 // THE BOOTSTRAP DEFECT, found by running the real CLI against a fresh clone:
 // the workspace packages are gitignored, so on a first update NOTHING is built —
 // and the CLI needs @sterling/store to read the project registry. Reading it at

@@ -595,7 +595,7 @@ test('runPostUpdateSteps: a project that is the plugin root, directly or through
   for (const [project, root] of [[plugin, plugin], [link, plugin], [plugin, link]]) {
     const { calls, runStep } = recordingSteps();
     const r = await runPostUpdateSteps(root, project, runStep);
-    assert.deepEqual(r, { ok: true, restart: true, drift: false, driftOut: '', inserted: [], migrated: [] }, `project ${project}, root ${root}`);
+    assert.deepEqual(r, { ok: true, restart: true, drift: false, driftOut: '', inserted: [], migrated: [], layer: [] }, `project ${project}, root ${root}`);
     assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`], 'stamp-contract is never invoked');
   }
   // A different directory still goes through stamp-contract.
@@ -1363,4 +1363,77 @@ test('OpenCode sync: a pending file that cannot be removed is said once; the roo
   await syncOnce.idle();
   assert.equal(mapRuns(), 1, 'the map is not run again for the next session in this process');
   assert.equal(noticeTexts(project).length, 1);
+});
+
+// ---- the Sterling layer in AGENTS.md (GitHub #329, review findings 6 and 8) ----
+// sync-agents prints one prefixed line per layer outcome; both callers carry them to what the user
+// sees, and a layer refusal is a failed sync that never advances the marker.
+const LAYER_KEPT = "⚠ Sterling layer: CLAUDE.md holds text that is not Sterling's generated layer, so it was kept. Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists. Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete CLAUDE.md.";
+const LAYER_REMOVED = "Sterling layer: GEMINI.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+const LAYER_REFUSED = "✗ Sterling layer REFUSED: AGENTS.md would be 27,738 bytes with the Sterling layer, over agy's 24,000-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed.";
+
+test('postUpdateSync: a kept CLAUDE.md and a removed GEMINI.md from the layer step are named in the banner and the context, and the marker advances', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `up_to_date: implementor\nSterling layer: AGENTS.md up to date\n${LAYER_KEPT}\n${LAYER_REMOVED}\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'synced');
+  for (const line of [LAYER_KEPT, LAYER_REMOVED]) {
+    assert.ok(r.warning.includes(line), `banner names: ${line}\n${r.warning}`);
+    assert.ok(r.context.includes(line), `context names: ${line}\n${r.context}`);
+  }
+  assert.ok(!r.context.includes('AGENTS.md up to date'), 'a routine line is not relayed');
+  assert.equal(markerOf(project), `${VERSION}\n`);
+});
+
+test('postUpdateSync: a layer refusal (sync-agents exit 2) is a failed sync naming the reason, and the marker is not advanced', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `up_to_date: implementor\n${LAYER_REFUSED}\n${LAYER_KEPT.replace("holds text that is not Sterling's generated layer", 'was not checked for removal because the Sterling layer is not verified in AGENTS.md')}\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 2, error: null, out, tail: 'refused' } : assert.fail('stamp-contract must not run after a refused sync');
+  const r = await postUpdateSync({ root: plugin, project, host: 'claude', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.match(r.warning, /REFUSED the Sterling layer in AGENTS\.md/);
+  assert.ok(r.warning.includes(LAYER_REFUSED), r.warning);
+  assert.ok(r.context.includes(LAYER_REFUSED), r.context);
+  assert.equal(markerOf(project), '0.0.1\n', 'marker not advanced past an unresolved refusal');
+});
+
+test('cloneAgentSync: layer lines from sync-agents are named in the banner and the context', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `refreshed: implementor\n${LAYER_KEPT}\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out, tail: out } : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' };
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+  assert.equal(r.outcome, 'synced');
+  assert.ok(r.warning.includes(LAYER_KEPT), r.warning);
+  assert.ok(r.context.includes(LAYER_KEPT), r.context);
+});
+
+test('H1 delivers the Claude Code layer block on the no-store exit of a Sterling project too', () => {
+  const project = makeProject({ marker: VERSION, store: false });
+  const plugin = makePluginRoot();
+  const ctx = runH1(project, plugin, {}, { rawContext: true }).ctx;
+  assert.equal(ctx.split(CLAUDE_BLOCK_FIXTURE).length, 2, ctx);
+});
+
+test('H1 on agy never delivers the Claude Code layer block, with or without a store', () => {
+  const plugin = makePluginRoot();
+  for (const store of [true, false]) {
+    const project = makeProject({ marker: VERSION, store });
+    const r = spawnSync(process.execPath, [seam.hookPath], {
+      input: JSON.stringify({ hookEventName: 'SessionStart', conversationId: 'c1', cwd: project, lastUserInput: 'hello' }),
+      encoding: 'utf8',
+      cwd: project,
+      timeout: 60_000,
+      env: { ...process.env, NO_COLOR: '1', STERLING_NO_BANNER: '1', STERLING_CURRENCY_DISABLE: '1', STERLING_PLUGIN_ROOT: plugin, HOME: tmp('sterling-pus-home-') },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.length > 0, `store ${store}: H1 printed its context`);
+    assert.ok(!r.stdout.includes(CLAUDE_BLOCK_FIXTURE), `store ${store}: no Claude Code block on agy:\n${r.stdout}`);
+  }
 });

@@ -17,7 +17,7 @@ import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, desc
 import { describeConflictRefusal, migrateProjectConfigCanonical, modelChoicesFromArgs } from './lib/config-migration.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
-import { setupAgy, formatAgyRows } from './lib/agy-setup.mjs';
+import { setupAgy, formatAgyRows, agyMcpRoot } from './lib/agy-setup.mjs';
 import { syncLayer } from './lib/sterling-layer.mjs';
 import { hasCustomOutputs, syncCustomAgents } from './lib/custom-agent-render.mjs';
 import { isSterlingClone, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
@@ -275,6 +275,10 @@ if (claudeHost) {
 // counting it would fail every /sterling:update on the machine for one project's choice.
 // Sterling's layer is a generated section of AGENTS.md (decision
 // project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer): regenerate it,
-// and remove a CLAUDE.md or GEMINI.md that holds only Sterling's text; any other one is kept with a warning.
-for (const line of syncLayer({ projectDir: targetDir, pluginRoot })) console.log(line);
+// and remove a CLAUDE.md or GEMINI.md that holds only Sterling's text; any other one is kept with a
+// warning. A layer refusal (untrusted markers, over agy's cap) is a refusal of this sync (exit 2).
+// The lines carry the "Sterling layer" prefixes that /sterling:update and the post-update sync relay.
+const layerSync = syncLayer({ projectDir: targetDir, pluginRoot, roots: [agyMcpRoot({ pluginRoot }).root] });
+for (const line of layerSync.lines) console.log(line);
+refused += layerSync.refused;
 process.exit(refused > 0 ? 2 : 0);

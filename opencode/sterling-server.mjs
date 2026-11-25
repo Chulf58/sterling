@@ -25493,26 +25493,29 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
 async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   const migrated = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
-  if (sync.error) return { ok: false, migrated, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2) return { ok: false, migrated, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
-  if (sync.status !== 0) return { ok: false, migrated, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
+  const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
+  const layerRefusals = layer.filter((l) => l.startsWith("\u2717 Sterling layer REFUSED:"));
+  if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
+  if (sync.status === 2 && layerRefusals.length) return { ok: false, migrated, layer, detail: "sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows)" };
+  if (sync.status === 2) return { ok: false, migrated, layer, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
+  if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
-  if (openCodeSkip) return { ok: false, migrated, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  if (openCodeSkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
   const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
-  if (agySkip) return { ok: false, migrated, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
+  if (agySkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out) || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out);
-  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated };
+  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
-  if (contract.error) return { ok: false, restart, migrated, detail: `stamp-contract did not run (${contract.error})` };
-  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, migrated, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
+  if (contract.error) return { ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` };
+  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, migrated, layer, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
   if (/—\s*0 project\(s\) processed/.test(contract.out)) {
     const refusals = contract.out.split("\n").filter((l) => l.startsWith("\u2717")).map((l) => l.trim());
-    if (refusals.length) return { ok: false, restart, migrated, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
-    return { ok: false, restart, migrated, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
+    if (refusals.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
+    return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
   const inserted = contract.out.split("\n").map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l)).filter(Boolean).map((m) => `${m[1]} ${m[2].trim()}`);
   const kept = contract.out.split("\n").map((l) => /^\s*SIMILAR_BULLET_KEPT {2}(.+)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated };
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated, layer };
 }
 function postUpdateApplies(root, project) {
   return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync27(join39(storeRootFor(project), ".sterling", "config.json"));
@@ -25564,10 +25567,10 @@ POST-UPDATE SYNC REFUSED (${t.label}): this Sterling copy is ${current}, older t
     const restartOwed = result.restart ? ` ${t.restartShort}.` : "";
     return {
       outcome: "failed",
-      warning: `\u2717 ${hop}: post-update sync FAILED \u2014 ${result.detail}.${restartOwed} ${migratedWarning(result.migrated ?? [])}`,
+      warning: `\u2717 ${hop}: post-update sync FAILED \u2014 ${result.detail}.${restartOwed} ${migratedWarning(result.migrated ?? [])}${layerWarning(result.layer)}`,
       context: `
 
-POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker was written, so it ${t.retry}; tell the user and fix the cause.` + (result.restart ? ` sync-agents DID refresh agents before the failure: ${t.restartLong}` : "") + migratedContext(result.migrated ?? [])
+POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker was written, so it ${t.retry}; tell the user and fix the cause.` + (result.restart ? ` sync-agents DID refresh agents before the failure: ${t.restartLong}` : "") + migratedContext(result.migrated ?? []) + layerContext(result.layer)
     };
   }
   let warning = "";
@@ -25580,16 +25583,23 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   const restartLine = result.restart ? t.restartShort : "agents synced, none changed";
   warning ||= `\u26A0 ${hop}: ${restartLine}. `;
   const inserted = result.inserted ?? [];
-  if (inserted.length) warning += `AGENTS.md/CLAUDE.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). `;
+  if (inserted.length) warning += `AGENTS.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). `;
   const migrated = result.migrated ?? [];
   warning += migratedWarning(migrated);
+  warning += layerWarning(result.layer);
   return {
     outcome: "synced",
     warning,
     context: `
 
-POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
+POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + layerContext(result.layer) + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
+}
+function layerWarning(layer = []) {
+  return layer.length ? `${layer.join(" ")} ` : "";
+}
+function layerContext(layer = []) {
+  return layer.length ? ` Sterling layer in AGENTS.md: ${layer.join(" ")} Tell the user about each line.` : "";
 }
 var RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
 var OVERPASS_CONVERSION_LINE = /^config migration: overpass\./;

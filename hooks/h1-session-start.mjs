@@ -13622,7 +13622,7 @@ var init_checks = __esm({
 
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
-import { readFileSync as readFileSync15, writeFileSync as writeFileSync8, readdirSync as readdirSync5, existsSync as existsSync15, mkdirSync as mkdirSync10, statSync as statSync6, lstatSync as lstatSync7, unlinkSync as unlinkSync4, renameSync as renameSync7, linkSync as linkSync2 } from "node:fs";
+import { readFileSync as readFileSync15, writeFileSync as writeFileSync7, readdirSync as readdirSync5, existsSync as existsSync15, mkdirSync as mkdirSync10, statSync as statSync6, lstatSync as lstatSync8, unlinkSync as unlinkSync4, renameSync as renameSync6, linkSync as linkSync2 } from "node:fs";
 function sha256(text) {
   return createHash5("sha256").update(normalize2(text), "utf8").digest("hex");
 }
@@ -13759,9 +13759,9 @@ var init_agent_distribution = __esm({
 
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID9 } from "node:crypto";
-import { readFileSync as readFileSync23, existsSync as existsSync23, mkdirSync as mkdirSync14, readdirSync as readdirSync8, renameSync as renameSync10, statSync as statSync10, writeFileSync as writeFileSync13, rmSync as rmSync9 } from "node:fs";
+import { readFileSync as readFileSync23, existsSync as existsSync23, mkdirSync as mkdirSync14, readdirSync as readdirSync8, renameSync as renameSync9, statSync as statSync10, writeFileSync as writeFileSync12, rmSync as rmSync9 } from "node:fs";
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { basename as basename3, join as join34 } from "node:path";
+import { basename as basename4, join as join34 } from "node:path";
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync } from "node:fs";
@@ -15695,7 +15695,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve14) => setTimeout(resolve14, ms));
+  return new Promise((resolve15) => setTimeout(resolve15, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -16539,9 +16539,10 @@ function renderUnavailable(reason) {
 }
 
 // scripts/lib/sterling-layer.mjs
-import { existsSync as existsSync11, readFileSync as readFileSync12, renameSync as renameSync6, unlinkSync as unlinkSync2, writeFileSync as writeFileSync7 } from "node:fs";
-import { join as join20 } from "node:path";
+import { existsSync as existsSync11, lstatSync as lstatSync5, readFileSync as readFileSync12, unlinkSync as unlinkSync2 } from "node:fs";
+import { basename as basename3, join as join20, resolve as resolve7 } from "node:path";
 init_agent_fences();
+init_atomic_write();
 var CLAUDE_BLOCK_REL = "templates/claude-session-block.md";
 var AGENTS_MD_AGY_CAP_BYTES = 24e3;
 var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
@@ -16559,15 +16560,15 @@ init_dist2();
 // scripts/lib/handoff-projection.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync12 } from "node:fs";
-import { join as join23, resolve as resolve9 } from "node:path";
+import { join as join23, resolve as resolve10 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync6, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync as unlinkSync3, constants } from "node:fs";
-import { join as join22, resolve as resolve8 } from "node:path";
+import { lstatSync as lstatSync7, readFileSync as readFileSync13, readdirSync as readdirSync4, mkdirSync as mkdirSync9, openSync as openSync5, writeSync as writeSync2, closeSync as closeSync5, unlinkSync as unlinkSync3, constants } from "node:fs";
+import { join as join22, resolve as resolve9 } from "node:path";
 
 // scripts/lib/store-path.mjs
-import { lstatSync as lstatSync5, realpathSync as realpathSync7 } from "node:fs";
-import { join as join21, resolve as resolve7, sep } from "node:path";
+import { lstatSync as lstatSync6, realpathSync as realpathSync7 } from "node:fs";
+import { join as join21, resolve as resolve8, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -16590,8 +16591,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve7(root);
-  const target = resolve7(rootResolved, ...segments);
+  const rootResolved = resolve8(root);
+  const target = resolve8(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -16621,7 +16622,7 @@ function resolveStoreWritePath(root, ...segments) {
     const next = join21(cursor, part);
     let st;
     try {
-      st = lstatSync5(next);
+      st = lstatSync6(next);
     } catch (e) {
       if (e && e.code === "ENOENT") break;
       throw new StorePathContainmentError(
@@ -16702,7 +16703,7 @@ var ContainmentError = class extends Error {
 };
 var lstatOrNull = (p) => {
   try {
-    return lstatSync6(p);
+    return lstatSync7(p);
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw e;
@@ -16711,7 +16712,7 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve8(root);
+  let cursor = resolve9(root);
   for (const [index, part] of segments.entries()) {
     cursor = join22(cursor, part);
     const st = lstatOrNull(cursor);
@@ -17176,9 +17177,9 @@ init_agent_distribution();
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
-import { readFileSync as readFileSync16, writeFileSync as writeFileSync9, mkdirSync as mkdirSync11, rmSync as rmSync7, statSync as statSync7, renameSync as renameSync8 } from "node:fs";
+import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, mkdirSync as mkdirSync11, rmSync as rmSync7, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { join as join26, dirname as dirname13, resolve as resolve10 } from "node:path";
+import { join as join26, dirname as dirname13, resolve as resolve11 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/session-events.mjs
@@ -17214,7 +17215,7 @@ function readHeadReflog(root) {
   if (r.status !== 0) return null;
   let raw;
   try {
-    raw = readFileSync16(resolve10(root, r.stdout.trim()), "utf8");
+    raw = readFileSync16(resolve11(root, r.stdout.trim()), "utf8");
   } catch {
     return null;
   }
@@ -17313,7 +17314,7 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   mkdirSync11(dirname13(p), { recursive: true });
   if (ifAbsent) {
     try {
-      writeFileSync9(p, JSON.stringify(snapshot), { flag: "wx" });
+      writeFileSync8(p, JSON.stringify(snapshot), { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
@@ -17322,8 +17323,8 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   }
   const tmp = `${p}.${process.pid}.${randomUUID8()}.tmp`;
   try {
-    writeFileSync9(tmp, JSON.stringify(snapshot));
-    renameSync8(tmp, p);
+    writeFileSync8(tmp, JSON.stringify(snapshot));
+    renameSync7(tmp, p);
   } catch (e) {
     rmSync7(tmp, { force: true });
     throw e;
@@ -17342,7 +17343,7 @@ import { join as join28 } from "node:path";
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync16, readFileSync as readFileSync17, readdirSync as readdirSync6, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join27, resolve as resolve11, sep as sep2 } from "node:path";
+import { join as join27, resolve as resolve12, sep as sep2 } from "node:path";
 import { createHash as createHash7 } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -17665,7 +17666,7 @@ function canonical(p) {
   try {
     return realpathSync8(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve11(p);
+    if (err?.code === "ENOENT") return resolve12(p);
     throw err;
   }
 }
@@ -17688,9 +17689,9 @@ function isInstalledCopy(root, { env = process.env, home = homedir7() } = {}) {
 
 // scripts/lib/post-update-sync.mjs
 import { spawn, spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync18, readFileSync as readFileSync18, realpathSync as realpathSync9, statSync as statSync8, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync18, readFileSync as readFileSync18, realpathSync as realpathSync9, statSync as statSync8, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { join as join29, resolve as resolve12 } from "node:path";
+import { join as join29, resolve as resolve13 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
 var SYNC_MARKER_REL = join29(".sterling", "synced-version");
 var HOST_TEXT = {
@@ -17740,7 +17741,7 @@ function sameRealPath(a, b) {
     try {
       return realpathSync9(p);
     } catch {
-      return resolve12(p);
+      return resolve13(p);
     }
   };
   return real(a) === real(b);
@@ -17773,26 +17774,29 @@ function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
 async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   const migrated = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
-  if (sync.error) return { ok: false, migrated, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2) return { ok: false, migrated, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
-  if (sync.status !== 0) return { ok: false, migrated, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
+  const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
+  const layerRefusals = layer.filter((l) => l.startsWith("\u2717 Sterling layer REFUSED:"));
+  if (sync.error) return { ok: false, migrated, layer, detail: `sync-agents did not run (${sync.error})` };
+  if (sync.status === 2 && layerRefusals.length) return { ok: false, migrated, layer, detail: "sync-agents REFUSED the Sterling layer in AGENTS.md (the reason follows)" };
+  if (sync.status === 2) return { ok: false, migrated, layer, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
+  if (sync.status !== 0) return { ok: false, migrated, layer, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
-  if (openCodeSkip) return { ok: false, migrated, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  if (openCodeSkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
   const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
-  if (agySkip) return { ok: false, migrated, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
+  if (agySkip) return { ok: false, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out) || host === "agy" && AGY_AGENT_WRITTEN_LINE.test(sync.out);
-  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated };
+  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
-  if (contract.error) return { ok: false, restart, migrated, detail: `stamp-contract did not run (${contract.error})` };
-  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, migrated, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
+  if (contract.error) return { ok: false, restart, migrated, layer, detail: `stamp-contract did not run (${contract.error})` };
+  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, migrated, layer, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
   if (/—\s*0 project\(s\) processed/.test(contract.out)) {
     const refusals = contract.out.split("\n").filter((l) => l.startsWith("\u2717")).map((l) => l.trim());
-    if (refusals.length) return { ok: false, restart, migrated, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
-    return { ok: false, restart, migrated, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
+    if (refusals.length) return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
+    return { ok: false, restart, migrated, layer, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
   const inserted = contract.out.split("\n").map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l)).filter(Boolean).map((m) => `${m[1]} ${m[2].trim()}`);
   const kept = contract.out.split("\n").map((l) => /^\s*SIMILAR_BULLET_KEPT {2}(.+)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated };
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated, layer };
 }
 function postUpdateApplies(root, project) {
   return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync18(join29(storeRootFor(project), ".sterling", "config.json"));
@@ -17844,15 +17848,15 @@ POST-UPDATE SYNC REFUSED (${t.label}): this Sterling copy is ${current}, older t
     const restartOwed = result.restart ? ` ${t.restartShort}.` : "";
     return {
       outcome: "failed",
-      warning: `\u2717 ${hop}: post-update sync FAILED \u2014 ${result.detail}.${restartOwed} ${migratedWarning(result.migrated ?? [])}`,
+      warning: `\u2717 ${hop}: post-update sync FAILED \u2014 ${result.detail}.${restartOwed} ${migratedWarning(result.migrated ?? [])}${layerWarning(result.layer)}`,
       context: `
 
-POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker was written, so it ${t.retry}; tell the user and fix the cause.` + (result.restart ? ` sync-agents DID refresh agents before the failure: ${t.restartLong}` : "") + migratedContext(result.migrated ?? [])
+POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker was written, so it ${t.retry}; tell the user and fix the cause.` + (result.restart ? ` sync-agents DID refresh agents before the failure: ${t.restartLong}` : "") + migratedContext(result.migrated ?? []) + layerContext(result.layer)
     };
   }
   let warning = "";
   try {
-    writeFileSync10(markerPath, `${current}
+    writeFileSync9(markerPath, `${current}
 `);
   } catch (err) {
     warning = `\u2717 ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) \u2014 the sync ${t.rerun} until it can. `;
@@ -17860,16 +17864,23 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   const restartLine = result.restart ? t.restartShort : "agents synced, none changed";
   warning ||= `\u26A0 ${hop}: ${restartLine}. `;
   const inserted = result.inserted ?? [];
-  if (inserted.length) warning += `AGENTS.md/CLAUDE.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). `;
+  if (inserted.length) warning += `AGENTS.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). `;
   const migrated = result.migrated ?? [];
   warning += migratedWarning(migrated);
+  warning += layerWarning(result.layer);
   return {
     outcome: "synced",
     warning,
     context: `
 
-POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
+POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + layerContext(result.layer) + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
+}
+function layerWarning(layer = []) {
+  return layer.length ? `${layer.join(" ")} ` : "";
+}
+function layerContext(layer = []) {
+  return layer.length ? ` Sterling layer in AGENTS.md: ${layer.join(" ")} Tell the user about each line.` : "";
 }
 var RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
 var OVERPASS_CONVERSION_LINE = /^config migration: overpass\./;
@@ -17916,12 +17927,12 @@ function cloneBranchState(root) {
     if (statSync8(dotGit).isFile()) {
       const pointer = /^gitdir: (.+)$/.exec(readFileSync18(dotGit, "utf8").split(/\r?\n/)[0]);
       if (!pointer) return unreadable(".git: no gitdir line");
-      gitDir = resolve12(root, pointer[1].trim());
+      gitDir = resolve13(root, pointer[1].trim());
       commonDir = gitDir;
       try {
         const common = readFileSync18(join29(gitDir, "commondir"), "utf8").trim();
         if (!common) return unreadable("commondir: empty");
-        commonDir = resolve12(gitDir, common);
+        commonDir = resolve13(gitDir, common);
         if (!statSync8(commonDir).isDirectory()) return unreadable("commondir: not a directory");
       } catch (e) {
         if (e?.code !== "ENOENT" || existsSync18(join29(gitDir, "commondir"))) return unreadable(`commondir: ${errCode(e)}`);
@@ -18005,10 +18016,10 @@ CLONE AGENT SYNC REFUSED (${t.label}): this Sterling clone is ${current}, older 
     const restart = Boolean(result.restart) || changed.length > 0;
     return {
       outcome: "failed",
-      warning: `\u2717 Sterling clone: agent sync FAILED \u2014 ${result.detail}.${restart ? ` ${t.restartShort}.` : ""} ${migratedWarning(result.migrated ?? [])}`,
+      warning: `\u2717 Sterling clone: agent sync FAILED \u2014 ${result.detail}.${restart ? ` ${t.restartShort}.` : ""} ${migratedWarning(result.migrated ?? [])}${layerWarning(result.layer)}`,
       context: `
 
-CLONE AGENT SYNC FAILED (${t.label}): this project's installed agents are behind the clone's templates${were} \u2014 ${result.detail}. Nothing records a clone sync, so it ${t.retry} while an installed agent is behind; tell the user and fix the cause.` + (restart ? ` sync-agents DID change agents before the failure${changed.length ? ` (${changed.join("; ")})` : ""}: ${t.restartLong}` : "") + migratedContext(result.migrated ?? [])
+CLONE AGENT SYNC FAILED (${t.label}): this project's installed agents are behind the clone's templates${were} \u2014 ${result.detail}. Nothing records a clone sync, so it ${t.retry} while an installed agent is behind; tell the user and fix the cause.` + (restart ? ` sync-agents DID change agents before the failure${changed.length ? ` (${changed.join("; ")})` : ""}: ${t.restartLong}` : "") + migratedContext(result.migrated ?? []) + layerContext(result.layer)
     };
   }
   const restartLine = result.restart ? t.restartShort : "agents synced, none changed";
@@ -18016,15 +18027,15 @@ CLONE AGENT SYNC FAILED (${t.label}): this project's installed agents are behind
   const migrated = result.migrated ?? [];
   return {
     outcome: "synced",
-    warning: `\u26A0 Sterling clone: installed agents were behind its templates${were} \u2014 ${restartLine}. ` + migratedWarning(migrated) + (inserted.length ? `AGENTS.md/CLAUDE.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). ` : ""),
+    warning: `\u26A0 Sterling clone: installed agents were behind its templates${were} \u2014 ${restartLine}. ` + migratedWarning(migrated) + layerWarning(result.layer) + (inserted.length ? `AGENTS.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). ` : ""),
     context: `
 
-CLONE AGENT SYNC (${t.label}): this project's installed agents were behind the clone's templates${were} \u2014 ${restartLine}.` + (changed.length ? ` sync-agents reported: ${changed.join("; ")}.` : "") + (result.restart ? ` ${t.restartLong}` : "") + migratedContext(migrated) + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
+CLONE AGENT SYNC (${t.label}): this project's installed agents were behind the clone's templates${were} \u2014 ${restartLine}.` + (changed.length ? ` sync-agents reported: ${changed.join("; ")}.` : "") + (result.restart ? ` ${t.restartLong}` : "") + layerContext(result.layer) + migratedContext(migrated) + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
 }
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync6, existsSync as existsSync19, mkdirSync as mkdirSync12, openSync as openSync6, readFileSync as readFileSync19, readdirSync as readdirSync7, readSync as readSync4, writeFileSync as writeFileSync11 } from "node:fs";
+import { closeSync as closeSync6, existsSync as existsSync19, mkdirSync as mkdirSync12, openSync as openSync6, readFileSync as readFileSync19, readdirSync as readdirSync7, readSync as readSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname14, join as join30 } from "node:path";
 init_dist();
@@ -18162,8 +18173,8 @@ import { existsSync as existsSync21, readFileSync as readFileSync21 } from "node
 import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { closeSync as closeSync7, existsSync as existsSync20, mkdirSync as mkdirSync13, openSync as openSync7, readFileSync as readFileSync20, renameSync as renameSync9, rmSync as rmSync8, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync12, appendFileSync } from "node:fs";
-import { dirname as dirname15, isAbsolute as isAbsolute3, join as join31, resolve as resolve13, sep as sep3 } from "node:path";
+import { closeSync as closeSync7, existsSync as existsSync20, mkdirSync as mkdirSync13, openSync as openSync7, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync8, rmdirSync as rmdirSync2, statSync as statSync9, writeFileSync as writeFileSync11, appendFileSync } from "node:fs";
+import { dirname as dirname15, isAbsolute as isAbsolute3, join as join31, resolve as resolve14, sep as sep3 } from "node:path";
 init_dist2();
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -18807,7 +18818,7 @@ async function deleteRegisterUnderLock(cwd) {
 `);
         }
         rmSync9(registerPath(cwd), { force: true });
-        const registerBasename = basename3(registerPath(cwd));
+        const registerBasename = basename4(registerPath(cwd));
         for (const f of readdirSync8(transientDir)) {
           if (f.startsWith(`${registerBasename}.tmp-`)) rmSync9(join34(transientDir, f), { force: true });
         }
@@ -18898,11 +18909,11 @@ var sessionMarkerTmp = join34(input.cwd, ".sterling", "transient", `session.json
 try {
   if (existsSync23(join34(storeRoot, ".sterling", "config.json"))) {
     mkdirSync14(join34(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync13(
+    writeFileSync12(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync10(sessionMarkerTmp, sessionMarkerPath);
+    renameSync9(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
@@ -19015,6 +19026,18 @@ if (domainMapResult) {
     postUpdateContext += notice.context;
   }
 }
+var claudeLayerContext = "";
+if (syncHost === "claude") {
+  try {
+    claudeLayerContext = `
+
+${readClaudeSessionBlock(pluginRoot2())}`;
+  } catch (err) {
+    claudeLayerContext = `
+
+STERLING LAYER (Claude Code): the Claude Code rules block could not be read (${String(err?.message ?? err).split("\n")[0]}); only the AGENTS.md layer applies this session. Report it with /sterling:report-issue.`;
+  }
+}
 var storeOpenWarning = "";
 var store = null;
 if (!projectStoreBlocked) {
@@ -19042,7 +19065,7 @@ ${storageLine({ ...readProjectConfig(storeRoot), root: storeRoot })}`;
         ...earlyWarning ? { systemMessage: earlyWarning.trim() } : {},
         hookSpecificOutput: {
           hookEventName: "SessionStart",
-          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join("\n\n") + (sterlingProject ? rootContext + earlyStorageContext : "") + storeVersionContext + postUpdateContext
+          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join("\n\n") + (sterlingProject ? rootContext + earlyStorageContext : "") + storeVersionContext + postUpdateContext + (sterlingProject ? claudeLayerContext : "")
         }
       })
     );
@@ -19075,18 +19098,6 @@ try {
 
 ${projectModeLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
-}
-var claudeLayerContext = "";
-if (syncHost === "claude") {
-  try {
-    claudeLayerContext = `
-
-${readClaudeSessionBlock(pluginRoot2())}`;
-  } catch (err) {
-    claudeLayerContext = `
-
-STERLING LAYER (Claude Code): the Claude Code rules block could not be read (${String(err?.message ?? err).split("\n")[0]}); only the AGENTS.md layer applies this session. Report it with /sterling:report-issue.`;
-  }
 }
 var handoffContext = "";
 try {
@@ -19154,7 +19165,7 @@ try {
         if (!fresh) {
           spawnSync11("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync13(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync12(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -19465,7 +19476,7 @@ function agentCurrencyState() {
         );
         continue;
       }
-      if (templateFile !== basename3(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
+      if (templateFile !== basename4(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
         unknown2.push(
           `- ${file} \u2014 currency UNKNOWN: its template '${templateFile}' does not name a plain .md file inside agent-templates/, so nothing outside that directory is allowed to certify it`
         );
@@ -19601,6 +19612,6 @@ var output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + claudeLayerContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext + claudeLayerContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

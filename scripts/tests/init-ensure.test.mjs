@@ -592,6 +592,7 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, a hand-written 
     assert.match(`${rerun.stdout}${rerun.stderr}`, /CLAUDE\.md holds text that is not Sterling's generated layer, so it was kept\. Claude Code ignores AGENTS\.md/);
     assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+differs\s+locally modified/m);
     assert.deepEqual(snapshot(dir), before, 'hand-edited files untouched');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), '# Mine\n\n- the human wrote this\n', 'the hand-written CLAUDE.md is kept byte for byte');
     assert.equal(readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8'), agentBefore, 'modified agent untouched');
     assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).delegation.max_concurrent, 7);
   } finally {
@@ -900,7 +901,9 @@ test('legacy migration — CRLF: the tail bytes are unchanged (still CRLF) and t
   }
 });
 
-test('legacy migration — git unavailable (no history to verify against): never migrated blind; AGENTS.md is created fresh, CLAUDE.md is kept, and the warning names the missing history', () => {
+// The pre-split heads ship in bin/host-file-history.json (review finding 9 of #329), so an
+// installed copy or a machine without git still recognises them: git is no longer consulted.
+test('legacy migration — git unavailable: the shipped template history still verifies the head, so the tail is migrated; CLAUDE.md is kept whole with its warning', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     mkdirSync(dir, { recursive: true });
@@ -908,9 +911,78 @@ test('legacy migration — git unavailable (no history to verify against): never
     writeFileSync(join(dir, 'CLAUDE.md'), legacy);
     const r = init(dir, FRESH_FLAGS, { PATH: '/nonexistent-bin-dir-for-this-test-only' });
     assert.equal(r.code, 0, r.stderr);
-    assert.ok(!readFileSync(join(dir, 'AGENTS.md'), 'utf8').includes('- tail'), 'never migrated blind when history cannot be verified');
-    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), legacy);
-    assert.match(`${r.stdout}${r.stderr}`, /CLAUDE\.md was not recognized as an older Sterling render \(git log failed for templates\/target-claude-md\.md/);
+    assert.match(r.stdout, /^AGENTS\.md\s+migrated\b/m, 'migrated from the shipped history, without git');
+    assert.ok(readFileSync(join(dir, 'AGENTS.md'), 'utf8').includes('- tail'), 'the project tail is carried into AGENTS.md');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), legacy, 'the legacy CLAUDE.md is never rewritten or removed');
+    assert.match(r.stdout, /^CLAUDE\.md\s+kept\b/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// Review of #329, findings 1, 2 and 5: init removes a CLAUDE.md only when it is the project's own
+// trusted render and the layer is verified in AGENTS.md; over agy's cap nothing is written.
+const pureClaude = (name) => renderClaudeText(readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8'), 'target-claude-md.md').replaceAll('{{PROJECT_NAME}}', name);
+
+test('init: a CLAUDE.md that is Sterling\'s render plus a rule on its project-name heading line is kept byte for byte', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '# Ours\n\n- **Ours.** A rule.\n');
+    const claude = pureClaude('ensure-target').replace('# CLAUDE.md — ensure-target (Sterling layer)', '# CLAUDE.md — ensure-target. Always use tabs. (Sterling layer)');
+    writeFileSync(join(dir, 'CLAUDE.md'), claude);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), claude);
+    assert.match(r.stdout, /^CLAUDE\.md\s+kept\b/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init: broken layer markers in AGENTS.md leave AGENTS.md byte-identical and keep a pure CLAUDE.md', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const agents = '# Ours\n\n<!-- sterling:begin generated (init and update rewrite this block\n\n- **Ours.** Must survive.\n\n<!-- sterling:end generated -->\n';
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    writeFileSync(join(dir, 'CLAUDE.md'), pureClaude('ensure-target'));
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), pureClaude('ensure-target'));
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\b/m);
+    assert.match(r.stdout, /^CLAUDE\.md\s+kept\b.*not verified in AGENTS\.md/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init: an AGENTS.md that would pass agy\'s 24,000-byte cap with the layer is not written, and a pure CLAUDE.md is kept', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const rule = '- **Project rule.** A long project rule that this project keeps in its AGENTS.md file.\n';
+    const agents = `# Ours\n\n${rule.repeat(Math.ceil(20_412 / Buffer.byteLength(rule)))}`.slice(0, 20_412);
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    writeFileSync(join(dir, 'CLAUDE.md'), pureClaude('ensure-target'));
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, 'nothing written');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), pureClaude('ensure-target'), 'nothing removed');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\s+AGENTS\.md would be [\d,]+ bytes with the Sterling layer, over agy's 24,000-byte cap/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init: a pure CLAUDE.md beside a valid AGENTS.md is removed once the layer is verified', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '# Ours\n\n- **Ours.** A rule.\n');
+    writeFileSync(join(dir, 'CLAUDE.md'), pureClaude('ensure-target'));
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^CLAUDE\.md\s+removed\b/m);
+    assert.ok(!existsSync(join(dir, 'CLAUDE.md')));
+    assert.ok(readFileSync(join(dir, 'AGENTS.md'), 'utf8').startsWith('# Ours\n\n- **Ours.** A rule.\n'));
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -923,6 +995,7 @@ test('refusal only for destructive actions: a FILE where .sterling/ must be a di
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /REFUSED \(destructive\)/);
+    assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'refusal happened before any write (AGENTS.md is the instruction file init writes)');
     assert.ok(!existsSync(join(dir, 'CLAUDE.md')), 'refusal happened before any write');
     assert.ok(!existsSync(join(dir, '.sterling', 'config.json')), 'refusal happened before any write');
   } finally {

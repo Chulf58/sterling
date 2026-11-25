@@ -1,7 +1,7 @@
 <!-- sterling:begin generated (init and update rewrite this block; put project rules outside it) -->
 ## Sterling layer (generated)
 
-The **knowledge base is the authority**, not this file. The conductor's posture is `agent-templates/conductor.md`, written for agy to `.agents/agents/conductor/agent.md`. Sterling root: `~/.gemini/config/plugins/sterling` (the installed plugin; expand `~` to the home directory), written `<root>` below. Rules for a host apply only under that host's heading.
+The **knowledge base is the authority**, not this file. The conductor's posture is `agent-templates/conductor.md`, written for agy to `.agents/agents/conductor/agent.md`. `<root>` below is the Sterling root your host's notice names. Rules for a host apply only under that host's heading.
 
 ### Authority and retrieval
 
@@ -34,13 +34,14 @@ The **knowledge base is the authority**, not this file. The conductor's posture 
 - **Store writes go through the MCP tools,** never shell scripts against `.sterling/`. Nothing but the MCP server writes `.sterling/sterling.db`; other files there are editable.
 - **When the platform disagrees with the design, stop.** Report the contradiction with the doc reference and a loud fallback, then wait. Never copy record shapes or rosters into instruction files; the store is the census.
 - **Report Sterling defects without asking:** `node "<root>/bin/report-issue.mjs"` with title, component, severity, observed, expected and evidence. The repo is public: each `--evidence` is a Sterling `file:line` or a quoted Sterling message, never this project's code or names. Feedback about Sterling states its version (manifest under `<root>`) and HEAD commit.
-- **At a clean boundary say `READY FOR NEW SESSION` on its own line** (committed, rotation note written by `node "<root>/bin/rotation-note.mjs"`, nothing in flight); `EXIT AND RELAUNCH` if hook or MCP code changed.
+- **At a clean boundary say your host's rotation line on its own line** (committed, rotation note written by `node "<root>/bin/rotation-note.mjs"`, nothing in flight); `EXIT AND RELAUNCH` if hook or MCP code changed.
 
 ### On Antigravity CLI (agy) only
 
+- **Rotation line: `READY FOR NEW SESSION`.**
 - **Start with `agy --agent conductor`.** Plain `agy` runs hooks but starts no Sterling MCP server. If a Sterling tool is missing: (1) the session lacks `--agent conductor`: ask for a restart; (2) first turn of a correct launch: agy attaches MCP tools after the first turn, so ask for one short follow-up; (3) still missing later: report a setup fault and ask for `/sterling:sync-agents` and a restart.
 - **Call Sterling tools as `call_mcp_tool{ServerName: "sterling", ToolName, Arguments}`.** Read-only roles use `ServerName: "sterling-ro"`. Others: `run_command`, `read_file`, `write_file`, `edit_file`, `invoke_subagent` (background), `send_message`, `ask_question`.
 - **agy delivers no knowledge on file touch, and Stop duties can be left owed** (one `continue` per turn). Query first, reconcile each changed article yourself, and check `board_query` and `maintenance_query` at each slice boundary.
 - **Nothing enforces the store-write rule on agy:** no deny on shell writes to `.sterling/sterling.db*`, and `tools:` cannot keep read-only roles off store-write tools.
-- **`/sterling:<name>` is a file:** read `<root>/commands/<name>.md` and follow it with agy tool names. `CLAUDE_PLUGIN_ROOT` means `<root>`. There is no `/sterling:dashboard`.
+- **`/sterling:<name>` is a file:** read `<root>/commands/<name>.md` and follow it with agy tool names. `<root>` and `CLAUDE_PLUGIN_ROOT` mean `~/.gemini/config/plugins/sterling`. There is no `/sterling:dashboard`.
 <!-- sterling:end generated -->

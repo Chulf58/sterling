@@ -17659,6 +17659,7 @@ var GENERATED_TRACKED = [
   /^bin\/[^/]+\.mjs$/,
   /^bin\/contract-history\.json$/,
   /^bin\/launcher-history\.json$/,
+  /^bin\/host-file-history\.json$/,
   /^mcp\/sterling-mcp\.mjs$/,
   /^mcp\/\.build-id$/,
   /^tui\/sterling-tui\.mjs$/,
@@ -18014,6 +18015,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
       const autoMemoryNotices = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^auto-memory off: (kept|wrong_type)\b/.test(l));
       const configMigrationLines = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
+      const layerLines = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
       const changedAgents = statuses.filter((l) => !l.startsWith("up_to_date") && !l.startsWith("locally_modified_up_to_date") && !l.startsWith("config_drift: ") && !l.startsWith("unsupported: "));
       const modelConflictLine = r.stdout.split("\n").map((l) => l.trim()).find((l) => l.startsWith("refused_model_conflicts: "));
       Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length, config_migration: configMigrationLines.length });
@@ -18023,7 +18025,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         fail(2);
         failed = true;
       } else if (r.status === 2) {
-        log(`  \u2717 ${p.name}: agent sync REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:
+        log(`  \u2717 ${p.name}: agent sync REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, a .claude/settings.json that is not valid JSON or not a JSON object, or a Sterling layer refusal in AGENTS.md). Output verbatim:
 ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         fail(2);
         failed = true;
@@ -18037,6 +18039,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         for (const line of driftedAgents) log(`      \u26A0 ${line}`);
         for (const line of autoMemoryNotices) log(`      \u26A0 ${line}`);
         for (const line of configMigrationLines) log(`      \u26A0 ${line}`);
+        for (const line of layerLines) log(`      ${line}`);
       }
       if (handoffUnmaintained.length) log(`      \u26A0 ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       try {

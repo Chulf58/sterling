@@ -202,6 +202,10 @@ test("the OpenCode layer is the template's opencode-only text plus the host tail
     assert.equal(layer.renderSterlingLayer(crlf.dir, root), out, 'a CRLF CLAUDE.md changes nothing');
     assert.ok(!out.includes('PROJECT-BULLET-QUARTZ'));
     assert.doesNotMatch(out, /^## Authority/m, 'the shared rules are in AGENTS.md, not injected again');
+    const section = readFileSync(join(repo, 'templates', 'sterling-layer-agents.md'), 'utf8');
+    for (const line of section.split('\n').filter((l) => l.startsWith('- **') || l.startsWith('#'))) {
+      assert.ok(!out.includes(line), `generated section text injected again: ${line.slice(0, 80)}`);
+    }
     assert.match(out, /^## Sterling layer on OpenCode/m);
     assert.match(out, /^## OpenCode host/m);
     assert.doesNotMatch(out, /STERLING LAYER HOST CHECK/);
@@ -222,4 +226,3 @@ test('stamp-contract reads the Claude render: no tracked bullet carries a fence 
   }
   assert.equal(extractTemplateBlock(template(), '- **Say `READY TO CLEAR` plainly when it is time.**').block.includes('READY FOR NEW SESSION'), false);
 });
-

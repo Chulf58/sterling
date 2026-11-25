@@ -327,7 +327,16 @@ test('a failing git ls-files inside a checkout refuses every agy write and names
 function agyOnlyProject() {
   const proj = tmp('sterling-agy-only-');
   git(proj, 'init', '-q');
-  writeFileSync(join(proj, 'AGENTS.md'), '# p\n\nProject rules.\n');
+  // A complete AGENTS.md as init renders it (every tracked AGENTS.md bullet in today's wording), so
+  // stamp-contract has nothing to refuse and a drift result would be a real defect.
+  writeFileSync(join(proj, 'AGENTS.md'), readFileSync(join(repo, 'templates', 'target-agents-md.md'), 'utf8')
+    .replaceAll('{{PROJECT_NAME}}', 'agy-only')
+    .replaceAll('{{STACK_TAGS}}', 'node')
+    .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+    .replaceAll('{{LINT_COMMAND}}', 'not recorded yet; add it here')
+    .replaceAll('{{DOMAINS}}', '~/.sterling/domains/node/ — created lazily on first need (§2.3)')
+    .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
+    .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)'));
   const regDb = join(tmp('sterling-agy-only-reg-'), 'registry.db');
   const registry = new ProjectRegistry(regDb);
   registry.register({ repo_path: proj, name: 'agy-only', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
@@ -344,11 +353,18 @@ test('post-update sync on agy: an agy-only project runs sync-agents and stamp-co
   Object.assign(process.env, { STERLING_REGISTRY_DB: regDb, STERLING_CLAUDE_PROBE: 'absent', STERLING_AGY_PROBE: 'ok', STERLING_OPENCODE_SETUP_DISABLE: '1' });
   delete process.env.STERLING_AGY_SETUP_DISABLE;
   try {
+    const before = readFileSync(join(proj, 'AGENTS.md'), 'utf8');
     const result = await runPostUpdateSteps(repo, proj, runStepSync, 'agy');
     assert.equal(result.ok, true, result.detail);
+    assert.equal(result.drift, false, `stamp-contract found no drift in a complete AGENTS.md:\n${result.driftOut}`);
+    assert.deepEqual(result.inserted, [], 'nothing to insert');
+    assert.deepEqual(result.layer, [], 'no layer warning or refusal');
     assert.equal(result.restart, true, 'sync-agents wrote the agy agents');
-    assert.match(readFileSync(join(proj, 'AGENTS.md'), 'utf8'), /sterling:begin generated/, 'sync-agents regenerated the layer section');
-    assert.equal(existsSync(join(proj, 'GEMINI.md')), false);
+    const after = readFileSync(join(proj, 'AGENTS.md'), 'utf8');
+    assert.ok(after.startsWith(before), 'the project text is kept byte for byte');
+    assert.match(after.slice(before.length), /^\n<!-- sterling:begin generated[\s\S]*<!-- sterling:end generated -->\n$/, 'the layer section is appended after it');
+    assert.equal(existsSync(join(proj, 'GEMINI.md')), false, 'no GEMINI.md is written');
+    assert.equal(existsSync(join(proj, 'CLAUDE.md')), false, 'no CLAUDE.md is written');
     assert.ok(existsSync(join(proj, '.agents', 'agents', 'conductor', 'agent.md')));
   } finally {
     for (const k of keys) if (saved[k] === undefined) delete process.env[k];

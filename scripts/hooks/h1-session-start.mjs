@@ -435,6 +435,20 @@ if (domainMapResult) {
   }
 }
 
+// Claude Code's own part of the Sterling layer (decision
+// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer): the shared
+// rules are a generated section of AGENTS.md, and this block, at most 2,000 bytes, carries the
+// rules that name Claude Code's hooks and tools. agy sessions never receive it. It needs no store,
+// so it is computed here and rides the no-store exit below as well as the main one.
+let claudeLayerContext = '';
+if (syncHost === 'claude') {
+  try {
+    claudeLayerContext = `\n\n${readClaudeSessionBlock(pluginRoot())}`;
+  } catch (err) {
+    claudeLayerContext = `\n\nSTERLING LAYER (Claude Code): the Claude Code rules block could not be read (${String(err?.message ?? err).split('\n')[0]}); only the AGENTS.md layer applies this session. Report it with /sterling:report-issue.`;
+  }
+}
+
 // A Postgres-storage project whose store cannot be opened (lib/common.mjs
 // openStore throws, naming the error) takes the no-store exit below with one
 // DEGRADED line, never the silence of "not a Sterling project". SQLite storage
@@ -478,7 +492,7 @@ if (!store) {
         ...(earlyWarning ? { systemMessage: earlyWarning.trim() } : {}),
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join('\n\n') + (sterlingProject ? rootContext + earlyStorageContext : '') + storeVersionContext + postUpdateContext,
+          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join('\n\n') + (sterlingProject ? rootContext + earlyStorageContext : '') + storeVersionContext + postUpdateContext + (sterlingProject ? claudeLayerContext : ''),
         },
       })
     );
@@ -534,19 +548,6 @@ try {
   modeContext = `\n\n${projectModeLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
   // fail-open — a malformed config costs only this line
-}
-
-// Claude Code's own part of the Sterling layer (decision
-// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer): the shared
-// rules are a generated section of AGENTS.md, and this block, at most 2,000 bytes, carries the
-// rules that name Claude Code's hooks and tools. agy sessions never receive it.
-let claudeLayerContext = '';
-if (syncHost === 'claude') {
-  try {
-    claudeLayerContext = `\n\n${readClaudeSessionBlock(pluginRoot())}`;
-  } catch (err) {
-    claudeLayerContext = `\n\nSTERLING LAYER (Claude Code): the Claude Code rules block could not be read (${String(err?.message ?? err).split('\n')[0]}); only the AGENTS.md layer applies this session. Report it with /sterling:report-issue.`;
-  }
 }
 
 let handoffContext = '';
@@ -1499,7 +1500,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + claudeLayerContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + hostFitContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext + claudeLayerContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

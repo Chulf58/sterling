@@ -400,6 +400,11 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
     const text = systemText(ci);
     assert.match(text, /## Sterling layer on OpenCode/, 'the OpenCode rules heading leads the layer');
     assert.doesNotMatch(text, /## Authority \(the knowledge base is the source of truth\)/, 'the shared rules come from AGENTS.md, not from this injection');
+    // The generated AGENTS.md section (GitHub #329) reaches OpenCode through AGENTS.md itself; none of it is injected again.
+    const section = readFileSync(join(repo, 'templates', 'sterling-layer-agents.md'), 'utf8');
+    for (const line of section.split('\n').filter((l) => l.startsWith('- **') || l.startsWith('#'))) {
+      assert.ok(!text.includes(line), `generated section text injected again: ${line.slice(0, 80)}`);
+    }
     assert.doesNotMatch(text, /\{\{PROJECT_NAME\}\}/);
     assert.match(text, /OpenCode host/);
     assert.match(text, /`question` tool/);

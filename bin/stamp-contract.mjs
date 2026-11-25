@@ -6477,10 +6477,6 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   return { worktree, mainRoot };
 }
 
-// scripts/lib/contract-bullets.mjs
-import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join8 } from "node:path";
-
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
@@ -6638,7 +6634,64 @@ function renderClaudeText(text, label) {
   return render(text, label, ["sterling-only", "claude-only"]);
 }
 
+// scripts/lib/sterling-layer.mjs
+var LAYER_END = "<!-- sterling:end generated -->";
+var LAYER_BEGIN = /^<!-- sterling:begin generated(?: \([^()]*\))? -->$/;
+var MARKER_LIKE = /^\s*<!--\s*sterling:(?:begin|end)\b/;
+var AGENTS_MD_AGY_CAP_BYTES = 24e3;
+var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
+var LayerMarkerError = class extends Error {
+};
+function scanLines(raw) {
+  const out = [];
+  let start = 0;
+  while (start < raw.length) {
+    const nl = raw.indexOf("\n", start);
+    const end = nl === -1 ? raw.length : nl + 1;
+    let contentEnd = nl === -1 ? raw.length : nl;
+    if (nl !== -1 && contentEnd > start && raw[contentEnd - 1] === "\r") contentEnd--;
+    out.push({ start, contentEnd, end, content: raw.slice(start, contentEnd) });
+    start = end;
+  }
+  return out;
+}
+var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+function findMarkers(lines) {
+  const begins = [];
+  const ends = [];
+  const malformed = [];
+  let fence = null;
+  lines.forEach(({ content }, i) => {
+    if (fence) {
+      const close = FENCE_CLOSE.exec(content);
+      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      return;
+    }
+    const open = FENCE_OPEN.exec(content);
+    if (open && !(open[1][0] === "`" && open[2].includes("`"))) {
+      fence = { ch: open[1][0], len: open[1].length, line: i };
+      return;
+    }
+    if (LAYER_BEGIN.test(content)) begins.push(i);
+    else if (content === LAYER_END) ends.push(i);
+    else if (MARKER_LIKE.test(content)) malformed.push(i);
+  });
+  if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
+  if (malformed.length) return { error: `AGENTS.md line ${malformed.map((i) => i + 1).join(", ")} looks like a sterling marker but is not the exact marker line` };
+  if (!begins.length && !ends.length) return { begin: null, end: null };
+  if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
+  return { error: `AGENTS.md has ${begins.length} sterling:begin and ${ends.length} sterling:end marker lines outside code (one of each, begin first, is required)` };
+}
+function layerLineRange(text) {
+  const found = findMarkers(scanLines(text));
+  if (found.error) throw new LayerMarkerError(found.error);
+  return { begin: found.begin, end: found.end };
+}
+
 // scripts/lib/contract-bullets.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join8 } from "node:path";
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -6954,6 +7007,15 @@ function itemEnd(text, start) {
   }
   return end;
 }
+var LAYER_MASK = "<!-- sterling layer section: generated, never stamped -->";
+function unmask(text, layerLines) {
+  if (!layerLines.length) return text;
+  const lines = text.split("\n");
+  const at = lines.indexOf(LAYER_MASK);
+  if (at === -1 || lines.indexOf(LAYER_MASK, at + 1) !== -1) throw new Error("stamp-contract: the Sterling layer section mask was lost while stamping AGENTS.md (a bug; nothing was written)");
+  lines.splice(at, 1, ...layerLines);
+  return lines.join("\n");
+}
 var { templates, leadLayer, current } = readTemplateBullets(repoRoot);
 var variants = historicalVariants({
   repoRoot,
@@ -7015,29 +7077,35 @@ for (const { p, dir: repo } of work) {
   }
   if (realpathSync4(repo) === selfPath) continue;
   const agentsMd = join9(repo, "AGENTS.md");
-  const claudeMd = join9(repo, "CLAUDE.md");
   if (!existsSync4(agentsMd)) {
     record({ project: projectLabel, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
-  const hasClaude = existsSync4(claudeMd);
-  const loadSibling = (path) => {
-    const raw = readFileSync4(path, "utf8");
-    const text = normalizeEol(raw);
-    return { path, raw, original: text, text };
-  };
-  const agents = loadSibling(agentsMd);
-  const claude = hasClaude ? loadSibling(claudeMd) : null;
-  const absentClaude = { path: claudeMd, raw: "", original: "", text: "" };
-  const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, claude ?? absentClaude]]);
-  const layerName = (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : "CLAUDE.md";
+  const raw = readFileSync4(agentsMd, "utf8");
+  const normalized = normalizeEol(raw);
+  let range;
+  try {
+    range = layerLineRange(normalized);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    record({ project: projectLabel, status: "processed", file: agentsMd, actions: [{ lead: "Sterling layer section", action: "LAYER_MARKERS_REFUSED", file: "AGENTS.md", detail: `${err.message}; nothing in AGENTS.md was stamped. Fix the markers by hand, then rerun /sterling:update.` }] });
+    drift++;
+    continue;
+  }
+  const normalizedLines = normalized.split("\n");
+  const layerLines = range.begin === null ? [] : normalizedLines.slice(range.begin, range.end + 1);
+  const masked = range.begin === null ? normalized : [...normalizedLines.slice(0, range.begin), LAYER_MASK, ...normalizedLines.slice(range.end + 1)].join("\n");
+  const agents = { path: agentsMd, raw, original: masked, text: masked };
+  const noHostFile = { path: null, raw: "", original: "", text: "" };
+  const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, noHostFile]]);
+  const layerName = () => "AGENTS.md";
   const actions = [];
   const VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
   const sectionRefused = /* @__PURE__ */ new Set();
   for (const section of TARGET_SECTIONS) {
     const home = leadLayer.get(section.leads[0]);
-    if (home === CLAUDE_TEMPLATE_REL && !claude) continue;
+    if (home === CLAUDE_TEMPLATE_REL) continue;
     const target = siblingFiles.get(home);
     if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
     const label = `${section.heading} (section)`;
@@ -7153,18 +7221,17 @@ for (const { p, dir: repo } of work) {
   };
   stampLeads({
     files: siblingFiles,
-    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead) && (claude || leadLayer.get(lead) !== CLAUDE_TEMPLATE_REL)),
+    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead) && leadLayer.get(lead) === AGENTS_TEMPLATE_REL),
     wantOf: (lead) => current.get(lead),
     variantsOf: (lead) => variants.get(lead),
     nameOf: layerName,
     pass: actions
   });
   if (WRITE_INSERTS) {
-    const written = [["AGENTS.md", agents], ...claude ? [["CLAUDE.md", claude]] : []];
-    for (const [file, f] of written) {
+    for (const [file, f] of [["AGENTS.md", agents]]) {
       if (f.text === f.original) continue;
       try {
-        writeFileSync(f.path, withOriginalEols(f.raw, f.text));
+        writeFileSync(f.path, withOriginalEols(f.raw, unmask(f.text, layerLines)));
       } catch (err) {
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({
@@ -7177,7 +7244,7 @@ for (const { p, dir: repo } of work) {
       }
     }
   }
-  record({ project: projectLabel, status: "processed", file: [agentsMd, ...claude ? [claudeMd] : []].join(" + "), actions });
+  record({ project: projectLabel, status: "processed", file: agentsMd, actions });
 }
 var processed = results.filter((r) => r.status === "processed").length;
 console.log(

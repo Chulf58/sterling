@@ -236,6 +236,7 @@ const GENERATED_TRACKED = [
   /^bin\/[^/]+\.mjs$/,
   /^bin\/contract-history\.json$/,
   /^bin\/launcher-history\.json$/,
+  /^bin\/host-file-history\.json$/,
   /^mcp\/sterling-mcp\.mjs$/,
   /^mcp\/\.build-id$/,
   /^tui\/sterling-tui\.mjs$/,
@@ -872,6 +873,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // value). The prefix has a space, so the status filter above never counts them as agent changes;
       // relayed on success here and verbatim in the failure output below.
       const configMigrationLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('config migration: '));
+      // The Sterling layer in AGENTS.md (scripts/lib/sterling-layer.mjs syncLayer): a removed host
+      // file, a kept one that hides AGENTS.md, and a refusal are each relayed; "up to date" and
+      // "regenerated" are not. A refusal also exits 2, which the branch below reports.
+      const layerLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
       // `unsupported:` is a role whose model Claude Code cannot run and that has no copy: nothing changed.
       const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: ') && !l.startsWith('unsupported: '));
       const modelConflictLine = r.stdout.split('\n').map((l) => l.trim()).find((l) => l.startsWith('refused_model_conflicts: '));
@@ -884,7 +889,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         fail(2);
         failed = true;
       } else if (r.status === 2) {
-        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
+        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, a .claude/settings.json that is not valid JSON or not a JSON object, or a Sterling layer refusal in AGENTS.md). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         fail(2);
         failed = true;
       } else if (r.status !== 0) {
@@ -896,6 +901,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
         for (const line of autoMemoryNotices) log(`      ⚠ ${line}`);
         for (const line of configMigrationLines) log(`      ⚠ ${line}`);
+        for (const line of layerLines) log(`      ${line}`);
       }
       // An absent handoff key with handoff files on disk that git does not track:
       // they stopped being maintained, so the run names them (sync-agents prints
