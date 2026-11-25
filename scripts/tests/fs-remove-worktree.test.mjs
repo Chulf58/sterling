@@ -5,16 +5,15 @@
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { article } from './lib-article-fixture.mjs';
 import { itemProvenance } from '../hooks/lib/reconcile-origins.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const NOW = '2026-06-10T12:00:00.000Z';
 
 let SterlingStore;
 before(async () => {
@@ -26,18 +25,6 @@ const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${oneLine(r.stderr)}`);
-}
-
-function article(slug, path) {
-  return {
-    id: randomUUID(), type: 'feature_article', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
-    superseded_by: null, links: [], scope: 'project', stack_tags: [],
-    slug, title: slug, what_it_does: 'x', intended_behavior: 'x',
-    files: [{ path, role: 'impl' }],
-    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
-    dependencies: { relies_on: [], relied_by: [] }, state: 'active', version: 1,
-    history: [{ date: NOW, event: 'originating brief' }], live_test_refs: [],
-  };
 }
 
 test('fs-remove --target <linked worktree without .sterling>: removes the file under the worktree and registers the reconcile item in the main checkout store', () => {
