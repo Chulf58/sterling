@@ -110,6 +110,16 @@ const passthrough = z.object({}).passthrough();
  * shape thunks, lazy getters) are wrapped so a recursive schema is cloned on
  * demand, never eagerly; refinement callbacks and RegExps are kept as-is.
  */
+/** The write-tool wording: tools.ts refuses a file_keys entry that is an existing directory. */
+const FILE_KEYS_WRITE_DESCRIPTION =
+  'repo-relative paths, forward slashes. An existing directory path is refused: pass a non-directory leaf (a file) or a path that does not exist yet, because a directory claim delivers nothing';
+/** The read-filter wording: a filter is not refused for a directory, it just matches that exact path. */
+const FILE_KEYS_FILTER_DESCRIPTION =
+  'repo-relative paths, forward slashes; exact-path match against the file_keys records claim (a directory path matches only records that claim that exact path, never the files under it)';
+// a fresh zod instance per call: a shared one is served as a $ref (see cloneZod)
+const fileKeysWriteField = () => z.array(z.string()).describe(FILE_KEYS_WRITE_DESCRIPTION).optional();
+const fileKeysFilterField = () => z.array(z.string()).describe(FILE_KEYS_FILTER_DESCRIPTION).optional();
+
 function cloneZod<T>(node: T): T {
   if (Array.isArray(node)) return node.map(cloneZod) as unknown as T;
   if (typeof node === 'function') return ((...args: unknown[]) => cloneZod((node as (...a: unknown[]) => unknown)(...args))) as unknown as T;
@@ -134,7 +144,8 @@ const buildCreateFieldVariants = (discriminatorOptional: boolean) => Object.keys
     if (SERVER_OWNED_FIELDS.includes(key)) continue; // dropped entirely — server-assigned, never caller-supplied
     // the advertised variants (discriminatorOptional) are cloned so no field is
     // served as a cross-branch $ref; the enforced variants never reach JSON Schema.
-    const field = discriminatorOptional ? cloneZod(node as z.ZodTypeAny) : (node as z.ZodTypeAny);
+    let field = discriminatorOptional ? cloneZod(node as z.ZodTypeAny) : (node as z.ZodTypeAny);
+    if (discriminatorOptional && key === 'file_keys') field = field.describe(FILE_KEYS_WRITE_DESCRIPTION);
     fieldsShape[key] = defaulted.has(key) ? field.optional() : field;
   }
   // the per-variant discriminator the decision names — re-added after the
@@ -688,8 +699,8 @@ export function createSterlingServer(
   const updateArgs = {
     id: z.string().describe(ID_LADDER),
     // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
-    body: z.object({}).passthrough().optional().describe('the partial patch; exactly one of body or fields'),
-    fields: z.object({}).passthrough().optional().describe('alias of body, the name knowledge_create uses; exactly one of body or fields'),
+    body: z.object({}).passthrough().optional().describe(`the partial patch; exactly one of body or fields. file_keys in the patch: ${FILE_KEYS_WRITE_DESCRIPTION}`),
+    fields: z.object({}).passthrough().optional().describe(`alias of body, the name knowledge_create uses; exactly one of body or fields. file_keys in the patch: ${FILE_KEYS_WRITE_DESCRIPTION}`),
     resolves: z.array(z.string()).optional().describe(RESOLVES_RECORD_CHAIN + RESTAMP_HINT),
     expected_version: z
       .number()
@@ -889,7 +900,7 @@ export function createSterlingServer(
     'knowledge_create',
     {
       description:
-        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` ('project' by default, or 'domain:<name>') is given the same way, as the top-level `scope` or as fields.scope. Example: {\"type\":\"decision\",\"fields\":{\"title\":\"...\",\"statement\":\"...\",\"alternatives_rejected\":[],\"rationale\":\"...\"}}. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
+        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` ('project' by default, or 'domain:<name>') is given the same way, as the top-level `scope` or as fields.scope. Example: {\"type\":\"decision\",\"fields\":{\"title\":\"...\",\"statement\":\"...\",\"alternatives_rejected\":[],\"rationale\":\"...\"}}. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A file_keys (or files[] path) entry that is an existing directory is refused: pass non-directory leaf paths or paths that do not exist yet. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
         createDomainsNote,
       inputSchema: knowledgeCreateInput,
     },
@@ -913,7 +924,7 @@ export function createSterlingServer(
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
-        file_keys: z.array(z.string()).optional(),
+        file_keys: fileKeysFilterField(),
         rank_terms: z.array(z.string()).optional(),
         cap: z.number().int().positive().optional(),
         projection: z.enum(['full', 'digest', 'count']).optional(),
@@ -1182,7 +1193,7 @@ export function createSterlingServer(
         text: z.string(),
         source: z.enum(['user', 'system']),
         objective: z.string().optional(),
-        file_keys: z.array(z.string()).optional(),
+        file_keys: fileKeysWriteField(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         feature_link: z.string().describe('full record uuid; a slug or an 8-char prefix is refused').optional(),
         system_reason: z.string().optional(),
@@ -1207,7 +1218,7 @@ export function createSterlingServer(
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         objective: z.string().optional(),
-        file_keys: z.array(z.string()).optional(),
+        file_keys: fileKeysFilterField(),
         contains: z.string().optional(),
         cap: z.number().int().positive().optional(),
         offset: z.number().int().nonnegative().optional(),
@@ -1260,7 +1271,7 @@ export function createSterlingServer(
         id: z.string().describe(ID_LADDER),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
-        file_keys: z.array(z.string()).optional(),
+        file_keys: fileKeysWriteField(),
         objective: z.string().describe("(re)groups the task; \"standalone\" or '' removes the objective").optional(),
         measured_at_head: z.string().optional(),
         blocked_by: z.array(z.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
@@ -1479,7 +1490,7 @@ export function createSterlingServer(
         "List open maintenance-queue items. Filters (AND): system_reason, file_keys, contains (case-insensitive literal substring), feature_slug (items owned by one article, including earlier superseded versions; unresolvable = empty). Same envelope, paging and projections as board_query: capped=true means the queue is deeper than shown — page (offset, or cursor = next_cursor, which never skips an item behind it; mutually exclusive; bound to its filters) until capped is false. projection: \"text\" (default; text clipped to 240 chars, artifact_evidence_count), \"headline\", \"digest\", or \"full\" (per-item artifact_evidence detail and annotation prose). artifact_evidence is a lookup, never a verdict — verify against HEAD before draining on it.",
       inputSchema: strict({
         system_reason: z.string().optional(),
-        file_keys: z.array(z.string()).optional(),
+        file_keys: fileKeysFilterField(),
         contains: z.string().optional(),
         feature_slug: z.string().optional(),
         cap: z.number().int().positive().optional(),

@@ -2028,7 +2028,10 @@ test('merge authorized: required check present and green on the head, workflow r
     required_checks_failing: [],
     workflow_runs: [{ id: 11, name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'success', run_attempt: 1 }],
     behind_by: 0,
+    merge_queue: false,
   });
+  assert.equal(r.out.merge_queue, false);
+  assert.equal(r.out.merge_action, 'merge');
   assert.match(r.stderr, new RegExp(`authorized to merge ${HEAD}`));
   assert.match(r.stderr, /this script does not merge/);
   assert.doesNotMatch(r.stderr, /\bmerged\b/i, 'the output never reads as a merge that happened');
@@ -2198,6 +2201,172 @@ test('issue #248: a branch behind its base withholds the merge, naming the base'
   const r = settleWith((f) => putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 2 }));
   assertWithheld(r, /the branch is behind base: 2 commits on main are not in the head/, '#248 behind base');
   assert.equal(r.out.merge_evidence.behind_by, 2);
+  assert.equal(r.out.merge_action, null);
+});
+
+// GitHub #323, decision merge-queue-exception-when-the-base-branch-has-a-github-merg.
+const REQUIRED_CI_RULE = { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }] } };
+const QUEUE_RULE = { type: 'merge_queue', parameters: { merge_method: 'SQUASH', grouping_strategy: 'ALLGREEN' } };
+
+test('#323 merge queue: a base branch with a merge_queue rule does not withhold for behind base; the settle says enqueue, pinned to the reviewed head', () => {
+  const r = settleWith((f) => {
+    putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 3 });
+  }, { rollup: { ...GREEN_ROLLUP, baseRefName: 'main' } });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.out.authorized_base_ref, 'main');
+  assert.deepEqual(r.out.withheld_reasons, []);
+  assert.equal(r.out.merge_queue, true);
+  assert.equal(r.out.merge_action, 'enqueue');
+  assert.equal(r.out.head_sha, HEAD);
+  assert.equal(r.out.merge_evidence.behind_by, 3, 'the behind count is still reported');
+  assert.match(r.stderr, new RegExp(`authorized to enqueue .*${HEAD}`));
+});
+
+test('#323 merge queue: the queue exception waives only behind base; a failing required check still withholds', () => {
+  const r = settleWith((f) => {
+    putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 3 });
+    putEvidence(f, 'check_runs', { total_count: 1, check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'failure' }] });
+  }, { rollup: { ...GREEN_ROLLUP, baseRefName: 'main' } });
+  assertWithheld(r, /required check not successful on the head commit: ci \(failure\)/, '#323 queue + failing check');
+  assert.equal(r.out.merge_action, null);
+  assert.ok(!r.out.withheld_reasons.some((x) => /read for base|retargeted/.test(x)), `the base binding must not be a second reason: ${JSON.stringify(r.out.withheld_reasons)}`);
+});
+
+// GraphQL reports mergeStateStatus BEHIND before the compare evidence is read: the
+// queue exception must hold there too, and only on positive queue evidence.
+function settleGraphqlBehind(setup, over = {}) {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('BEHIND', [thread('PRRT_done', { isResolved: true })], { ...GREEN_ROLLUP, baseRefName: 'main', ...over })]);
+    setup?.(f);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
+    return { ...r, loop: JSON.parse(readFileSync(loopPath(f), 'utf8')) };
+  } finally {
+    f.cleanup();
+  }
+}
+
+test('#323 GraphQL BEHIND + merge queue: the BEHIND blocker is waived, the settle authorizes an enqueue pinned to the head', () => {
+  const r = settleGraphqlBehind((f) => {
+    putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 4 });
+  });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.status, 'clean');
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.out.merge_queue, true);
+  assert.equal(r.out.merge_action, 'enqueue');
+  assert.equal(r.out.head_sha, HEAD);
+  assert.equal(r.out.merge_evidence.behind_by, 4);
+});
+
+test('#323 GraphQL BEHIND + merge queue: only BEHIND is waived; an unresolved thread still blocks', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('BEHIND', [thread('PRRT_open')], { ...GREEN_ROLLUP, baseRefName: 'main' })]);
+    putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'blocked');
+    assert.match(r.out.error, /unresolved review thread PRRT_open/);
+    assert.doesNotMatch(r.out.error, /mergeStateStatus is BEHIND/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#323 GraphQL BEHIND + no merge queue rule: still blocked, naming BEHIND', () => {
+  const r = settleGraphqlBehind((f) => putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 4 }));
+  assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.status, 'blocked');
+  assert.match(r.out.error, /mergeStateStatus is BEHIND/);
+  assert.equal(r.loop.status, 'owed');
+});
+
+test('#323 GraphQL BEHIND + unreadable rules: blocked, never read as a queue (merge_queue null)', () => {
+  const r = settleGraphqlBehind((f) => {
+    failEvidence(f, 'rules', 'gh: Server Error (HTTP 502)');
+    putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 4 });
+  });
+  assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.status, 'blocked');
+  assert.match(r.out.error, /mergeStateStatus is BEHIND/);
+  assert.match(r.out.error, /merge-queue rules could not be read \(rulesets: .*HTTP 502/, 'the rules-read error is preserved');
+  assert.strictEqual(r.out.merge_queue, null, 'unknown is null, not false');
+  assert.equal(r.out.merge_authorized, false);
+  assert.equal(r.loop.status, 'owed');
+});
+
+test('#323 GraphQL BEHIND + no queue: merge_queue is exactly false (known, not unknown)', () => {
+  const r = settleGraphqlBehind(null);
+  assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+  assert.strictEqual(r.out.merge_queue, false);
+  assert.doesNotMatch(r.out.error, /could not be read/);
+});
+
+for (const decision of ['REVIEW_REQUIRED', 'CHANGES_REQUESTED']) {
+  test(`#323 GraphQL BEHIND + merge queue + reviewDecision ${decision}: the review blocker is kept, nothing is enqueued`, () => {
+    const r = settleGraphqlBehind((f) => putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]), { reviewDecision: decision });
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'blocked');
+    assert.match(r.out.error, /mergeStateStatus is BEHIND/);
+    assert.notEqual(r.out.merge_authorized, true);
+    assert.equal(r.loop.status, 'owed');
+  });
+}
+
+test('#323 GraphQL BEHIND + merge queue + reviewDecision APPROVED: enqueue is authorized', () => {
+  const r = settleGraphqlBehind((f) => putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]), { reviewDecision: 'APPROVED' });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_action, 'enqueue');
+});
+
+test('#323 GraphQL BEHIND: the queue rule disappears between the waiver read and the evidence read — withheld, never a direct merge', () => {
+  const r = settleGraphqlBehind((f) => {
+    putEvidence(f, 'rules.0', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    putEvidence(f, 'rules.1', [REQUIRED_CI_RULE]);
+    putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 0 });
+  });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, false);
+  assert.equal(r.out.merge_action, null);
+  assert.ok(r.out.withheld_reasons.some((x) => /merge-queue evidence changed between reads/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+test('#323 GraphQL BEHIND: the base changes between the waiver read and the evidence read — withheld, never a direct merge', () => {
+  const r = settleGraphqlBehind((f) => {
+    putEvidence(f, 'rules.0', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    f.put('pull', 0, [{ number: 7, head: { sha: HEAD }, base: { ref: 'main' } }]);
+    f.put('pull', 1, [{ number: 7, head: { sha: HEAD }, base: { ref: 'release' } }]);
+    putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 0 });
+  });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, false);
+  assert.equal(r.out.merge_action, null);
+  assert.ok(r.out.withheld_reasons.some((x) => /merge-queue evidence changed between reads|evidence is for base release/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+test('#323 no merge queue rule: behind base still withholds and merge_queue is false', () => {
+  const r = settleWith((f) => putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 2 }));
+  assertWithheld(r, /the branch is behind base: 2 commits on main/, '#323 no queue');
+  assert.equal(r.out.merge_queue, false);
+});
+
+test('#323 rulesets unreadable: fails loud (merge_queue null, behind base and the unreadable ruleset both withhold), never read as no queue', () => {
+  const r = settleWith((f) => {
+    failEvidence(f, 'rules', 'gh: Server Error (HTTP 502)');
+    putEvidence(f, 'protection', { contexts: ['ci'], checks: [{ context: 'ci', app_id: null }] });
+    putEvidence(f, 'compare', { status: 'diverged', ahead_by: 1, behind_by: 2 });
+  });
+  assertWithheld(r, /rulesets: .*HTTP 502/, '#323 unreadable rulesets');
+  assert.ok(r.out.withheld_reasons.some((x) => /the branch is behind base/.test(x)));
+  assert.equal(r.out.merge_queue, null);
+  assert.equal(r.out.merge_action, null);
 });
 
 for (const [label, setup, pattern] of [
@@ -2935,4 +3104,86 @@ test('rate limit (GitHub issue #294): a reset beyond --timeout exits rate_limite
   } finally {
     f.cleanup();
   }
+});
+
+for (const [label, over] of [['reviewDecision omitted', { reviewDecision: undefined }], ['an unknown reviewDecision', { reviewDecision: 'SOMETHING_NEW' }]]) {
+  test(`#323 GraphQL BEHIND + merge queue + ${label}: BEHIND keeps blocking`, () => {
+    const r = settleGraphqlBehind((f) => putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]), over);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.match(r.out.error, /mergeStateStatus is BEHIND/);
+    assert.notEqual(r.out.merge_authorized, true);
+  });
+}
+
+test('#323 GraphQL BEHIND + merge queue + explicit null reviewDecision: waived (no review required)', () => {
+  const r = settleGraphqlBehind((f) => putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]), { reviewDecision: null });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_action, 'enqueue');
+});
+
+test('#323 GraphQL BEHIND: the PR is retargeted between the GraphQL read and the first REST read — the waiver is refused, the blocker names both bases', () => {
+  const r = settleGraphqlBehind((f) => {
+    putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    f.put('pull', 0, [{ number: 7, head: { sha: HEAD }, base: { ref: 'release' } }]);
+  });
+  assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+  assert.match(r.out.error, /mergeStateStatus is BEHIND/);
+  assert.match(r.out.error, /evidence is for base release, the merge state was read for base main/);
+  assert.notEqual(r.out.merge_authorized, true);
+});
+
+test('#323 GraphQL BEHIND: a GraphQL answer without baseRefName never waives BEHIND', () => {
+  const r = settleGraphqlBehind((f) => putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]), { baseRefName: undefined });
+  assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+  assert.match(r.out.error, /mergeStateStatus is BEHIND/);
+});
+
+test('#323 GraphQL BEHIND: the final rules read is unreadable after the first showed a queue — withheld, top-level merge_queue is null', () => {
+  const r = settleGraphqlBehind((f) => {
+    putEvidence(f, 'rules.0', [REQUIRED_CI_RULE, QUEUE_RULE]);
+    putEvidence(f, 'rules.1', { message: 'unexpected' });
+    putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 0 });
+  });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, false);
+  assert.strictEqual(r.out.merge_queue, null);
+  assert.strictEqual(r.out.merge_evidence.merge_queue, null);
+  assert.equal(r.out.merge_action, null);
+});
+
+const queueSetup = (f) => putEvidence(f, 'rules', [REQUIRED_CI_RULE, QUEUE_RULE]);
+
+test('#323 CLEAN GraphQL for main, PR retargeted to a queue base before the REST reads: nothing is enqueued', () => {
+  const r = settleWith((f) => {
+    queueSetup(f);
+    f.put('pull', 0, [{ number: 7, head: { sha: HEAD }, base: { ref: 'release' } }]);
+  }, { rollup: { ...GREEN_ROLLUP, baseRefName: 'main' } });
+  assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+  assert.equal(r.out.merge_authorized, false);
+  assert.equal(r.out.merge_action, null);
+  assert.equal(r.out.authorized_base_ref, null);
+  assert.ok(r.out.withheld_reasons.some((x) => /read for base main but the merge-queue evidence is for base release/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+test('#323 CLEAN GraphQL without baseRefName and a queue on the REST base: nothing is enqueued', () => {
+  const r = settleWith(queueSetup);
+  assert.equal(r.out.merge_authorized, false);
+  assert.equal(r.out.merge_action, null);
+  assert.ok(r.out.withheld_reasons.some((x) => /read for base unknown/.test(x)), JSON.stringify(r.out.withheld_reasons));
+});
+
+test('#323 CLEAN stable-base control: GraphQL and REST agree on main with a queue — enqueue', () => {
+  const r = settleWith(queueSetup, { rollup: { ...GREEN_ROLLUP, baseRefName: 'main' } });
+  assert.equal(r.out.merge_authorized, true, JSON.stringify(r.out.withheld_reasons));
+  assert.equal(r.out.merge_action, 'enqueue');
+  assert.equal(r.out.authorized_base_ref, 'main');
+});
+
+test('#323 CLEAN + queue + REST behind + reviewDecision REVIEW_REQUIRED: not enqueued', () => {
+  const r = settleWith((f) => {
+    queueSetup(f);
+    putEvidence(f, 'compare', { status: 'behind', ahead_by: 0, behind_by: 2 });
+  }, { rollup: { ...GREEN_ROLLUP, baseRefName: 'main', reviewDecision: 'REVIEW_REQUIRED' } });
+  assert.equal(r.out.merge_authorized, false, JSON.stringify(r.out));
+  assert.equal(r.out.merge_action, null);
 });

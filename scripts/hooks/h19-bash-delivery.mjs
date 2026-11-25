@@ -82,7 +82,7 @@ function main(input) {
   // breakage shows once on H1's session-start line (decision
   // maintenance-worker-notices-session-start-only-and-no-sliver-launch).
   if (GIT_COMMIT_RE.test(command)) {
-    maybeLaunchMaintenanceWorker({ root: input.cwd, config: loadConfig(input.cwd), store, trigger: 'commit', spawn });
+    maybeLaunchMaintenanceWorker({ root: input.cwd, config: loadConfig(input.cwd), store, trigger: 'commit', spawn, host: input.host });
   }
   if (blindNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blindNotice } }), 0);
   const quietExit = (notice) => {

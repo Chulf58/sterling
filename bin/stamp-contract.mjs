@@ -6775,6 +6775,10 @@ var TARGET_LEADS = [
   // template order so a sibling missing all three gets them back in that order.
   "- **Finish what you start.**",
   "- **Resolve a review thread once its finding is handled.**",
+  // 2026-11-25: code-comments rule (decision code-comments-conduct-rule-write-self-explanatory-code-defau,
+  // GitHub issue #327). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
+  // Resolve bullet (the nearest tracked lead; the template places it after Minimal change).
+  "- **Write self-explanatory code; comment only what the code can't say.**",
   "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**",
   // 2026-10-01: board every user ask at intake (decision
   // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
@@ -6807,6 +6811,7 @@ var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Start every subagent and every long shell command in the background.**", ["- **Text meant to be copied goes between two horizontal rules.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Finish what you start.**", ["- **Start every subagent and every long shell command in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Resolve a review thread once its finding is handled.**", ["- **Finish what you start.**", "- **Start every subagent and every long shell command in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Write self-explanatory code; comment only what the code can't say.**", ["- **Resolve a review thread once its finding is handled.**", "- **Finish what you start.**", "- **Start every subagent and every long shell command in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
@@ -6848,6 +6853,8 @@ var SUBJECT_MARKERS = /* @__PURE__ */ new Map([
     /^(?=.*\b(never|don'?t|do not)\b)(?=.*\b(stop|end|quit)\b)(?=.*\b(work|tasks?)\b)(?=.*\b(half|unfinished|incomplete)\b)/i,
     /^(?=.*\b(work|tasks?)\b)(?=.*\bhalf[- ]done\b)/i
   ]],
+  // The rule has two parts, so a project bullet covers it only when it states both: self-explanatory code or no inline comments, AND comments only for a non-obvious reason.
+  ["- **Write self-explanatory code; comment only what the code can't say.**", [/^(?=.*(\bself-explanatory code\b|\b(no|avoid|without|skip) (inline|code|source[- ]code) comments?\b))(?=.*\b(non-obvious|only (the |a )?(why|reason)|(why|reason) the code)\b)/i]],
   ["- **Resolve a review thread once its finding is handled.**", [/^(?=.*\bresolve\b)(?=.*\b(threads?|conversations?)\b)(?=.*\b(review|pr|pull request|copilot)\b)/i]],
   ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", [/\bde-?ai\b/i]],
   ["- **Solve, don't board.**", [/\bsolve,? don'?t board\b/i, /\bevery user ask is boarded\b/i]],

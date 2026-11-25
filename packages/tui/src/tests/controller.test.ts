@@ -222,6 +222,23 @@ test('controller: the picker shows agy/inherit as the agy session model, and the
   }
 });
 
+// GitHub #321: the agy tiers carry generic labels, never Gemini model names.
+test('controller: the picker labels the agy flash, pro and flash_lite tiers', async () => {
+  const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    const choices = modelChoices(ctl.roster()!, 'implementor');
+    const labelOf = (ref: string) => choices.find((o) => 'ref' in o.choice && o.choice.ref === ref)?.label;
+    assert.equal(labelOf('agy/flash'), 'agy flash tier');
+    assert.equal(labelOf('agy/pro'), 'agy pro tier');
+    assert.equal(labelOf('agy/flash_lite'), 'agy flash-lite tier');
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 // Restored from the pre-cutover suite (model_swap), ported to the agent_model effect that replaced it.
 test('controller: a disabled agent_model effect surfaces its notice and leaves config.models untouched', async () => {
   const f = fixture({ models: { implementor: { model: 'anthropic/claude-sonnet-5-5', effort: 'high' } } });

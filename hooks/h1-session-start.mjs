@@ -17857,23 +17857,30 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
   };
 }
 var RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
-var OVERPASS_RESET_LINE = /^config migration: overpass\./;
+var OVERPASS_CONVERSION_LINE = /^config migration: overpass\./;
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var strip = (l) => l.replace(/^config migration: /, "");
+var MODELS_LINE = /^config migration: models\./;
+var OVERPASS_ENTRY_LINE = /^config migration: models\.[^\s.]+ set to \{"model":"overpass\//;
 function splitMigrated(migrated) {
+  const hasOverpassKeys = migrated.some((l) => OVERPASS_CONVERSION_LINE.test(l));
+  const converted = hasOverpassKeys && migrated.some((l) => OVERPASS_ENTRY_LINE.test(l));
+  const inConversion = (l) => OVERPASS_CONVERSION_LINE.test(l) || converted && OVERPASS_ENTRY_LINE.test(l);
   return {
     retired: migrated.filter((l) => RETIRED_KEY_LINE.test(l)),
-    overpass: migrated.filter((l) => OVERPASS_RESET_LINE.test(l)),
-    other: migrated.filter((l) => !RETIRED_KEY_LINE.test(l) && !OVERPASS_RESET_LINE.test(l))
+    overpass: migrated.filter(inConversion),
+    overpassActive: converted,
+    other: migrated.filter((l) => MODELS_LINE.test(l) && !RETIRED_KEY_LINE.test(l) && !inConversion(l)),
+    shape: migrated.filter((l) => !MODELS_LINE.test(l) && !OVERPASS_CONVERSION_LINE.test(l))
   };
 }
 function migratedWarning(migrated) {
-  const { retired, overpass, other } = splitMigrated(migrated);
-  return (retired.length ? `.sterling/config.json lost ${plural(retired.length, "retired models key")} (ignored before, so no model changed). ` : "") + (overpass.length ? `.sterling/config.json had its Overpass settings reset to the defaults (tier overrides removed, conductor bypass on), which changes model routing. ` : "") + (other.length ? `.sterling/config.json had ${plural(other.length, "other config migration step")} applied (model defaults or the implementor-hard move), which can change model pins. ` : "");
+  const { retired, overpass, overpassActive, other, shape } = splitMigrated(migrated);
+  return (retired.length ? `.sterling/config.json lost ${plural(retired.length, "retired models key")} (ignored before, so no model changed). ` : "") + (overpass.length ? overpassActive ? `.sterling/config.json had its legacy Overpass settings converted to per-agent models entries (${plural(overpass.length, "step")}); the tiers, efforts and conductor bypass in use are kept, so routing is unchanged. ` : `.sterling/config.json had legacy Overpass settings removed (${plural(overpass.length, "step")}); no Overpass models entries were written, so routing is unchanged. ` : "") + (shape.length ? `.sterling/config.json had ${plural(shape.length, "settings-shape step")} applied (workflow and mode only, not model settings). ` : "") + (other.length ? `.sterling/config.json had ${plural(other.length, "other config migration step")} applied (model entries or the implementor-hard move), which can change model pins. ` : "");
 }
 function migratedContext(migrated) {
-  const { retired, overpass, other } = splitMigrated(migrated);
-  return (retired.length ? ` sync-agents removed ${plural(retired.length, "retired models key")} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join("; ")}.` : "") + (overpass.length ? ` sync-agents reset the Overpass settings in .sterling/config.json, which changes model routing (config.overpass.roles overrides are gone and the conductor bypass is on); tell the user, because the old values are no longer in the file: ${overpass.map(strip).join("; ")}.` : "") + (other.length ? ` sync-agents applied ${plural(other.length, "other config migration step")} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join("; ")}.` : "");
+  const { retired, overpass, overpassActive, other, shape } = splitMigrated(migrated);
+  return (retired.length ? ` sync-agents removed ${plural(retired.length, "retired models key")} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join("; ")}.` : "") + (overpass.length ? overpassActive ? ` sync-agents converted the legacy Overpass settings in .sterling/config.json (overpass.enabled, overpass.conductor_bypass, overpass.roles) into per-agent config.models entries: a role on Overpass has model \`overpass/<tier>\` with its effort, and the conductor keeps its direct model when models.conductor is unset. The tiers and bypass the project ran on are carried, so routing did not change and nothing needs restoring; tell the user what moved, because the old keys are no longer in the file: ${overpass.map(strip).join("; ")}.` : ` sync-agents removed legacy Overpass settings from .sterling/config.json without writing any Overpass models entries (Overpass was off or not used in this mode), so routing is unchanged; tell the user, because the values are no longer in the file: ${overpass.map(strip).join("; ")}.` : "") + (shape.length ? ` sync-agents moved the settings shape in .sterling/config.json (workflow and mode, not model settings); tell the user: ${shape.map(strip).join("; ")}.` : "") + (other.length ? ` sync-agents applied ${plural(other.length, "other config migration step")} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join("; ")}.` : "");
 }
 function cloneAgentSyncApplies(root, project) {
   return Boolean(root) && !isInstalledCopy(root) && existsSync17(join28(project, ".sterling", "config.json"));
@@ -18194,6 +18201,7 @@ var WORKER_DISALLOWED_TOOLS = [
   "Bash"
 ];
 var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_move", "knowledge_link"];
+var AGY_NO_WORKER_TEXT = "worker: not launched on agy \u2014 drain the worker lanes yourself";
 var OPENCODE_MODEL_KEY = "opencode_model";
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
@@ -18478,7 +18486,7 @@ function readMaintenanceState(store2, cwd) {
   queueReasons2 = queueReasonEntries2.map(([r, n]) => inLane(n, r));
   return { total: systemTotal, reconcile: reconcile2, drainable: drainable2, parked: parked2, queueReasonEntries: queueReasonEntries2, queueReasons: queueReasons2 };
 }
-function queueDepthLine({ drainable: drainable2, parked: parked2, queueReasons: queueReasons2, queueReasonEntries: queueReasonEntries2, deepThreshold: rawThreshold }) {
+function queueDepthLine({ drainable: drainable2, parked: parked2, queueReasons: queueReasons2, queueReasonEntries: queueReasonEntries2, deepThreshold: rawThreshold, host }) {
   const TOO_DEEP_MULTIPLIER = 10;
   let queueContext2 = "";
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
@@ -18487,7 +18495,7 @@ function queueDepthLine({ drainable: drainable2, parked: parked2, queueReasons: 
   const conductorText = /* @__PURE__ */ new Map();
   const workerEntries = [];
   for (const [r, n, handed = 0] of queueReasonEntries2) {
-    if (!isWorkerLane(r)) {
+    if (!isWorkerLane(r) || host === "agy") {
       conductorEntries.push([r, n]);
       conductorText.set(r, reasonText.get(r) ?? inLane(n, r));
       continue;
@@ -18615,17 +18623,23 @@ function handoffSentence(handed, total, handoffs = []) {
   const more = handoffs.length - shown.length;
   return `${lead}Why: ${shown.join("; ")}${more > 0 ? ` (+${more} more in .sterling/maintenance-worker.jsonl)` : ""}. `;
 }
+function agyOwnershipSentence(reconcile2) {
+  const past = reconcile2.handedOff > 0 ? `${reconcile2.handedOff} of them were handed to you by the worker in an earlier session (history only). ` : "";
+  return `No worker runs on agy, so all ${reconcile2.count} item${reconcile2.count === 1 ? " is" : "s are"} yours. ${past}`;
+}
 function auditSentence(writes) {
   if (!writes || !writes.count) return "";
   return `Worker writes on record: ${writes.count} (spot-check a few in ${writes.path}). `;
 }
-function reconcileBacklog({ reconcile: reconcile2, cwd, config: config2, nowMs = Date.now(), env = process.env }) {
+function reconcileBacklog({ reconcile: reconcile2, cwd, config: config2, nowMs = Date.now(), env = process.env, host }) {
   let reconcileBanner2 = "";
   let reconcileContext2 = "";
   if (reconcile2.count > 0) {
     let worker;
     let lastRunNote = "";
-    try {
+    if (host === "agy") {
+      worker = AGY_NO_WORKER_TEXT;
+    } else try {
       const ws = workerStatus(cwd, nowMs);
       worker = workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowMs, env });
       const broken = workerBreakage(ws.lastRun);
@@ -18639,7 +18653,7 @@ function reconcileBacklog({ reconcile: reconcile2, cwd, config: config2, nowMs =
     reconcileBanner2 = ` \xB7 ${lanesText2}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext2 = `
 
-RECONCILE BACKLOG: ${lanesText2}, the oldest of all items open since ${reconcile2.oldest ?? "unknown"} (${age}). ` + (reconcile2.handedOff === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. ` : handoffSentence(reconcile2.handedOff ?? 0, reconcile2.count, reconcile2.handoffs)) + auditSentence(reconcile2.writes) + `${worker}${lastRunNote}.`;
+RECONCILE BACKLOG: ${lanesText2}, the oldest of all items open since ${reconcile2.oldest ?? "unknown"} (${age}). ` + (host === "agy" ? agyOwnershipSentence(reconcile2) : reconcile2.handedOff === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. ` : handoffSentence(reconcile2.handedOff ?? 0, reconcile2.count, reconcile2.handoffs)) + auditSentence(reconcile2.writes) + `${worker}${lastRunNote}.`;
   }
   return { banner: reconcileBanner2, line: reconcileContext2.replace(/^\n\n/, "") };
 }
@@ -19258,11 +19272,11 @@ var boardReadinessText = boardReadinessError ? `BOARD READINESS UNAVAILABLE (${b
 var boardReadinessContext = boardReadinessText ? `
 
 ${boardReadinessText}` : "";
-var queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold });
+var queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold, host: input.host });
 var queueContext = queueLine ? `
 
 ${queueLine}` : "";
-var backlog = reconcileBacklog({ reconcile, cwd: storeRoot });
+var backlog = reconcileBacklog({ reconcile, cwd: storeRoot, host: input.host });
 var reconcileBanner = backlog.banner;
 var reconcileContext = backlog.line ? `
 

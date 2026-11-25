@@ -35728,7 +35728,7 @@ var SterlingTools = class _SterlingTools {
         const sourceAge = ageDays(r.source_date);
         const stale = r.status === "flagged_stale" || sourceAge > threshold;
         let mintFailed;
-        if (sourceAge > threshold) {
+        if (sourceAge > threshold && this.store.projectStoreHolds(record2.id)) {
           const f = record2;
           mintFailed = this.mintAtRead({
             reason: "stale_research",
@@ -38469,6 +38469,9 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     const ts = this.now();
     const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, version: _v, ...overrides } = body;
     this.refuseUnknownFields(old.type, overrides);
+    if (Object.keys(overrides).length === 0 && !resolves?.length && !relationRemoval) {
+      throw new Error(`${toolName}: no fields to update on '${old.id}' \u2014 pass at least one field to change; an empty update would bump the version (${old.version}) without changing the record. Nothing was written.`);
+    }
     if (overrides.links !== void 0) {
       overrides.links = this.resolveLinksTargets(overrides.links, toolName);
       SterlingStore.refuseRawSupersedesLinks(toolName, overrides.links, new Set(old.links.filter((l) => l.rel === "supersedes").map((l) => l.target_id)));
@@ -42465,6 +42468,10 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
 
 // packages/mcp-server/dist/server.js
 var passthrough = external_exports.object({}).passthrough();
+var FILE_KEYS_WRITE_DESCRIPTION = "repo-relative paths, forward slashes. An existing directory path is refused: pass a non-directory leaf (a file) or a path that does not exist yet, because a directory claim delivers nothing";
+var FILE_KEYS_FILTER_DESCRIPTION = "repo-relative paths, forward slashes; exact-path match against the file_keys records claim (a directory path matches only records that claim that exact path, never the files under it)";
+var fileKeysWriteField = () => external_exports.array(external_exports.string()).describe(FILE_KEYS_WRITE_DESCRIPTION).optional();
+var fileKeysFilterField = () => external_exports.array(external_exports.string()).describe(FILE_KEYS_FILTER_DESCRIPTION).optional();
 function cloneZod(node) {
   if (Array.isArray(node))
     return node.map(cloneZod);
@@ -42491,7 +42498,9 @@ var buildCreateFieldVariants = (discriminatorOptional) => Object.keys(RECORD_TYP
   for (const [key, node] of Object.entries(rawShape)) {
     if (SERVER_OWNED_FIELDS.includes(key))
       continue;
-    const field = discriminatorOptional ? cloneZod(node) : node;
+    let field = discriminatorOptional ? cloneZod(node) : node;
+    if (discriminatorOptional && key === "file_keys")
+      field = field.describe(FILE_KEYS_WRITE_DESCRIPTION);
     fieldsShape[key] = defaulted.has(key) ? field.optional() : field;
   }
   fieldsShape.type = discriminatorOptional ? external_exports.literal(type).optional() : external_exports.literal(type);
@@ -42783,8 +42792,8 @@ function createSterlingServer(target, opts = {}) {
   const updateArgs = {
     id: external_exports.string().describe(ID_LADDER),
     // separate instances, never one shared `passthrough`: a reused zod instance is served as a $ref OpenCode shows as unknown
-    body: external_exports.object({}).passthrough().optional().describe("the partial patch; exactly one of body or fields"),
-    fields: external_exports.object({}).passthrough().optional().describe("alias of body, the name knowledge_create uses; exactly one of body or fields"),
+    body: external_exports.object({}).passthrough().optional().describe(`the partial patch; exactly one of body or fields. file_keys in the patch: ${FILE_KEYS_WRITE_DESCRIPTION}`),
+    fields: external_exports.object({}).passthrough().optional().describe(`alias of body, the name knowledge_create uses; exactly one of body or fields. file_keys in the patch: ${FILE_KEYS_WRITE_DESCRIPTION}`),
     resolves: external_exports.array(external_exports.string()).optional().describe(RESOLVES_RECORD_CHAIN + RESTAMP_HINT),
     expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written")
   };
@@ -42940,7 +42949,7 @@ function createSterlingServer(target, opts = {}) {
     return ops;
   };
   server.registerTool("knowledge_create", {
-    description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` (\'project\' by default, or \'domain:<name>\') is given the same way, as the top-level `scope` or as fields.scope. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
+    description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` (\'project\' by default, or \'domain:<name>\') is given the same way, as the top-level `scope` or as fields.scope. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A file_keys (or files[] path) entry that is an existing directory is refused: pass non-directory leaf paths or paths that do not exist yet. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
     inputSchema: knowledgeCreateInput
   }, ({ fields, projection }) => {
     const { type: recordType2, ...restFields } = fields;
@@ -42951,7 +42960,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({
       types: external_exports.array(external_exports.string()).optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
-      file_keys: external_exports.array(external_exports.string()).optional(),
+      file_keys: fileKeysFilterField(),
       rank_terms: external_exports.array(external_exports.string()).optional(),
       cap: external_exports.number().int().positive().optional(),
       projection: external_exports.enum(["full", "digest", "count"]).optional(),
@@ -43085,7 +43094,7 @@ function createSterlingServer(target, opts = {}) {
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
       objective: external_exports.string().optional(),
-      file_keys: external_exports.array(external_exports.string()).optional(),
+      file_keys: fileKeysWriteField(),
       priority: external_exports.enum(["low", "normal", "high"]).optional(),
       feature_link: external_exports.string().describe("full record uuid; a slug or an 8-char prefix is refused").optional(),
       system_reason: external_exports.string().optional(),
@@ -43104,7 +43113,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
-      file_keys: external_exports.array(external_exports.string()).optional(),
+      file_keys: fileKeysFilterField(),
       contains: external_exports.string().optional(),
       cap: external_exports.number().int().positive().optional(),
       offset: external_exports.number().int().nonnegative().optional(),
@@ -43135,7 +43144,7 @@ function createSterlingServer(target, opts = {}) {
       id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),
       priority: external_exports.enum(["low", "normal", "high"]).optional(),
-      file_keys: external_exports.array(external_exports.string()).optional(),
+      file_keys: fileKeysWriteField(),
       objective: external_exports.string().describe(`(re)groups the task; "standalone" or '' removes the objective`).optional(),
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
@@ -43244,7 +43253,7 @@ function createSterlingServer(target, opts = {}) {
     description: 'List open maintenance-queue items. Filters (AND): system_reason, file_keys, contains (case-insensitive literal substring), feature_slug (items owned by one article, including earlier superseded versions; unresolvable = empty). Same envelope, paging and projections as board_query: capped=true means the queue is deeper than shown \u2014 page (offset, or cursor = next_cursor, which never skips an item behind it; mutually exclusive; bound to its filters) until capped is false. projection: "text" (default; text clipped to 240 chars, artifact_evidence_count), "headline", "digest", or "full" (per-item artifact_evidence detail and annotation prose). artifact_evidence is a lookup, never a verdict \u2014 verify against HEAD before draining on it.',
     inputSchema: strict({
       system_reason: external_exports.string().optional(),
-      file_keys: external_exports.array(external_exports.string()).optional(),
+      file_keys: fileKeysFilterField(),
       contains: external_exports.string().optional(),
       feature_slug: external_exports.string().optional(),
       cap: external_exports.number().int().positive().optional(),
