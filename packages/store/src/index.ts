@@ -5060,6 +5060,12 @@ export class SterlingStore {
           record_id,
           (current) => {
             const patched = deepReplaceString(current as unknown, from, to) as Record<string, unknown>;
+            // Observations are historical checkout evidence: each one's path, checkout,
+            // commit and state are one fact about what a checkout held, not an ownership
+            // key. Rewriting them would corrupt the evidence (even a state.kind that
+            // equals a path), so a rename leaves them exactly as observed.
+            const observations = (current as unknown as { observations?: unknown }).observations;
+            if (observations !== undefined) patched.observations = observations;
             // A reconcile_needed system todo's file_keys/text are DERIVED
             // state, not raw ownership (board 7e779e1f review round, MEDIUM):
             // deepReplaceString's plain element-wise map can COLLIDE two
