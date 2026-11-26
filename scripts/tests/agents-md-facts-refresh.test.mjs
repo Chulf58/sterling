@@ -182,3 +182,21 @@ test('domains.mjs --apply refreshes the AGENTS.md lines for the added tag', () =
   assert.equal(lineOf(text, STACK_TAGS_LABEL), `${STACK_TAGS_LABEL}node, python, sterling`);
   assert.doesNotMatch(r.out, /by hand/);
 });
+
+// #329 fix round, finding 10: domains.mjs writes AGENTS.md through the same checks as every other
+// writer, so a refresh that would take the file past agy's 24,000-byte cap writes nothing and the
+// run fails loudly, naming what it already applied.
+test("domains.mjs --apply refuses (exit 2) an AGENTS.md refresh that would pass agy's 24,000-byte cap, and AGENTS.md is byte-identical", () => {
+  const { dir, home } = initedProject();
+  const agentsPath = join(dir, 'AGENTS.md');
+  const base = readFileSync(agentsPath, 'utf8');
+  const pad = `<!-- ${'x'.repeat(24_000 - Buffer.byteLength(base) - 10)} -->\n`;
+  const padded = base.replace('\n', `\n${pad}`);
+  assert.ok(Buffer.byteLength(padded) <= 24_000 && Buffer.byteLength(padded) > 23_990, 'fixture: the file sits just under the cap');
+  writeFileSync(agentsPath, padded);
+  const r = run('domains.mjs', dir, home, ['--apply', '--add', 'python']);
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /domains REFUSED: AGENTS\.md was not updated \(AGENTS\.md would be [\d,]+ bytes .*over agy's 24,000-byte cap/);
+  assert.match(r.out, /Already applied in this run: .*stack_tags in \.sterling\/config\.json/);
+  assert.equal(readFileSync(agentsPath, 'utf8'), padded, 'nothing written');
+});

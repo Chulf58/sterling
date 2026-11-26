@@ -23,6 +23,8 @@ import { spawnSync } from 'node:child_process';
 import { renderAgyText, renderClaudeText } from './agent-fences.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { ContainmentError, containedPath } from './contained-fs.mjs';
+import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
+import { storeRootFor } from './worktree-root.mjs';
 
 export const LAYER_TEMPLATE_REL = 'templates/sterling-layer-agents.md';
 export const CLAUDE_BLOCK_REL = 'templates/claude-session-block.md';
@@ -294,7 +296,9 @@ export function loadHostFileHistory(pluginRoot) {
  */
 export function knownHostValues({ projectDir, pluginRoot, projectNames = [], roots = [], home = homedir() }) {
   const names = [...projectNames];
-  const configPath = join(projectDir, '.sterling', 'config.json');
+  // The project's name is read from the shared config at its store root, as the writers that
+  // filled the file read it: a linked worktree has no config of its own.
+  const configPath = join(storeRootFor(projectDir), '.sterling', 'config.json');
   if (existsSync(configPath)) {
     // A config that cannot be parsed only leaves the directory name as a candidate: fewer
     // candidates can keep a file Sterling wrote, never delete one it did not.
@@ -343,6 +347,10 @@ const HOSTS = [
  */
 export function retireHostFiles({ projectDir, pluginRoot, known, layer, readFile = readFileSync, unlink = unlinkSync }) {
   const rows = [];
+  // A Sterling source tree's instruction files are hand-maintained (decision
+  // a-sterling-source-checkout-s-agents-md-is-hand-maintained-up): nothing in it is ever removed,
+  // whoever calls.
+  const sourceTree = looksLikeSterlingSourceTree(projectDir);
   for (const { file, host, consequence } of HOSTS) {
     const path = join(projectDir, file);
     const keep = (why, remedy = `Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete ${file}`) => {
@@ -354,6 +362,10 @@ export function retireHostFiles({ projectDir, pluginRoot, known, layer, readFile
     } catch (err) {
       if (err?.code === 'ENOENT') continue;
       keep(`could not be checked (${err?.code ?? err?.message ?? err})`);
+      continue;
+    }
+    if (sourceTree) {
+      rows.push({ item: file, status: 'kept', detail: 'is in a Sterling source tree, whose instruction files are hand-maintained', warning: `${file} is in a Sterling source tree, whose instruction files are hand-maintained, so it was kept.` });
       continue;
     }
     if (!layer.ok) {

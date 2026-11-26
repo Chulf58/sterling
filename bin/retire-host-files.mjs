@@ -7,14 +7,14 @@ var __export = (target2, all) => {
 };
 
 // scripts/retire-host-files.mjs
-import { statSync as statSync2 } from "node:fs";
-import { dirname as dirname2, resolve as resolve6 } from "node:path";
+import { statSync as statSync3 } from "node:fs";
+import { dirname as dirname3, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-layer.mjs
-import { existsSync, lstatSync as lstatSync3, readFileSync as readFileSync2, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync3, lstatSync as lstatSync3, readFileSync as readFileSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join as join3, resolve as resolve3 } from "node:path";
+import { basename as basename2, join as join5, resolve as resolve4 } from "node:path";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -344,7 +344,111 @@ function containedPath(root, rel, leaf) {
     throw e;
   }
 }
+function existsContained(root, rel, leaf) {
+  return lstatOrNull(containedPath(root, rel, leaf)) !== null;
+}
+function readContained(root, rel) {
+  return readFileSync(containedPath(root, rel, "file"), "utf8");
+}
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/sterling-source-tree.mjs
+var MANIFEST = ".claude-plugin/plugin.json";
+var SENTINEL = "scripts/architecture-projection.mjs";
+function isSterlingSourceTree(dir) {
+  if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
+  return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
+}
+function looksLikeSterlingSourceTree(dir) {
+  try {
+    return isSterlingSourceTree(dir);
+  } catch (err) {
+    if (err instanceof ContainmentError || err instanceof SyntaxError || err instanceof TypeError || typeof err?.code === "string") return false;
+    throw err;
+  }
+}
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync as realpathSync2, statSync } from "node:fs";
+import { basename, dirname, join as join4, resolve as resolve3 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
+var CONFIG_REL = join3(".sterling", "config.json");
+var STORE_DB_REL = join3(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync(join3(dir, CONFIG_REL)) || existsSync(join3(dir, STORE_DB_REL)));
+}
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync2(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve3(cwd, gitDir));
+  const commonReal = real(resolve3(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve3(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target2)) {
+  if (!linkedWorktree) return target2;
+  const configRel = join4(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync2(join4(linkedWorktree.mainRoot, configRel)) && existsSync2(join4(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
+var linkedProbes = /* @__PURE__ */ new Map();
+function linkedWorktreeOnce(dir) {
+  if (!linkedProbes.has(dir)) linkedProbes.set(dir, resolveLinkedWorktree(dir));
+  return linkedProbes.get(dir);
+}
+function gitFileAt(dir) {
+  try {
+    return statSync(join4(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+function storeRootFor(dir, isRoot = isSterlingRoot) {
+  if (!dir) return dir;
+  const at = resolve3(String(dir));
+  if (!gitFileAt(at)) return dir;
+  const linked = linkedWorktreeOnce(at);
+  if (!linked || realOf(at) !== linked.worktree) return dir;
+  const storeRoot = resolveStoreRoot(linked.worktree, linked);
+  return isRoot(storeRoot) ? storeRoot : dir;
+}
+function realOf(p) {
+  try {
+    return realpathSync2(p);
+  } catch {
+    return p;
+  }
+}
 
 // scripts/lib/sterling-layer.mjs
 var LAYER_TEMPLATE_REL = "templates/sterling-layer-agents.md";
@@ -364,7 +468,7 @@ var bytes = (s) => Buffer.byteLength(s, "utf8");
 var LayerMarkerError = class extends Error {
 };
 function readLayerSection(pluginRoot2) {
-  const text = normalize(readFileSync2(join3(pluginRoot2, LAYER_TEMPLATE_REL), "utf8")).trimEnd();
+  const text = normalize(readFileSync3(join5(pluginRoot2, LAYER_TEMPLATE_REL), "utf8")).trimEnd();
   const lines2 = text.split("\n");
   if (!LAYER_BEGIN.test(lines2[0]) || lines2[lines2.length - 1] !== LAYER_END || lines2.slice(1, -1).some((l) => MARKER_LIKE.test(l))) {
     throw new LayerMarkerError(`${LAYER_TEMPLATE_REL} must start with the sterling:begin marker line, end with the sterling:end marker line and hold no other marker line`);
@@ -415,7 +519,7 @@ function findMarkers(lines2) {
   if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
   return { error: `AGENTS.md has ${begins.length} sterling:begin and ${ends.length} sterling:end marker lines outside code (one of each, begin first, is required)` };
 }
-function readAgentsMd(projectDir, { readFile = readFileSync2 } = {}) {
+function readAgentsMd(projectDir, { readFile = readFileSync3 } = {}) {
   let path;
   try {
     path = containedPath(projectDir, "AGENTS.md", "file");
@@ -468,22 +572,22 @@ function fill(tokenText, { name, root }) {
 }
 function knownHostValues({ projectDir, pluginRoot: pluginRoot2, projectNames = [], roots = [], home = homedir() }) {
   const names = [...projectNames];
-  const configPath = join3(projectDir, ".sterling", "config.json");
-  if (existsSync(configPath)) {
+  const configPath = join5(storeRootFor(projectDir), ".sterling", "config.json");
+  if (existsSync3(configPath)) {
     try {
-      const recorded = JSON.parse(readFileSync2(configPath, "utf8"))?.project_name;
+      const recorded = JSON.parse(readFileSync3(configPath, "utf8"))?.project_name;
       if (typeof recorded === "string") names.push(recorded);
     } catch {
     }
   }
-  names.push(basename(resolve3(projectDir)));
-  const allRoots = [resolve3(pluginRoot2), join3(home, ".gemini", "sterling-root"), ...roots].map(fwd);
+  names.push(basename2(resolve4(projectDir)));
+  const allRoots = [resolve4(pluginRoot2), join5(home, ".gemini", "sterling-root"), ...roots].map(fwd);
   return { names: [...new Set(names.filter(Boolean))], roots: [...new Set(allRoots.filter(Boolean))] };
 }
 function classifyHostFile(fileText, host, { pluginRoot: pluginRoot2, known }) {
   if (host === "claude" && ["@AGENTS.md", ...authorizedEols("@AGENTS.md\n")].includes(fileText)) return { pure: true };
   const combos = known.names.flatMap((name) => host === "agy" ? known.roots.map((root) => ({ name, root })) : [{ name, root: null }]);
-  const current = tokenRender(readFileSync2(join3(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host);
+  const current = tokenRender(readFileSync3(join5(pluginRoot2, HOST_TEMPLATE_REL), "utf8"), host);
   return { pure: combos.some((v) => authorizedEols(fill(current, v)).includes(fileText)) };
 }
 var authorizedEols = (lf) => [lf, lf.replace(/\n/g, "\r\n")];
@@ -491,10 +595,11 @@ var HOSTS = [
   { file: "CLAUDE.md", host: "claude", consequence: "Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists" },
   { file: "GEMINI.md", host: "agy", consequence: "agy loads it next to AGENTS.md, so its text is read twice and counts against agy's 24,000-byte limit" }
 ];
-function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, readFile = readFileSync2, unlink = unlinkSync2 }) {
+function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, readFile = readFileSync3, unlink = unlinkSync2 }) {
   const rows = [];
+  const sourceTree = looksLikeSterlingSourceTree(projectDir);
   for (const { file, host, consequence } of HOSTS) {
-    const path = join3(projectDir, file);
+    const path = join5(projectDir, file);
     const keep = (why, remedy = `Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete ${file}`) => {
       rows.push({ item: file, status: "kept", detail: why, warning: `${file} ${why}, so it was kept. ${consequence}. ${remedy}.` });
     };
@@ -504,6 +609,10 @@ function retireHostFiles({ projectDir, pluginRoot: pluginRoot2, known, layer, re
     } catch (err) {
       if (err?.code === "ENOENT") continue;
       keep(`could not be checked (${err?.code ?? err?.message ?? err})`);
+      continue;
+    }
+    if (sourceTree) {
+      rows.push({ item: file, status: "kept", detail: "is in a Sterling source tree, whose instruction files are hand-maintained", warning: `${file} is in a Sterling source tree, whose instruction files are hand-maintained, so it was kept.` });
       continue;
     }
     if (!layer.ok) {
@@ -573,9 +682,9 @@ function retireAfterWriters({ projectDir, pluginRoot: pluginRoot2, roots = [], u
 }
 
 // scripts/lib/agy-setup.mjs
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, rmdirSync, statSync, unlinkSync as unlinkSync3, writeFileSync } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, rmdirSync, statSync as statSync2, unlinkSync as unlinkSync3, writeFileSync } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname, isAbsolute, join as join7, resolve as resolve5 } from "node:path";
+import { dirname as dirname2, isAbsolute, join as join8, resolve as resolve6 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -6246,14 +6355,14 @@ var renameFenceSchema = external_exports.object({
 }).strict();
 
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync3 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join7 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, realpathSync as realpathSync2 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join4, resolve as resolve4, sep as sep2 } from "node:path";
+import { join as join6, resolve as resolve5, sep as sep2 } from "node:path";
 import { createHash } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -6444,7 +6553,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync2, readFileSync3, readdirSync2, join4, homedir2);
+)(existsSync4, readFileSync4, readdirSync2, join6, homedir2);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -6519,14 +6628,14 @@ var loaded = new Function(
   "homedir",
   `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
 return { openCodeCacheKey, openCodeLoadedSterling };`
-)(createHash, existsSync2, readFileSync3, readdirSync2, join4, homedir2);
+)(createHash, existsSync4, readFileSync4, readdirSync2, join6, homedir2);
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function canonical(p) {
   try {
-    return realpathSync2(p);
+    return realpathSync3(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve4(p);
+    if (err?.code === "ENOENT") return resolve5(p);
     throw err;
   }
 }
@@ -6543,14 +6652,9 @@ function isInstalledCopy(root, { env = process.env, home = homedir3() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync3(join5(root, ".git"))) return true;
+  if (!existsSync5(join7(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
-
-// scripts/hooks/lib/store-backend.mjs
-import { join as join6 } from "node:path";
-var CONFIG_REL = join6(".sterling", "config.json");
-var STORE_DB_REL = join6(".sterling", "sterling.db");
 
 // scripts/lib/agy-setup.mjs
 var READ = ["read_file", "grep_search", "find_by_name", "list_dir"];
@@ -6572,14 +6676,14 @@ var AGY_TOOLS = {
 var AGY_ROSTER = Object.keys(AGY_TOOLS);
 var fwd2 = (p) => p.replace(/\\/g, "/");
 function agyPluginCopy({ env = process.env, home = homedir4() } = {}) {
-  return join7(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
+  return join8(installRoots(env, home).find((r) => r.host === "agy").dir, "sterling");
 }
 function agyMcpRoot({ pluginRoot: pluginRoot2, env = process.env, home = homedir4(), installed }) {
   const isInstalled = installed ?? isInstalledCopy(pluginRoot2, { env, home });
-  if (!isInstalled) return { root: resolve5(pluginRoot2), why: "the Sterling clone running this" };
+  if (!isInstalled) return { root: resolve6(pluginRoot2), why: "the Sterling clone running this" };
   const agyCopy = agyPluginCopy({ env, home });
-  if (existsSync4(join7(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
-  return { root: resolve5(pluginRoot2), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd2(agyCopy)})` };
+  if (existsSync6(join8(agyCopy, "mcp", "sterling-mcp.mjs"))) return { root: agyCopy, why: "agy's installed Sterling" };
+  return { root: resolve6(pluginRoot2), why: `the installed Sterling running this (agy has no Sterling copy at ${fwd2(agyCopy)})` };
 }
 
 // scripts/retire-host-files.mjs
@@ -6592,15 +6696,15 @@ ${USAGE}`);
 var argv = process.argv.slice(2);
 if (argv.length !== 2 || argv[0] !== "--target") usageError("exactly one --target <project dir> is required");
 if (!argv[1] || argv[1].startsWith("-")) usageError(`'${argv[1]}' is an option, not a project directory`);
-var target = resolve6(argv[1]);
+var target = resolve7(argv[1]);
 var st;
 try {
-  st = statSync2(target);
+  st = statSync3(target);
 } catch (err) {
   usageError(`${target} does not exist (${err?.code ?? err?.message ?? err})`);
 }
 if (!st.isDirectory()) usageError(`${target} is not a directory`);
-var pluginRoot = resolve6(dirname2(fileURLToPath(new URL("../scripts/retire-host-files.mjs", import.meta.url).href)), "..");
+var pluginRoot = resolve7(dirname3(fileURLToPath(new URL("../scripts/retire-host-files.mjs", import.meta.url).href)), "..");
 var { lines, failed } = retireAfterWriters({ projectDir: target, pluginRoot, roots: [agyMcpRoot({ pluginRoot }).root] });
 for (const line of lines) console.log(line);
 if (failed) process.exit(1);

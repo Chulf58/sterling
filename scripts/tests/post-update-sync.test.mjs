@@ -1620,3 +1620,52 @@ test('runPostUpdateSteps: a Sterling source tree runs no retire step and names a
   assert.equal(r.layer.length, 1);
   assert.match(r.layer[0], /^⚠ Sterling layer: CLAUDE\.md kept — this project is a Sterling source tree, so the post-update sync removes no host file\..*bin\/retire-host-files\.mjs" --target ".*" or \/sterling:update\.$/);
 });
+
+// #329 fix round, finding 2: during an OpenCode auto-update the runtime already loaded (from
+// before #329) runs the NEW scripts' sync-agents and stamp-contract, never retire-host-files, and
+// writes the new version to the marker. After /reload the new runtime sees an equal marker. It
+// must still run the steps, retirement included, while a CLAUDE.md or GEMINI.md is left and no
+// layer receipt says this version's steps ran; then it writes the receipt and stays quiet.
+test('postUpdateSync: an equal marker written by a pre-#329 runtime, with CLAUDE.md left and no layer receipt, runs the steps with retirement once; then it is quiet', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: VERSION, store: false });
+  writeFileSync(join(project, 'CLAUDE.md'), '# held over from before #329\n');
+  const { calls, runStep } = stepsWith({});
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r?.outcome, 'synced', JSON.stringify(r));
+  assert.deepEqual(calls, ['sync-agents.mjs', 'stamp-contract.mjs', 'retire-host-files.mjs'], 'retirement runs after the writers');
+  assert.equal(markerOf(project), `${VERSION}\n`);
+  assert.equal(readFileSync(join(project, '.sterling', 'synced-layer-version'), 'utf8'), `${VERSION}\n`, 'the layer receipt is written');
+  const again = stepsWith({});
+  assert.equal(await postUpdateSync({ root: plugin, project, host: 'opencode', runStep: again.runStep }), null, 'with the receipt, an equal marker is a finished sync');
+  assert.deepEqual(again.calls, []);
+});
+
+test('postUpdateSync: an equal marker without a layer receipt but with no CLAUDE.md or GEMINI.md left has nothing to retire and runs nothing', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: VERSION, store: false });
+  const { calls, runStep } = stepsWith({});
+  assert.equal(await postUpdateSync({ root: plugin, project, host: 'opencode', runStep }), null);
+  assert.deepEqual(calls, []);
+});
+
+// #329 fix round, finding 5: whether retirement may run is settled before any writer outcome. A
+// Sterling source tree never reaches retire-host-files, even when sync-agents refused or crashed.
+for (const [label, sync] of [
+  ['a sync-agents refusal', { status: 2, error: null, out: 'refused_x: y', tail: 'refused_x: y' }],
+  ['a sync-agents crash', { status: 1, error: null, out: 'boom', tail: 'boom' }],
+  ['a sync-agents spawn error', { status: null, error: 'ENOENT', out: '', tail: '' }],
+]) {
+  test(`runPostUpdateSteps: in a Sterling source tree, ${label} never reaches retire-host-files`, async () => {
+    const plugin = makePluginRoot({ clone: true });
+    const project = tmp('sterling-pus-source-tree-');
+    mkdirSync(join(project, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(project, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    writeFileSync(join(project, 'scripts', 'architecture-projection.mjs'), '');
+    const { calls, runStep } = stepsWith({ 'sync-agents.mjs': sync });
+    const r = await runPostUpdateSteps(plugin, project, runStep);
+    assert.equal(r.ok, false);
+    assert.ok(!calls.includes('retire-host-files.mjs'), calls.join(', '));
+  });
+}

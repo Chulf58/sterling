@@ -1925,3 +1925,39 @@ test('createSectionTimer: times sync and async sections, lists the slowest three
   assert.throws(() => t.time('boom', () => { clock += 80; throw new Error('x'); }), /x/);
   assert.equal(t.slowest(), ' (slowest: b 90 ms, boom 80 ms, c 70 ms)');
 });
+
+// #329 fix round, finding 4: a Sterling source checkout keeps its AGENTS.md by hand with no generated
+// section (decision a-sterling-source-checkout-s-agents-md-is-hand-maintained-up), so OpenCode would
+// read none of the shared rules from it. The injection carries them, read from the template, and
+// writes nothing; a consumer project, whose AGENTS.md carries the section, is unchanged.
+test('the injected layer carries the shared Sterling rules for a Sterling source tree whose AGENTS.md has no generated section, and only there', async () => {
+  const { readLayerSection } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'sterling-layer.mjs')).href);
+  const shared = readLayerSection(repo);
+  const tree = mkdtempSync(join(tmpdir(), 'sterling-oc-source-tree-'));
+  const consumer = mkdtempSync(join(tmpdir(), 'sterling-oc-consumer-'));
+  try {
+    // This repo's real instruction files: AGENTS.md hand-maintained, no sterling:begin section.
+    const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
+    assert.ok(!agents.includes('sterling:begin'), "fixture: this repo's AGENTS.md has no generated section");
+    writeFileSync(join(tree, 'AGENTS.md'), agents);
+    writeFileSync(join(tree, 'CLAUDE.md'), readFileSync(join(repo, 'CLAUDE.md'), 'utf8'));
+    mkdirSync(join(tree, '.claude-plugin'));
+    writeFileSync(join(tree, '.claude-plugin', 'plugin.json'), readFileSync(join(repo, '.claude-plugin', 'plugin.json'), 'utf8'));
+    mkdirSync(join(tree, 'scripts'));
+    writeFileSync(join(tree, 'scripts', 'architecture-projection.mjs'), '');
+    const layer = server.renderSterlingLayer(tree, repo);
+    assert.ok(layer.includes(shared), 'the shared section is injected whole');
+    for (const rule of ['**Every change updates the store before the work is done.**', '**Author records to be found.**', '**A settled ruling is not a fresh choice.**']) assert.ok(layer.includes(rule), rule);
+    assert.ok(!layer.includes('The shared Sterling rules are in the "Sterling layer (generated)" section of AGENTS.md'), 'it does not point at a section the file lacks');
+    assert.match(layer, /the shared Sterling layer is injected above, since this project's AGENTS\.md does not carry it/);
+    assert.equal(readFileSync(join(tree, 'AGENTS.md'), 'utf8'), agents, 'AGENTS.md is not written');
+
+    writeFileSync(join(consumer, 'AGENTS.md'), `# P\n\n${shared}\n`);
+    const plain = server.renderSterlingLayer(consumer, repo);
+    assert.ok(!plain.includes(shared), 'a consumer reads the section from its own AGENTS.md');
+    assert.ok(plain.includes('The shared Sterling rules are in the "Sterling layer (generated)" section of AGENTS.md'));
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+    rmSync(consumer, { recursive: true, force: true });
+  }
+});

@@ -565,3 +565,42 @@ test('retire-host-files refuses an option as the target, a missing target and a 
   assert.match(r.stdout, /^Sterling layer: CLAUDE\.md removed/m);
   assert.equal(existsSync(join(dir, 'CLAUDE.md')), false);
 });
+
+// #329 fix round, finding 5: retirement itself refuses a Sterling source tree, whoever calls it, so
+// a hand-maintained CLAUDE.md there is never removed even when it is byte-for-byte Sterling's render.
+test('retireAfterWriters in a Sterling source tree keeps even a pure CLAUDE.md beside a verified layer', () => {
+  const dir = project({ agents: validAgents() });
+  mkdirSync(join(dir, '.claude-plugin'));
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+  mkdirSync(join(dir, 'scripts'));
+  writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '');
+  writeFileSync(join(dir, 'CLAUDE.md'), claudeRender());
+  const { lines, failed } = retireAfterWriters({ projectDir: dir, pluginRoot: repo });
+  assert.equal(failed, 0);
+  assert.equal(read(dir, 'CLAUDE.md'), claudeRender(), 'kept byte for byte');
+  assert.deepEqual(lines, ['⚠ Sterling layer: CLAUDE.md is in a Sterling source tree, whose instruction files are hand-maintained, so it was kept.']);
+});
+
+// #329 fix round, finding 6: in a linked worktree the project's name comes from the shared config at
+// the store root, as the writer that filled CLAUDE.md read it; the worktree copy is the one checked
+// and removed, and the main checkout is not touched.
+test('retireAfterWriters in a linked worktree removes a pure CLAUDE.md filled with the name from the shared config', () => {
+  const main = tmp();
+  mkdirSync(join(main, '.sterling'));
+  writeFileSync(join(main, '.sterling', 'config.json'), JSON.stringify({ project_name: 'shared-name' }));
+  writeFileSync(join(main, 'AGENTS.md'), validAgents());
+  writeFileSync(join(main, 'CLAUDE.md'), claudeRender('shared-name'));
+  const git = (...args) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: main, encoding: 'utf8' }).status, 0, args.join(' '));
+  git('init', '-q');
+  git('add', 'AGENTS.md', 'CLAUDE.md');
+  git('commit', '-q', '-m', 'seed');
+  const wt = `${main}-wt`;
+  dirs.push(wt);
+  git('worktree', 'add', '-q', wt, '-b', 'wt-branch');
+  assert.equal(existsSync(join(wt, '.sterling', 'config.json')), false, 'fixture: the worktree has no config of its own');
+  const { lines, failed } = retireAfterWriters({ projectDir: wt, pluginRoot: repo });
+  assert.equal(failed, 0);
+  assert.ok(lines.some((l) => /^Sterling layer: CLAUDE\.md removed — /.test(l)), lines.join('\n'));
+  assert.equal(existsSync(join(wt, 'CLAUDE.md')), false, 'the worktree copy is removed');
+  assert.equal(read(main, 'CLAUDE.md'), claudeRender('shared-name'), 'the main checkout is not touched');
+});

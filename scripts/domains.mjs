@@ -48,6 +48,7 @@ import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { buildDomainMap, renderDomainMap, UNIVERSAL_DOMAIN } from './lib/domain-map.mjs';
 import { refreshAgentsMdFacts, describeAgentsMdRefresh } from './lib/agents-md-facts.mjs';
+import { writeAgentsMdChecked } from './lib/sterling-layer.mjs';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 const USAGE = 'usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]';
@@ -447,10 +448,11 @@ if (toAdd.length) {
   if (existsSync(agentsMdPath)) {
     const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
     const refresh = refreshAgentsMdFacts(readFileSync(agentsMdPath, 'utf8'), facts);
+    // The same checks as every AGENTS.md writer (a plain file, trusted markers, the whole planned
+    // file within agy's 24,000-byte cap); a refusal writes nothing and fails the run loudly.
     if (refresh.refreshed.length) {
-      const tmpPath = `${agentsMdPath}.tmp-${process.pid}`;
-      writeFileSync(tmpPath, refresh.text);
-      renameSync(tmpPath, agentsMdPath);
+      const why = writeAgentsMdChecked(project.dir, refresh.text);
+      if (why) refuse(`AGENTS.md was not updated (${why}). Already applied in this run: ${done.join('; ')}. Shorten or fix AGENTS.md, then update its ${refresh.refreshed.join(' and ')} line by hand.`);
     }
     if (refresh.refreshed.length || refresh.kept.length) done.push(`AGENTS.md: ${describeAgentsMdRefresh(refresh, facts)}`);
     for (const k of refresh.kept) notes.push(`AGENTS.md's ${k.name} line was not rewritten (${k.reason}); update it by hand.`);

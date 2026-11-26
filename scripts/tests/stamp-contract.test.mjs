@@ -251,7 +251,10 @@ test('stamp-contract: a CRLF sibling gets a stale historical bullet updated, and
   }
 });
 
-test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own path, if registered, is skipped entirely and never read or written', () => {
+// Changed in the #329 fix round: the clone's skip is now one named line, not silence, because ruling
+// a-sterling-source-checkout-s-agents-md-is-hand-maintained-up requires a named skip for every
+// Sterling source tree, the running clone included. It is still never read or written.
+test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own path, if registered, is one named skip and never read or written', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const registry = new ProjectRegistry(regDb);
@@ -262,7 +265,8 @@ test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own pat
 
     const r = runStampContract(regDb);
     assert.equal(r.status, 0, 'the self-excluded clone contributes no drift');
-    assert.ok(!r.stdout.includes('self'), 'the self project never appears in the output at all — excluded before any read');
+    const selfLines = r.stdout.split('\n').filter((l) => l.includes('self'));
+    assert.deepEqual(selfLines, [`– self (${join(root, 'AGENTS.md')}): skipped — the Sterling clone running this stamp, whose instruction files are hand-maintained; nothing stamped`], 'the self project is one named skip line and nothing else');
     assert.equal(readFileSync(join(root, 'AGENTS.md'), 'utf8'), selfAgentsBefore, 'this clone\'s own AGENTS.md untouched');
     assert.equal(readFileSync(join(root, 'CLAUDE.md'), 'utf8'), selfClaudeBefore, 'this clone\'s own CLAUDE.md untouched');
   } finally {

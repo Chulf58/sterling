@@ -14,7 +14,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { resolveLinkedWorktree } from './lib/worktree-root.mjs';
-import { stampProjects, stampRefusalCount, stampResultLines, stampSummaryLine } from './lib/stamp-projects.mjs';
+import { loadContract, stampProjects, stampRefusalCount, stampResultLines, stampSummaryLine } from './lib/stamp-projects.mjs';
 
 const USAGE = 'usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...] [--help]';
 const KNOWN_FLAGS = new Set(['--apply', '--apply-inserts', '--verbose', '--project']);
@@ -57,6 +57,9 @@ const projectTargets = onlyProjects.map((value) => {
 // when run as bin/stamp-contract.mjs, whose bundle rewrites import.meta.url to this source
 // path (sourceIdentityPlugin in scripts/lib/bundled-artifacts.mjs).
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+// Loaded before the registry is read, so an installed copy names its missing template history even
+// when no project is stamped.
+const contract = loadContract(repoRoot);
 
 const registry = new ProjectRegistry(registryPath());
 let projects;
@@ -85,6 +88,7 @@ const results = stampProjects(rows, {
   repoRoot,
   apply: APPLY,
   applyInserts: APPLY_INSERTS,
+  contract,
   onResult: (r) => {
     for (const line of stampResultLines(r, { verbose: VERBOSE })) console.log(line);
   },

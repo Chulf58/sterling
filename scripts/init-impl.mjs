@@ -56,6 +56,8 @@ import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './l
 import { probeClaude } from './lib/claude-probe.mjs';
 import { applyLayer, capRefusal, classifyHostFile, decodeExact, knownHostValues, loadHostFileHistory, plannedAgentsMdRefusal, readAgentsMd, readLayerSection, retireHostFiles, verifyLayerOnDisk, LayerMarkerError } from './lib/sterling-layer.mjs';
 import { writeFileAtomic } from './lib/atomic-write.mjs';
+import { SYNC_LAYER_RECEIPT_REL, SYNC_MARKER_REL } from './lib/post-update-sync.mjs';
+import { looksLikeSterlingSourceTree } from './lib/sterling-source-tree.mjs';
 import { renderStackTags, renderDomains, refreshAgentsMdFacts, describeAgentsMdRefresh, renderKnowledgeSection, refreshAgentsMdKnowledge } from './lib/agents-md-facts.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
@@ -808,17 +810,24 @@ function computeMigration(rawText) {
   };
 }
 
+// A Sterling source tree (this clone, or any other Sterling checkout) keeps its instruction files
+// by hand (decision a-sterling-source-checkout-s-agents-md-is-hand-maintained-up): init, the
+// --update-ensure pass included, neither writes its AGENTS.md nor removes its CLAUDE.md or GEMINI.md.
+// The rest of init runs as usual.
+const instructionFilesHandMaintained = looksLikeSterlingSourceTree(target);
 // AGENTS.md is read and replaced only as a plain, singly linked, lossless UTF-8 file in the project
 // (readAgentsMd); anything else is reported and left alone, with no host file removed.
 let agentsMdRefusal = null;
 let agentsFile = { exists: false, text: null };
-try {
-  agentsFile = readAgentsMd(target);
-} catch (err) {
-  if (!(err instanceof LayerMarkerError)) throw err;
-  agentsMdRefusal = err.message;
+if (!instructionFilesHandMaintained) {
+  try {
+    agentsFile = readAgentsMd(target);
+  } catch (err) {
+    if (!(err instanceof LayerMarkerError)) throw err;
+    agentsMdRefusal = err.message;
+  }
 }
-const agentsMdExists = agentsFile.exists || agentsMdRefusal !== null;
+const agentsMdExists = agentsFile.exists || agentsMdRefusal !== null || instructionFilesHandMaintained;
 const hostValues = knownHostValues({ projectDir: target, pluginRoot, projectNames: [eff.projectName], roots: [agyMcpRoot({ pluginRoot }).root] });
 // A pre-split CLAUDE.md that carries project rules donates its tail to a new AGENTS.md, so it is
 // read only when AGENTS.md is absent. One that cannot be read or is not Sterling's own render
@@ -858,7 +867,9 @@ const refuseOverCap = (text) => {
   return true;
 };
 
-if (agentsMdRefusal) {
+if (instructionFilesHandMaintained) {
+  items.push({ item: 'AGENTS.md', status: 'skipped', detail: 'a Sterling source tree: its instruction files are hand-maintained, so AGENTS.md is not written and no CLAUDE.md or GEMINI.md is removed' });
+} else if (agentsMdRefusal) {
   items.push({ item: 'AGENTS.md', status: 'manual', detail: `${agentsMdRefusal}; no CLAUDE.md or GEMINI.md was removed` });
   warns.push(`\n⚠ ${agentsMdRefusal}; no CLAUDE.md or GEMINI.md was removed.`);
   layerState = { ok: false, reason: 'AGENTS.md was refused' };
@@ -925,7 +936,7 @@ if (agentsMdRefusal) {
 
 // CLAUDE.md and GEMINI.md from earlier versions: removed only when the layer is verified in
 // AGENTS.md and the file holds nothing but Sterling's render; else kept with a warning.
-const retiredHostFiles = retireHostFiles({ projectDir: target, pluginRoot, known: hostValues, layer: layerState });
+const retiredHostFiles = instructionFilesHandMaintained ? { rows: [] } : retireHostFiles({ projectDir: target, pluginRoot, known: hostValues, layer: layerState });
 for (const row of retiredHostFiles.rows) {
   items.push({ item: row.item, status: row.status, detail: row.detail });
   if (row.warning) warns.push(`\n⚠ ${row.warning}`);
@@ -1057,9 +1068,13 @@ if (claudeHost) {
   // session after init does not sync them again. Written only when no agent was
   // refused — the same bar H1 sets before it writes the marker (sync-agents exit 2 is
   // not a sync), so a refusal keeps H1 retrying and surfacing it.
+  // Nor when the Sterling layer was refused or is not verified in AGENTS.md, or a CLAUDE.md /
+  // GEMINI.md that was due to go could not be removed: the post-update sync then still runs.
   const agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === 'refused');
-  if (!agentRefused) {
-    writeFileSync(join(target, '.sterling', 'synced-version'), `${installedPluginVersion}\n`);
+  const instructionFilesSynced = instructionFilesHandMaintained || (layerState.ok && !retiredHostFiles.rows.some((r) => r.status === 'failed'));
+  if (!agentRefused && instructionFilesSynced) {
+    writeFileSync(join(target, SYNC_MARKER_REL), `${installedPluginVersion}\n`);
+    writeFileSync(join(target, SYNC_LAYER_RECEIPT_REL), `${installedPluginVersion}\n`);
   }
 
   // Route A (decision conductor-instructions-via-main-session-agent-route-a): init installs

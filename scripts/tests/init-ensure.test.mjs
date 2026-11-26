@@ -951,6 +951,9 @@ test('init: broken layer markers in AGENTS.md leave AGENTS.md byte-identical and
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), pureClaude('ensure-target'));
     assert.match(r.stdout, /^AGENTS\.md\s+manual\b/m);
     assert.match(r.stdout, /^CLAUDE\.md\s+kept\b.*not verified in AGENTS\.md/m);
+    // #329 fix round: with the layer refused, the post-update sync must still run, so init writes no marker.
+    assert.equal(existsSync(join(dir, '.sterling', 'synced-version')), false, 'no sync marker while the layer is refused');
+    assert.equal(existsSync(join(dir, '.sterling', 'synced-layer-version')), false, 'and no layer receipt');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -968,6 +971,36 @@ test('init: an AGENTS.md that would pass agy\'s 24,000-byte cap with the layer i
     assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, 'nothing written');
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), pureClaude('ensure-target'), 'nothing removed');
     assert.match(r.stdout, /^AGENTS\.md\s+manual\s+AGENTS\.md would be [\d,]+ bytes with the Sterling layer, over agy's 24,000-byte cap/m);
+    assert.equal(existsSync(join(dir, '.sterling', 'synced-version')), false, 'no sync marker while the layer is refused');
+    assert.equal(existsSync(join(dir, '.sterling', 'synced-layer-version')), false, 'and no layer receipt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// #329 fix round: a Sterling source tree's instruction files are hand-maintained (decision
+// a-sterling-source-checkout-s-agents-md-is-hand-maintained-up). init, and the --update-ensure pass
+// /sterling:update runs on the clone, write no layer into its AGENTS.md and remove no CLAUDE.md,
+// even when the layer would fit; the rest of init still runs.
+test('init and init --update-ensure on a Sterling source tree leave AGENTS.md and a pure CLAUDE.md byte-identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-source-tree-'));
+  try {
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0' }));
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '');
+    const agents = '# AGENTS.md — Sterling\n\n- **Ours.** Hand-maintained, no generated section.\n';
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    writeFileSync(join(dir, 'CLAUDE.md'), pureClaude('ensure-target'));
+    for (const args of [FRESH_FLAGS, ['--update-ensure']]) {
+      const r = init(dir, args);
+      assert.equal(r.code, 0, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
+      assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `${args.join(' ')}: AGENTS.md byte-identical`);
+      assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), pureClaude('ensure-target'), `${args.join(' ')}: CLAUDE.md kept`);
+      assert.match(r.stdout, /^AGENTS\.md\s+skipped\s+a Sterling source tree/m, args.join(' '));
+      assert.doesNotMatch(r.stdout, /^CLAUDE\.md\s+(removed|kept)\b/m, `${args.join(' ')}: retirement does not run`);
+    }
+    assert.ok(existsSync(join(dir, '.sterling', 'config.json')), 'the rest of init ran');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -1390,6 +1423,7 @@ test('init records the plugin version in .sterling/synced-version, so the first 
     const marker = join(dir, '.sterling', 'synced-version');
     assert.ok(existsSync(marker), 'init wrote the marker H1 keys its post-update sync on');
     assert.equal(readFileSync(marker, 'utf8').trim(), version, 'it carries the version whose agents init just installed');
+    assert.equal(readFileSync(join(dir, '.sterling', 'synced-layer-version'), 'utf8').trim(), version, 'and the layer receipt: init verified the layer and ran retirement at this version');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

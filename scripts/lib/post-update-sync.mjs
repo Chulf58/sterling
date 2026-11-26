@@ -36,6 +36,22 @@ import { compareSterlingVersions, installHostOf, parseSterlingVersion, sterlingU
 export const POST_UPDATE_STEP_TIMEOUT_MS = 60_000;
 
 export const SYNC_MARKER_REL = join('.sterling', 'synced-version');
+// The layer receipt (GitHub #329): the version whose post-update steps, the layer pass and the
+// CLAUDE.md / GEMINI.md retirement included, last completed in this project. Written beside the
+// marker by the post-update sync and by init; a runtime from before #329 never writes it.
+export const SYNC_LAYER_RECEIPT_REL = join('.sterling', 'synced-layer-version');
+const HOST_FILES = ['CLAUDE.md', 'GEMINI.md'];
+
+/** True when the project's layer receipt is `current` or newer. */
+export function layerReceiptCurrent(project, current) {
+  let receipt;
+  try {
+    receipt = readFileSync(join(project, SYNC_LAYER_RECEIPT_REL), 'utf8').trim();
+  } catch {
+    return false;
+  }
+  return parseVersion(receipt) ? (compareVersions(receipt, current) ?? -1) >= 0 : false;
+}
 
 const HOST_TEXT = {
   claude: {
@@ -208,8 +224,11 @@ export async function runPostUpdateSteps(root, project, runStep, host = 'claude'
   // refusal from the layer pass, and later the receipts of retire-host-files, ride every result,
   // so the session banner and context name them.
   const layer = (sync.out ?? '').split('\n').map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l));
+  // Whether retirement may run is settled before any writer outcome: never in a Sterling source
+  // tree, whose instruction files are hand-maintained, whichever way the writers ended.
+  const sourceTree = sameRealPath(project, root) || looksLikeSterlingSourceTree(project);
   const { result, retire } = await writerSteps({ root, project, runStep, host, sync, migrated, layer });
-  if (!retire) return result;
+  if (sourceTree || !retire) return result;
   // The last step on every path, whatever the writers' outcome (review loop 4 of #329): it removes
   // a CLAUDE.md / GEMINI.md only when the file is Sterling's current render or the stub and the
   // layer is verified in AGENTS.md on disk, so no writer failure can make it lose project text.
@@ -337,7 +356,11 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   }
   // An absent or non-version marker reads as never synced, as before the version order.
   const order = previous === null ? 1 : compareVersions(current, previous) ?? 1;
-  if (order === 0) return null;
+  // An equal marker is a finished sync only when the layer receipt says this version's #329 steps
+  // ran too. A runtime from before #329 (OpenCode's loaded plugin during an auto-update) runs the
+  // new scripts but writes the version marker without retiring CLAUDE.md / GEMINI.md, so with a
+  // host file left the steps run again. With none left there is nothing to retire.
+  if (order === 0 && (layerReceiptCurrent(project, current) || !HOST_FILES.some((f) => existsSync(join(project, f))))) return null;
   if (order < 0) {
     const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]](env, home, root);
     return {
@@ -365,6 +388,7 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   let warning = '';
   try {
     writeFileSync(markerPath, `${current}\n`);
+    writeFileSync(join(project, SYNC_LAYER_RECEIPT_REL), `${current}\n`);
   } catch (err) {
     warning = `✗ ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) — the sync ${t.rerun} until it can. `;
   }

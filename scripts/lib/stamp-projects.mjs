@@ -149,33 +149,11 @@ const VALID_ANCHOR = new Set(['matches', 'updated', 'would_update', 'inserted', 
 const isRefusal = (a) => a.action.includes('REFUSED');
 
 /**
- * Stamp each row's AGENTS.md. One result per row, in row order:
- * { row, project, path, status, actions, reason }
- *   status 'skipped'      nothing read: reason 'stale_path' (the directory does not exist),
- *                         'running_clone' (repoRoot itself) or 'sterling_source_tree';
- *          'not_migrated' no AGENTS.md; reason says what to run;
- *          'refused'      at least one *_REFUSED action;
- *          'stamped'      something to report (an insert, old wording, a kept bullet);
- *          'in_sync'      every tracked bullet matches.
- *   actions [{ lead, action, file, detail?, have?, info? }]
- * An empty `rows` reads nothing and returns []. A thrown error (an unreadable template, a bug)
- * propagates: the caller decides what a crash means.
- * @param {Array<{name: string, repo_path: string, dir?: string}>} rows `dir` is where AGENTS.md
- *   lives when it is not repo_path (a linked worktree of the registered project).
- * @param {object} o
- * @param {string} o.repoRoot the Sterling root whose templates and history are stamped
- * @param {boolean} [o.apply] replace old wording too (the by-hand --apply)
- * @param {boolean} [o.applyInserts] write only text that is entirely absent
- * @param {(line: string) => void} [o.warn] a DEGRADED history notice
- * @param {(result: object) => void} [o.onResult] called as each project is done
+ * The templates' current bullets and their historical variants under `repoRoot`. The CLI loads
+ * them before it reads the registry, so an installed copy names its missing history (DEGRADED on
+ * `warn`) even when no project is stamped; stampProjects loads them itself when not given.
  */
-export function stampProjects(rows, { repoRoot, apply = false, applyInserts = false, warn, onResult = () => {} }) {
-  if (!rows.length) return [];
-  if (!repoRoot) throw new Error('stampProjects: repoRoot is required');
-  // --apply wins when both are given: it is the wider mode.
-  const APPLY = apply;
-  const APPLY_INSERTS = !apply && applyInserts;
-  const WRITE_INSERTS = APPLY || APPLY_INSERTS;
+export function loadContract(repoRoot, { warn } = {}) {
   // leadLayer: lead -> template rel it currently lives in (= the sibling file it propagates to).
   const { leadLayer, current } = readTemplateBullets(repoRoot);
   // Historical variants (scripts/lib/contract-history.mjs): the git history of both
@@ -189,6 +167,40 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
     currentBlocks: current,
     ...(warn ? { warn } : {}),
   });
+  return { leadLayer, current, variants };
+}
+
+/**
+ * Stamp each row's AGENTS.md. One result per row, in row order:
+ * { row, project, path, status, actions, reason }
+ *   status 'skipped'      nothing read: reason 'stale_path' (the directory does not exist),
+ *                         'running_clone' (repoRoot itself) or 'sterling_source_tree';
+ *          'not_migrated' no AGENTS.md; reason says what to run;
+ *          'refused'      at least one *_REFUSED action;
+ *          'stamped'      something to report (an insert, old wording, a kept bullet);
+ *          'in_sync'      every tracked bullet matches.
+ *   actions [{ lead, action, file, detail?, have?, info? }]
+ * An empty `rows` reads nothing and returns []. A thrown error (an unreadable template, a bug)
+ * propagates: the caller decides what a crash means.
+ * @param {Array<{name: string, repo_path: string, dir?: string, readOnly?: boolean}>} rows `dir` is
+ *   where AGENTS.md lives when it is not repo_path (a linked worktree of the registered project);
+ *   a `readOnly` row is checked and reported as a dry run, never written.
+ * @param {object} o
+ * @param {string} o.repoRoot the Sterling root whose templates and history are stamped
+ * @param {boolean} [o.apply] replace old wording too (the by-hand --apply)
+ * @param {boolean} [o.applyInserts] write only text that is entirely absent
+ * @param {(line: string) => void} [o.warn] a DEGRADED history notice
+ * @param {(result: object) => void} [o.onResult] called as each project is done
+ * @param {object} [o.contract] loadContract(repoRoot), when the caller already loaded it
+ */
+export function stampProjects(rows, { repoRoot, apply = false, applyInserts = false, warn, onResult = () => {}, contract = null }) {
+  if (!rows.length) return [];
+  if (!repoRoot) throw new Error('stampProjects: repoRoot is required');
+  // --apply wins when both are given: it is the wider mode.
+  const APPLY = apply;
+  const APPLY_INSERTS = !apply && applyInserts;
+  const WRITE_INSERTS = APPLY || APPLY_INSERTS;
+  const { leadLayer, current, variants } = contract ?? loadContract(repoRoot, { warn });
   const selfPath = realpathSync(repoRoot);
   const results = [];
   const done = (r) => {
@@ -250,6 +262,10 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
     const noHostFile = { path: null, raw: '', original: '', text: '' };
     const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, noHostFile]]);
     const layerName = () => 'AGENTS.md';
+    // A read-only row (the caller already refused another writer of this AGENTS.md) is checked and
+    // reported as a dry run, and nothing is written to it.
+    const rowWrites = WRITE_INSERTS && !row.readOnly;
+    const rowApply = APPLY && !row.readOnly;
     const actions = [];
     // Whole sections first. A sibling with the heading, or with any of the section's bullets
     // in either file, is left to the per-lead loop below.
@@ -289,7 +305,7 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
       if (at > 0 && lines[at - 1].trim() !== '') block.unshift('');
       lines.splice(at, 0, ...block);
       target.text = lines.join('\n');
-      actions.push({ lead: label, action: WRITE_INSERTS ? 'section_inserted' : 'would_insert_section', file: layerName(home) });
+      actions.push({ lead: label, action: rowWrites ? 'section_inserted' : 'would_insert_section', file: layerName(home) });
     }
     // The per-lead pass: `files` maps each template rel to the sibling file its leads land in,
     // `wantOf` gives a lead's current text and `variantsOf` the template-descended texts that
@@ -328,7 +344,7 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
               lines.splice(found.start, found.end - found.start, ...want.split('\n'));
               target.text = lines.join('\n');
             }
-            pass.push({ lead, action: APPLY ? 'updated' : 'would_update', file: nameOf(home) });
+            pass.push({ lead, action: rowApply ? 'updated' : 'would_update', file: nameOf(home) });
           } else {
             pass.push({ lead, action: 'HAND_TUNED_REFUSED', file: nameOf(home), have: found.block });
           }
@@ -348,7 +364,7 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
               lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
               target.text = lines.join('\n');
             }
-            pass.push({ lead, action: APPLY ? 'renamed' : 'would_rename', file: nameOf(home) });
+            pass.push({ lead, action: rowApply ? 'renamed' : 'would_rename', file: nameOf(home) });
           } else {
             pass.push({ lead, action: 'HAND_TUNED_REFUSED', file: nameOf(home), have: oldFound.block });
           }
@@ -381,7 +397,7 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
           const lines = target.text.split('\n');
           lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split('\n'));
           target.text = lines.join('\n');
-          pass.push({ lead, action: WRITE_INSERTS ? 'inserted' : 'would_insert', file: nameOf(home) });
+          pass.push({ lead, action: rowWrites ? 'inserted' : 'would_insert', file: nameOf(home) });
           continue;
         }
         pass.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: nameOf(home) });
@@ -397,7 +413,7 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
     });
     // Only a file whose text changed is written. In a dry run nothing is; in applyInserts
     // the text holds inserts only.
-    if (WRITE_INSERTS && agents.text !== agents.original) {
+    if (rowWrites && agents.text !== agents.original) {
       const file = 'AGENTS.md';
       const planned = withOriginalEols(agents.raw, unmask(agents.text, layerLines));
       // The exact bytes about to be written must fit agy's cap with trusted markers, and the file
@@ -437,12 +453,13 @@ export function stampProjects(rows, { repoRoot, apply = false, applyInserts = fa
 export const stampRefusalCount = (r) => (r.status === 'not_migrated' ? 1 : r.actions.filter(isRefusal).length);
 
 const SKIP_WHY = {
+  running_clone: 'the Sterling clone running this stamp, whose instruction files are hand-maintained',
   stale_path: 'the registered path does not exist (a stale registry entry)',
   sterling_source_tree: 'a Sterling source tree, whose instruction files are hand-maintained',
 };
 
 /**
- * The lines one result prints: none for an in-sync project (unless verbose) or the running clone;
+ * The lines one result prints: none for an in-sync project (unless verbose);
  * one `– ` line for a skip; a `✗`/`•` header naming the AGENTS.md path, then its actions.
  */
 export function stampResultLines(r, { verbose = false } = {}) {

@@ -7221,13 +7221,7 @@ function unmask(text, layerLines) {
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 var VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
 var isRefusal = (a) => a.action.includes("REFUSED");
-function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts = false, warn, onResult = () => {
-} }) {
-  if (!rows2.length) return [];
-  if (!repoRoot2) throw new Error("stampProjects: repoRoot is required");
-  const APPLY2 = apply;
-  const APPLY_INSERTS2 = !apply && applyInserts;
-  const WRITE_INSERTS = APPLY2 || APPLY_INSERTS2;
+function loadContract(repoRoot2, { warn } = {}) {
   const { leadLayer, current } = readTemplateBullets(repoRoot2);
   const variants = historicalVariants({
     repoRoot: repoRoot2,
@@ -7237,6 +7231,16 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
     currentBlocks: current,
     ...warn ? { warn } : {}
   });
+  return { leadLayer, current, variants };
+}
+function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts = false, warn, onResult = () => {
+}, contract: contract2 = null }) {
+  if (!rows2.length) return [];
+  if (!repoRoot2) throw new Error("stampProjects: repoRoot is required");
+  const APPLY2 = apply;
+  const APPLY_INSERTS2 = !apply && applyInserts;
+  const WRITE_INSERTS = APPLY2 || APPLY_INSERTS2;
+  const { leadLayer, current, variants } = contract2 ?? loadContract(repoRoot2, { warn });
   const selfPath = realpathSync5(repoRoot2);
   const results2 = [];
   const done = (r) => {
@@ -7289,6 +7293,8 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
     const noHostFile = { path: null, raw: "", original: "", text: "" };
     const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, noHostFile]]);
     const layerName = () => "AGENTS.md";
+    const rowWrites = WRITE_INSERTS && !row.readOnly;
+    const rowApply = APPLY2 && !row.readOnly;
     const actions = [];
     const sectionRefused = /* @__PURE__ */ new Set();
     for (const section of TARGET_SECTIONS) {
@@ -7324,7 +7330,7 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
       if (at > 0 && lines[at - 1].trim() !== "") block.unshift("");
       lines.splice(at, 0, ...block);
       target.text = lines.join("\n");
-      actions.push({ lead: label, action: WRITE_INSERTS ? "section_inserted" : "would_insert_section", file: layerName(home) });
+      actions.push({ lead: label, action: rowWrites ? "section_inserted" : "would_insert_section", file: layerName(home) });
     }
     const stampLeads = ({ files, leads, wantOf, variantsOf, nameOf, pass }) => {
       const outcome = (lead) => [...pass].reverse().find((a) => a.lead === lead)?.action;
@@ -7355,7 +7361,7 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
               lines.splice(found.start, found.end - found.start, ...want.split("\n"));
               target.text = lines.join("\n");
             }
-            pass.push({ lead, action: APPLY2 ? "updated" : "would_update", file: nameOf(home) });
+            pass.push({ lead, action: rowApply ? "updated" : "would_update", file: nameOf(home) });
           } else {
             pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: found.block });
           }
@@ -7372,7 +7378,7 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
               lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
               target.text = lines.join("\n");
             }
-            pass.push({ lead, action: APPLY2 ? "renamed" : "would_rename", file: nameOf(home) });
+            pass.push({ lead, action: rowApply ? "renamed" : "would_rename", file: nameOf(home) });
           } else {
             pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: oldFound.block });
           }
@@ -7395,7 +7401,7 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
           const lines = target.text.split("\n");
           lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split("\n"));
           target.text = lines.join("\n");
-          pass.push({ lead, action: WRITE_INSERTS ? "inserted" : "would_insert", file: nameOf(home) });
+          pass.push({ lead, action: rowWrites ? "inserted" : "would_insert", file: nameOf(home) });
           continue;
         }
         pass.push({ lead, action: "ANCHOR_MISSING_REFUSED", file: nameOf(home) });
@@ -7409,7 +7415,7 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
       nameOf: layerName,
       pass: actions
     });
-    if (WRITE_INSERTS && agents.text !== agents.original) {
+    if (rowWrites && agents.text !== agents.original) {
       const file = "AGENTS.md";
       const planned = withOriginalEols(agents.raw, unmask(agents.text, layerLines));
       const refusal = plannedAgentsMdRefusal(planned) ?? (() => {
@@ -7444,6 +7450,7 @@ function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts
 }
 var stampRefusalCount = (r) => r.status === "not_migrated" ? 1 : r.actions.filter(isRefusal).length;
 var SKIP_WHY = {
+  running_clone: "the Sterling clone running this stamp, whose instruction files are hand-maintained",
   stale_path: "the registered path does not exist (a stale registry entry)",
   sterling_source_tree: "a Sterling source tree, whose instruction files are hand-maintained"
 };
@@ -7508,6 +7515,7 @@ var projectTargets = onlyProjects.map((value) => {
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
 var repoRoot = join12(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var contract = loadContract(repoRoot);
 var registry = new ProjectRegistry(registryPath());
 var projects;
 try {
@@ -7529,6 +7537,7 @@ var results = stampProjects(rows, {
   repoRoot,
   apply: APPLY,
   applyInserts: APPLY_INSERTS,
+  contract,
   onResult: (r) => {
     for (const line of stampResultLines(r, { verbose: VERBOSE })) console.log(line);
   }

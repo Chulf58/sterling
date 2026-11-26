@@ -813,6 +813,10 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
   // The projects the contract step stamps and judges: one explicit set, those of this refresh that
   // passed the pre-write checks (workflow, identity, handoff setting). See stampTargets.
   const stampQueue = [];
+  // Queued projects whose AGENTS.md another writer refused (the layer, or the Knowledge section):
+  // the contract step still checks and judges them, as a dry run, and writes nothing to them.
+  const agentsMdWriteRefused = new Set();
+  const stampRow = (p) => (agentsMdWriteRefused.has(p) ? { ...p, readOnly: true } : p);
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
@@ -932,6 +936,7 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
       // same checks as the layer (a plain file, and the whole planned file under agy's cap).
       if (layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) {
         log('      ⚠ AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed');
+        agentsMdWriteRefused.add(p);
       } else try {
         const agents = readAgentsMd(p.repo_path);
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
@@ -941,6 +946,7 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
             // A writer refusal is a failed project refresh (exit 2), with its reason.
             log(`      ✗ AGENTS.md Knowledge section REFUSED: ${refusal}`);
             entry.knowledge = 'refused';
+            agentsMdWriteRefused.add(p);
             fail(2);
             failed = true;
           } else {
@@ -952,6 +958,7 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
         if (err instanceof LayerMarkerError) {
           log(`      ✗ AGENTS.md Knowledge section REFUSED: ${err.message}`);
           entry.knowledge = 'refused';
+          agentsMdWriteRefused.add(p);
           fail(2);
           failed = true;
         } else {
@@ -960,6 +967,7 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
           if (!isProjectReadRefusal(err)) throw err;
           log(`      ✗ AGENTS.md Knowledge section NOT updated: ${err.message}`);
           entry.knowledge = 'failed';
+          agentsMdWriteRefused.add(p);
           fail(2);
           failed = true;
         }
@@ -1120,7 +1128,7 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
   const stampTargets = () => {
     const targets = [];
     for (const p of stampQueue.splice(0)) {
-      if (!isSourceTree(p)) targets.push(p);
+      if (!isSourceTree(p)) targets.push(stampRow(p));
       else log(`  • ${p.name}: a Sterling source tree — its contract files are hand-maintained, not stamped`);
     }
     return targets;
@@ -1210,7 +1218,7 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
       log('▸ contract text not stamped: the project was refused above, before any write');
     } else {
       // Inserts only: see the sibling-projects step below.
-      stampAndJudge('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', [project]);
+      stampAndJudge('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', [stampRow(project)]);
       if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
     }
     retireAfterWriters();

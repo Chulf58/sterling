@@ -16720,6 +16720,22 @@ function readContained(root, rel) {
 }
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
+// scripts/lib/sterling-source-tree.mjs
+var MANIFEST = ".claude-plugin/plugin.json";
+var SENTINEL = "scripts/architecture-projection.mjs";
+function isSterlingSourceTree(dir) {
+  if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
+  return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
+}
+function looksLikeSterlingSourceTree(dir) {
+  try {
+    return isSterlingSourceTree(dir);
+  } catch (err) {
+    if (err instanceof ContainmentError || err instanceof SyntaxError || err instanceof TypeError || typeof err?.code === "string") return false;
+    throw err;
+  }
+}
+
 // scripts/lib/sterling-layer.mjs
 var CLAUDE_BLOCK_REL = "templates/claude-session-block.md";
 var AGENTS_MD_AGY_CAP_BYTES = 24e3;
@@ -16739,24 +16755,6 @@ init_dist2();
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync12 } from "node:fs";
 import { join as join23, resolve as resolve10 } from "node:path";
-
-// scripts/lib/sterling-source-tree.mjs
-var MANIFEST = ".claude-plugin/plugin.json";
-var SENTINEL = "scripts/architecture-projection.mjs";
-function isSterlingSourceTree(dir) {
-  if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
-  return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
-}
-function looksLikeSterlingSourceTree(dir) {
-  try {
-    return isSterlingSourceTree(dir);
-  } catch (err) {
-    if (err instanceof ContainmentError || err instanceof SyntaxError || err instanceof TypeError || typeof err?.code === "string") return false;
-    throw err;
-  }
-}
-
-// scripts/lib/handoff-projection.mjs
 init_dist();
 var CONFIG_REL3 = ".sterling/config.json";
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
@@ -17729,6 +17727,17 @@ var stampProcessedNothing = (out) => /—\s*0 project\(s\) processed/.test(Strin
 // scripts/lib/post-update-sync.mjs
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
 var SYNC_MARKER_REL = join29(".sterling", "synced-version");
+var SYNC_LAYER_RECEIPT_REL = join29(".sterling", "synced-layer-version");
+var HOST_FILES = ["CLAUDE.md", "GEMINI.md"];
+function layerReceiptCurrent(project, current) {
+  let receipt;
+  try {
+    receipt = readFileSync18(join29(project, SYNC_LAYER_RECEIPT_REL), "utf8").trim();
+  } catch {
+    return false;
+  }
+  return parseVersion(receipt) ? (compareVersions(receipt, current) ?? -1) >= 0 : false;
+}
 var HOST_TEXT = {
   claude: {
     label: "H1",
@@ -17812,8 +17821,9 @@ async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   const migrated = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("config migration: "));
   const layer = (sync.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l));
+  const sourceTree = sameRealPath(project, root) || looksLikeSterlingSourceTree(project);
   const { result, retire } = await writerSteps({ root, project, runStep, host, sync, migrated, layer });
-  if (!retire) return result;
+  if (sourceTree || !retire) return result;
   const retired = await runStep(root, "retire-host-files.mjs", ["--target", project]);
   layer.push(...(retired.out ?? "").split("\n").map((l) => l.trim()).filter((l) => LAYER_RELAY_LINE.test(l)));
   const why = retired.error ? `retire-host-files did not run (${retired.error})` : retired.status !== 0 ? `retire-host-files exited ${retired.status}: ${retired.tail}` : null;
@@ -17887,7 +17897,7 @@ POST-UPDATE SYNC (${t.label}): SKIPPED \u2014 ${manifest} carries version '${cur
     };
   }
   const order = previous === null ? 1 : compareVersions(current, previous) ?? 1;
-  if (order === 0) return null;
+  if (order === 0 && (layerReceiptCurrent(project, current) || !HOST_FILES.some((f) => existsSync18(join29(project, f))))) return null;
   if (order < 0) {
     const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]](env, home, root);
     return {
@@ -17913,6 +17923,8 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   let warning = "";
   try {
     writeFileSync9(markerPath, `${current}
+`);
+    writeFileSync9(join29(project, SYNC_LAYER_RECEIPT_REL), `${current}
 `);
   } catch (err) {
     warning = `\u2717 ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) \u2014 the sync ${t.rerun} until it can. `;

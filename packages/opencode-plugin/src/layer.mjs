@@ -8,19 +8,21 @@ import { basename, join } from 'node:path';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
 import { FENCE_KINDS, NO_COUNTERPART_MARKER, validateFences } from '../../../scripts/lib/agent-fences.mjs';
+import { LayerMarkerError, layerLineRange, readLayerSection } from '../../../scripts/lib/sterling-layer.mjs';
+import { looksLikeSterlingSourceTree } from '../../../scripts/lib/sterling-source-tree.mjs';
 
 /**
  * The OpenCode host section appended after the rendered layer. `pluginRoot`
  * is the resolved Sterling root, or null when it could not be resolved.
  */
-export function opencodeHostTail(pluginRoot) {
+export function opencodeHostTail(pluginRoot, { sharedLayerInjected = false } = {}) {
   const install = pluginRoot
     ? `- **Sterling is installed at \`${pluginRoot}\`.** Its scripts are \`${pluginRoot}/bin/*.mjs\` (run one with \`node "${pluginRoot}/bin/<name>.mjs"\`), its commands are \`${pluginRoot}/commands/*.md\`, its skills are \`${pluginRoot}/skills/*/SKILL.md\` and its agent templates are under \`${pluginRoot}/agent-templates/\`. Those files are written for Claude Code: where one says CLAUDE_PLUGIN_ROOT, use \`${pluginRoot}\`, and read the rest with the substitutions this layer makes.`
     : "- **Sterling's install root could not be resolved** (the error is above), so its scripts, commands and skills are unreachable this session. Tell the user before relying on any of them.";
   return [
     '## OpenCode host',
     '',
-    "This session runs on OpenCode, not Claude Code. The OpenCode rules above are Sterling's OpenCode text; the shared Sterling layer is in AGENTS.md. The other differences:",
+    `This session runs on OpenCode, not Claude Code. The OpenCode rules above are Sterling's OpenCode text; the shared Sterling layer is ${sharedLayerInjected ? "injected above, since this project's AGENTS.md does not carry it" : 'in AGENTS.md'}. The other differences:`,
     '',
     install,
     '- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling through the plugin shim in its config dir. Sterling\'s commands are registered as OpenCode slash commands under the same names (`/sterling:<name>`), except `sterling:dashboard`, which does not exist here: open the dashboard with `/sterling` or <leader>k. Each command this layer names also points at its file under the commands directory. .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here.',
@@ -97,6 +99,31 @@ function opencodeLines(templateText) {
 }
 
 /**
+ * The shared layer section for a Sterling source tree whose AGENTS.md has no generated section
+ * (decision a-sterling-source-checkout-s-agents-md-is-hand-maintained-up keeps it out), so its
+ * rules still reach the session; null for every other project, where OpenCode reads them from
+ * AGENTS.md. A source tree whose markers cannot be trusted gets the section too. Nothing is written.
+ */
+function sourceTreeSharedLayer(projectDir, pluginRoot) {
+  if (!looksLikeSterlingSourceTree(projectDir)) return null;
+  let text = null;
+  try {
+    text = readFileSync(join(projectDir, 'AGENTS.md'), 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  if (text !== null) {
+    try {
+      if (layerLineRange(text.replace(/\r\n/g, '\n')).begin !== null) return null;
+    } catch (err) {
+      // Untrusted markers: what the file holds is not the layer, so the section is injected.
+      if (!(err instanceof LayerMarkerError)) throw err;
+    }
+  }
+  return readLayerSection(pluginRoot);
+}
+
+/**
  * The layer for OpenCode: the template's opencode-only blocks with the Sterling root filled in and
  * each /sterling:<name> pointed at its command file, then the OpenCode host tail. Whatever is left
  * that only Claude Code can act on is listed in a STERLING LAYER HOST CHECK block at the top.
@@ -121,7 +148,11 @@ export function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), tem
     ...(residue.length ? [`Claude-only phrase(s) left in the text: ${residue.join(', ')}.`] : []),
     ...missingCommands,
   ];
-  const body = `## Sterling layer on OpenCode\n\nThe shared Sterling rules are in the "Sterling layer (generated)" section of AGENTS.md. These rules are OpenCode's own.\n\n${rules.trim()}\n\n${opencodeHostTail(pluginRoot)}`;
+  const shared = sourceTreeSharedLayer(projectDir, pluginRoot);
+  const where = shared
+    ? `This project is a Sterling source tree whose AGENTS.md is hand-maintained without the generated section, so the shared Sterling rules follow, read from ${join(pluginRoot, 'templates', 'sterling-layer-agents.md')}; AGENTS.md is not changed.\n\n${shared}\n\nThe rules below are OpenCode's own.`
+    : 'The shared Sterling rules are in the "Sterling layer (generated)" section of AGENTS.md. These rules are OpenCode\'s own.';
+  const body = `## Sterling layer on OpenCode\n\n${where}\n\n${rules.trim()}\n\n${opencodeHostTail(pluginRoot, { sharedLayerInjected: Boolean(shared) })}`;
   if (!problems.length) return body;
   return `STERLING LAYER HOST CHECK: parts of the OpenCode text could not be rendered and are injected unchanged. Read them as Claude Code instructions, apply the OpenCode host section at the end, and tell the user.\n${problems.map((p) => `- ${p}`).join('\n')}\n\n${body}`;
 }

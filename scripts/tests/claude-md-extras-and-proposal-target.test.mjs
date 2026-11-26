@@ -39,3 +39,16 @@ test('the generated AGENTS.md section tells every host to put project rules in A
   assert.ok(bullet, 'the section has the bullet');
   assert.ok(bullet.includes('outside the generated block'));
 });
+
+// Restored in the #329 fix round: these direct file checks stood on their own, apart from the
+// retired CLAUDE.md bullet scanner, and still hold (decision
+// project-rules-live-in-agents-md-claude-and-gemini-md-hold-only-the-sterling-layer).
+test("this repo's CLAUDE.md carries no project bullet that moved to AGENTS.md, and AGENTS.md carries them", () => {
+  const claude = read('CLAUDE.md');
+  const agents = read('AGENTS.md');
+  for (const lead of ['- **The MACHINE ROLE line at session start says what this clone is.**', '- **This repo runs in hobby mode on local SQLite:**', '- **Task-end review in this repo is 3 Sol reviewers in parallel, not 1.**']) {
+    assert.ok(!claude.includes(lead), lead);
+    assert.ok(agents.includes(lead), lead);
+  }
+  assert.ok(agents.includes('## Project rules'));
+});

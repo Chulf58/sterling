@@ -1237,6 +1237,35 @@ test('full path, real stamper: a registered main checkout and its registered lin
   }
 });
 
+// #329 fix round, finding 7: after the Sterling layer writer refused a project's AGENTS.md, nothing
+// else writes that file. The contract step still checks and judges the row, as a dry run.
+test('full path, real stamper: a project whose Sterling layer was refused is stamped as a dry run, its AGENTS.md is not written', async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const cwd = contractCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-layer-refused-'));
+  try {
+    const agents = '# AGENTS.md\n\n## Conduct rules\n\n- A rule of this project.\n\n## Conventions\n\nNone.\n';
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    const refusedLine = "✗ Sterling layer REFUSED: AGENTS.md would be 24,310 bytes with the Sterling layer, over agy's 24,000-byte cap. Fix it, then rerun /sterling:update.";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 2, syncStdout: `${refusedLine}\n` });
+    const rows = [];
+    const stamp = (r, o) => {
+      rows.push(...r);
+      return stampProjects(r, { ...o, repoRoot });
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'capped', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `nothing else writes the file:\n${log}`);
+    assert.deepEqual(rows.map((r) => [r.repo_path, r.readOnly]), [[dir, true]], 'the row is still checked, read-only');
+    assert.match(log, /^[✗•] capped \(.*\/AGENTS\.md\)\n {4}would_insert_section {2}## Domains/m, 'and reported as a dry run');
+    assert.equal(report.exit, 2, 'the layer refusal fails the project');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('authoring role: a second registered Sterling checkout as the invoking project is synced, but the stamper is not run on it', async () => {
   const cwd = authoringCwd();
   const f = stampSetFixture();
