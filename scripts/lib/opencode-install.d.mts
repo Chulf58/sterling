@@ -14,10 +14,8 @@ export interface StagedWrite {
   content: string;
   previous: string | null;
 }
-export interface AtomicWriteFs {
-  writeFile?: (path: string, content: string) => void;
-  rename?: (from: string, to: string) => void;
-}
+export type { AtomicWriteFs } from './atomic-write.mjs';
+import type { AtomicWriteFs } from './atomic-write.mjs';
 export function writeFileAtomic(path: string, content: string, fs?: AtomicWriteFs): void;
 export function writeFullAgentFiles(writes: StagedWrite[], fs?: AtomicWriteFs): void;
 export function restoreFullAgentFiles(writes: StagedWrite[], fs?: AtomicWriteFs): void;

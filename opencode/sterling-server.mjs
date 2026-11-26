@@ -23716,6 +23716,11 @@ function pendingAnswersNotice(root) {
   return `PENDING ANSWERS: ${entries.length} answered question form${entries.length === 1 ? "" : "s"} not yet recorded. Each is a ruling or a confirmation; capture the decisions, then clear each with pending_answers_resolve({ids, outcome: "recorded", record_id}) or outcome "not_a_decision".
 ${listed.join("\n")}${more}`;
 }
+function pendingAnswersBlock(root) {
+  const text2 = pendingAnswersNotice(root);
+  if (!text2 || text2.startsWith("PENDING ANSWERS UNREADABLE")) return { text: text2, sig: text2 };
+  return { text: text2, sig: readPendingAnswers(root).map((e) => e.id).sort().join(",") };
+}
 
 // scripts/hooks/lib/subject-fan.mjs
 import { existsSync as existsSync20 } from "node:fs";
@@ -27349,7 +27354,7 @@ ${opencodeHostTail(pluginRoot)}`;
       if (!inWorkerChild(env)) {
         out.push({ key: "board", ...t.time("board", () => boardBlock(root, state.config, sessionID, state.configUnreadable)), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
         out.push({ key: "lanes", text: t.time("lanes", () => laneLine(root, state.config, sessionID)) });
-        out.push({ key: "pending-answers", text: t.time("pending-answers", () => pendingAnswersNotice(root)) });
+        out.push({ key: "pending-answers", ...t.time("pending-answers", () => pendingAnswersBlock(root)) });
       }
     }
     out.push({ key: "restore", text: await t.time("restore", () => rotationRestore(root, sessionID)) });

@@ -156,3 +156,14 @@ export function pendingAnswersNotice(root) {
   const more = entries.length > NOTICE_LISTED ? `\n- … and ${entries.length - NOTICE_LISTED} more` : '';
   return `PENDING ANSWERS: ${entries.length} answered question form${entries.length === 1 ? '' : 's'} not yet recorded. Each is a ruling or a confirmation; capture the decisions, then clear each with pending_answers_resolve({ids, outcome: "recorded", record_id}) or outcome "not_a_decision".\n${listed.join('\n')}${more}`;
 }
+
+/**
+ * The OpenCode context block: the notice text, and a delivery signature over the full set of
+ * unresolved ids (the text lists only the first few entries, so it cannot tell a replaced
+ * entry from an unchanged list). An unreadable file signs as its notice.
+ */
+export function pendingAnswersBlock(root) {
+  const text = pendingAnswersNotice(root);
+  if (!text || text.startsWith('PENDING ANSWERS UNREADABLE')) return { text, sig: text };
+  return { text, sig: readPendingAnswers(root).map((e) => e.id).sort().join(',') };
+}

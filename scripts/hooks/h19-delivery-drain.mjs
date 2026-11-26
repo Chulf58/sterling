@@ -84,7 +84,7 @@ try {
     if (legacyMessage) texts.unshift(legacyMessage);
     files.push(legacy);
   }
-  // Not on agy (the tool that clears it is not served there), and a failure here costs only this line.
+  // Not on agy, where capture is deferred (the resolver tool is still served there); a failure here costs only this line.
   if (!queueOnly && input.host !== 'agy') {
     try {
       const pendingAnswers = pendingAnswersNotice(input.cwd);
