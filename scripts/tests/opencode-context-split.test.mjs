@@ -104,7 +104,7 @@ test('the system prompt is the same bytes on every request while the board, stat
     const h = handler(dir);
     const first = contextInput('ses_root');
     await h.onContext(first);
-    assert.match(systemOf(first), /Sterling layer\)/, 'the layer is in the system prompt');
+    assert.match(systemOf(first), /## Sterling layer on OpenCode/, 'the layer is in the system prompt');
     assert.doesNotMatch(systemOf(first), /STERLING STATUS|BOARD READINESS|STERLING NOTICES|TDD posture/, 'no live line is in the system prompt');
 
     addTodo(dir, 'a new user ask');
@@ -786,7 +786,9 @@ test('the system block is frozen at a session\'s first request: an unstaged chil
     assert.match(systemOf(child1), /TDD posture: tests-first ON/, 'the implementor chrome carries the TDD posture read now');
     const root1 = contextInput('ses_root');
     await h.onContext(root1);
-    assert.match(systemOf(root1), /fixture-proj/);
+    // The OpenCode layer holds no project value since GitHub #329, so the root block is identified by
+    // its heading; the config-driven re-render is pinned on the child's TDD posture below.
+    assert.match(systemOf(root1), /## Sterling layer on OpenCode/);
 
     writeFileSync(join(dir, '.sterling', 'plan-lock.json'), JSON.stringify(PLAN_LOCK));
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'renamed-proj', tdd: { enabled: false } }));
@@ -800,7 +802,7 @@ test('the system block is frozen at a session\'s first request: an unstaged chil
     // A session that starts now renders the current state, and a compaction renders again.
     const other = contextInput('ses_other');
     await h.onContext(other);
-    assert.match(systemOf(other), /renamed-proj/);
+    assert.match(systemOf(other), /## Sterling layer on OpenCode/);
     h.resetSession('ses_child');
     const child3 = childInput();
     await h.onContext(child3);

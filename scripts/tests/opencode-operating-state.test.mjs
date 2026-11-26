@@ -560,7 +560,7 @@ test('the per-session caches are bounded: the oldest entry goes first', async ()
   assert.deepEqual([...m.keys()], ['k3', 'k4', 'k2'], 'a rewrite refreshes the entry');
 });
 
-test('MACHINE ROLE on OpenCode names the Sterling layer, not CLAUDE.md; the Claude text is unchanged', async () => {
+test('MACHINE ROLE on OpenCode names the Sterling layer, not CLAUDE.md; the Claude text names the layer in AGENTS.md', async () => {
   const dir = makeProject({ project_name: 'fixture-proj', machine_role: 'consumer' });
   try {
     const h = handler(dir, { pluginRoot: dir, sessions: { ses_root: {} } });
@@ -569,7 +569,7 @@ test('MACHINE ROLE on OpenCode names the Sterling layer, not CLAUDE.md; the Clau
     const roleLine = textOf(i).split('\n').find((l) => l.startsWith('MACHINE ROLE:'));
     assert.match(roleLine, /^MACHINE ROLE: CONSUMER — .*The Sterling layer's "this machine authors" language/);
     assert.doesNotMatch(roleLine, /CLAUDE\.md/);
-    assert.match(lib.machineRoleLine({ atClone: true, installedCopy: false, config: { machine_role: 'consumer' } }), /The Sterling layer in CLAUDE\.md's "this machine authors"/);
+    assert.match(lib.machineRoleLine({ atClone: true, installedCopy: false, config: { machine_role: 'consumer' } }), /The Sterling layer in AGENTS\.md's "this machine authors"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

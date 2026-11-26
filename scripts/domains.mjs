@@ -48,6 +48,7 @@ import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { buildDomainMap, renderDomainMap, UNIVERSAL_DOMAIN } from './lib/domain-map.mjs';
 import { refreshAgentsMdFacts, describeAgentsMdRefresh } from './lib/agents-md-facts.mjs';
+import { LayerMarkerError, readAgentsMd, writeAgentsMdChecked } from './lib/sterling-layer.mjs';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 const USAGE = 'usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]';
@@ -443,14 +444,33 @@ if (toAdd.length) {
   } else done.push('this project has no registry row, so the registry was not changed (run /sterling:init to register it)');
 
   // The two AGENTS.md lines that name the tags follow them, unless edited by hand (GitHub #158).
-  const agentsMdPath = join(project.dir, 'AGENTS.md');
-  if (existsSync(agentsMdPath)) {
+  // Read and written with the same checks as every AGENTS.md writer (a plain file, trusted markers,
+  // the whole planned file within agy's 24,000-byte cap). A refusal, or a file system error reading
+  // or writing it, writes nothing more and fails the run loudly, naming what was already applied.
+  const agentsMdNotUpdated = (why, lines = 'Stack tags and Domain stores lines') =>
+    refuse(`AGENTS.md was not updated (${why}). Already applied in this run: ${done.join('; ')}. Fix AGENTS.md, then update its ${lines} by hand.`);
+  const fsReason = (e) => {
+    if (e instanceof LayerMarkerError) return e.message;
+    if (typeof e?.code === 'string') return `${e.code}: ${e.message}`;
+    throw e;
+  };
+  let agentsFile;
+  try {
+    agentsFile = readAgentsMd(project.dir);
+  } catch (e) {
+    agentsMdNotUpdated(fsReason(e));
+  }
+  if (agentsFile.exists) {
     const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
-    const refresh = refreshAgentsMdFacts(readFileSync(agentsMdPath, 'utf8'), facts);
+    const refresh = refreshAgentsMdFacts(agentsFile.text, facts);
     if (refresh.refreshed.length) {
-      const tmpPath = `${agentsMdPath}.tmp-${process.pid}`;
-      writeFileSync(tmpPath, refresh.text);
-      renameSync(tmpPath, agentsMdPath);
+      let why;
+      try {
+        why = writeAgentsMdChecked(project.dir, refresh.text);
+      } catch (e) {
+        why = fsReason(e);
+      }
+      if (why) agentsMdNotUpdated(why, `${refresh.refreshed.join(' and ')} line${refresh.refreshed.length > 1 ? 's' : ''}`);
     }
     if (refresh.refreshed.length || refresh.kept.length) done.push(`AGENTS.md: ${describeAgentsMdRefresh(refresh, facts)}`);
     for (const k of refresh.kept) notes.push(`AGENTS.md's ${k.name} line was not rewritten (${k.reason}); update it by hand.`);

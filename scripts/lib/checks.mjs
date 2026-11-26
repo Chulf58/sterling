@@ -538,7 +538,7 @@ export function lintRecordCitations(content, label, resolve) {
 // free: on a secondary store, citations to ids this store did not mint mostly
 // fail to resolve at all (reported, not failed), so `hit` here is already
 // falsy and no currency warning is produced — no extra gating needed.
-export const POINTER_SURFACE_FILES = ['AGENTS.md', 'CLAUDE.md', 'templates/target-agents-md.md', 'templates/target-claude-md.md'];
+export const POINTER_SURFACE_FILES = ['AGENTS.md', 'CLAUDE.md', 'templates/target-agents-md.md', 'templates/target-claude-md.md', 'templates/sterling-layer-agents.md', 'templates/claude-session-block.md'];
 export const POINTER_SURFACE_PREFIXES = ['skills/', 'commands/'];
 
 export function isPointerSurface(file) {

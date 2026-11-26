@@ -95,7 +95,7 @@ test('runPostUpdateSteps: a consumer with a symlinked manifest, a directory sent
   for (const project of [withSymlinkedManifest(), withDirectorySentinel(), makeTree({ manifest: '{not json' })]) {
     calls.length = 0;
     assert.equal((await runPostUpdateSteps(root, project, runStep)).ok, true, project);
-    assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`], project);
+    assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`, `retire-host-files.mjs --target ${project}`], project);
   }
   const clone = makeTree();
   calls.length = 0;

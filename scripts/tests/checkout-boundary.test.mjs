@@ -39,7 +39,9 @@ before(async () => {
   main = join(base, 'main');
   mkdirSync(join(main, '.sterling'), { recursive: true });
   mkdirSync(join(main, 'src'), { recursive: true });
-  writeFileSync(join(main, '.sterling', 'config.json'), JSON.stringify({ project_name: 'boundary-fixture' }));
+  // tdd off: the posture line defaults to ON without a config, so OFF shows the worktree session
+  // read the main checkout's config.
+  writeFileSync(join(main, '.sterling', 'config.json'), JSON.stringify({ project_name: 'boundary-fixture', tdd: { enabled: false } }));
   writeFileSync(join(main, '.gitignore'), '.sterling/\n.claude/\n');
   writeFileSync(join(main, 'src', 'a.mjs'), 'export const a = 1;\n');
   const store = new SterlingStore(join(main, '.sterling', 'sterling.db'));
@@ -166,7 +168,10 @@ test('the plugin writes a worktree session\'s transient state into the worktree 
     await ctx.hooks.session.prompt(p);
     await ctx.hooks.session.context(input);
     const text = [...input.system.map((x) => x.text), p.prompt?.text ?? ''].join('\n');
-    assert.match(text, /# CLAUDE\.md — boundary-fixture \(Sterling layer\)/, 'the config is the main checkout\'s');
+    // The OpenCode layer no longer names the project (GitHub #329: the shared rules are AGENTS.md's
+    // generated section), so a config-driven live line proves which config was read.
+    assert.match(text, /TDD posture: tests-first OFF/, 'the config is the main checkout\'s');
+    assert.match(text, /## Sterling layer on OpenCode/, 'the layer is injected');
     assert.match(text, /STERLING STATUS: board 0 open, maintenance queue 0/, 'the board is the main store\'s');
     assert.match(text, /WORKTREE-NOTICE-1/, 'the worktree session reads its own notices');
     assert.doesNotMatch(text, /MAIN-NOTICE-2/, 'and never drains the main checkout\'s');

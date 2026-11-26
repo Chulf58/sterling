@@ -86,7 +86,7 @@ test('bin bundles: one per BIN_ENTRIES member, node: imports only, source identi
     // plus the stamp-contract bullet history and the launcher template history an installed
     // copy reads in place of git (buildBins), and the Postgres worker every bin bundle that
     // contains the store spawns from beside it (board 6be7b53f)
-    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json', 'pg-worker.js'].sort());
+    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json', 'host-file-history.json', 'pg-worker.js'].sort());
     assert.deepEqual(JSON.parse(readFileSync(join(binDir, 'launcher-history.json'), 'utf8')), JSON.parse(launcherHistorySnapshot({ repoRoot: root })));
     for (const file of readdirSync(binDir)) {
       const src = readFileSync(join(binDir, file), 'utf8');

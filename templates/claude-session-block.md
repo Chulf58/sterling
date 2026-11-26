@@ -1,0 +1,11 @@
+STERLING LAYER (Claude Code). Shared rules are in AGENTS.md under "Sterling layer"; ignore its agy-only part. Claude Code adds:
+- Ask through the AskUserQuestion tool. A ruling exists only if it came through that form.
+- Retrieval: H19 puts an owning article into context when you touch its file. It never blocks and misses unowned territory, so still `knowledge_query` first.
+- H7 mints a `reconcile_needed` item for a touched article. H10 holds capture, owning-article, concept-article (`concept_designed`) and research duties at Stop; `no_capture` clears capture only.
+- Store writes: MCP tools only; H15 denies shell writes to `.sterling/sterling.db`. If the MCP server lags the code, restart the session.
+- H22 reads `REVIEW-TERRITORY: [...]` from dispatch briefs and warns on a reviewer brief without it.
+- Run `sterling:de-ai-writing` on prose before it ships.
+- Report Sterling defects with `/sterling:report-issue`; the Sterling root is the STERLING ROOT line above.
+- At a clean boundary print `READY TO CLEAR` on its own line (`EXIT AND RELAUNCH` if hook or MCP code changed).
+- If Claude Code's hook or frontmatter behavior contradicts a record, stop and report it.
+- Launched with `--strict-mcp-config`, user-scope MCP entries are silently dropped; check scope if a tool is missing.

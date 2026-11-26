@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { contractHistoryJson } from './contract-bullets.mjs';
 import { launcherHistorySnapshot } from './launcher-history.mjs';
+import { hostFileHistorySnapshot } from './sterling-layer.mjs';
 
 // Banner for bundles that inline CommonJS dependencies: esbuild's ESM output
 // has no `require`, so a bundled CJS module's require() of a node builtin
@@ -404,6 +405,8 @@ export const BIN_ENTRIES = {
   // the one-way board-to-GitHub-issues mirror skills/sync-board-issues/SKILL.md runs in any consumer project
   'sync-board-issues': 'scripts/sync-board-issues.mjs',
   update: 'scripts/update.mjs',
+  // the last step of an update: remove a CLAUDE.md / GEMINI.md that holds only Sterling's current render (GitHub #329)
+  'retire-host-files': 'scripts/retire-host-files.mjs',
   // multi-session toolkit slice 3: wake another registered project's owner session; --set-owner, --show-owners
   'wake-project': 'scripts/wake-project.mjs',
 };
@@ -417,9 +420,11 @@ export const BIN_ENTRIES = {
 // it leaves out the current template blocks, so a template commit does not make bin/ stale.
 // outDir/launcher-history.json is the same for the launcher templates: the earlier versions
 // init matches an existing launcher against (scripts/lib/launcher-history.mjs).
+// outDir/host-file-history.json holds fingerprints of earlier CLAUDE.md / GEMINI.md renders and
+// the pre-split heads, which init and update check old host files against (scripts/lib/sterling-layer.mjs).
 // Returns the emitted absolute paths.
 export async function buildBins({ root, outDir, extraEntries = EXTRA_ENTRIES.bin }) {
-  checkExtraEntries('buildBins', extraEntries, [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json']);
+  checkExtraEntries('buildBins', extraEntries, [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json', 'host-file-history.json']);
   const emitted = [];
   for (const [name, entry] of Object.entries(BIN_ENTRIES)) {
     const outFile = join(outDir, `${name}.mjs`);
@@ -444,6 +449,9 @@ export async function buildBins({ root, outDir, extraEntries = EXTRA_ENTRIES.bin
   const launcherHistoryFile = join(outDir, 'launcher-history.json');
   writeFileSync(launcherHistoryFile, launcherHistorySnapshot({ repoRoot: root }));
   emitted.push(launcherHistoryFile);
+  const hostFileHistoryFile = join(outDir, 'host-file-history.json');
+  writeFileSync(hostFileHistoryFile, hostFileHistorySnapshot({ repoRoot: root }));
+  emitted.push(hostFileHistoryFile);
   emitted.push(...(await emitExtraEntries({ root, outDir, extraEntries, generator: 'scripts/build-bin.mjs' })));
   return emitted;
 }

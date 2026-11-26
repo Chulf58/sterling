@@ -8,14 +8,39 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, rmSync, existsSync, lstatSync, symlinkSync } from 'node:fs';
+import { refreshAgentsMdKnowledge, renderKnowledgeSection } from '../lib/agents-md-facts.mjs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, isGeneratedTrackedPath, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV, failingTests } from '../lib/update.mjs';
+import { readCurrency, refusalFor, isGeneratedTrackedPath, currencyLine, gitFrom, defaultExec, runUpdate as runUpdateWith, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV, failingTests } from '../lib/update.mjs';
+import { stampProjects } from '../lib/stamp-projects.mjs';
 import { BUNDLED_ARTIFACTS } from '../lib/bundled-artifacts.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
+
+/**
+ * A stand-in for the in-process contract stamper (scripts/lib/stamp-projects.mjs): it records the
+ * rows and options it was given (and, with `calls`, a `stamp <repo_path>...` line in the exec log,
+ * so step order can be asserted) and returns one structured result per row, `resultFor(row)`
+ * merged over an in-sync result. A `resultFor` that throws is a stamper crash.
+ */
+function fakeStamp({ calls = null, resultFor = () => ({}) } = {}) {
+  const stamped = [];
+  const stamp = (rows, o) => {
+    stamped.push({ rows: rows.map((r) => r.repo_path), opts: o });
+    calls?.push(`stamp ${rows.map((r) => r.repo_path).join(' ')}`);
+    return rows.map((row) => {
+      const r = { row, project: row.name, path: join(row.dir ?? row.repo_path, 'AGENTS.md'), status: 'in_sync', actions: [], reason: null, ...resultFor(row) };
+      o.onResult?.(r);
+      return r;
+    });
+  };
+  return { stamp, stamped };
+}
+// Every runUpdate here gets an in-sync stamper unless the test passes its own, as every
+// fakeExec answered the old stamp-contract child with an in-sync run.
+const runUpdate = (o) => runUpdateWith({ stamp: fakeStamp().stamp, ...o });
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
 
@@ -199,7 +224,7 @@ test('describe surfaces an annotated tag as the human-legible version; no tags s
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 
-function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, contractStatus = 0, head = HEAD_A, remoteHead = head, lsRemote = null, mergeBase = null } = {}) {
+function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, retireStdout = '', head = HEAD_A, remoteHead = head, lsRemote = null, mergeBase = null } = {}) {
   const calls = [];
   let merged = false;
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -230,9 +255,8 @@ function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = n
       return ok('');
     }
     if (cmd === 'npm') return ok('npm output');
-    // stamp-contract exits 2 on a refusal it will not auto-resolve
-    if (args[0]?.endsWith('stamp-contract.mjs')) {
-      return { status: contractStatus, stdout: contractStatus ? '✗ comsoft: HAND_TUNED_REFUSED\n' : '7 already in sync, 0 refusal(s).\n', stderr: '' };
+    if (args[0]?.endsWith('retire-host-files.mjs')) {
+      return { status: 0, stdout: retireStdout, stderr: '' };
     }
     // node <script> --target <dir>
     if (args[0]?.endsWith('sync-agents.mjs')) {
@@ -498,6 +522,147 @@ test('fan-out: config migration lines are relayed once with the warning mark and
     assert.doesNotMatch(log, /Dome: .*config migration/, 'the project line still reads as no agent changes');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The Sterling layer in AGENTS.md (GitHub #329, review finding 6): sync-agents' layer lines are
+// relayed on success, never dropped, and a layer refusal fails the project with its reason.
+test('fan-out: the retire step\'s receipts (a kept CLAUDE.md, a removed GEMINI.md) are relayed once each; routine layer lines are not', async () => {
+  const cwd = scratchCwd();
+  try {
+    const kept = "⚠ Sterling layer: CLAUDE.md holds text that is not Sterling's generated layer, so it was kept. Claude Code ignores AGENTS.md (including the Sterling layer) while a CLAUDE.md exists. Move your rules into AGENTS.md outside the sterling:begin/sterling:end markers, then delete CLAUDE.md.";
+    const removed = "Sterling layer: GEMINI.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec, calls } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\nSterling layer: AGENTS.md regenerated\n', retireStdout: `${kept}\n${removed}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 0);
+    assert.ok(calls.some((c) => c.includes('retire-host-files.mjs --target /tmp/dome')), 'the receipts come from the retire step');
+    assert.equal(report.projects[0].changed, 0, 'layer lines are not agent changes');
+    const log = lines.join('\n');
+    for (const line of [kept, removed]) assert.equal(log.split(line).length - 1, 1, `relayed exactly once: ${line}\n${log}`);
+    assert.ok(!log.includes('AGENTS.md regenerated'), log);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('fan-out: a Sterling layer refusal (sync-agents exit 2) fails the project and shows the refusal', async () => {
+  const cwd = scratchCwd();
+  try {
+    const refused = "✗ Sterling layer REFUSED: AGENTS.md would be 27,738 bytes with the Sterling layer, over agy's 24,000-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed.";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 2, syncStdout: `up_to_date: scout\n${refused}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 2);
+    const log = lines.join('\n');
+    assert.match(log, /Dome: agent sync REFUSED .*Sterling layer refusal in AGENTS\.md/);
+    assert.ok(log.includes(refused), log);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Review loop 2 of #329, findings 3 and 4: after a layer refusal nothing else writes AGENTS.md,
+// and the Knowledge refresh never follows a symlinked AGENTS.md.
+function knowledgeProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-knowledge-'));
+  mkdirSync(join(dir, '.sterling'));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ handoff: { enabled: false } }));
+  return dir;
+}
+const projectedAgentsMd = () => renderKnowledgeSection(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'target-agents-md.md'), 'utf8'), true);
+
+test('fan-out: after a Sterling layer refusal the Knowledge section is not rewritten — AGENTS.md is byte-identical', async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  try {
+    const agents = projectedAgentsMd();
+    assert.notEqual(refreshAgentsMdKnowledge(agents, false).text, agents, 'fixture: the handoff-off refresh would rewrite this AGENTS.md');
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    const refused = "✗ Sterling layer REFUSED: AGENTS.md would be 27,738 bytes with the Sterling layer, over agy's 24,000-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed.";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 2, syncStdout: `up_to_date: scout\n${refused}\n` });
+    const lines = [];
+    await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents);
+    assert.match(lines.join('\n'), /Knowledge section not checked: the Sterling layer in AGENTS\.md was refused above/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #329 re-check loop 2, H: a layer write I/O failure (EACCES, EFBIG) makes sync-agents exit 1 with
+// no refusal line. The Knowledge pass must not write AGENTS.md either; the project stays failed.
+test('fan-out: after sync-agents fails with no layer refusal line (exit 1) the Knowledge section is not rewritten — AGENTS.md is byte-identical, the project fails', async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  try {
+    const agents = projectedAgentsMd();
+    assert.notEqual(refreshAgentsMdKnowledge(agents, false).text, agents, 'fixture: the handoff-off refresh would rewrite this AGENTS.md');
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 1, syncStdout: `Error: EFBIG: file too large, write '${join(dir, 'AGENTS.md')}.tmp'\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `nothing else writes the file:\n${log}`);
+    assert.match(log, /⚠ AGENTS\.md Knowledge section not updated: sync-agents did not succeed above \(exit 1\)/);
+    assert.equal(report.projects[0].knowledge, 'not_updated');
+    assert.equal(report.exit, 1, 'the failed agent sync fails the update');
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fan-out: the Knowledge refresh never follows a symlinked AGENTS.md — link and target unchanged, and it says why', async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  const outside = mkdtempSync(join(tmpdir(), 'sterling-update-outside-'));
+  try {
+    const agents = projectedAgentsMd();
+    writeFileSync(join(outside, 'AGENTS.md'), agents);
+    symlinkSync(join(outside, 'AGENTS.md'), join(dir, 'AGENTS.md'));
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\n' });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    assert.equal(readFileSync(join(outside, 'AGENTS.md'), 'utf8'), agents);
+    assert.ok(lstatSync(join(dir, 'AGENTS.md')).isSymbolicLink());
+    // A Knowledge writer refusal is a failed project refresh (review loop 4 of #329, ruling R2).
+    assert.match(lines.join('\n'), /✗ AGENTS\.md Knowledge section REFUSED: AGENTS\.md is not a plain file in the project/);
+    assert.equal(report.exit, 2);
+    assert.equal(report.projects[0].knowledge, 'refused');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+// Review loop 5 of #329: a file system error from the Knowledge writer (here EACCES on a read-only
+// project directory, as EROFS on a read-only mount) is a failed project refresh, never a warning.
+test('fan-out: a Knowledge section that cannot be written (read-only project dir) fails the project refresh', { skip: process.getuid?.() === 0 && 'root ignores directory permissions' }, async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  try {
+    const agents = projectedAgentsMd();
+    assert.notEqual(refreshAgentsMdKnowledge(agents, false).text, agents, 'fixture: the handoff-off refresh would rewrite this AGENTS.md');
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    chmodSync(dir, 0o555);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: 'up_to_date: scout\n' });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, 'nothing was written');
+    assert.match(log, /✗ AGENTS\.md Knowledge section NOT updated: .*EACCES/, log);
+    assert.doesNotMatch(log, /Knowledge section not checked/);
+    assert.equal(report.projects[0].knowledge, 'failed');
+    assert.equal(report.exit, 2);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    chmodSync(dir, 0o755);
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -804,33 +969,46 @@ test('a green test battery run is unchanged: migration still runs (machine + per
   }
 });
 
-// The stamp-contract step is deliberately TOLERATED (a sibling's CLAUDE.md must
-// never abort this clone's update) — but tolerated used to mean its verdict lived
-// only in a block sandwiched between build/test/check output. The closing summary
-// now repeats it, so a refusal cannot scroll past (P1/P5).
+// The contract step is deliberately TOLERATED (a sibling's AGENTS.md must never abort this clone's
+// update) — but tolerated used to mean its verdict lived only in a block sandwiched between
+// build/test/check output. The closing summary now repeats it, so a refusal cannot scroll past
+// (P1/P5). Since the #329 rebuild (decision
+// 329-rebuild-how-sterling-update-stamps-sibling-projects-as-o) the stamper runs in-process and
+// returns one structured result per row; these tests pass a fakeStamp that returns the result.
+const HAND_TUNED = () => ({ status: 'refused', actions: [{ lead: '- **Anti-speculation:**', action: 'HAND_TUNED_REFUSED', file: 'AGENTS.md', have: '- **Anti-speculation:** This project tunes the rest of the rule its own hand-edited way.' }] });
 test('sibling contract drift is tolerated but repeated in the closing summary, never only in the scrolled-past block', async () => {
-  for (const [contractStatus, expectDrift] of [
-    [2, true],
-    [0, false],
+  for (const [expectDrift, resultFor] of [
+    [true, HAND_TUNED],
+    [false, () => ({})],
   ]) {
     const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-contract-'));
+    const project = mkdtempSync(join(tmpdir(), 'sterling-update-drift-project-'));
     try {
       mkdirSync(join(cwd, 'scripts'), { recursive: true });
       writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
-      const { exec, calls } = fakeExec({ behind: 1, contractStatus });
+      const { exec } = fakeExec({ behind: 1 });
+      const { stamp, stamped } = fakeStamp({ resultFor });
       const lines = [];
-      const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [], opts: {} });
+      const report = await runUpdate({ cwd, exec, stamp, log: (m) => lines.push(m), projects: [{ name: 'p', repo_path: project }], opts: {} });
       const out = lines.join('\n');
 
-      assert.ok(calls.some((c) => c.includes('stamp-contract.mjs')), 'the dry run runs either way');
-      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
+      assert.deepEqual(stamped.map((s) => s.rows), [[project]], 'the stamper runs once, for the refreshed project');
+      assert.equal(stamped[0].opts.applyInserts, true, 'new text is inserted, wording is never replaced: applyInserts');
+      assert.ok(!stamped[0].opts.apply, 'never the full apply');
+      assert.equal(stamped[0].opts.repoRoot, cwd, "the templates are the updated clone's");
       assert.equal(report.contract_drift, expectDrift, 'the report carries the verdict for callers');
-      assert.equal(report.exit, 0, "a sibling's CLAUDE.md never blocks this clone's update");
+      assert.equal(report.exit, 0, "a sibling's AGENTS.md never blocks this clone's update");
+      assert.doesNotMatch(out, /✗ p: stamp-contract could not update AGENTS\.md/, 'hand-tuned text is drift, never a failed stamp');
       assert.equal(/CONTRACT DRIFT/.test(out), expectDrift, 'the summary names drift only when there is drift');
-      if (expectDrift) assert.match(out, /stamp-contract\.mjs --apply/, 'and names the command that fixes it');
+      if (expectDrift) {
+        assert.match(out, /stamp-contract\.mjs --apply/, 'and names the command that fixes it');
+        assert.match(out, new RegExp(`^✗ p \\(${join(project, 'AGENTS.md').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)\\n {4}HAND_TUNED_REFUSED {2}- \\*\\*Anti-speculation`, 'm'), 'the stamper block is logged');
+      }
+      assert.match(out, /INSERTS APPLIED .* 1 project\(s\) processed/, 'the summary line is logged');
       assert.match(out, /RESTART THE SESSION/, 'the restart instruction survives either way');
     } finally {
       rmSync(cwd, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
     }
   }
 });
@@ -851,13 +1029,427 @@ function authoringCwd(role = 'authoring') {
   return cwd;
 }
 
+// Review loop 3 of #329 (ruling C): host files are checked for removal only after the contract
+// step, the last AGENTS.md writer; a stamper refusal to update AGENTS.md itself fails the update.
+test('authoring role: retire-host-files runs after the contract stamp for the invoking project and its lines are relayed', async () => {
+  const cwd = authoringCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-retire-'));
+  try {
+    const removed = "Sterling layer: CLAUDE.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec, calls } = fakeExec({ retireStdout: `${removed}\n` });
+    const { stamp } = fakeStamp({ calls });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dir }], invokingProject: dir, opts: {} });
+    assert.equal(report.exit, 0);
+    const stamped = calls.indexOf(`stamp ${dir}`);
+    const retire = calls.findIndex((c) => c.includes('retire-host-files.mjs'));
+    assert.ok(stamped !== -1 && retire > stamped, `retirement runs after the contract step:\n${calls.join('\n')}`);
+    assert.match(calls[retire], new RegExp(`--target ${dir}$`));
+    assert.ok(lines.join('\n').includes(removed));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Review loop 4 of #329 (ruling R2): a write or safety refusal and a crash of the stamper on the
+// target each fail the update; the retire step still runs last (R1). A stale path is a named skip.
+for (const [label, resultFor, exit, pattern] of [
+  ['a PLANNED_AGENTS_MD_REFUSED (planned file over the cap)', () => ({ status: 'refused', actions: [{ lead: 'AGENTS.md (write)', action: 'PLANNED_AGENTS_MD_REFUSED', file: 'AGENTS.md', detail: "AGENTS.md would be 24,310 bytes with the Sterling layer, over agy's 24,000-byte cap. Nothing in AGENTS.md was changed." }] }), 2, /✗ dome: stamp-contract could not update AGENTS\.md \(PLANNED_AGENTS_MD_REFUSED .*24,310 bytes/],
+  ['a WRITE_FAILED_REFUSED', () => ({ status: 'refused', actions: [{ lead: 'AGENTS.md (write)', action: 'WRITE_FAILED_REFUSED', file: 'AGENTS.md', detail: 'AGENTS.md could not be written (EACCES: permission denied).' }] }), 2, /✗ dome: stamp-contract could not update AGENTS\.md \(WRITE_FAILED_REFUSED .*EACCES/],
+  ['a crash', () => {
+    throw new TypeError('boom');
+  }, 1, /✗ stamp-contract crashed — instruction files were not checked: TypeError: boom/],
+]) {
+  test(`authoring role: ${label} from the stamper fails the update (exit ${exit}); the retire step still runs last`, async () => {
+    const cwd = authoringCwd();
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-update-retire-'));
+    try {
+      const { exec, calls } = fakeExec();
+      const { stamp } = fakeStamp({ calls, resultFor });
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dir }], invokingProject: dir, opts: {} });
+      assert.equal(report.exit, exit, lines.join('\n'));
+      assert.match(lines.join('\n'), pattern);
+      assert.equal(calls.filter((c) => c.includes('retire-host-files.mjs')).length, 1, 'retirement runs on its own on-disk checks');
+      assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > calls.indexOf(`stamp ${dir}`));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// A crash part-way still judges the projects stamped before it, as the old child's output was
+// judged up to where it died.
+test('fan-out: a stamper crash after one project still fails that project for its write refusal', async () => {
+  const cwd = contractCwd();
+  try {
+    const { exec } = fakeExec({ behind: 1 });
+    const resultFor = (row) => {
+      if (row.name === 'second') throw new Error('boom');
+      return { status: 'refused', actions: [{ lead: 'AGENTS.md (write)', action: 'WRITE_FAILED_REFUSED', file: 'AGENTS.md', detail: 'EACCES' }] };
+    };
+    const { stamp } = fakeStamp({ resultFor });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'first', repo_path: '/tmp/first' }, { name: 'second', repo_path: '/tmp/second' }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(report.exit, 1, log);
+    assert.match(log, /✗ stamp-contract crashed — instruction files were not checked past the 1 project\(s\) above: Error: boom/);
+    assert.match(log, /✗ first: stamp-contract could not update AGENTS\.md \(WRITE_FAILED_REFUSED AGENTS\.md \(write\) — EACCES\)/);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a stale path the stamper skips is named and never fails the update', async () => {
+  const cwd = authoringCwd();
+  try {
+    const { exec } = fakeExec();
+    const { stamp, stamped } = fakeStamp({ resultFor: () => ({ status: 'skipped', reason: 'stale_path' }) });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    const log = lines.join('\n');
+    assert.deepEqual(stamped.map((s) => s.rows), [['/tmp/p']]);
+    assert.equal(report.exit, 0, log);
+    assert.match(log, /^– p \(\/tmp\/p\/AGENTS\.md\): skipped — the registered path does not exist \(a stale registry entry\); nothing stamped$/m);
+    assert.doesNotMatch(log, /could not update AGENTS\.md|CONTRACT DRIFT/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Review loop 5 of #329: a project the stamper could not check (a legacy project with only
+// CLAUDE.md is not_migrated) fails the update, on the full path and on the already-current path, so
+// a stamp that failed after the completion marker was written is reached again on the next run.
+const notMigrated = (row) => (row.name === 'legacy' ? { status: 'not_migrated', reason: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${row.repo_path}` } : {});
+function contractCwd() {
+  const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-contract-'));
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
+  return cwd;
+}
+
+test('fan-out: a not_migrated project from the stamper fails the update (exit 2) and is named; a project it checked is not', async () => {
+  const cwd = contractCwd();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1 });
+    const { stamp, stamped } = fakeStamp({ calls, resultFor: notMigrated });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'legacy', repo_path: '/tmp/legacy' }, { name: 'dome', repo_path: '/tmp/dome' }], opts: {} });
+    const log = lines.join('\n');
+    assert.deepEqual(stamped.map((s) => s.rows), [['/tmp/legacy', '/tmp/dome']], 'one call with both refreshed rows');
+    assert.equal(report.exit, 2, log);
+    assert.match(log, /✗ legacy: stamp-contract could not update AGENTS\.md \(not_migrated — no AGENTS\.md — run: /);
+    assert.match(log, /^✗ legacy \(\/tmp\/legacy\/AGENTS\.md\): not_migrated \(no AGENTS\.md/m, 'the stamper block names it too');
+    assert.doesNotMatch(log, /✗ dome: stamp-contract/);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+    assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > calls.findIndex((c) => c.startsWith('stamp ')));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('already current: the stamper runs for the registered projects, so a not_migrated project still fails the update on the next run', async () => {
+  const cwd = contractCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const { exec, calls } = fakeExec({ behind: 0 });
+    const { stamp, stamped } = fakeStamp({ calls, resultFor: notMigrated });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'legacy', repo_path: '/tmp/legacy' }], opts: {} });
+    const log = lines.join('\n');
+    assert.deepEqual(stamped.map((s) => s.rows), [['/tmp/legacy']], `the already-current refresh stamps:\n${calls.join('\n')}`);
+    assert.equal(stamped[0].opts.applyInserts, true, 'inserts only');
+    assert.ok(calls.findIndex((c) => c.includes('retire-host-files.mjs')) > calls.indexOf('stamp /tmp/legacy'), 'retirement stays the last step');
+    assert.equal(report.exit, 2, log);
+    assert.match(log, /✗ legacy: stamp-contract could not update AGENTS\.md \(not_migrated/);
+    assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')), log);
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Review loop 7 of #329: the contract step stamps and judges ONE explicit target set: the refreshed
+// projects that passed the pre-write checks, minus any Sterling source tree. A project refused
+// before any write (here an invalid handoff setting) and a second registered Sterling checkout are
+// not stamped, on the full path and on the already-current path.
+function stampSetFixture() {
+  const refused = mkdtempSync(join(tmpdir(), 'sterling-update-refused-'));
+  mkdirSync(join(refused, '.sterling'));
+  writeFileSync(join(refused, '.sterling', 'config.json'), JSON.stringify({ handoff: { enabled: 'yes' } }));
+  const checkout = mkdtempSync(join(tmpdir(), 'sterling-update-second-checkout-'));
+  mkdirSync(join(checkout, '.claude-plugin'));
+  writeFileSync(join(checkout, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+  mkdirSync(join(checkout, 'scripts'));
+  writeFileSync(join(checkout, 'scripts', 'architecture-projection.mjs'), '');
+  const projects = [{ name: 'refused', repo_path: refused }, { name: 'checkout', repo_path: checkout }, { name: 'dome', repo_path: '/tmp/dome' }];
+  return { projects, refused, checkout };
+}
+for (const [label, behind] of [['full path', 1], ['already current', 0]]) {
+  test(`${label}: the stamper gets exactly the projects that passed the pre-write checks and are not a Sterling source tree, and those are judged`, async () => {
+    const cwd = contractCwd();
+    const f = stampSetFixture();
+    try {
+      if (!behind) seedUpdateMarker(cwd, HEAD_A);
+      const { exec, calls } = fakeExec({ behind, changed: ['packages/store/src/index.ts'] });
+      const { stamp, stamped } = fakeStamp({ resultFor: () => ({ status: 'not_migrated', reason: 'no AGENTS.md' }) });
+      const lines = [];
+      await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: f.projects, opts: {} });
+      const log = lines.join('\n');
+      assert.deepEqual(stamped.map((s) => s.rows), [['/tmp/dome']], 'one call, the one target');
+      assert.match(log, /✗ dome: stamp-contract could not update AGENTS\.md \(not_migrated/, 'the verdict is read for the stamped row');
+      assert.doesNotMatch(log, /✗ (refused|checkout): stamp-contract/, 'and for no other');
+      assert.match(log, /✗ refused: REFUSED — handoff setting/, 'fixture: the project was refused before any write');
+      assert.match(log, /• checkout: a Sterling source tree — its contract files are hand-maintained, not stamped/);
+      assert.ok(!calls.some((c) => c.includes(`retire-host-files.mjs --target ${f.checkout}`)), 'no host file is retired in a source tree');
+    } finally {
+      for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+test('full path: with no project left to stamp, the stamper is not called', async () => {
+  const cwd = contractCwd();
+  const f = stampSetFixture();
+  try {
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'] });
+    const { stamp, stamped } = fakeStamp();
+    const lines = [];
+    await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: f.projects.slice(0, 2), opts: {} });
+    assert.deepEqual(stamped, []);
+    assert.doesNotMatch(lines.join('\n'), /contract text in sibling projects/, 'no contract step is announced');
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// The same list, stamped for real: a registered main checkout and its registered linked worktree are
+// two rows and each is stamped in its own directory (review loop 8 of #329), and a row refused by
+// the pre-write checks is not stamped. The stamper reads this repository's templates.
+test('full path, real stamper: a registered main checkout and its registered linked worktree are both stamped; a refused project is not', async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const cwd = contractCwd();
+  const f = stampSetFixture();
+  const main = mkdtempSync(join(tmpdir(), 'sterling-update-main-'));
+  const wt = `${main}-wt`;
+  try {
+    const agents = '# AGENTS.md\n\n## Conduct rules\n\n- A rule of this project.\n\n## Conventions\n\nNone.\n';
+    writeFileSync(join(main, 'AGENTS.md'), agents);
+    git(main, ['init', '-q']);
+    git(main, ['add', '.']);
+    git(main, ['commit', '-q', '-m', 'seed']);
+    git(main, ['worktree', 'add', '-q', wt, '-b', 'wt-branch']);
+    writeFileSync(join(f.refused, 'AGENTS.md'), agents);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'] });
+    const stamp = (rows, o) => stampProjects(rows, { ...o, repoRoot });
+    const lines = [];
+    await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'main', repo_path: main }, { name: 'main-wt', repo_path: wt }, f.projects[0]], opts: {} });
+    const log = lines.join('\n');
+    for (const dir of [main, wt]) {
+      const after = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+      assert.notEqual(after, agents, `${dir} is stamped:\n${log}`);
+      assert.match(after, /^## Domains$/m, `${dir} gains the Domains section`);
+    }
+    assert.match(log, /^[✗•] main \(.*-main-[^/]*\/AGENTS\.md\)\n {4}section_inserted {2}## Domains/m, 'each row is its own block');
+    assert.match(log, /^[✗•] main-wt \(.*-wt\/AGENTS\.md\)\n {4}section_inserted {2}## Domains/m);
+    assert.equal(readFileSync(join(f.refused, 'AGENTS.md'), 'utf8'), agents, 'the refused project is not stamped');
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout, wt, main]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// #329 fix round, finding 7: after the Sterling layer writer refused a project's AGENTS.md, nothing
+// else writes that file. The contract step still checks and judges the row, as a dry run.
+test('full path, real stamper: a project whose Sterling layer was refused is stamped as a dry run, its AGENTS.md is not written', async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const cwd = contractCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-layer-refused-'));
+  try {
+    const agents = '# AGENTS.md\n\n## Conduct rules\n\n- A rule of this project.\n\n## Conventions\n\nNone.\n';
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    const refusedLine = "✗ Sterling layer REFUSED: AGENTS.md would be 24,310 bytes with the Sterling layer, over agy's 24,000-byte cap. Fix it, then rerun /sterling:update.";
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 2, syncStdout: `${refusedLine}\n` });
+    const rows = [];
+    const stamp = (r, o) => {
+      rows.push(...r);
+      return stampProjects(r, { ...o, repoRoot });
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'capped', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `nothing else writes the file:\n${log}`);
+    assert.deepEqual(rows.map((r) => [r.repo_path, r.readOnly]), [[dir, true]], 'the row is still checked, read-only');
+    assert.match(log, /^[✗•] capped \(.*\/AGENTS\.md\)\n {4}would_insert_section {2}## Domains/m, 'and reported as a dry run');
+    assert.equal(report.exit, 2, 'the layer refusal fails the project');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #329 re-check, gap 1: the layer writer can also fail on I/O. In a project directory that cannot be
+// written (the layer's atomic write cannot create its temp file) sync-agents exits 1 with no
+// refusal line, while AGENTS.md itself stays writable in place. The contract step must still only
+// check that row.
+test('full path, real stamper: sync-agents failing (exit 1, no refusal line) in a non-writable project dir leaves a writable AGENTS.md byte-identical', { skip: process.getuid?.() === 0 && 'root writes into a read-only directory' }, async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const cwd = contractCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-layer-eacces-'));
+  try {
+    const agents = '# AGENTS.md\n\n## Conduct rules\n\n- A rule of this project.\n\n## Conventions\n\nNone.\n';
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    chmodSync(dir, 0o555);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 1, syncStdout: `Error: EACCES: permission denied, open '${join(dir, 'AGENTS.md')}.tmp'\n` });
+    const rows = [];
+    const stamp = (r, o) => {
+      rows.push(...r);
+      return stampProjects(r, { ...o, repoRoot });
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'eacces', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `nothing else writes the file:\n${log}`);
+    assert.deepEqual(rows.map((r) => [r.repo_path, r.readOnly]), [[dir, true]], 'the row is still checked, read-only');
+    assert.match(log, /^[✗•] eacces \(.*\/AGENTS\.md\)\n {4}would_insert_section {2}## Domains/m);
+    assert.equal(report.exit, 1, 'the failed agent sync fails the update');
+  } finally {
+    chmodSync(dir, 0o755);
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a second registered Sterling checkout as the invoking project is synced, but the stamper is not run on it', async () => {
+  const cwd = authoringCwd();
+  const f = stampSetFixture();
+  try {
+    const { exec } = fakeExec();
+    const { stamp, stamped } = fakeStamp();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'checkout', repo_path: f.checkout }], invokingProject: f.checkout, opts: {} });
+    assert.equal(report.exit, 0, lines.join('\n'));
+    assert.deepEqual(stamped, []);
+    assert.match(lines.join('\n'), /this Sterling source tree's contract files are hand-maintained — not checked/);
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: an invoking project refused before any write gets no stamp', async () => {
+  const cwd = authoringCwd();
+  const f = stampSetFixture();
+  try {
+    const { exec } = fakeExec();
+    const { stamp, stamped } = fakeStamp();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'refused', repo_path: f.refused }], invokingProject: f.refused, opts: {} });
+    assert.equal(report.exit, 2, lines.join('\n'));
+    assert.deepEqual(stamped, []);
+    assert.match(lines.join('\n'), /contract text not stamped: the project was refused above, before any write/);
+  } finally {
+    for (const d of [cwd, f.refused, f.checkout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// Review loop 5 of #329: the authoring update syncs Sterling's own checkout, whose hand-maintained
+// AGENTS.md is close enough to agy's cap that adding the layer would pass it. sync-agents (run for
+// real here) leaves a Sterling source tree's AGENTS.md alone, so the update succeeds; the control
+// shows the same file in an ordinary project is refused for the cap.
+test('authoring role: updating a Sterling source tree whose AGENTS.md plus the layer is over the cap succeeds and leaves AGENTS.md byte-identical', async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const home = mkdtempSync(join(tmpdir(), 'sterling-update-home-'));
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_STATE_HOME: join(home, '.state'), STERLING_OPENCODE_SETUP_DISABLE: '1', STERLING_AGY_SETUP_DISABLE: '1', STERLING_CLAUDE_PROBE: 'absent' };
+  delete env.OPENCODE;
+  delete env.OPENCODE_SESSION_ID;
+  const realSync = (target) => spawnSync(process.execPath, [join(repoRoot, 'scripts', 'sync-agents.mjs'), '--target', target], { encoding: 'utf8', env });
+  const agents = `# AGENTS.md — hand-maintained\n\n${'- **A rule.** Kept as written.\n'.repeat(700)}`;
+  const tree = (sourceTree) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-update-source-tree-'));
+    mkdirSync(join(dir, '.sterling'));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring', handoff: { enabled: false } }));
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(join(dir, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
+    if (sourceTree) {
+      mkdirSync(join(dir, '.claude-plugin'));
+      writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0' }));
+      writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '');
+    }
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    return dir;
+  };
+  const cwd = tree(true);
+  const control = tree(false);
+  try {
+    assert.ok(Buffer.byteLength(agents) < 24_000, 'fixture: the hand-maintained file alone is under the cap');
+    const refused = realSync(control);
+    assert.equal(refused.status, 2, `control: the layer would push this AGENTS.md over the cap:\n${refused.stdout}${refused.stderr}`);
+    assert.match(refused.stdout, /✗ Sterling layer REFUSED: AGENTS\.md would be [\d,]+ bytes with the Sterling layer, over agy's 24,000-byte cap/);
+
+    const { exec: fake, calls } = fakeExec();
+    const exec = (cmd, args, o) => {
+      if (!args[0]?.endsWith('sync-agents.mjs')) return fake(cmd, args, o);
+      calls.push(`${cmd} ${args.join(' ')}`);
+      return realSync(args[2]);
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'sterling', repo_path: cwd }], invokingProject: cwd, opts: {} });
+    const log = lines.join('\n');
+    assert.ok(calls.some((c) => c.includes(`sync-agents.mjs --target ${cwd}`)), calls.join('\n'));
+    assert.equal(report.exit, 0, log);
+    assert.doesNotMatch(log, /Sterling layer REFUSED/);
+    assert.equal(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), agents, 'the source tree\'s AGENTS.md is not touched');
+    assert.equal(calls.filter((c) => c.includes('retire-host-files.mjs')).length, 0, 'no host file is retired in a source tree');
+  } finally {
+    for (const d of [cwd, control, home]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('already current: the refresh runs the retire step for each project and relays its receipts', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const removed = "Sterling layer: CLAUDE.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec, calls } = fakeExec({ behind: 0, retireStdout: `${removed}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 0, lines.join('\n'));
+    assert.ok(calls.some((c) => c.includes('retire-host-files.mjs --target /tmp/dome')), calls.join('\n'));
+    assert.ok(lines.join('\n').includes(removed));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('the retire step\'s receipts are relayed even when it exits non-zero, and the update fails', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const removed = "Sterling layer: CLAUDE.md removed — held only Sterling's generated text; the layer now lives in AGENTS.md";
+    const { exec } = fakeExec({ behind: 0, retireStdout: `${removed}\n` });
+    const failing = (cmd, args, o) => (args[0]?.endsWith('retire-host-files.mjs') ? { ...exec(cmd, args, o), status: 1 } : exec(cmd, args, o));
+    const lines = [];
+    const report = await runUpdate({ cwd, exec: failing, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    const log = lines.join('\n');
+    assert.ok(log.includes(removed), `the receipt of the removed file is kept:\n${log}`);
+    assert.match(log, /✗ Dome: retire-host-files failed \(exit 1\)/);
+    assert.doesNotMatch(log, /no CLAUDE\.md or GEMINI\.md was removed/);
+    assert.equal(report.exit, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the invoking project, prints the loud line', async () => {
   const cwd = authoringCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 4 });
+    const { stamp, stamped } = fakeStamp();
     const lines = [];
     const fanOut = [{ name: 'other', repo_path: '/tmp/other' }, { name: 'dome', repo_path: '/tmp/dome-farmer' }];
-    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: fanOut, invokingProject: '/tmp/dome-farmer', opts: {} });
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: fanOut, invokingProject: '/tmp/dome-farmer', opts: {} });
 
     assert.equal(report.exit, 0);
     for (const forbidden of ['npm', 'migrate-stores', 'init.mjs', 'handoff-projection']) {
@@ -866,11 +1458,9 @@ test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the in
     // git: exactly the three read-only calls of the origin-drift check (issue #61) — never a fetch, merge or ref write.
     assert.deepEqual(calls.filter((c) => c.startsWith('git') || c.includes('git ')), ['git ls-remote origin HEAD', 'git rev-parse HEAD', `git merge-base --is-ancestor ${HEAD_A} HEAD`], 'git runs only the read-only drift check on the authoring machine');
     assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/dome-farmer'], 'sync-agents gets the invoking project only — no fan-out');
-    const contract = calls.filter((c) => c.includes('stamp-contract.mjs'));
-    assert.equal(contract.length, 1);
-    assert.match(contract[0], /--project \/tmp\/dome-farmer$/, 'stamp-contract is scoped to the invoking project');
-    assert.match(contract[0], /stamp-contract\.mjs --apply-inserts --project /, 'inserts only, never a full --apply');
-    assert.doesNotMatch(contract[0], /--apply( |$)/, 'existing wording is never replaced by an update: no full --apply');
+    assert.deepEqual(stamped.map((s) => s.rows), [['/tmp/dome-farmer']], 'the stamper gets the invoking project only, as its registry row');
+    assert.equal(stamped[0].opts.applyInserts, true, 'inserts only');
+    assert.ok(!stamped[0].opts.apply, 'existing wording is never replaced by an update: no full apply');
     assert.ok(lines.some((l) => l.includes('AUTHORING clone — no pull on the authoring machine; syncing /tmp/dome-farmer only')), 'the loud line names the project');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the marker attests the full sequence, which did not run — never written');
   } finally {
@@ -882,16 +1472,16 @@ test('authoring role: a stale marker does not matter, and a refused sync is exit
   const cwd = authoringCwd();
   try {
     seedUpdateMarker(cwd, 'c'.repeat(40));
-    const refused = fakeExec({ syncStatus: () => 2, contractStatus: 2 });
+    const refused = fakeExec({ syncStatus: () => 2 });
     const lines = [];
-    const report = await runUpdate({ cwd, exec: refused.exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    const report = await runUpdate({ cwd, exec: refused.exec, stamp: fakeStamp({ resultFor: HAND_TUNED }).stamp, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
     assert.equal(report.exit, 2, 'a locally modified agent is relayed as a refusal');
     assert.equal(report.contract_drift, true);
     assert.equal(refused.calls.filter((c) => c.startsWith('npm')).length, 0);
     assert.match(lines.join('\n'), /agent sync REFUSED/);
 
-    const drift = fakeExec({ contractStatus: 2 });
-    const r2 = await runUpdate({ cwd, exec: drift.exec, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    const drift = fakeExec();
+    const r2 = await runUpdate({ cwd, exec: drift.exec, stamp: fakeStamp({ resultFor: HAND_TUNED }).stamp, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {} });
     assert.equal(r2.exit, 0, "a sibling's contract drift never fails the authoring sync");
     assert.equal(r2.contract_drift, true);
   } finally {
@@ -990,10 +1580,12 @@ test('authoring role: the invoking project must be REGISTERED — an unregistere
   const cwd = authoringCwd();
   try {
     const { exec, calls } = fakeExec();
+    const { stamp, stamped } = fakeStamp();
     const lines = [];
-    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/not-a-project', opts: {} });
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/not-a-project', opts: {} });
     assert.equal(report.exit, 2);
-    assert.deepEqual(calls, [], 'nothing runs: no sync-agents, no stamp-contract');
+    assert.deepEqual(calls, [], 'nothing runs: no sync-agents');
+    assert.deepEqual(stamped, [], 'and no stamp');
     assert.match(lines.join('\n'), /\/tmp\/not-a-project/, 'the refusal names the directory it refused');
     assert.match(lines.join('\n'), /not (inside )?a registered project/);
   } finally {
@@ -1031,30 +1623,13 @@ test('authoring role: the clone itself (when registered) is synced but its contr
   const cwd = authoringCwd();
   try {
     const { exec, calls } = fakeExec();
+    const { stamp, stamped } = fakeStamp();
     const lines = [];
-    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'sterling', repo_path: cwd }], invokingProject: cwd, opts: {} });
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'sterling', repo_path: cwd }], invokingProject: cwd, opts: {} });
     assert.equal(report.exit, 0);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1);
-    assert.equal(calls.filter((c) => c.includes('stamp-contract')).length, 0, 'stamp-contract skips the clone silently, so it is not called');
+    assert.deepEqual(stamped, [], 'the clone is never handed to the stamper');
     assert.match(lines.join('\n'), /the clone's contract files are hand-maintained — not checked/);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test('authoring role: stamp-contract reporting "0 project(s) processed" for a registered non-clone project is a loud step failure', async () => {
-  const cwd = authoringCwd();
-  try {
-    const inner = fakeExec();
-    const exec = (cmd, args) =>
-      args[0]?.endsWith('stamp-contract.mjs')
-        ? { status: 0, stdout: 'DRY-RUN (no writes; pass --apply) — 0 project(s) processed, 0 already in sync, 0 refusal(s).\n', stderr: '' }
-        : inner.exec(cmd, args);
-    const lines = [];
-    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
-    assert.equal(report.exit, 1);
-    assert.match(lines.join('\n'), /stamp-contract checked NOTHING/);
-    assert.equal(report.contract_unchecked, true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
