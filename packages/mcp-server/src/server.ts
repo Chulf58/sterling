@@ -1417,6 +1417,16 @@ export function createSterlingServer(
   );
 
   server.registerTool(
+    'pending_answers_resolve',
+    {
+      description:
+        "Conductor-only: clear answered question forms listed by the PENDING ANSWERS notice (.sterling/transient/pending-answers.json). `ids` are the 8-character ids the notice prints. outcome 'recorded' needs `record_id`, the decision (slug or id) that holds the answer; outcome 'not_a_decision' clears forms that settled nothing durable. An unknown id refuses the whole call and clears nothing.",
+      inputSchema: strict({ ids: z.array(z.string()).min(1), outcome: z.enum(['recorded', 'not_a_decision']), record_id: z.string().optional() }),
+    },
+    ({ ids, outcome, record_id }) => json(tools.pendingAnswersResolve({ ids, outcome, record_id }))
+  );
+
+  server.registerTool(
     'config_set',
     {
       description:

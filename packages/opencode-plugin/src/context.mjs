@@ -16,6 +16,7 @@ import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
 import { NOTICES_REL, claimNotices } from './notices.mjs';
+import { pendingAnswersNotice } from '../../../scripts/hooks/lib/pending-answers.mjs';
 import { queueDepthLine, readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { claimLease, claimLeaseMinutes, laneCeiling, lanesText, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
@@ -473,6 +474,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         out.push({ key: 'board', ...t.time('board', () => boardBlock(root, state.config, sessionID, state.configUnreadable)), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
         // The live-lane count, a line of its own so it can change without re-sending the board.
         out.push({ key: 'lanes', text: t.time('lanes', () => laneLine(root, state.config, sessionID)) });
+        // Answered question forms not yet recorded or dismissed; '' at zero, re-sent when the count or the list changes.
+        out.push({ key: 'pending-answers', text: t.time('pending-answers', () => pendingAnswersNotice(root)) });
       }
     }
     out.push({ key: 'restore', text: await t.time('restore', () => rotationRestore(root, sessionID)) });

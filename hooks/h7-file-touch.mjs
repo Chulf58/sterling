@@ -6285,6 +6285,29 @@ function parseStoreFence(value) {
   throw new Error(`store_meta '${STORE_FENCE_KEY}' has an unknown fence kind ${JSON.stringify(kind)}`);
 }
 
+// packages/schemas/dist/pending-answers.js
+var PENDING_ANSWER_OUTCOMES = ["recorded", "not_a_decision"];
+var pendingAnswerEntrySchema = external_exports.object({
+  id: external_exports.string().min(1),
+  host: external_exports.enum(["opencode", "claude"]),
+  session: external_exports.string(),
+  time: external_exports.string(),
+  call_id: external_exports.string().min(1),
+  questions: external_exports.array(external_exports.object({
+    header: external_exports.string(),
+    question: external_exports.string(),
+    multiple: external_exports.boolean(),
+    options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
+    picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
+  }).strict())
+}).strict();
+var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
+var pendingAnswersResolveInputSchema = external_exports.object({
+  ids: external_exports.array(external_exports.string().min(1)).min(1),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
+  record_id: external_exports.string().min(1).optional()
+}).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync as statSync3 } from "node:fs";
 import { dirname as dirname4, join as join5, resolve as resolvePath2 } from "node:path";

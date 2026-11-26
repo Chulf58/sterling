@@ -405,6 +405,7 @@ export function createSterlingServer(deps = {}) {
       await delivery.onAfter(input);
       await axis.onOutput(input, output);
       await axis.onAfter(input);
+      await axis.onAnswers(input);
       await dispatch.onAfter(input);
       await recordResearch(input);
       // Last, so the session lines that changed mid-turn follow every other delivery on the result.

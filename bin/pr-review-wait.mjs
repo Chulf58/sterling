@@ -6095,6 +6095,29 @@ var renameFenceSchema = external_exports.object({
   fenced_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/pending-answers.js
+var PENDING_ANSWER_OUTCOMES = ["recorded", "not_a_decision"];
+var pendingAnswerEntrySchema = external_exports.object({
+  id: external_exports.string().min(1),
+  host: external_exports.enum(["opencode", "claude"]),
+  session: external_exports.string(),
+  time: external_exports.string(),
+  call_id: external_exports.string().min(1),
+  questions: external_exports.array(external_exports.object({
+    header: external_exports.string(),
+    question: external_exports.string(),
+    multiple: external_exports.boolean(),
+    options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
+    picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
+  }).strict())
+}).strict();
+var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
+var pendingAnswersResolveInputSchema = external_exports.object({
+  ids: external_exports.array(external_exports.string().min(1)).min(1),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
+  record_id: external_exports.string().min(1).optional()
+}).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+
 // scripts/lib/work-pr.mjs
 function gh(cwd, args, timeoutMs = 12e4) {
   return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });

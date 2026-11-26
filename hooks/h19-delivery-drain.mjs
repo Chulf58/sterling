@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h19-delivery-drain.mjs
-import { readFileSync as readFileSync6, readdirSync, rmSync as rmSync3, statSync as statSync2 } from "node:fs";
-import { join as join7, resolve as resolve3, sep } from "node:path";
+import { readFileSync as readFileSync7, readdirSync, rmSync as rmSync4, statSync as statSync2 } from "node:fs";
+import { join as join9, resolve as resolve3, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync3, existsSync as existsSync4, writeSync, writeFileSync as writeFileSync2, renameSync as renameSync2, mkdirSync } from "node:fs";
@@ -4089,12 +4089,12 @@ var SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
 var HAS_SEPARATOR = /[\\/]/;
 var ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
 function classifyLocation(location) {
-  const text = location.trim();
-  if (SCHEME_LOCATION.test(text))
+  const text2 = location.trim();
+  if (SCHEME_LOCATION.test(text2))
     return "url";
-  if (!/\s/.test(text))
-    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
-  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
+  if (!/\s/.test(text2))
+    return HAS_SEPARATOR.test(text2) || ENDS_IN_EXTENSION.test(text2) ? "path" : "prose";
+  return HAS_SEPARATOR.test(text2) && ENDS_IN_EXTENSION.test(text2) && !text2.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
   if (classifyLocation(location) !== "path")
@@ -5681,6 +5681,29 @@ var renameFenceSchema = external_exports.object({
   fenced_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/pending-answers.js
+var PENDING_ANSWER_OUTCOMES = ["recorded", "not_a_decision"];
+var pendingAnswerEntrySchema = external_exports.object({
+  id: external_exports.string().min(1),
+  host: external_exports.enum(["opencode", "claude"]),
+  session: external_exports.string(),
+  time: external_exports.string(),
+  call_id: external_exports.string().min(1),
+  questions: external_exports.array(external_exports.object({
+    header: external_exports.string(),
+    question: external_exports.string(),
+    multiple: external_exports.boolean(),
+    options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
+    picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
+  }).strict())
+}).strict();
+var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
+var pendingAnswersResolveInputSchema = external_exports.object({
+  ids: external_exports.array(external_exports.string().min(1)).min(1),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
+  record_id: external_exports.string().min(1).optional()
+}).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+
 // packages/store/dist/pg-bridge.js
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -5983,8 +6006,8 @@ function makeExitHelpers({ stdout, stderr, exit }) {
     exit(exitCode);
   }
   function exitAfterWrite2(payload, code, { onWritten } = {}) {
-    const text = typeof payload === "string" ? payload : String(payload ?? "");
-    if (!text) {
+    const text2 = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text2) {
       if (pending > 0) return;
       exitCode = code;
       finish();
@@ -5992,7 +6015,7 @@ function makeExitHelpers({ stdout, stderr, exit }) {
     }
     if (stdoutWritten) {
       note(
-        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text2.slice(0, 400)}`
       );
       if (pending === 0) finish();
       return;
@@ -6033,7 +6056,7 @@ function makeExitHelpers({ stdout, stderr, exit }) {
     const onError = (err) => settle(err || new Error("stdout error"));
     if (typeof stdout.once === "function") stdout.once("error", onError);
     try {
-      stdout.write(text, (err) => settle(err || null));
+      stdout.write(text2, (err) => settle(err || null));
     } catch (e) {
       settle(e || new Error("stdout write threw"));
     }
@@ -6172,15 +6195,15 @@ function normalizeAgyInput(raw, { agyEveryInvocation = false } = {}) {
   return { input: input2, skip: null };
 }
 function agyContextTexts(out) {
-  const text = String(out ?? "").trim();
-  if (!text) return [];
+  const text2 = String(out ?? "").trim();
+  if (!text2) return [];
   let parsed;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text2);
   } catch {
-    return [text];
+    return [text2];
   }
-  if (parsed === null || typeof parsed !== "object") return [text];
+  if (parsed === null || typeof parsed !== "object") return [text2];
   const texts = [];
   const ctx = parsed.hookSpecificOutput?.additionalContext;
   if (typeof ctx === "string" && ctx.trim()) texts.push(ctx);
@@ -6188,8 +6211,8 @@ function agyContextTexts(out) {
   return texts;
 }
 var AGY_SYSTEM_MESSAGE_MAX_BYTES = 3500;
-function splitForAgy(text, maxBytes = AGY_SYSTEM_MESSAGE_MAX_BYTES) {
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) return [text];
+function splitForAgy(text2, maxBytes = AGY_SYSTEM_MESSAGE_MAX_BYTES) {
+  if (Buffer.byteLength(text2, "utf8") <= maxBytes) return [text2];
   const pieces = [];
   let cur = "";
   let curBytes = 0;
@@ -6203,7 +6226,7 @@ function splitForAgy(text, maxBytes = AGY_SYSTEM_MESSAGE_MAX_BYTES) {
     cur += seg;
     curBytes += b;
   };
-  for (const line of text.split(/(?<=\n)/)) {
+  for (const line of text2.split(/(?<=\n)/)) {
     if (Buffer.byteLength(line, "utf8") <= maxBytes) {
       push(line);
       continue;
@@ -6230,8 +6253,8 @@ function agyExitEnvelope({ event, code = 0, err = "", emitted = false, stopConti
   if (emitted) return { text: "", code: 0 };
   return json({});
 }
-function writeAllSync(fd, text) {
-  const buf = Buffer.from(text, "utf8");
+function writeAllSync(fd, text2) {
+  const buf = Buffer.from(text2, "utf8");
   let off = 0;
   while (off < buf.length) {
     try {
@@ -6253,12 +6276,12 @@ function writeJsonAtomic(path, value) {
   mkdirSync(dirname3(path), { recursive: true });
   writeFileAtomic(path, JSON.stringify(value));
 }
-function queueAgyNotice(checkout, conversationId, text, { guards = [] } = {}) {
+function queueAgyNotice(checkout, conversationId, text2, { guards = [] } = {}) {
   const dir = join4(checkout, ".sterling", "transient", "notices");
   mkdirSync(dir, { recursive: true });
   const target = join4(dir, `agy-${agyKey(conversationId)}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const tmp = `${target}.tmp`;
-  const body = { text: String(text), session_id: String(conversationId), ...guards.length ? { guards } : {} };
+  const body = { text: String(text2), session_id: String(conversationId), ...guards.length ? { guards } : {} };
   writeFileSync2(tmp, JSON.stringify(body), { flag: "wx" });
   renameSync2(tmp, target);
   return target;
@@ -6291,12 +6314,12 @@ function agyStdoutWrite(chunk) {
 function adoptAgyInput(raw, options = {}) {
   const { input: input2, skip } = normalizeAgyInput(raw, options);
   Object.assign(agy, { active: true, event: raw.hookEventName, conversationId: raw.conversationId, skip });
-  const text = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+  const text2 = (chunk) => typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
   process.stdout.write = (chunk, encoding, callback) => {
     const done = typeof encoding === "function" ? encoding : callback;
     let failure = null;
     try {
-      agyStdoutWrite(text(chunk));
+      agyStdoutWrite(text2(chunk));
     } catch (e) {
       failure = e;
     }
@@ -6306,7 +6329,7 @@ function adoptAgyInput(raw, options = {}) {
   };
   const writeErr = process.stderr.write.bind(process.stderr);
   process.stderr.write = (chunk, ...rest) => {
-    agy.errText.push(text(chunk));
+    agy.errText.push(text2(chunk));
     return writeErr(chunk, ...rest);
   };
   process.on("exit", (code) => {
@@ -6462,6 +6485,47 @@ function pruneUnhashed(path) {
   else rmSync2(path);
 }
 
+// scripts/hooks/lib/pending-answers.mjs
+import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync6, renameSync as renameSync4, rmSync as rmSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname6, join as join8 } from "node:path";
+
+// scripts/hooks/lib/session-events.mjs
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { dirname as dirname5, join as join7 } from "node:path";
+var SESSION_EVENTS_REL = join7(".sterling", "transient", "session-events.json");
+
+// scripts/hooks/lib/pending-answers.mjs
+var PENDING_ANSWERS_REL = join8(".sterling", "transient", "pending-answers.json");
+var NOTICE_LISTED = 5;
+var CLIP = 100;
+var text = (v) => typeof v === "string" ? v : "";
+function readPendingAnswers(root) {
+  const path = join8(root, PENDING_ANSWERS_REL);
+  if (!existsSync7(path)) return [];
+  const parsed = JSON.parse(readFileSync6(path, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error(`${PENDING_ANSWERS_REL} is not a JSON array`);
+  return parsed;
+}
+var clip = (s) => s.length > CLIP ? `${s.slice(0, CLIP - 1)}\u2026` : s;
+function pendingAnswersNotice(root) {
+  let entries;
+  try {
+    entries = readPendingAnswers(root);
+  } catch (e) {
+    return `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+  }
+  if (!entries.length) return "";
+  const listed = entries.slice(0, NOTICE_LISTED).map((e) => {
+    const q = e.questions?.[0];
+    const picks = (q?.picks ?? []).map((p) => p.custom ? `${p.label} (typed)` : p.label).join(", ");
+    return `- ${e.id} ${e.time}: ${clip(text(q?.header) || text(q?.question))} -> ${clip(picks)}${e.questions?.length > 1 ? ` (+${e.questions.length - 1} more question${e.questions.length > 2 ? "s" : ""})` : ""}`;
+  });
+  const more = entries.length > NOTICE_LISTED ? `
+- \u2026 and ${entries.length - NOTICE_LISTED} more` : "";
+  return `PENDING ANSWERS: ${entries.length} answered question form${entries.length === 1 ? "" : "s"} not yet recorded. Each is a ruling or a confirmation; capture the decisions, then clear each with pending_answers_resolve({ids, outcome: "recorded", record_id}) or outcome "not_a_decision".
+${listed.join("\n")}${more}`;
+}
+
 // scripts/hooks/h19-delivery-drain.mjs
 var input = readStdin({ agyEveryInvocation: true });
 var queueOnly = input.agy_queue_only === true;
@@ -6489,22 +6553,22 @@ try {
   const agyTexts = /* @__PURE__ */ new Set();
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
   for (const name of names) {
-    const file = join7(dir, name);
+    const file = join9(dir, name);
     try {
-      const notice = JSON.parse(readFileSync6(file, "utf8"));
+      const notice = JSON.parse(readFileSync7(file, "utf8"));
       if (hasSession && typeof notice.session_id === "string" && notice.session_id !== input.session_id) {
         if (name.startsWith("agy-") && Date.now() - statSync2(file).mtimeMs < AGY_QUEUE_STALE_MS) continue;
-        rmSync3(file, { force: true });
+        rmSync4(file, { force: true });
         continue;
       }
       files.push(file);
       if (Array.isArray(notice.guards)) guards.push(...notice.guards);
-      const text = notice.text;
-      if (name.startsWith("agy-") && typeof text === "string" && text) {
-        if (agyTexts.has(text)) continue;
-        agyTexts.add(text);
+      const text2 = notice.text;
+      if (name.startsWith("agy-") && typeof text2 === "string" && text2) {
+        if (agyTexts.has(text2)) continue;
+        agyTexts.add(text2);
       }
-      if (typeof text === "string" && text) texts.push(text);
+      if (typeof text2 === "string" && text2) texts.push(text2);
       else texts.push("\u24D8 STERLING: removed malformed immutable notice; its contents were unreadable.");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
@@ -6512,7 +6576,7 @@ try {
       texts.push("\u24D8 STERLING: removed malformed immutable notice; its contents were unreadable.");
     }
   }
-  const legacy = join7(input.cwd, ".sterling", "transient", "delivery", "pending.json");
+  const legacy = join9(input.cwd, ".sterling", "transient", "delivery", "pending.json");
   let legacyExists = false;
   if (!queueOnly) {
     try {
@@ -6525,7 +6589,7 @@ try {
   if (legacyExists) {
     let legacyMessage;
     try {
-      const entries = JSON.parse(readFileSync6(legacy, "utf8"));
+      const entries = JSON.parse(readFileSync7(legacy, "utf8"));
       const count = Array.isArray(entries) ? entries.length : 0;
       legacyMessage = `\u24D8 STERLING: removed obsolete delayed delivery queue with ${count} pending entr${count === 1 ? "y" : "ies"}; none were delivered.`;
     } catch (e) {
@@ -6534,6 +6598,10 @@ try {
     }
     if (legacyMessage) texts.unshift(legacyMessage);
     files.push(legacy);
+  }
+  if (!queueOnly) {
+    const pendingAnswers = pendingAnswersNotice(input.cwd);
+    if (pendingAnswers) texts.push(pendingAnswers);
   }
   if (!texts.length) allow();
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: texts.join("\n\n") } }), (err) => {
@@ -6553,7 +6621,7 @@ try {
 `);
       }
     }
-    for (const file of files) rmSync3(file, { force: true, recursive: file === legacy });
+    for (const file of files) rmSync4(file, { force: true, recursive: file === legacy });
     process.exit(0);
   });
 } catch (e) {

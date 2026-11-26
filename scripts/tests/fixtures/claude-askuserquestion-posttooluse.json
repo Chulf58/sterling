@@ -1,0 +1,67 @@
+{
+  "session_id": "9ad984d4-6f48-41a0-b799-b29a0d59c0d5",
+  "cwd": "/tmp/ignored",
+  "prompt_id": "4897a5d3-77ee-4a52-8e72-42942d671caf",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Pick a colour",
+        "header": "Colour",
+        "options": [
+          {
+            "label": "Red",
+            "description": "Choose red"
+          },
+          {
+            "label": "Green",
+            "description": "Choose green"
+          },
+          {
+            "label": "Blue",
+            "description": "Choose blue"
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "answers": {
+      "Pick a colour": "Red"
+    },
+    "annotations": {}
+  },
+  "tool_response": {
+    "questions": [
+      {
+        "question": "Pick a colour",
+        "header": "Colour",
+        "options": [
+          {
+            "label": "Red",
+            "description": "Choose red"
+          },
+          {
+            "label": "Green",
+            "description": "Choose green"
+          },
+          {
+            "label": "Blue",
+            "description": "Choose blue"
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "answers": {
+      "Pick a colour": "Red"
+    },
+    "annotations": {}
+  },
+  "tool_use_id": "toolu_01Dt8VbzRwHBsXZM18cEWJia",
+  "duration_ms": 10
+}

@@ -5871,6 +5871,36 @@ var init_store_fence = __esm({
   }
 });
 
+// packages/schemas/dist/pending-answers.js
+var PENDING_ANSWER_OUTCOMES, pendingAnswerEntrySchema, pendingAnswersFileSchema, pendingAnswersResolveInputSchema;
+var init_pending_answers = __esm({
+  "packages/schemas/dist/pending-answers.js"() {
+    "use strict";
+    init_zod();
+    PENDING_ANSWER_OUTCOMES = ["recorded", "not_a_decision"];
+    pendingAnswerEntrySchema = external_exports.object({
+      id: external_exports.string().min(1),
+      host: external_exports.enum(["opencode", "claude"]),
+      session: external_exports.string(),
+      time: external_exports.string(),
+      call_id: external_exports.string().min(1),
+      questions: external_exports.array(external_exports.object({
+        header: external_exports.string(),
+        question: external_exports.string(),
+        multiple: external_exports.boolean(),
+        options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
+        picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
+      }).strict())
+    }).strict();
+    pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
+    pendingAnswersResolveInputSchema = external_exports.object({
+      ids: external_exports.array(external_exports.string().min(1)).min(1),
+      outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
+      record_id: external_exports.string().min(1).optional()
+    }).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+  }
+});
+
 // packages/schemas/dist/index.js
 var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
@@ -5891,6 +5921,7 @@ var init_dist = __esm({
     init_project();
     init_broker();
     init_store_fence();
+    init_pending_answers();
   }
 });
 
