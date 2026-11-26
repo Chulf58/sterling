@@ -18975,6 +18975,9 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
       if (layerLines.some((l) => l.startsWith("\u2717 Sterling layer REFUSED:"))) {
         log("      \u26A0 AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed");
         agentsMdWriteRefused.add(p);
+      } else if (r.status !== 0) {
+        log(`      \u26A0 AGENTS.md Knowledge section not updated: sync-agents did not succeed above (exit ${r.status}), so the Sterling layer in AGENTS.md is not confirmed and nothing else writes the file until a rerun succeeds`);
+        entry.knowledge = "not_updated";
       } else try {
         const agents = readAgentsMd(p.repo_path);
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;

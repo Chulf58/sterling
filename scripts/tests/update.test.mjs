@@ -591,6 +591,30 @@ test('fan-out: after a Sterling layer refusal the Knowledge section is not rewri
   }
 });
 
+// #329 re-check loop 2, H: a layer write I/O failure (EACCES, EFBIG) makes sync-agents exit 1 with
+// no refusal line. The Knowledge pass must not write AGENTS.md either; the project stays failed.
+test('fan-out: after sync-agents fails with no layer refusal line (exit 1) the Knowledge section is not rewritten — AGENTS.md is byte-identical, the project fails', async () => {
+  const cwd = scratchCwd();
+  const dir = knowledgeProject();
+  try {
+    const agents = projectedAgentsMd();
+    assert.notEqual(refreshAgentsMdKnowledge(agents, false).text, agents, 'fixture: the handoff-off refresh would rewrite this AGENTS.md');
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 1, syncStdout: `Error: EFBIG: file too large, write '${join(dir, 'AGENTS.md')}.tmp'\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `nothing else writes the file:\n${log}`);
+    assert.match(log, /⚠ AGENTS\.md Knowledge section not updated: sync-agents did not succeed above \(exit 1\)/);
+    assert.equal(report.projects[0].knowledge, 'not_updated');
+    assert.equal(report.exit, 1, 'the failed agent sync fails the update');
+    assert.match(log, /1 project\(s\) failed their refresh/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fan-out: the Knowledge refresh never follows a symlinked AGENTS.md — link and target unchanged, and it says why', async () => {
   const cwd = scratchCwd();
   const dir = knowledgeProject();

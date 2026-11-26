@@ -936,10 +936,14 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
       // same checks as the layer (a plain file, and the whole planned file under agy's cap).
       // A sync-agents run that did not succeed (an I/O error writing the layer exits 1 with no
       // refusal line) also leaves the layer unconfirmed: the contract step only checks this row.
+      // The Knowledge pass skips its write on the same guard; the project is already failed above.
       if (r.status !== 0) agentsMdWriteRefused.add(p);
       if (layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) {
         log('      ⚠ AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed');
         agentsMdWriteRefused.add(p);
+      } else if (r.status !== 0) {
+        log(`      ⚠ AGENTS.md Knowledge section not updated: sync-agents did not succeed above (exit ${r.status}), so the Sterling layer in AGENTS.md is not confirmed and nothing else writes the file until a rerun succeeds`);
+        entry.knowledge = 'not_updated';
       } else try {
         const agents = readAgentsMd(p.repo_path);
         const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
