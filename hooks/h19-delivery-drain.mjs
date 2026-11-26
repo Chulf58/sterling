@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h19-delivery-drain.mjs
-import { readFileSync as readFileSync7, readdirSync, rmSync as rmSync4, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync7, readdirSync, rmSync as rmSync3, statSync as statSync2 } from "node:fs";
 import { join as join9, resolve as resolve3, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5692,17 +5692,19 @@ var pendingAnswerEntrySchema = external_exports.object({
   questions: external_exports.array(external_exports.object({
     header: external_exports.string(),
     question: external_exports.string(),
+    raw_answer: external_exports.string().optional(),
     multiple: external_exports.boolean(),
     options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
     picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
   }).strict())
 }).strict();
 var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
-var pendingAnswersResolveInputSchema = external_exports.object({
-  ids: external_exports.array(external_exports.string().min(1)).min(1),
-  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
-  record_id: external_exports.string().min(1).optional()
-}).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+var pendingAnswersResolveShape = {
+  ids: external_exports.array(external_exports.string().trim().min(1)).min(1).describe("Full pending-answer ids exactly as the PENDING ANSWERS notice prints them (32 hex characters, a pending-answer id and not a record uuid); an unknown id refuses the whole call"),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES).describe("'recorded' (a live decision holds the answer; needs record_id) or 'not_a_decision'"),
+  record_id: external_exports.string().trim().min(1).optional().describe("For outcome recorded: the live decision that holds the answer, as its slug or id; a missing or non-decision record refuses the whole call")
+};
+var pendingAnswersResolveInputSchema = external_exports.object(pendingAnswersResolveShape).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
 
 // packages/store/dist/pg-bridge.js
 import { homedir } from "node:os";
@@ -5968,9 +5970,10 @@ import { existsSync as existsSync3, readFileSync as readFileSync2, renameSync, r
 function writeFileAtomic(path, content, fs = {}) {
   replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
 }
-function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync, mode } = {}) {
   try {
-    writeFile(tmp, content);
+    if (mode === void 0) writeFile(tmp, content);
+    else writeFile(tmp, content, { mode, flag: "wx" });
     rename(tmp, path);
   } catch (err) {
     rmSync(tmp, { force: true });
@@ -6486,7 +6489,7 @@ function pruneUnhashed(path) {
 }
 
 // scripts/hooks/lib/pending-answers.mjs
-import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync6, renameSync as renameSync4, rmSync as rmSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync6 } from "node:fs";
 import { dirname as dirname6, join as join8 } from "node:path";
 
 // scripts/hooks/lib/session-events.mjs
@@ -6501,10 +6504,16 @@ var CLIP = 100;
 var text = (v) => typeof v === "string" ? v : "";
 function readPendingAnswers(root) {
   const path = join8(root, PENDING_ANSWERS_REL);
-  if (!existsSync7(path)) return [];
-  const parsed = JSON.parse(readFileSync6(path, "utf8"));
-  if (!Array.isArray(parsed)) throw new Error(`${PENDING_ANSWERS_REL} is not a JSON array`);
-  return parsed;
+  let raw;
+  try {
+    raw = readFileSync6(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    throw e;
+  }
+  const parsed = pendingAnswersFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new Error(`${PENDING_ANSWERS_REL} does not hold valid pending answers: ${parsed.error.issues[0]?.message ?? "invalid"} at ${parsed.error.issues[0]?.path.join(".")}`);
+  return parsed.data;
 }
 var clip = (s) => s.length > CLIP ? `${s.slice(0, CLIP - 1)}\u2026` : s;
 function pendingAnswersNotice(root) {
@@ -6558,7 +6567,7 @@ try {
       const notice = JSON.parse(readFileSync7(file, "utf8"));
       if (hasSession && typeof notice.session_id === "string" && notice.session_id !== input.session_id) {
         if (name.startsWith("agy-") && Date.now() - statSync2(file).mtimeMs < AGY_QUEUE_STALE_MS) continue;
-        rmSync4(file, { force: true });
+        rmSync3(file, { force: true });
         continue;
       }
       files.push(file);
@@ -6599,9 +6608,13 @@ try {
     if (legacyMessage) texts.unshift(legacyMessage);
     files.push(legacy);
   }
-  if (!queueOnly) {
-    const pendingAnswers = pendingAnswersNotice(input.cwd);
-    if (pendingAnswers) texts.push(pendingAnswers);
+  if (!queueOnly && input.host !== "agy") {
+    try {
+      const pendingAnswers = pendingAnswersNotice(input.cwd);
+      if (pendingAnswers) texts.push(pendingAnswers);
+    } catch (e) {
+      texts.push(`PENDING ANSWERS UNAVAILABLE (${e && e.message || e}): answered question forms cannot be counted this turn.`);
+    }
   }
   if (!texts.length) allow();
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: texts.join("\n\n") } }), (err) => {
@@ -6621,7 +6634,7 @@ try {
 `);
       }
     }
-    for (const file of files) rmSync4(file, { force: true, recursive: file === legacy });
+    for (const file of files) rmSync3(file, { force: true, recursive: file === legacy });
     process.exit(0);
   });
 } catch (e) {

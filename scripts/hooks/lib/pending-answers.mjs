@@ -5,8 +5,10 @@
 // and the MCP tool pending_answers_resolve. The entry shape is pendingAnswerEntrySchema
 // in packages/schemas. Builtins only: hooks and the servers vendor this module.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { pendingAnswersFileSchema } from '@sterling/schemas';
+import { writeFileAtomic } from '../../lib/atomic-write.mjs';
 import { withSessionEventsLock } from './session-events.mjs';
 
 export const PENDING_ANSWERS_REL = join('.sterling', 'transient', 'pending-answers.json');
@@ -16,8 +18,10 @@ const CLIP = 100;
 
 const text = (v) => (typeof v === 'string' ? v : '');
 
-function entryId(host, callId) {
-  return createHash('sha256').update(`${host}\0${callId}`).digest('hex').slice(0, 8);
+// The id is the dedupe key and the handle pending_answers_resolve deletes by, so it covers the
+// whole identity (host, session, call) and is 128 bits: no two live calls share one.
+function entryId(host, session, callId) {
+  return createHash('sha256').update(`${host}\0${session}\0${callId}`).digest('hex').slice(0, 32);
 }
 
 function questionOf(q, picked) {
@@ -46,13 +50,16 @@ export function entryFromClaude(stdin, now = new Date().toISOString()) {
   if (!callId) return null;
   const built = questions.map((q) => {
     const raw = answers[text(q?.question)];
+    if (typeof raw !== 'string' || raw === '') return questionOf(q, []);
     const labels = (Array.isArray(q?.options) ? q.options : []).map((o) => text(o?.label));
-    let picked = [];
-    if (typeof raw === 'string' && raw !== '') picked = q?.multiSelect === true && !labels.includes(raw) ? raw.split(', ') : [raw];
-    return questionOf(q, picked);
+    // Claude Code's multi-select separator is unmeasured: split only when every part is an exact
+    // option label, otherwise keep the raw answer as one custom pick.
+    const parts = raw.split(', ');
+    const picked = !labels.includes(raw) && q?.multiSelect === true && parts.every((p) => labels.includes(p)) ? parts : [raw];
+    return { ...questionOf(q, picked), raw_answer: raw };
   });
   if (!built.some((q) => q.picks.length)) return null;
-  return { id: entryId('claude', callId), host: 'claude', session: text(stdin?.session_id), time: now, call_id: callId, questions: built };
+  return { id: entryId('claude', text(stdin?.session_id), callId), host: 'claude', session: text(stdin?.session_id), time: now, call_id: callId, questions: built };
 }
 
 /**
@@ -69,28 +76,30 @@ export function entryFromOpenCode(call, now = new Date().toISOString()) {
   if (!callId) return null;
   const built = questions.map((q, i) => questionOf(q, (Array.isArray(answers[i]) ? answers[i] : []).map(String)));
   if (!built.some((q) => q.picks.length)) return null;
-  return { id: entryId('opencode', callId), host: 'opencode', session: text(call.sessionID), time: now, call_id: callId, questions: built };
+  return { id: entryId('opencode', text(call.sessionID), callId), host: 'opencode', session: text(call.sessionID), time: now, call_id: callId, questions: built };
 }
 
 function writeAtomic(path, value) {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(value));
-    renameSync(tmp, path);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  writeFileAtomic(path, JSON.stringify(value), { mode: 0o600 });
 }
 
-/** The unresolved entries; an unparsable or non-array file throws and is left as it is. */
+/**
+ * The unresolved entries. Only a missing file is absence; an unparsable file or one that does
+ * not match the entry schema throws and its bytes are left as they are.
+ */
 export function readPendingAnswers(root) {
   const path = join(root, PENDING_ANSWERS_REL);
-  if (!existsSync(path)) return [];
-  const parsed = JSON.parse(readFileSync(path, 'utf8'));
-  if (!Array.isArray(parsed)) throw new Error(`${PENDING_ANSWERS_REL} is not a JSON array`);
-  return parsed;
+  let raw;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    if (e?.code === 'ENOENT') return [];
+    throw e;
+  }
+  const parsed = pendingAnswersFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new Error(`${PENDING_ANSWERS_REL} does not hold valid pending answers: ${parsed.error.issues[0]?.message ?? 'invalid'} at ${parsed.error.issues[0]?.path.join('.')}`);
+  return parsed.data;
 }
 
 function locked(root, fn) {
@@ -111,7 +120,7 @@ export function appendPendingAnswer(root, entry) {
 }
 
 /**
- * Removes the entries named by `ids` (8-char ids as the notice prints them). An unknown id
+ * Removes the entries named by `ids` (the full ids the notice prints). An unknown id
  * refuses the whole call and nothing is removed. Returns the resolved entry ids.
  */
 export function resolvePendingAnswers(root, ids) {

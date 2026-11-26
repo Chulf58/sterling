@@ -6673,7 +6673,7 @@ var init_store_fence = __esm({
 });
 
 // packages/schemas/dist/pending-answers.js
-var PENDING_ANSWER_OUTCOMES, pendingAnswerEntrySchema, pendingAnswersFileSchema, pendingAnswersResolveInputSchema;
+var PENDING_ANSWER_OUTCOMES, pendingAnswerEntrySchema, pendingAnswersFileSchema, pendingAnswersResolveShape, pendingAnswersResolveInputSchema;
 var init_pending_answers = __esm({
   "packages/schemas/dist/pending-answers.js"() {
     "use strict";
@@ -6688,17 +6688,19 @@ var init_pending_answers = __esm({
       questions: external_exports.array(external_exports.object({
         header: external_exports.string(),
         question: external_exports.string(),
+        raw_answer: external_exports.string().optional(),
         multiple: external_exports.boolean(),
         options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
         picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
       }).strict())
     }).strict();
     pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
-    pendingAnswersResolveInputSchema = external_exports.object({
-      ids: external_exports.array(external_exports.string().min(1)).min(1),
-      outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
-      record_id: external_exports.string().min(1).optional()
-    }).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+    pendingAnswersResolveShape = {
+      ids: external_exports.array(external_exports.string().trim().min(1)).min(1).describe("Full pending-answer ids exactly as the PENDING ANSWERS notice prints them (32 hex characters, a pending-answer id and not a record uuid); an unknown id refuses the whole call"),
+      outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES).describe("'recorded' (a live decision holds the answer; needs record_id) or 'not_a_decision'"),
+      record_id: external_exports.string().trim().min(1).optional().describe("For outcome recorded: the live decision that holds the answer, as its slug or id; a missing or non-decision record refuses the whole call")
+    };
+    pendingAnswersResolveInputSchema = external_exports.object(pendingAnswersResolveShape).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
   }
 });
 
@@ -14011,9 +14013,10 @@ import { existsSync as existsSync6, readFileSync as readFileSync7, renameSync as
 function writeFileAtomic(path, content, fs = {}) {
   replaceVia(`${path}.tmp-${randomUUID5()}`, path, content, fs);
 }
-function replaceVia(tmp, path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+function replaceVia(tmp, path, content, { writeFile = writeFileSync3, rename = renameSync2, mode } = {}) {
   try {
-    writeFile(tmp, content);
+    if (mode === void 0) writeFile(tmp, content);
+    else writeFile(tmp, content, { mode, flag: "wx" });
     rename(tmp, path);
   } catch (err) {
     rmSync4(tmp, { force: true });
@@ -23629,16 +23632,18 @@ function pruneShownNotices(root, { afterRead } = {}) {
 }
 
 // scripts/hooks/lib/pending-answers.mjs
+init_dist();
+init_atomic_write();
 import { createHash as createHash8 } from "node:crypto";
-import { existsSync as existsSync20, mkdirSync as mkdirSync18, readFileSync as readFileSync21, renameSync as renameSync9, rmSync as rmSync11, writeFileSync as writeFileSync11 } from "node:fs";
+import { mkdirSync as mkdirSync18, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname17, join as join31 } from "node:path";
 var PENDING_ANSWERS_REL = join31(".sterling", "transient", "pending-answers.json");
 var LOCK_TIMEOUT_MS = 2e3;
 var NOTICE_LISTED = 5;
 var CLIP = 100;
 var text = (v) => typeof v === "string" ? v : "";
-function entryId(host, callId) {
-  return createHash8("sha256").update(`${host}\0${callId}`).digest("hex").slice(0, 8);
+function entryId(host, session, callId) {
+  return createHash8("sha256").update(`${host}\0${session}\0${callId}`).digest("hex").slice(0, 32);
 }
 function questionOf(q, picked) {
   const options = (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: text(o?.label), description: text(o?.description) }));
@@ -23659,25 +23664,24 @@ function entryFromOpenCode(call, now = (/* @__PURE__ */ new Date()).toISOString(
   if (!callId) return null;
   const built = questions.map((q, i) => questionOf(q, (Array.isArray(answers[i]) ? answers[i] : []).map(String)));
   if (!built.some((q) => q.picks.length)) return null;
-  return { id: entryId("opencode", callId), host: "opencode", session: text(call.sessionID), time: now, call_id: callId, questions: built };
+  return { id: entryId("opencode", text(call.sessionID), callId), host: "opencode", session: text(call.sessionID), time: now, call_id: callId, questions: built };
 }
 function writeAtomic(path, value) {
   mkdirSync18(dirname17(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync11(tmp, JSON.stringify(value));
-    renameSync9(tmp, path);
-  } catch (e) {
-    rmSync11(tmp, { force: true });
-    throw e;
-  }
+  writeFileAtomic(path, JSON.stringify(value), { mode: 384 });
 }
 function readPendingAnswers(root) {
   const path = join31(root, PENDING_ANSWERS_REL);
-  if (!existsSync20(path)) return [];
-  const parsed = JSON.parse(readFileSync21(path, "utf8"));
-  if (!Array.isArray(parsed)) throw new Error(`${PENDING_ANSWERS_REL} is not a JSON array`);
-  return parsed;
+  let raw;
+  try {
+    raw = readFileSync21(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    throw e;
+  }
+  const parsed = pendingAnswersFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new Error(`${PENDING_ANSWERS_REL} does not hold valid pending answers: ${parsed.error.issues[0]?.message ?? "invalid"} at ${parsed.error.issues[0]?.path.join(".")}`);
+  return parsed.data;
 }
 function locked(root, fn) {
   const path = join31(root, PENDING_ANSWERS_REL);
@@ -23714,7 +23718,7 @@ ${listed.join("\n")}${more}`;
 }
 
 // scripts/hooks/lib/subject-fan.mjs
-import { existsSync as existsSync21 } from "node:fs";
+import { existsSync as existsSync20 } from "node:fs";
 import { join as join32 } from "node:path";
 init_dist();
 init_dist2();
@@ -23729,7 +23733,7 @@ function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   cwd = storeRootFor(cwd);
   if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
   const projectPath = join32(cwd, ".sterling", "sterling.db");
-  if (!existsSync21(projectPath)) return null;
+  if (!existsSync20(projectPath)) return null;
   let mounts = [];
   let configError = null;
   try {
@@ -23750,7 +23754,7 @@ function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
     }
   };
   for (const m of mounts) {
-    if (!existsSync21(m.dbPath)) {
+    if (!existsSync20(m.dbPath)) {
       missingDomains.push({ name: m.name, dbPath: m.dbPath });
       continue;
     }
@@ -23908,7 +23912,7 @@ function warnFanDegraded(fan, who) {
 function describeMountedDomains(config, { opener = defaultOpener, root } = {}) {
   if (config?.storage === "postgres") return describeRoutedDomains(config, root);
   return domainMountsFromConfig(config).map((m) => {
-    if (!existsSync21(m.dbPath)) return { name: m.name, dbPath: m.dbPath, state: "missing" };
+    if (!existsSync20(m.dbPath)) return { name: m.name, dbPath: m.dbPath, state: "missing" };
     let store;
     try {
       store = opener(m.dbPath);
@@ -24161,7 +24165,7 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
 }
 
 // packages/opencode-plugin/src/compaction.mjs
-import { rmSync as rmSync12 } from "node:fs";
+import { rmSync as rmSync11 } from "node:fs";
 function createCompactionHandler({ rootOf, fenced }) {
   return async function onCompaction(input) {
     const root = rootOf();
@@ -24169,14 +24173,14 @@ function createCompactionHandler({ rootOf, fenced }) {
     await fenced("compaction", root, () => {
       const dir = deliverySessionDir(root, input?.sessionID);
       if (!dir) throw new Error(`compaction input has no usable sessionID (${typeof input?.sessionID}); delivery receipts were not reset`);
-      rmSync12(dir, { recursive: true, force: true });
+      rmSync11(dir, { recursive: true, force: true });
     });
   };
 }
 
 // packages/opencode-plugin/src/config.mjs
 init_agent_fences();
-import { existsSync as existsSync25, readdirSync as readdirSync7, readFileSync as readFileSync24 } from "node:fs";
+import { existsSync as existsSync24, readdirSync as readdirSync7, readFileSync as readFileSync24 } from "node:fs";
 import { join as join36 } from "node:path";
 
 // packages/opencode-plugin/src/mcp-name.mjs
@@ -24189,12 +24193,12 @@ function sterlingToolName(tool) {
 }
 
 // packages/opencode-plugin/src/layer.mjs
-import { existsSync as existsSync23, readFileSync as readFileSync23 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync23 } from "node:fs";
 import { basename as basename6, join as join34 } from "node:path";
 init_agent_fences();
 
 // scripts/lib/sterling-layer.mjs
-import { existsSync as existsSync22, lstatSync as lstatSync9, readFileSync as readFileSync22, unlinkSync as unlinkSync4 } from "node:fs";
+import { existsSync as existsSync21, lstatSync as lstatSync9, readFileSync as readFileSync22, unlinkSync as unlinkSync4 } from "node:fs";
 import { basename as basename5, join as join33, resolve as resolve15 } from "node:path";
 init_agent_fences();
 init_atomic_write();
@@ -24348,7 +24352,7 @@ function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePa
   const missingCommands = [];
   const rules = opencodeLines(templateText).join("\n").replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
     const file = join34(pluginRoot, "commands", `${name}.md`);
-    if (existsSync23(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
+    if (existsSync22(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
     missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
     return whole;
   });
@@ -24380,12 +24384,12 @@ ${body}`;
 // packages/opencode-plugin/src/worker.mjs
 init_dist();
 import { spawn } from "node:child_process";
-import { existsSync as existsSync24 } from "node:fs";
+import { existsSync as existsSync23 } from "node:fs";
 import { delimiter, join as join35 } from "node:path";
 function inWorkerChild(env = process.env) {
   return env?.[WORKER_ENV_FLAG] === "1";
 }
-var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync24(join35(d, name)));
+var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync23(join35(d, name)));
 function claudeOnPathDefault() {
   return onPath("claude");
 }
@@ -24549,8 +24553,8 @@ function renderRegistrations(root) {
   const failures = [];
   const commandsDir = join36(root, "commands");
   const skillsDir = join36(root, "skills");
-  if (!existsSync25(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
-  if (!existsSync25(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
+  if (!existsSync24(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
+  if (!existsSync24(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
   for (const file of readdirSync7(commandsDir).filter((f) => f.endsWith(".md") && !OPENCODE_UNREGISTERED_COMMANDS.includes(f.slice(0, -3))).sort()) {
     const name = `${COMMAND_PREFIX}${file.slice(0, -3)}`;
     try {
@@ -24562,7 +24566,7 @@ function renderRegistrations(root) {
   }
   for (const dir of readdirSync7(skillsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()) {
     const path = join36(skillsDir, dir, "SKILL.md");
-    if (!existsSync25(path)) continue;
+    if (!existsSync24(path)) continue;
     const id = `${SKILL_PREFIX}${dir}`;
     try {
       const { description, body } = renderSource(path, root, `skills/${dir}/SKILL.md`);
@@ -24654,7 +24658,7 @@ import { join as join46 } from "node:path";
 init_dist2();
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync7, existsSync as existsSync26, mkdirSync as mkdirSync19, openSync as openSync7, readFileSync as readFileSync25, readdirSync as readdirSync8, readSync as readSync3, writeFileSync as writeFileSync12 } from "node:fs";
+import { closeSync as closeSync7, existsSync as existsSync25, mkdirSync as mkdirSync19, openSync as openSync7, readFileSync as readFileSync25, readdirSync as readdirSync8, readSync as readSync3, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname18, join as join37 } from "node:path";
 
 // scripts/lib/stamp-outcome.mjs
@@ -24917,7 +24921,7 @@ function parseDomainProposal(stdout) {
 }
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
-  if (!existsSync26(walPath)) return null;
+  if (!existsSync25(walPath)) return null;
   const wal = readFileSync25(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
@@ -25511,7 +25515,7 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 }
 
 // scripts/hooks/lib/operating-state.mjs
-import { existsSync as existsSync28, readFileSync as readFileSync28 } from "node:fs";
+import { existsSync as existsSync27, readFileSync as readFileSync28 } from "node:fs";
 import { join as join40 } from "node:path";
 init_dist();
 init_dist2();
@@ -25519,7 +25523,7 @@ init_dist2();
 // scripts/lib/work-pr.mjs
 init_dist();
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync27, linkSync as linkSync2, mkdirSync as mkdirSync20, readdirSync as readdirSync9, readFileSync as readFileSync27, renameSync as renameSync10, unlinkSync as unlinkSync5, writeFileSync as writeFileSync13 } from "node:fs";
+import { existsSync as existsSync26, linkSync as linkSync2, mkdirSync as mkdirSync20, readdirSync as readdirSync9, readFileSync as readFileSync27, renameSync as renameSync9, unlinkSync as unlinkSync5, writeFileSync as writeFileSync12 } from "node:fs";
 import { dirname as dirname19, join as join39 } from "node:path";
 function noOriginRemote(cwd) {
   const r = spawnSync6("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
@@ -25558,7 +25562,7 @@ function parsePrLoopFileOrThrow(file, rel) {
 function readPrLoopEntries(root) {
   const entries = [];
   const dir = join39(root, PR_LOOPS_DIR_REL);
-  if (existsSync27(dir)) {
+  if (existsSync26(dir)) {
     for (const name of readdirSync9(dir).sort()) {
       const m = name.match(/^(\d+)\.json$/);
       if (!m) continue;
@@ -25568,7 +25572,7 @@ function readPrLoopEntries(root) {
       entries.push({ state, file: join39(dir, name), rel });
     }
   }
-  if (existsSync27(prLoopPath(root))) {
+  if (existsSync26(prLoopPath(root))) {
     const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
     if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
   }
@@ -25680,7 +25684,7 @@ function unsupportedAgentsLine({ config, configUnreadable, host, root }) {
     const hostName = host === "claude" ? "Claude Code" : "OpenCode";
     const head = `the conductor's model ${conductor.model} cannot run on ${hostName}`;
     const fix = `pick a model ${hostName} can run for the conductor in the TUI System tab`;
-    const present = root ? existsSync28(join40(root, rel)) : null;
+    const present = root ? existsSync27(join40(root, rel)) : null;
     if (present === true) {
       parts.push(`${head}; a conductor file Sterling did not remove is present at ${rel}, and it may not run ${conductor.model}; ${fix}`);
     } else if (present === null) {
@@ -25704,7 +25708,7 @@ function unsupportedAgentsLine({ config, configUnreadable, host, root }) {
 }
 var STORAGE_TAIL = "TUI System tab; switch with the move-store skill";
 function storageLine({ config, configUnreadable, root }) {
-  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync28(join40(storeRootFor(root), ".sterling", "config.json"));
+  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync27(join40(storeRootFor(root), ".sterling", "config.json"));
   if (configUnreadable || presentButNull) {
     return "Storage: UNKNOWN \u2014 the project config could not be read, so config.storage could not be determined. This is NOT the SQLite default: repair the config.";
   }
@@ -25741,7 +25745,7 @@ function handoffFilesLine({ config, configUnreadable, root }) {
 var PENDING_ISSUE_REPORTS = "pending-issue-reports.jsonl";
 function pendingIssueReportsLine({ cwd, pluginRoot }) {
   const path = join40(cwd, ".sterling", PENDING_ISSUE_REPORTS);
-  if (!existsSync28(path)) return "";
+  if (!existsSync27(path)) return "";
   let count;
   try {
     count = readFileSync28(path, "utf8").split("\n").filter((l) => l.trim()).length;
@@ -25777,7 +25781,7 @@ init_dist();
 
 // scripts/lib/post-update-sync.mjs
 import { spawn as spawn2, spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync29, lstatSync as lstatSync10, readFileSync as readFileSync29, realpathSync as realpathSync11, statSync as statSync8, writeFileSync as writeFileSync14 } from "node:fs";
+import { existsSync as existsSync28, lstatSync as lstatSync10, readFileSync as readFileSync29, realpathSync as realpathSync11, statSync as statSync8, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
 import { join as join41, resolve as resolve16 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
@@ -25855,7 +25859,7 @@ function sameRealPath(a, b) {
 }
 function pluginScript(root, name) {
   const bundled = join41(root, "bin", name);
-  return existsSync29(bundled) ? bundled : join41(root, "scripts", name);
+  return existsSync28(bundled) ? bundled : join41(root, "scripts", name);
 }
 function readPluginVersion(root) {
   try {
@@ -25936,7 +25940,7 @@ async function writerSteps({ root, project, runStep, host, sync, migrated, layer
   const agySkip = host === "agy" ? AGY_SKIP_LINE.exec(sync.out) : null;
   if (agySkip) return done({ ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` });
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) {
-    const retained = ["CLAUDE.md", "GEMINI.md"].filter((f) => existsSync29(join41(project, f)));
+    const retained = ["CLAUDE.md", "GEMINI.md"].filter((f) => existsSync28(join41(project, f)));
     if (retained.length) layer.push(`\u26A0 Sterling layer: ${retained.join(" and ")} kept \u2014 this project is a Sterling source tree, whose instruction files are maintained by hand, so Sterling removes no host file here.`);
     return { result: { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer }, retire: false };
   }
@@ -25955,7 +25959,7 @@ async function writerSteps({ root, project, runStep, host, sync, migrated, layer
   return done({ ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept, migrated, layer });
 }
 function postUpdateApplies(root, project) {
-  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync29(join41(storeRootFor(project), ".sterling", "config.json"));
+  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync28(join41(storeRootFor(project), ".sterling", "config.json"));
 }
 async function postUpdateSync({ root, project, host = "claude", runStep = runStepSync, env = process.env, home = homedir8() }) {
   const t = hostText(host);
@@ -26013,7 +26017,7 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   let warning = "";
   let receiptFailure = null;
   try {
-    writeFileSync14(markerPath, `${current}
+    writeFileSync13(markerPath, `${current}
 `);
   } catch (err) {
     warning = `\u2717 ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) \u2014 the sync ${t.rerun} until it can. `;
@@ -26021,7 +26025,7 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   if (!warning) {
     const receiptPath = join41(project, SYNC_LAYER_RECEIPT_REL);
     try {
-      writeFileSync14(receiptPath, `${current}
+      writeFileSync13(receiptPath, `${current}
 `);
     } catch (err) {
       receiptFailure = `${receiptPath} could not be written (${err?.code ?? err?.message ?? err}), so the post-update steps, retirement included, run again: it ${t.retry} while a CLAUDE.md or GEMINI.md is left in the project`;
@@ -26112,7 +26116,7 @@ init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash as createHash9, randomUUID as randomUUID9 } from "node:crypto";
-import { closeSync as closeSync8, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync21, openSync as openSync8, readSync as readSync4, renameSync as renameSync11, unlinkSync as unlinkSync6, writeFileSync as writeFileSync15 } from "node:fs";
+import { closeSync as closeSync8, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync21, openSync as openSync8, readSync as readSync4, renameSync as renameSync10, unlinkSync as unlinkSync6, writeFileSync as writeFileSync14 } from "node:fs";
 import { join as join42 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -26234,7 +26238,7 @@ function computeStatus(lock) {
 function claimMarker(path) {
   const claimed = `${path}.claimed-${randomUUID9()}`;
   try {
-    renameSync11(path, claimed);
+    renameSync10(path, claimed);
   } catch {
     return null;
   }
@@ -26427,12 +26431,12 @@ function stageChild({ store, root, sessionID, agent: agentName, brief, disclosur
 }
 
 // packages/opencode-plugin/src/dispatch.mjs
-import { mkdirSync as mkdirSync22, readdirSync as readdirSync10, rmSync as rmSync14, statSync as statSync9 } from "node:fs";
+import { mkdirSync as mkdirSync22, readdirSync as readdirSync10, rmSync as rmSync13, statSync as statSync9 } from "node:fs";
 import { basename as basename7, dirname as dirname20, join as join44 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync30, readFileSync as readFileSync30, rmSync as rmSync13 } from "node:fs";
+import { existsSync as existsSync29, readFileSync as readFileSync30, rmSync as rmSync12 } from "node:fs";
 import { join as join43 } from "node:path";
 var NOTE_PROSE_MAX = 2e3;
 var LIVE_DISPATCH_MAX = 20;
@@ -26455,12 +26459,12 @@ function rotationNotePath(cwd) {
 }
 function readRotationNote(cwd) {
   const notePath = rotationNotePath(cwd);
-  if (!existsSync30(notePath)) return null;
+  if (!existsSync29(notePath)) return null;
   return JSON.parse(readFileSync30(notePath, "utf8"));
 }
 function consumeRotationNote(cwd) {
   const note = readRotationNote(cwd);
-  if (note) rmSync13(rotationNotePath(cwd), { force: true });
+  if (note) rmSync12(rotationNotePath(cwd), { force: true });
   return note;
 }
 function renderRotationRestore(note, { cwd, source, host = "claude", planLock = null, planLockMalformed = false }) {
@@ -26676,10 +26680,10 @@ async function sweepStaleDispatches(root) {
         const sweep = sessionBoundarySweep(root, { now: Date.now() });
         if (sweep.refused) refused = sweep.refused;
         terminated = sweep.terminated ?? 0;
-        rmSync14(registerPath(root), { force: true });
+        rmSync13(registerPath(root), { force: true });
         const registerBasename = basename7(registerPath(root));
         for (const f of readdirSync10(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync14(join44(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync13(join44(transientDir, f), { force: true });
         }
       },
       { retryMs: 100, timeoutMs: 2e3 }
@@ -26908,9 +26912,9 @@ function handoverFailedText(error, from) {
 // scripts/hooks/lib/registry-refresh.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync31 } from "node:fs";
+import { existsSync as existsSync30 } from "node:fs";
 function refreshRegistryRow(cwd, { config, configUnreadable = false, at = (/* @__PURE__ */ new Date()).toISOString() } = {}) {
-  if (!existsSync31(registryPath())) return null;
+  if (!existsSync30(registryPath())) return null;
   const cwdPosix = cwd.replace(/\\/g, "/");
   const isThisProject = (p) => sameLocationAnyHost(p.repo_path, cwdPosix);
   let mounts = null;
@@ -27717,7 +27721,7 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 import { join as join50 } from "node:path";
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync23, readFileSync as readFileSync31, renameSync as renameSync12, rmSync as rmSync15, writeFileSync as writeFileSync16 } from "node:fs";
+import { mkdirSync as mkdirSync23, readFileSync as readFileSync31, renameSync as renameSync11, rmSync as rmSync14, writeFileSync as writeFileSync15 } from "node:fs";
 import { hostname as hostname3 } from "node:os";
 import { join as join49 } from "node:path";
 import { randomUUID as randomUUID10 } from "node:crypto";
@@ -27729,7 +27733,7 @@ function takeSelectionFile(root) {
   const path = selectionFilePath(root);
   const claimed = `${path}.taken-${process.pid}-${randomUUID10()}`;
   try {
-    renameSync12(path, claimed);
+    renameSync11(path, claimed);
   } catch (e) {
     if (e?.code === "ENOENT") return void 0;
     throw e;
@@ -27743,7 +27747,7 @@ function takeSelectionFile(root) {
   } catch (e) {
     throw new Error(`the TUI selection slot ${path} could not be read (${e && e.message || e}); it was removed, so select the record again`);
   } finally {
-    rmSync15(claimed, { force: true });
+    rmSync14(claimed, { force: true });
   }
 }
 
@@ -27895,7 +27899,7 @@ ${line}`;
 // packages/opencode-plugin/src/settle.mjs
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { createHash as createHash11, randomUUID as randomUUID13 } from "node:crypto";
-import { existsSync as existsSync33, mkdirSync as mkdirSync25, readFileSync as readFileSync34, renameSync as renameSync14, rmSync as rmSync17, writeFileSync as writeFileSync18 } from "node:fs";
+import { existsSync as existsSync32, mkdirSync as mkdirSync25, readFileSync as readFileSync34, renameSync as renameSync13, rmSync as rmSync16, writeFileSync as writeFileSync17 } from "node:fs";
 import { dirname as dirname22, join as join53 } from "node:path";
 init_dist();
 
@@ -27903,7 +27907,7 @@ init_dist();
 init_dist();
 init_dist2();
 import { randomUUID as randomUUID11 } from "node:crypto";
-import { existsSync as existsSync32, readFileSync as readFileSync32, readdirSync as readdirSync11 } from "node:fs";
+import { existsSync as existsSync31, readFileSync as readFileSync32, readdirSync as readdirSync11 } from "node:fs";
 import { join as join51 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
@@ -27956,7 +27960,7 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
         return domains;
       }
       for (const m of resolveDomainMounts(config)) {
-        if (!existsSync32(m.dbPath)) continue;
+        if (!existsSync31(m.dbPath)) continue;
         try {
           domains.push({ name: m.name, store: opener(m.dbPath) });
         } catch (e) {
@@ -28163,7 +28167,7 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash10, randomUUID as randomUUID12 } from "node:crypto";
-import { readFileSync as readFileSync33, writeFileSync as writeFileSync17, mkdirSync as mkdirSync24, rmSync as rmSync16, statSync as statSync11, renameSync as renameSync13 } from "node:fs";
+import { readFileSync as readFileSync33, writeFileSync as writeFileSync16, mkdirSync as mkdirSync24, rmSync as rmSync15, statSync as statSync11, renameSync as renameSync12 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { join as join52, dirname as dirname21, resolve as resolve17 } from "node:path";
 init_dist2();
@@ -28362,7 +28366,7 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   mkdirSync24(dirname21(p), { recursive: true });
   if (ifAbsent) {
     try {
-      writeFileSync17(p, JSON.stringify(snapshot), { flag: "wx" });
+      writeFileSync16(p, JSON.stringify(snapshot), { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
@@ -28371,10 +28375,10 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   }
   const tmp = `${p}.${process.pid}.${randomUUID12()}.tmp`;
   try {
-    writeFileSync17(tmp, JSON.stringify(snapshot));
-    renameSync13(tmp, p);
+    writeFileSync16(tmp, JSON.stringify(snapshot));
+    renameSync12(tmp, p);
   } catch (e) {
-    rmSync16(tmp, { force: true });
+    rmSync15(tmp, { force: true });
     throw e;
   }
   return true;
@@ -28390,14 +28394,14 @@ var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool"
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
   const p = join53(root, DUTIES_REL);
-  if (!existsSync33(p)) return { owed: [], weighed: [] };
+  if (!existsSync32(p)) return { owed: [], weighed: [] };
   const parsed = JSON.parse(readFileSync34(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
   const p = join53(root, EVENTS_REL);
-  if (!existsSync33(p)) return { events: [] };
+  if (!existsSync32(p)) return { events: [] };
   try {
     const parsed = JSON.parse(readFileSync34(p, "utf8"));
     if (!Array.isArray(parsed)) return { events: [], error: "it is not a JSON array" };
@@ -28416,7 +28420,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned, foreignOnlyOwners } = ownershipJoin(store, root, config.working_trees);
-  let unowned = paths.filter((p) => existsSync33(join53(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync32(join53(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -28495,7 +28499,7 @@ function weighDuties(store, records, config, root, at, git2) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed2 = [];
   const windowStart = isValidAt(git2.settled.at) ? git2.settled.at : at;
-  const changed = git2.candidates.filter((c) => existsSync33(join53(root, c.path)));
+  const changed = git2.candidates.filter((c) => existsSync32(join53(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
@@ -28530,10 +28534,10 @@ function writeJsonAtomic2(path, value) {
   mkdirSync25(dirname22(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID13()}.tmp`;
   try {
-    writeFileSync18(tmp, JSON.stringify(value));
-    renameSync14(tmp, path);
+    writeFileSync17(tmp, JSON.stringify(value));
+    renameSync13(tmp, path);
   } catch (e) {
-    rmSync17(tmp, { force: true });
+    rmSync16(tmp, { force: true });
     throw e;
   }
 }
@@ -28597,7 +28601,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
       if (held) writeJsonAtomic2(join53(root, MINTED_REL), held.record);
       else {
         writeGitSettled(root, git2.next);
-        rmSync17(join53(root, MINTED_REL), { force: true });
+        rmSync16(join53(root, MINTED_REL), { force: true });
       }
       if (minted.length) {
         const lines = minted.map((m) => {
@@ -29268,7 +29272,7 @@ function createProjectStores({ openRouted = (root) => openRoutedStores(root).sto
 }
 
 // packages/opencode-plugin/src/session-move.mjs
-import { existsSync as existsSync34 } from "node:fs";
+import { existsSync as existsSync33 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { isAbsolute as isAbsolute6, join as join54, resolve as resolve18 } from "node:path";
 var MOVE_TOOLS = /* @__PURE__ */ new Set(["opencode_session_move", "session_move"]);
@@ -29318,7 +29322,7 @@ async function checkSessionMove(input, { sessionInfo, env = process.env, home = 
     if (typeof info?.directory !== "string" || !info.directory) throw refuse(sessionMoveUncheckedRefusal(`session.get gave no location.directory for session ${moved}`));
     target = moveTarget(args.directory, info.directory, home);
   }
-  if (!existsSync34(target)) return;
+  if (!existsSync33(target)) return;
   const seen = agentVisibleFrom({ dir: target, name: agent, env, home, systemDir, managedPrefs });
   if (seen.visible === true) return;
   if (seen.visible === null) throw refuse(sessionMoveUncheckedRefusal(seen.why));
@@ -29327,18 +29331,18 @@ async function checkSessionMove(input, { sessionInfo, env = process.env, home = 
 }
 
 // packages/opencode-plugin/src/sync.mjs
-import { rmSync as rmSync19 } from "node:fs";
+import { rmSync as rmSync18 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join57, resolve as resolve20 } from "node:path";
 
 // scripts/hooks/lib/domain-notice.mjs
 import { spawn as spawn3, spawnSync as spawnSync12 } from "node:child_process";
-import { existsSync as existsSync35, readFileSync as readFileSync35 } from "node:fs";
+import { existsSync as existsSync34, readFileSync as readFileSync35 } from "node:fs";
 import { join as join55 } from "node:path";
 var DOMAIN_MAP_TIMEOUT_MS = 3e4;
 function domainMapDue(root, project, env = process.env) {
   if (env[WORKER_ENV_FLAG] === "1") return null;
-  if (existsSync35(join55(project, DOMAIN_MAP_PENDING_REL))) return "marker";
+  if (existsSync34(join55(project, DOMAIN_MAP_PENDING_REL))) return "marker";
   if (!postUpdateApplies(root, project)) return null;
   const current = readPluginVersion(root);
   if (!current || !parseVersion(current)) return null;
@@ -29352,7 +29356,7 @@ function domainMapDue(root, project, env = process.env) {
 function mapScript(root) {
   if (!root) return { error: "the Sterling plugin root is unresolved" };
   const script = pluginScript(root, "domains.mjs");
-  return existsSync35(script) ? { script } : { error: `${script} is missing` };
+  return existsSync34(script) ? { script } : { error: `${script} is missing` };
 }
 var mapArgs = (script, project) => [script, "--target", project, "--json"];
 function mapResult({ error, signal, status, stdout, stderr }) {
@@ -29428,7 +29432,7 @@ import { homedir as homedir10 } from "node:os";
 import { join as join56, resolve as resolve19, sep as sep4 } from "node:path";
 
 // scripts/lib/file-lock.mjs
-import { linkSync as linkSync3, mkdirSync as mkdirSync26, readFileSync as readFileSync36, rmSync as rmSync18, statSync as statSync12, writeFileSync as writeFileSync19 } from "node:fs";
+import { linkSync as linkSync3, mkdirSync as mkdirSync26, readFileSync as readFileSync36, rmSync as rmSync17, statSync as statSync12, writeFileSync as writeFileSync18 } from "node:fs";
 import { dirname as dirname24 } from "node:path";
 import { hostname as hostname4 } from "node:os";
 import { createHash as createHash12, randomUUID as randomUUID14 } from "node:crypto";
@@ -29459,7 +29463,7 @@ function procStartTime2(pid) {
 }
 function createWithContent2(path, content) {
   const tmp = `${path}.tmp-${randomUUID14()}`;
-  writeFileSync19(tmp, content, { flag: "wx", mode: 384 });
+  writeFileSync18(tmp, content, { flag: "wx", mode: 384 });
   try {
     linkSync3(tmp, path);
     return true;
@@ -29467,7 +29471,7 @@ function createWithContent2(path, content) {
     if (e?.code === "EEXIST") return false;
     throw e;
   } finally {
-    rmSync18(tmp, { force: true });
+    rmSync17(tmp, { force: true });
   }
 }
 function readLock2(path) {
@@ -29504,11 +29508,11 @@ function takeOverStale2(path, staleRaw, me, probe) {
     if (createWithContent2(ticket, me)) {
       try {
         probe.beforeRemove?.();
-        if (readLock2(path)?.raw === staleRaw) rmSync18(path, { force: true });
+        if (readLock2(path)?.raw === staleRaw) rmSync17(path, { force: true });
         return "removed";
       } finally {
-        rmSync18(ticket, { force: true });
-        for (const d of dead) rmSync18(d, { force: true });
+        rmSync17(ticket, { force: true });
+        for (const d of dead) rmSync17(d, { force: true });
       }
     }
     const t = readLock2(ticket);
@@ -29529,7 +29533,7 @@ async function takeFileLock(path, { waitMs = 5e3, pollMs = 25, now = Date.now, s
   for (; ; ) {
     if (createWithContent2(path, me)) {
       return () => {
-        if (readLock2(path)?.owner?.token === token) rmSync18(path, { force: true });
+        if (readLock2(path)?.owner?.token === token) rmSync17(path, { force: true });
       };
     }
     const seen = readLock2(path);
@@ -29792,7 +29796,7 @@ function createSessionSync(deps = {}) {
     }
     if (map && due === "marker") {
       try {
-        rmSync19(join57(root, DOMAIN_MAP_PENDING_REL), { force: true });
+        rmSync18(join57(root, DOMAIN_MAP_PENDING_REL), { force: true });
       } catch (e) {
         unremoved = pendingFileNote(join57(root, DOMAIN_MAP_PENDING_REL), e);
         started.add(root);

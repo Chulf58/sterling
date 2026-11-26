@@ -10867,10 +10867,21 @@ export class SterlingTools {
    * or judged them not a decision. An unknown id refuses the whole call and removes nothing.
    */
   pendingAnswersResolve(args: { ids: string[]; outcome: 'recorded' | 'not_a_decision'; record_id?: string }): { resolved: string[]; outcome: string; record_id?: string } {
-    if (!this.repoRoot) throw new Error('pending_answers_resolve: no project root is known to this server, so the pending answers file cannot be resolved');
+    const root = this.checkoutRoot ?? this.repoRoot;
+    if (!root) throw new Error('pending_answers_resolve: no project root is known to this server, so the pending answers file cannot be resolved');
     const parsed = pendingAnswersResolveInputSchema.parse(args);
-    const resolved = resolvePendingAnswers(this.repoRoot, parsed.ids);
-    return { resolved, outcome: parsed.outcome, ...(parsed.record_id === undefined ? {} : { record_id: parsed.record_id }) };
+    // A recorded answer must point at a live decision, checked before anything is removed.
+    let recordId: string | undefined;
+    if (parsed.outcome === 'recorded') {
+      const record = this.resolveRecordId(parsed.record_id as string, 'pending_answers_resolve');
+      if (record.type !== 'decision' || record.status !== 'active') {
+        throw new Error(`pending_answers_resolve: record_id '${parsed.record_id}' is ${record.status} ${record.type} ${record.id}; outcome 'recorded' needs a live decision that holds the answer. Nothing was resolved.`);
+      }
+      recordId = record.id;
+    }
+    // Pending answers are transient state, so they are the checkout's (a linked worktree has its own).
+    const resolved = resolvePendingAnswers(root, parsed.ids);
+    return { resolved, outcome: parsed.outcome, ...(recordId === undefined ? {} : { record_id: recordId }) };
   }
 
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------

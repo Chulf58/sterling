@@ -161,5 +161,5 @@ export {
 export type { BrokerTarget, BrokerIdentity, BrokerRegistration, BrokerHello, BrokerError, BrokerWelcome, BrokerCall, BrokerResult } from './broker.js';
 export { STORE_FENCE_KEY, moveFenceSchema, renameFenceSchema, parseStoreFence } from './store-fence.js';
 export type { StoreFence, RenameFence, MoveFenceValue } from './store-fence.js';
-export { PENDING_ANSWER_OUTCOMES, pendingAnswerEntrySchema, pendingAnswersFileSchema, pendingAnswersResolveInputSchema } from './pending-answers.js';
+export { PENDING_ANSWER_OUTCOMES, pendingAnswerEntrySchema, pendingAnswersFileSchema, pendingAnswersResolveInputSchema, pendingAnswersResolveShape } from './pending-answers.js';
 export type { PendingAnswerEntry } from './pending-answers.js';

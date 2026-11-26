@@ -234,7 +234,8 @@ test('roster permissions: the reviewer is read-only with no store write; the lib
   for (const line of ['edit: deny', 'bash: deny', 'webfetch: deny', 'websearch: deny', 'task: deny']) {
     assert.match(librarian, new RegExp(`^  ${line}$`, 'm'), `librarian: ${line}`);
   }
-  assert.doesNotMatch(librarian, /sterling_\w+: deny/, 'the librarian keeps its store-write tools');
+  assert.deepEqual(librarian.match(/sterling_\w+: deny/g), ['sterling_pending_answers_resolve: deny'], 'the librarian keeps its store-write tools except the conductor-only pending_answers_resolve');
+  assert.doesNotMatch(frontmatter(fullRender('conductor')), /sterling_\w+: deny/, 'the conductor denies no Sterling tool');
 
   for (const name of ['implementor', 'implementor-hard', 'researcher', 'scout']) {
     assert.match(frontmatter(fullRender(name)), /^ {2}sterling_knowledge_create: deny$/m, `${name} holds no store write`);

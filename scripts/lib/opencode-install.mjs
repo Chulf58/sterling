@@ -1222,6 +1222,9 @@ const FULL_PERMISSIONS = {
 // Roles that may write the store on OpenCode, as on Claude: every other subagent
 // gets an explicit deny for each store-write tool.
 const STORE_WRITERS = new Set(['conductor', 'librarian']);
+// Store-write tools only the conductor may call: the librarian writes the store but never
+// clears the conductor's pending answers.
+const CONDUCTOR_ONLY_TOOLS = ['sterling_pending_answers_resolve'];
 
 /**
  * The store-write tools as OpenCode's permission keys name them (<mcp server>_<tool>,
@@ -1319,8 +1322,9 @@ export function renderFullOpenCodeAgent(templateContent, label, entry, { primary
   const header = parseOpenCodeHeader(out.content);
   let content = normalize(out.content).replace(`${header.headerLine}\n`, '');
   if (primary || mode === 'primary') content = content.replace(/^mode: subagent$/m, 'mode: primary');
-  if (!STORE_WRITERS.has(entry.name)) {
-    const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
+  if (entry.name !== 'conductor') {
+    const denied = STORE_WRITERS.has(entry.name) ? CONDUCTOR_ONLY_TOOLS : (writeTools ?? storeWriteTools());
+    const denies = denied.map((t) => `  ${t}: deny`);
     const close = content.indexOf('\n---\n', 4);
     const block = /^permission:$/m.test(content.slice(0, close)) ? denies : ['permission:', ...denies];
     content = `${content.slice(0, close)}\n${block.join('\n')}${content.slice(close)}`;

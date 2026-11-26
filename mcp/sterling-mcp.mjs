@@ -20164,17 +20164,19 @@ var pendingAnswerEntrySchema = external_exports.object({
   questions: external_exports.array(external_exports.object({
     header: external_exports.string(),
     question: external_exports.string(),
+    raw_answer: external_exports.string().optional(),
     multiple: external_exports.boolean(),
     options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
     picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
   }).strict())
 }).strict();
 var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
-var pendingAnswersResolveInputSchema = external_exports.object({
-  ids: external_exports.array(external_exports.string().min(1)).min(1),
-  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES),
-  record_id: external_exports.string().min(1).optional()
-}).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+var pendingAnswersResolveShape = {
+  ids: external_exports.array(external_exports.string().trim().min(1)).min(1).describe("Full pending-answer ids exactly as the PENDING ANSWERS notice prints them (32 hex characters, a pending-answer id and not a record uuid); an unknown id refuses the whole call"),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES).describe("'recorded' (a live decision holds the answer; needs record_id) or 'not_a_decision'"),
+  record_id: external_exports.string().trim().min(1).optional().describe("For outcome recorded: the live decision that holds the answer, as its slug or id; a missing or non-decision record refuses the whole call")
+};
+var pendingAnswersResolveInputSchema = external_exports.object(pendingAnswersResolveShape).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
 
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
@@ -32064,7 +32066,7 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync13, existsSync as existsSync9, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, readSync as readSync4, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
+import { readFileSync as readFileSync14, existsSync as existsSync9, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, readSync as readSync4, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
 import { join as join18, dirname as dirname10, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve7, sep as sep2 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
@@ -32485,8 +32487,8 @@ function guardReadOnlyTools(server, writeTools) {
 
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync8, lstatSync as lstatSync6, mkdirSync as mkdirSync8, readFileSync as readFileSync12, readdirSync as readdirSync3, realpathSync as realpathSync6, renameSync as renameSync4, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
+import { appendFileSync, chmodSync, existsSync as existsSync8, lstatSync as lstatSync6, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync3, realpathSync as realpathSync6, renameSync as renameSync4, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { basename as basename4, dirname as dirname9, isAbsolute, join as join17, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -33142,27 +33144,45 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
 }
 
 // scripts/hooks/lib/pending-answers.mjs
-import { existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync10, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync11 } from "node:fs";
 import { dirname as dirname8, join as join15 } from "node:path";
+
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { existsSync as existsSync7, readFileSync as readFileSync10, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID5()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync4, rename = renameSync3, mode } = {}) {
+  try {
+    if (mode === void 0) writeFile(tmp, content);
+    else writeFile(tmp, content, { mode, flag: "wx" });
+    rename(tmp, path);
+  } catch (err) {
+    rmSync4(tmp, { force: true });
+    throw err;
+  }
+}
+
+// scripts/hooks/lib/pending-answers.mjs
 var PENDING_ANSWERS_REL = join15(".sterling", "transient", "pending-answers.json");
 var LOCK_TIMEOUT_MS = 2e3;
 function writeAtomic(path, value) {
   mkdirSync7(dirname8(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync4(tmp, JSON.stringify(value));
-    renameSync3(tmp, path);
-  } catch (e) {
-    rmSync4(tmp, { force: true });
-    throw e;
-  }
+  writeFileAtomic(path, JSON.stringify(value), { mode: 384 });
 }
 function readPendingAnswers(root) {
   const path = join15(root, PENDING_ANSWERS_REL);
-  if (!existsSync7(path)) return [];
-  const parsed = JSON.parse(readFileSync10(path, "utf8"));
-  if (!Array.isArray(parsed)) throw new Error(`${PENDING_ANSWERS_REL} is not a JSON array`);
-  return parsed;
+  let raw;
+  try {
+    raw = readFileSync11(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    throw e;
+  }
+  const parsed = pendingAnswersFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new Error(`${PENDING_ANSWERS_REL} does not hold valid pending answers: ${parsed.error.issues[0]?.message ?? "invalid"} at ${parsed.error.issues[0]?.path.join(".")}`);
+  return parsed.data;
 }
 function locked(root, fn) {
   const path = join15(root, PENDING_ANSWERS_REL);
@@ -33181,7 +33201,7 @@ function resolvePendingAnswers(root, ids) {
 
 // scripts/hooks/lib/reconcile-origins.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { lstatSync as lstatSync5, readFileSync as readFileSync11, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
+import { lstatSync as lstatSync5, readFileSync as readFileSync12, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
 import { basename as basename3, join as join16, resolve as resolve6 } from "node:path";
 var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 function git2(root, args2, input) {
@@ -33232,7 +33252,7 @@ function workingState(root, rel) {
       filters = false;
     } else if (st.isFile()) {
       mode = st.mode & 73 ? "100755" : "100644";
-      bytes = readFileSync11(join16(root, rel));
+      bytes = readFileSync12(join16(root, rel));
     } else return { kind: "unreadable" };
   } catch {
     return { kind: "unreadable" };
@@ -33662,7 +33682,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync12(configPath);
+    currentBytes = readFileSync13(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -33737,7 +33757,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${validationIssues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join17(configDir, `config.json.tmp-${randomUUID5()}`);
+  const tmpPath = join17(configDir, `config.json.tmp-${randomUUID6()}`);
   writeFileSync5(tmpPath, serialized);
   let renamed = false;
   try {
@@ -33749,7 +33769,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync12(configPath);
+      raceBytes = readFileSync13(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -33784,7 +33804,7 @@ function busyRefusal(op, e, safeToResend) {
   const next = safeToResend ? "This call wrote nothing, so it is safe to re-send." : "An earlier write in this call may have landed; check before re-sending.";
   return new Error(`${op}: ${e.message} ${next}`, { cause: e });
 }
-var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID5())}`;
+var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID6())}`;
 var SterlingTools = class _SterlingTools {
   store;
   config;
@@ -33803,7 +33823,7 @@ var SterlingTools = class _SterlingTools {
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
-    this.newId = deps.newId ?? randomUUID5;
+    this.newId = deps.newId ?? randomUUID6;
     this.repoRoot = deps.repoRoot;
     this.checkoutRoot = deps.checkoutRoot ?? deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
@@ -34109,7 +34129,7 @@ var SterlingTools = class _SterlingTools {
     if (!this.repoRoot)
       return this.config.working_trees;
     const path = join17(this.repoRoot, ".sterling", "config.json");
-    return parseConfig(existsSync8(path) ? JSON.parse(readFileSync12(path, "utf8")) : {}).working_trees;
+    return parseConfig(existsSync8(path) ? JSON.parse(readFileSync13(path, "utf8")) : {}).working_trees;
   }
   treeRootFor(record2, workingTrees = this.config.working_trees) {
     const name = record2.working_tree;
@@ -34794,7 +34814,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash4("sha256").update(readFileSync12(join17(root, rel))).digest("hex");
+      return createHash4("sha256").update(readFileSync13(join17(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -35546,7 +35566,7 @@ var SterlingTools = class _SterlingTools {
       fields = { ...fields, observations: opts.observations };
     const ts = this.now();
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
-    const operationId = randomUUID5();
+    const operationId = randomUUID6();
     const candidate = {
       id: this.newId(),
       type,
@@ -38629,7 +38649,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         if (expectedVersion !== void 0 && previousVersion !== void 0 && expectedVersion !== previousVersion) {
           throw new Error(`${toolName}: stale expected_version \u2014 the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`);
         }
-        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID5() });
+        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID6() });
         for (const claim of claims) {
           const atRemoval = this.store.get(claim.id);
           this.store.remove(claim.id, ts);
@@ -39203,7 +39223,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: "informed_by", target_id: originalId }]
-      }, { operation_id: randomUUID5() });
+      }, { operation_id: randomUUID6() });
     } catch (err) {
       if (err instanceof ZodError2)
         throw this.renderValidationFailure(err, original.type, "knowledge_promote");
@@ -39460,7 +39480,7 @@ ${JSON.stringify(entry)}
     const MIN_LINE_BYTES = 30;
     if (statSync4(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync12(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync13(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -39478,7 +39498,7 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join17(dirname9(ledgerPath), knowledgeWritesTempFile(basename4(ledgerPath), process.pid, randomUUID5()));
+    const tmp = join17(dirname9(ledgerPath), knowledgeWritesTempFile(basename4(ledgerPath), process.pid, randomUUID6()));
     try {
       writeFileSync5(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
@@ -39661,11 +39681,20 @@ ${JSON.stringify(entry)}
    * or judged them not a decision. An unknown id refuses the whole call and removes nothing.
    */
   pendingAnswersResolve(args2) {
-    if (!this.repoRoot)
+    const root = this.checkoutRoot ?? this.repoRoot;
+    if (!root)
       throw new Error("pending_answers_resolve: no project root is known to this server, so the pending answers file cannot be resolved");
     const parsed = pendingAnswersResolveInputSchema.parse(args2);
-    const resolved = resolvePendingAnswers(this.repoRoot, parsed.ids);
-    return { resolved, outcome: parsed.outcome, ...parsed.record_id === void 0 ? {} : { record_id: parsed.record_id } };
+    let recordId;
+    if (parsed.outcome === "recorded") {
+      const record2 = this.resolveRecordId(parsed.record_id, "pending_answers_resolve");
+      if (record2.type !== "decision" || record2.status !== "active") {
+        throw new Error(`pending_answers_resolve: record_id '${parsed.record_id}' is ${record2.status} ${record2.type} ${record2.id}; outcome 'recorded' needs a live decision that holds the answer. Nothing was resolved.`);
+      }
+      recordId = record2.id;
+    }
+    const resolved = resolvePendingAnswers(root, parsed.ids);
+    return { resolved, outcome: parsed.outcome, ...recordId === void 0 ? {} : { record_id: recordId } };
   }
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
   configSet(args2) {
@@ -42235,7 +42264,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       }
     }
     const ts = this.now();
-    const operationId = randomUUID5();
+    const operationId = randomUUID6();
     const candidate = {
       id: this.newId(),
       type,
@@ -42775,7 +42804,7 @@ var StoreArgInPostgresStorageError = class extends Error {
 };
 function openStoreArg(storePath2) {
   const configPath = join18(dirname10(storePath2), "config.json");
-  const raw = existsSync9(configPath) ? JSON.parse(readFileSync13(configPath, "utf8")) : {};
+  const raw = existsSync9(configPath) ? JSON.parse(readFileSync14(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
@@ -43297,8 +43326,8 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ target: external_exports.string(), reason: external_exports.string() })
   }, ({ target: target2, reason }) => json(tools.capturePending(target2, reason)));
   server.registerTool("pending_answers_resolve", {
-    description: "Conductor-only: clear answered question forms listed by the PENDING ANSWERS notice (.sterling/transient/pending-answers.json). `ids` are the 8-character ids the notice prints. outcome 'recorded' needs `record_id`, the decision (slug or id) that holds the answer; outcome 'not_a_decision' clears forms that settled nothing durable. An unknown id refuses the whole call and clears nothing.",
-    inputSchema: strict({ ids: external_exports.array(external_exports.string()).min(1), outcome: external_exports.enum(["recorded", "not_a_decision"]), record_id: external_exports.string().optional() })
+    description: "Conductor-only: clear answered question forms listed by the PENDING ANSWERS notice (.sterling/transient/pending-answers.json). `ids` are the full ids the notice prints. outcome 'recorded' needs `record_id`, a live decision (slug or id) that holds the answer, checked before anything is cleared; outcome 'not_a_decision' clears forms that settled nothing durable. An unknown id refuses the whole call and clears nothing.",
+    inputSchema: strict(pendingAnswersResolveShape)
   }, ({ ids, outcome, record_id }) => json(tools.pendingAnswersResolve({ ids, outcome, record_id })));
   server.registerTool("config_set", {
     description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node \"<Sterling root>/bin/move-store.mjs\" --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
@@ -43350,13 +43379,13 @@ function createSterlingServer(target, opts = {}) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync14, mkdirSync as mkdirSync9, writeFileSync as writeFileSync6 } from "node:fs";
+import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname11 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync14(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync15(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
@@ -43374,10 +43403,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync15, realpathSync as realpathSync8 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync16, realpathSync as realpathSync8 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync15(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync16(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -43539,7 +43568,7 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
 import { dirname as dirname13, isAbsolute as isAbsolute3, relative as relative3, resolve as resolve9 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync10, readFileSync as readFileSync16 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync17 } from "node:fs";
 import { join as join19 } from "node:path";
 var CONFIG_REL2 = join19(".sterling", "config.json");
 var STORE_DB_REL = join19(".sterling", "sterling.db");

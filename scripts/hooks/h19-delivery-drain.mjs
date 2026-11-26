@@ -84,9 +84,14 @@ try {
     if (legacyMessage) texts.unshift(legacyMessage);
     files.push(legacy);
   }
-  if (!queueOnly) {
-    const pendingAnswers = pendingAnswersNotice(input.cwd);
-    if (pendingAnswers) texts.push(pendingAnswers);
+  // Not on agy (the tool that clears it is not served there), and a failure here costs only this line.
+  if (!queueOnly && input.host !== 'agy') {
+    try {
+      const pendingAnswers = pendingAnswersNotice(input.cwd);
+      if (pendingAnswers) texts.push(pendingAnswers);
+    } catch (e) {
+      texts.push(`PENDING ANSWERS UNAVAILABLE (${(e && e.message) || e}): answered question forms cannot be counted this turn.`);
+    }
   }
   if (!texts.length) allow();
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: texts.join('\n\n') } }), (err) => {
