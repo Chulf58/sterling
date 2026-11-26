@@ -51,7 +51,7 @@ import {
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { isSourcePath, needsReasonAllowed, collectRetiredTerms, retiredTermUses, retiredTermsInText, retiredTermWarning, type RetiredTerm } from '@sterling/schemas';
-import { RETIRED_REASONS } from '@sterling/schemas';
+import { RETIRED_REASONS, pendingAnswersResolveInputSchema } from '@sterling/schemas';
 import { BOARD_REMOVAL_OUTCOMES, HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, boardRemovalOutcomeSchema, handoffEvidenceSchema, todoHandoffSchema, type BoardRemovalOutcome, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
@@ -60,6 +60,7 @@ import { EntryReachability, type EntryVerdict } from './entry-reachability.js';
 // session-events-and-register-locks-are-kernel-held-never-reclaimed-by-age):
 // esbuild inlines it into mcp/sterling-mcp.mjs, as packages/tui does for scripts/lib.
 import { appendSessionEventsAt } from '../../../scripts/hooks/lib/session-events.mjs';
+import { resolvePendingAnswers } from '../../../scripts/hooks/lib/pending-answers.mjs';
 import { headCommit, itemProvenance, observePaths, prefixOf, type Observation } from '../../../scripts/hooks/lib/reconcile-origins.mjs';
 
 export interface SkippedCheck {
@@ -10858,6 +10859,29 @@ export class SterlingTools {
     // debt on it alone, so the same target with a different reason is one item.
     const { at } = this.appendSessionEvents([{ kind: 'capture_pending', detail, target: target.trim() }]);
     return { pending: detail, at };
+  }
+
+  /**
+   * pending_answers_resolve: clears answered question forms (.sterling/transient/pending-answers.json,
+   * written by the hosts' question hooks) once the conductor has recorded the decision they settle
+   * or judged them not a decision. An unknown id refuses the whole call and removes nothing.
+   */
+  pendingAnswersResolve(args: { ids: string[]; outcome: 'recorded' | 'not_a_decision'; record_id?: string }): { resolved: string[]; outcome: string; record_id?: string } {
+    const root = this.checkoutRoot ?? this.repoRoot;
+    if (!root) throw new Error('pending_answers_resolve: no project root is known to this server, so the pending answers file cannot be resolved');
+    const parsed = pendingAnswersResolveInputSchema.parse(args);
+    // A recorded answer must point at a live decision, checked before anything is removed.
+    let recordId: string | undefined;
+    if (parsed.outcome === 'recorded') {
+      const record = this.resolveRecordId(parsed.record_id as string, 'pending_answers_resolve');
+      if (record.type !== 'decision' || record.status !== 'active') {
+        throw new Error(`pending_answers_resolve: record_id '${parsed.record_id}' is ${record.status} ${record.type} ${record.id}; outcome 'recorded' needs a live decision that holds the answer. Nothing was resolved.`);
+      }
+      recordId = record.id;
+    }
+    // Pending answers are transient state, so they are the checkout's (a linked worktree has its own).
+    const resolved = resolvePendingAnswers(root, parsed.ids);
+    return { resolved, outcome: parsed.outcome, ...(recordId === undefined ? {} : { record_id: recordId }) };
   }
 
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------

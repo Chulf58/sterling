@@ -579,6 +579,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "(on OpenCode `sterling/sparring`, with no `model`)",
     after: "(with no `model`)",
   },
+  {
+    commit: 'answered-question-forms-are-kept-as-pending-answers-in-a-tra',
+    date: '2026-11-26',
+    reason: 'the Capture section tells the conductor to clear the PENDING ANSWERS notice with pending_answers_resolve',
+    before: "Promotion is a backstop for a record that was scoped wrong, not the normal path.",
+    after: "Promotion is a backstop for a record that was scoped wrong, not the normal path.\nA `PENDING ANSWERS` notice lists answered question forms not yet recorded: write the decision each one settles, then clear it with `pending_answers_resolve` (`outcome: \"recorded\"` with the decision's `record_id`, or `\"not_a_decision\"`).",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
@@ -714,6 +721,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     reason: "new MCP tool knowledge_apply_drafts (applies a drafts file of record updates server-side) is denied to the implementor under both prefixes; store writes stay the conductor's and the librarian's",
     before: "mcp__sterling__knowledge_array_remove, mcp__plugin_sterling_sterling__knowledge_array_remove, mcp__sterling__knowledge_promote",
     after: "mcp__sterling__knowledge_array_remove, mcp__plugin_sterling_sterling__knowledge_array_remove, mcp__sterling__knowledge_apply_drafts, mcp__plugin_sterling_sterling__knowledge_apply_drafts, mcp__sterling__knowledge_promote",
+  },
+  {
+    commit: 'answered-question-forms-are-kept-as-pending-answers-in-a-tra',
+    date: '2026-11-26',
+    reason: 'pending_answers_resolve is a conductor-only store write, so the implementor deny-list names it under both prefixes',
+    before: "mcp__sterling__capture_pending, mcp__plugin_sterling_sterling__capture_pending,",
+    after: "mcp__sterling__capture_pending, mcp__plugin_sterling_sterling__capture_pending, mcp__sterling__pending_answers_resolve, mcp__plugin_sterling_sterling__pending_answers_resolve,",
   },
 ];
 

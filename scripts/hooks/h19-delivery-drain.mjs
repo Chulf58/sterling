@@ -4,6 +4,7 @@ import { join, resolve, sep } from 'node:path';
 import { readStdin, allow, warnNonBlocking } from './lib/common.mjs';
 import { noticesDir, deliveryDir, mergeGuardMarks } from './lib/delivery.mjs';
 import { ledgerPath, pruneUnhashed } from './lib/ledger.mjs';
+import { pendingAnswersNotice } from './lib/pending-answers.mjs';
 
 // Antigravity CLI (agy): this hook also drains the agy context queue, the
 // `agy-*` notices lib/common.mjs writes for what a PreToolUse or PostToolUse
@@ -82,6 +83,15 @@ try {
     }
     if (legacyMessage) texts.unshift(legacyMessage);
     files.push(legacy);
+  }
+  // Not on agy, where capture is deferred (the resolver tool is still served there); a failure here costs only this line.
+  if (!queueOnly && input.host !== 'agy') {
+    try {
+      const pendingAnswers = pendingAnswersNotice(input.cwd);
+      if (pendingAnswers) texts.push(pendingAnswers);
+    } catch (e) {
+      texts.push(`PENDING ANSWERS UNAVAILABLE (${(e && e.message) || e}): answered question forms cannot be counted this turn.`);
+    }
   }
   if (!texts.length) allow();
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: texts.join('\n\n') } }), (err) => {
