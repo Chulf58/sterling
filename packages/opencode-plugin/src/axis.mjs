@@ -39,6 +39,7 @@ import { dispatchOverpass, missingRouteRefusal, overpassRefusal, overpassUnknown
 import { checkVariant, dispatchModel } from './dispatch-model.mjs';
 import { logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
+import { appendPendingAnswer, entryFromOpenCode } from '../../../scripts/hooks/lib/pending-answers.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
 
 const PENDING_CAP = 200;
@@ -259,6 +260,17 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
     });
   }
 
+  /** Keeps a completed question form as a pending answer (scripts/hooks/lib/pending-answers.mjs); a dismissed form is status 'error' and adds nothing. */
+  async function onAnswers(input) {
+    if (input?.tool !== 'question') return;
+    const root = rootOf();
+    if (!root) return;
+    await fenced('axis', root, () => {
+      const entry = entryFromOpenCode(input);
+      if (entry) appendPendingAnswer(root, entry);
+    });
+  }
+
   /** The output H23 matches, or '' when the call is not a completed read or shell. */
   function outputOf(input) {
     if ((input?.tool !== 'read' && input?.tool !== 'shell') || input.status !== 'completed') return '';
@@ -293,5 +305,5 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
     });
   }
 
-  return { onBefore, onAfter, outputOf, onOutput };
+  return { onBefore, onAfter, onAnswers, outputOf, onOutput };
 }

@@ -105,6 +105,12 @@
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h31-plan-lock.mjs\"" }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h32-pending-answers.mjs\"" }
+        ]
       }
     ],
     "PostToolUseFailure": [

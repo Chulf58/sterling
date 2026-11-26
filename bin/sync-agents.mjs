@@ -6238,6 +6238,31 @@ var renameFenceSchema = external_exports.object({
   fenced_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/pending-answers.js
+var PENDING_ANSWER_OUTCOMES = ["recorded", "not_a_decision"];
+var pendingAnswerEntrySchema = external_exports.object({
+  id: external_exports.string().min(1),
+  host: external_exports.enum(["opencode", "claude"]),
+  session: external_exports.string(),
+  time: external_exports.string(),
+  call_id: external_exports.string().min(1),
+  questions: external_exports.array(external_exports.object({
+    header: external_exports.string(),
+    question: external_exports.string(),
+    raw_answer: external_exports.string().optional(),
+    multiple: external_exports.boolean(),
+    options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
+    picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
+  }).strict())
+}).strict();
+var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
+var pendingAnswersResolveShape = {
+  ids: external_exports.array(external_exports.string().trim().min(1)).min(1).describe("Full pending-answer ids exactly as the PENDING ANSWERS notice prints them (32 hex characters, a pending-answer id and not a record uuid); an unknown id refuses the whole call"),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES).describe("'recorded' (a live decision holds the answer; needs record_id) or 'not_a_decision'"),
+  record_id: external_exports.string().trim().min(1).optional().describe("For outcome recorded: the live decision that holds the answer, as its slug or id; a missing or non-decision record refuses the whole call")
+};
+var pendingAnswersResolveInputSchema = external_exports.object(pendingAnswersResolveShape).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync2, mkdirSync, statSync, lstatSync as lstatSync2, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
@@ -6422,9 +6447,10 @@ function atomicTempPath(path) {
 function writeFileAtomic(path, content, fs = {}) {
   replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
 }
-function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync, mode } = {}) {
   try {
-    writeFile(tmp, content);
+    if (mode === void 0) writeFile(tmp, content);
+    else writeFile(tmp, content, { mode, flag: "wx" });
     rename(tmp, path);
   } catch (err) {
     rmSync(tmp, { force: true });
@@ -11334,6 +11360,7 @@ var FULL_PERMISSIONS = {
   preflight: { edit: "deny", bash: "deny", webfetch: "deny", websearch: "deny", task: "deny" }
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
+var CONDUCTOR_ONLY_TOOLS = ["sterling_pending_answers_resolve"];
 function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
   const tools = readStoreWriteToolNames(pluginRoot2).map((t) => `sterling_${t}`);
   if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd3(implementorTemplatePath(pluginRoot2))} disallowedTools (P5)`);
@@ -11397,8 +11424,9 @@ function renderFullOpenCodeAgent(templateContent, label, entry, { primary = fals
   let content = normalize3(out.content).replace(`${header.headerLine}
 `, "");
   if (primary || mode === "primary") content = content.replace(/^mode: subagent$/m, "mode: primary");
-  if (!STORE_WRITERS.has(entry.name)) {
-    const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
+  if (entry.name !== "conductor") {
+    const denied = STORE_WRITERS.has(entry.name) ? CONDUCTOR_ONLY_TOOLS : writeTools ?? storeWriteTools();
+    const denies = denied.map((t) => `  ${t}: deny`);
     const close = content.indexOf("\n---\n", 4);
     const block = /^permission:$/m.test(content.slice(0, close)) ? denies : ["permission:", ...denies];
     content = `${content.slice(0, close)}

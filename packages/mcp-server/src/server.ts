@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync, lstatSync, realpathSync, openSync, closeSync, fstatSync, readSync, unlinkSync, constants as fsConstants } from 'node:fs';
 import { join, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { z, ZodError } from 'zod';
-import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, BOARD_REMOVAL_OUTCOMES, handoffEvidenceSchema, RETIRED_REASONS } from '@sterling/schemas';
+import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, BOARD_REMOVAL_OUTCOMES, handoffEvidenceSchema, RETIRED_REASONS, pendingAnswersResolveShape } from '@sterling/schemas';
 import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
@@ -1414,6 +1414,16 @@ export function createSterlingServer(
       inputSchema: strict({ target: z.string(), reason: z.string() }),
     },
     ({ target, reason }) => json(tools.capturePending(target, reason))
+  );
+
+  server.registerTool(
+    'pending_answers_resolve',
+    {
+      description:
+        "Conductor-only: clear answered question forms listed by the PENDING ANSWERS notice (.sterling/transient/pending-answers.json). `ids` are the full ids the notice prints. outcome 'recorded' needs `record_id`, a live decision (slug or id) that holds the answer, checked before anything is cleared; outcome 'not_a_decision' clears forms that settled nothing durable. An unknown id refuses the whole call and clears nothing.",
+      inputSchema: strict(pendingAnswersResolveShape),
+    },
+    ({ ids, outcome, record_id }) => json(tools.pendingAnswersResolve({ ids, outcome, record_id }))
   );
 
   server.registerTool(

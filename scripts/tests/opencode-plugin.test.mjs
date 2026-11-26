@@ -1961,3 +1961,24 @@ test('the injected layer carries the shared Sterling rules for a Sterling source
     rmSync(consumer, { recursive: true, force: true });
   }
 });
+
+test('the pending-answers block is re-sent when one entry is resolved and another added, though the clipped list and the count stay the same', async () => {
+  const p = makeProject({ withGit: false });
+  try {
+    const { appendPendingAnswer, resolvePendingAnswers } = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'pending-answers.mjs')).href);
+    const entry = (n) => ({ id: String(n).padStart(32, '0'), host: 'opencode', session: 'ses_1', time: '2026-11-26T13:00:00.000Z', call_id: `c${n}`, questions: [{ header: `Form ${n}`, question: 'q', multiple: false, options: [], picks: [{ label: 'a', custom: false }] }] });
+    for (let n = 1; n <= 6; n++) appendPendingAnswer(p.dir, entry(n));
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    const first = await seeTurn(ctx, contextInput());
+    assert.match(systemText(first), /PENDING ANSWERS: 6 answered question forms/);
+    resolvePendingAnswers(p.dir, [entry(6).id]);
+    appendPendingAnswer(p.dir, entry(7));
+    const second = await seeTurn(ctx, contextInput());
+    assert.match(systemText(second), /PENDING ANSWERS: 6 answered question forms/, 'the replaced sixth entry is delivered again');
+    const third = await seeTurn(ctx, contextInput());
+    assert.doesNotMatch(systemText(third), /PENDING ANSWERS/, 'an unchanged set is not re-sent');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});

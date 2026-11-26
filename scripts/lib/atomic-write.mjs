@@ -26,9 +26,12 @@ export function writeFileAtomic(path, content, fs = {}) {
   replaceVia(`${path}.tmp-${randomUUID()}`, path, content, fs);
 }
 
-function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+// `mode`, when given, creates the temp file exclusively with that mode, so a file that
+// must stay private (the pending answers) is never visible wider than asked.
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync, mode } = {}) {
   try {
-    writeFile(tmp, content);
+    if (mode === undefined) writeFile(tmp, content);
+    else writeFile(tmp, content, { mode, flag: 'wx' });
     rename(tmp, path);
   } catch (err) {
     rmSync(tmp, { force: true });

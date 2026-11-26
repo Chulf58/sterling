@@ -1,0 +1,178 @@
+// Pending answers: <project>/.sterling/transient/pending-answers.json, one entry per
+// answered question form, kept until the agent resolves it as recorded or not a decision
+// (decision answered-question-forms-are-kept-as-pending-answers-in-a-tra). Shared by the
+// Claude Code hook (h32-pending-answers.mjs), the OpenCode plugin, the next-turn notices
+// and the MCP tool pending_answers_resolve. The entry shape is pendingAnswerEntrySchema
+// in packages/schemas. Builtins only: hooks and the servers vendor this module.
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { pendingAnswersFileSchema } from '@sterling/schemas';
+import { writeFileAtomic } from '../../lib/atomic-write.mjs';
+import { withSessionEventsLock } from './session-events.mjs';
+
+export const PENDING_ANSWERS_REL = join('.sterling', 'transient', 'pending-answers.json');
+const LOCK_TIMEOUT_MS = 2000;
+const NOTICE_LISTED = 5;
+const CLIP = 100;
+
+const text = (v) => (typeof v === 'string' ? v : '');
+
+// The id is the dedupe key and the handle pending_answers_resolve deletes by, so it covers the
+// whole identity (host, session, call) and is 128 bits: no two live calls share one.
+function entryId(host, session, callId) {
+  return createHash('sha256').update(`${host}\0${session}\0${callId}`).digest('hex').slice(0, 32);
+}
+
+function questionOf(q, picked) {
+  const options = (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: text(o?.label), description: text(o?.description) }));
+  const labels = new Set(options.map((o) => o.label));
+  return {
+    header: text(q?.header),
+    question: text(q?.question),
+    multiple: q?.multiple === true || q?.multiSelect === true,
+    options,
+    picks: picked.map((label) => ({ label, custom: !labels.has(label) })),
+  };
+}
+
+/**
+ * The entry for a Claude Code PostToolUse payload of AskUserQuestion, or null when the
+ * payload carries no answered question. `tool_response.answers` maps each question's text
+ * to the chosen label; a multi-select answer arrives as one string, split on ', ' when the
+ * whole string is not itself a label.
+ */
+export function entryFromClaude(stdin, now = new Date().toISOString()) {
+  const response = stdin?.tool_response;
+  const questions = Array.isArray(response?.questions) ? response.questions : [];
+  const answers = response?.answers && typeof response.answers === 'object' ? response.answers : {};
+  const callId = text(stdin?.tool_use_id);
+  if (!callId) return null;
+  const built = questions.map((q) => {
+    const raw = answers[text(q?.question)];
+    if (typeof raw !== 'string' || raw === '') return questionOf(q, []);
+    const labels = (Array.isArray(q?.options) ? q.options : []).map((o) => text(o?.label));
+    // Claude Code's multi-select separator is unmeasured: split only when every part is an exact
+    // option label, otherwise keep the raw answer as one custom pick.
+    const parts = raw.split(', ');
+    const picked = !labels.includes(raw) && q?.multiSelect === true && parts.every((p) => labels.includes(p)) ? parts : [raw];
+    return { ...questionOf(q, picked), raw_answer: raw };
+  });
+  if (!built.some((q) => q.picks.length)) return null;
+  return { id: entryId('claude', text(stdin?.session_id), callId), host: 'claude', session: text(stdin?.session_id), time: now, call_id: callId, questions: built };
+}
+
+/**
+ * The entry for an OpenCode execute.after call of the question tool, or null when the form
+ * was not completed (a dismissed form is status 'error') or nothing was picked. The picks
+ * are result.metadata.answers: one array of labels per question, in order, read from the
+ * OpenCode 2.0.x binary (execute.after result = {output, content, metadata:{answers}}).
+ */
+export function entryFromOpenCode(call, now = new Date().toISOString()) {
+  if (call?.tool !== 'question' || call.status !== 'completed') return null;
+  const questions = Array.isArray(call.input?.questions) ? call.input.questions : [];
+  const answers = Array.isArray(call.result?.metadata?.answers) ? call.result.metadata.answers : [];
+  const callId = text(call.id);
+  if (!callId) return null;
+  const built = questions.map((q, i) => questionOf(q, (Array.isArray(answers[i]) ? answers[i] : []).map(String)));
+  if (!built.some((q) => q.picks.length)) return null;
+  return { id: entryId('opencode', text(call.sessionID), callId), host: 'opencode', session: text(call.sessionID), time: now, call_id: callId, questions: built };
+}
+
+function writeAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileAtomic(path, JSON.stringify(value), { mode: 0o600 });
+}
+
+/**
+ * The unresolved entries. Only a missing file is absence; an unparsable file or one that does
+ * not match the entry schema throws and its bytes are left as they are.
+ */
+export function readPendingAnswers(root) {
+  const path = join(root, PENDING_ANSWERS_REL);
+  let raw;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    if (e?.code === 'ENOENT') return [];
+    throw e;
+  }
+  const parsed = pendingAnswersFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new Error(`${PENDING_ANSWERS_REL} does not hold valid pending answers: ${parsed.error.issues[0]?.message ?? 'invalid'} at ${parsed.error.issues[0]?.path.join('.')}`);
+  return parsed.data;
+}
+
+function locked(root, fn) {
+  const path = join(root, PENDING_ANSWERS_REL);
+  mkdirSync(dirname(path), { recursive: true });
+  return withSessionEventsLock(path, () => fn(path), { timeoutMs: LOCK_TIMEOUT_MS });
+}
+
+/** Appends `entry` unless an entry with its id is already there (the same call seen twice); returns whether it was added. */
+export function appendPendingAnswer(root, entry) {
+  return locked(root, (path) => {
+    const entries = readPendingAnswers(root);
+    if (entries.some((e) => e.id === entry.id)) return false;
+    entries.push(entry);
+    writeAtomic(path, entries);
+    return true;
+  });
+}
+
+/**
+ * Removes the entries named by `ids` (the full ids the notice prints). An unknown id
+ * refuses the whole call and nothing is removed. Returns the resolved entry ids.
+ */
+export function resolvePendingAnswers(root, ids) {
+  return locked(root, (path) => {
+    const entries = readPendingAnswers(root);
+    const unknown = ids.filter((id) => !entries.some((e) => e.id === id));
+    if (unknown.length) throw new Error(`pending_answers_resolve: no pending answer with id ${unknown.join(', ')}; the pending ids are ${entries.map((e) => e.id).join(', ') || '(none)'}`);
+    writeAtomic(path, entries.filter((e) => !ids.includes(e.id)));
+    return [...new Set(ids)];
+  });
+}
+
+const clip = (s) => (s.length > CLIP ? `${s.slice(0, CLIP - 1)}…` : s);
+
+/**
+ * The next-turn line: how many answered forms are unrecorded, the first few by id, and the
+ * resolve call. '' at zero, so a project with nothing pending sees nothing. An unreadable
+ * file says so, never reads as zero.
+ */
+export function pendingAnswersNotice(root) {
+  try {
+    return noticeOf(readPendingAnswers(root));
+  } catch (e) {
+    return unreadableNotice(e);
+  }
+}
+
+const unreadableNotice = (e) => `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+
+function noticeOf(entries) {
+  if (!entries.length) return '';
+  const listed = entries.slice(0, NOTICE_LISTED).map((e) => {
+    const q = e.questions?.[0];
+    const picks = (q?.picks ?? []).map((p) => (p.custom ? `${p.label} (typed)` : p.label)).join(', ');
+    return `- ${e.id} ${e.time}: ${clip(text(q?.header) || text(q?.question))} -> ${clip(picks)}${e.questions?.length > 1 ? ` (+${e.questions.length - 1} more question${e.questions.length > 2 ? 's' : ''})` : ''}`;
+  });
+  const more = entries.length > NOTICE_LISTED ? `\n- … and ${entries.length - NOTICE_LISTED} more` : '';
+  return `PENDING ANSWERS: ${entries.length} answered question form${entries.length === 1 ? '' : 's'} not yet recorded. Each is a ruling or a confirmation; capture the decisions, then clear each with pending_answers_resolve({ids, outcome: "recorded", record_id}) or outcome "not_a_decision".\n${listed.join('\n')}${more}`;
+}
+
+/**
+ * The OpenCode context block: the notice text, and a delivery signature over the full set of
+ * unresolved ids (the text lists only the first few entries, so it cannot tell a replaced
+ * entry from an unchanged list). An unreadable file signs as its notice.
+ */
+export function pendingAnswersBlock(root, { read = readPendingAnswers } = {}) {
+  let entries;
+  try {
+    entries = read(root);
+  } catch (e) {
+    const text = unreadableNotice(e);
+    return { text, sig: text };
+  }
+  return { text: noticeOf(entries), sig: entries.map((e) => e.id).sort().join(',') };
+}

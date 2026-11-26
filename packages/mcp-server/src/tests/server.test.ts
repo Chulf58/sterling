@@ -92,6 +92,7 @@ const SERVED_TOOLS = [
   'no_capture',
   'concept_designed',
   'capture_pending',
+  'pending_answers_resolve',
   // maintenance_enqueue deliberately unregistered — decision foreign_6269b714:
   // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',

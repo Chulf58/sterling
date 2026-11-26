@@ -839,3 +839,24 @@ test('the maintenance worker child never sweeps: a parent\'s live background imp
     p.cleanup();
   }
 });
+
+// --- pending answers -------------------------------------------------------
+
+test('the question tool keeps a completed form as a pending answer; a dismissed form keeps nothing', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, cleanup } = await setup(p.dir);
+    const pendingFile = join(p.dir, '.sterling', 'transient', 'pending-answers.json');
+    const questions = [{ header: 'Colour', question: 'Pick a colour', options: [{ label: 'Red', description: 'r' }, { label: 'Green', description: 'g' }] }];
+    await call(ctx, { tool: 'question', input: { questions }, status: 'error' });
+    assert.equal(existsSync(pendingFile), false, 'a dismissed form writes nothing');
+    await call(ctx, { tool: 'question', id: 'q_pa_1', input: { questions }, metadata: { answers: [['Teal']] } });
+    const entries = JSON.parse(readFileSync(pendingFile, 'utf8'));
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].host, 'opencode');
+    assert.deepEqual(entries[0].questions[0].picks, [{ label: 'Teal', custom: true }]);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});

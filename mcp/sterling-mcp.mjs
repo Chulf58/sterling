@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname14, isAbsolute as isAbsolute4, join as join21, resolve as resolve10 } from "node:path";
+import { dirname as dirname15, isAbsolute as isAbsolute4, join as join22, resolve as resolve10 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -20153,6 +20153,31 @@ function parseStoreFence(value) {
   throw new Error(`store_meta '${STORE_FENCE_KEY}' has an unknown fence kind ${JSON.stringify(kind)}`);
 }
 
+// packages/schemas/dist/pending-answers.js
+var PENDING_ANSWER_OUTCOMES = ["recorded", "not_a_decision"];
+var pendingAnswerEntrySchema = external_exports.object({
+  id: external_exports.string().min(1),
+  host: external_exports.enum(["opencode", "claude"]),
+  session: external_exports.string(),
+  time: external_exports.string(),
+  call_id: external_exports.string().min(1),
+  questions: external_exports.array(external_exports.object({
+    header: external_exports.string(),
+    question: external_exports.string(),
+    raw_answer: external_exports.string().optional(),
+    multiple: external_exports.boolean(),
+    options: external_exports.array(external_exports.object({ label: external_exports.string(), description: external_exports.string() }).strict()),
+    picks: external_exports.array(external_exports.object({ label: external_exports.string(), custom: external_exports.boolean() }).strict())
+  }).strict())
+}).strict();
+var pendingAnswersFileSchema = external_exports.array(pendingAnswerEntrySchema);
+var pendingAnswersResolveShape = {
+  ids: external_exports.array(external_exports.string().trim().min(1)).min(1).describe("Full pending-answer ids exactly as the PENDING ANSWERS notice prints them (32 hex characters, a pending-answer id and not a record uuid); an unknown id refuses the whole call"),
+  outcome: external_exports.enum(PENDING_ANSWER_OUTCOMES).describe("'recorded' (a live decision holds the answer; needs record_id) or 'not_a_decision'"),
+  record_id: external_exports.string().trim().min(1).optional().describe("For outcome recorded: the live decision that holds the answer, as its slug or id; a missing or non-decision record refuses the whole call")
+};
+var pendingAnswersResolveInputSchema = external_exports.object(pendingAnswersResolveShape).strict().refine((v) => v.outcome !== "recorded" || v.record_id !== void 0, { message: "outcome 'recorded' needs record_id: the decision (slug or id) that holds the answer" });
+
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
 import { dirname as dirname6, join as join8, resolve as resolvePath2 } from "node:path";
@@ -32041,8 +32066,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync12, existsSync as existsSync8, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, readSync as readSync4, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
-import { join as join17, dirname as dirname9, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve7, sep as sep2 } from "node:path";
+import { readFileSync as readFileSync14, existsSync as existsSync9, lstatSync as lstatSync7, realpathSync as realpathSync7, openSync as openSync5, closeSync as closeSync5, fstatSync as fstatSync3, readSync as readSync4, unlinkSync as unlinkSync3, constants as fsConstants2 } from "node:fs";
+import { join as join18, dirname as dirname10, isAbsolute as isAbsolute2, relative as relative2, resolve as resolve7, sep as sep2 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
 function holdRoutedStores(opened, reopen, announce) {
@@ -32462,9 +32487,9 @@ function guardReadOnlyTools(server, writeTools) {
 
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync6, mkdirSync as mkdirSync7, readFileSync as readFileSync11, readdirSync as readdirSync3, realpathSync as realpathSync6, renameSync as renameSync3, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename4, dirname as dirname8, isAbsolute, join as join16, relative, sep } from "node:path";
+import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
+import { appendFileSync, chmodSync, existsSync as existsSync8, lstatSync as lstatSync6, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync3, realpathSync as realpathSync6, renameSync as renameSync4, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { basename as basename4, dirname as dirname9, isAbsolute, join as join17, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/handoff-target.js
@@ -33118,10 +33143,66 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
   }
 }
 
+// scripts/hooks/lib/pending-answers.mjs
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync11 } from "node:fs";
+import { dirname as dirname8, join as join15 } from "node:path";
+
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { existsSync as existsSync7, readFileSync as readFileSync10, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID5()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync4, rename = renameSync3, mode } = {}) {
+  try {
+    if (mode === void 0) writeFile(tmp, content);
+    else writeFile(tmp, content, { mode, flag: "wx" });
+    rename(tmp, path);
+  } catch (err) {
+    rmSync4(tmp, { force: true });
+    throw err;
+  }
+}
+
+// scripts/hooks/lib/pending-answers.mjs
+var PENDING_ANSWERS_REL = join15(".sterling", "transient", "pending-answers.json");
+var LOCK_TIMEOUT_MS = 2e3;
+function writeAtomic(path, value) {
+  mkdirSync7(dirname8(path), { recursive: true });
+  writeFileAtomic(path, JSON.stringify(value), { mode: 384 });
+}
+function readPendingAnswers(root) {
+  const path = join15(root, PENDING_ANSWERS_REL);
+  let raw;
+  try {
+    raw = readFileSync11(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return [];
+    throw e;
+  }
+  const parsed = pendingAnswersFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new Error(`${PENDING_ANSWERS_REL} does not hold valid pending answers: ${parsed.error.issues[0]?.message ?? "invalid"} at ${parsed.error.issues[0]?.path.join(".")}`);
+  return parsed.data;
+}
+function locked(root, fn) {
+  const path = join15(root, PENDING_ANSWERS_REL);
+  mkdirSync7(dirname8(path), { recursive: true });
+  return withSessionEventsLock(path, () => fn(path), { timeoutMs: LOCK_TIMEOUT_MS });
+}
+function resolvePendingAnswers(root, ids) {
+  return locked(root, (path) => {
+    const entries = readPendingAnswers(root);
+    const unknown3 = ids.filter((id) => !entries.some((e) => e.id === id));
+    if (unknown3.length) throw new Error(`pending_answers_resolve: no pending answer with id ${unknown3.join(", ")}; the pending ids are ${entries.map((e) => e.id).join(", ") || "(none)"}`);
+    writeAtomic(path, entries.filter((e) => !ids.includes(e.id)));
+    return [...new Set(ids)];
+  });
+}
+
 // scripts/hooks/lib/reconcile-origins.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { lstatSync as lstatSync5, readFileSync as readFileSync10, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
-import { basename as basename3, join as join15, resolve as resolve6 } from "node:path";
+import { lstatSync as lstatSync5, readFileSync as readFileSync12, readlinkSync, realpathSync as realpathSync5 } from "node:fs";
+import { basename as basename3, join as join16, resolve as resolve6 } from "node:path";
 var HEX = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 function git2(root, args2, input) {
   const r = spawnSync2("git", ["-C", root, ...args2], { input, timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
@@ -33157,7 +33238,7 @@ function checkoutIdentity(root, storeRoot) {
 function workingState(root, rel) {
   let st;
   try {
-    st = lstatSync5(join15(root, rel));
+    st = lstatSync5(join16(root, rel));
   } catch (e) {
     return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
   }
@@ -33167,11 +33248,11 @@ function workingState(root, rel) {
   try {
     if (st.isSymbolicLink()) {
       mode = "120000";
-      bytes = Buffer.from(readlinkSync(join15(root, rel)));
+      bytes = Buffer.from(readlinkSync(join16(root, rel)));
       filters = false;
     } else if (st.isFile()) {
       mode = st.mode & 73 ? "100755" : "100644";
-      bytes = readFileSync10(join15(root, rel));
+      bytes = readFileSync12(join16(root, rel));
     } else return { kind: "unreadable" };
   } catch {
     return { kind: "unreadable" };
@@ -33561,8 +33642,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   }
   if (path === "storage" || path.startsWith("storage."))
     throw new StorageTransitionRequiredError(path);
-  const configDir = join16(repoRoot, ".sterling");
-  const configPath = join16(configDir, "config.json");
+  const configDir = join17(repoRoot, ".sterling");
+  const configPath = join17(configDir, "config.json");
   let dirLst;
   try {
     dirLst = lstatSync6(configDir);
@@ -33601,7 +33682,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync11(configPath);
+    currentBytes = readFileSync13(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -33676,8 +33757,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${validationIssues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join16(configDir, `config.json.tmp-${randomUUID5()}`);
-  writeFileSync4(tmpPath, serialized);
+  const tmpPath = join17(configDir, `config.json.tmp-${randomUUID6()}`);
+  writeFileSync5(tmpPath, serialized);
   let renamed = false;
   try {
     if (fileLst) {
@@ -33688,7 +33769,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync11(configPath);
+      raceBytes = readFileSync13(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -33696,7 +33777,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (raceDigest !== currentDigest) {
       throw new Error(`config_set: config.json changed on disk while this write was in flight (a concurrent writer) \u2014 read digest ${currentDigest}, now ${raceDigest}. Nothing was written; re-read and retry.`);
     }
-    renameSync3(tmpPath, configPath);
+    renameSync4(tmpPath, configPath);
     renamed = true;
   } finally {
     if (!renamed) {
@@ -33723,7 +33804,7 @@ function busyRefusal(op, e, safeToResend) {
   const next = safeToResend ? "This call wrote nothing, so it is safe to re-send." : "An earlier write in this call may have landed; check before re-sending.";
   return new Error(`${op}: ${e.message} ${next}`, { cause: e });
 }
-var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID5())}`;
+var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID6())}`;
 var SterlingTools = class _SterlingTools {
   store;
   config;
@@ -33742,7 +33823,7 @@ var SterlingTools = class _SterlingTools {
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
-    this.newId = deps.newId ?? randomUUID5;
+    this.newId = deps.newId ?? randomUUID6;
     this.repoRoot = deps.repoRoot;
     this.checkoutRoot = deps.checkoutRoot ?? deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
@@ -33900,7 +33981,7 @@ var SterlingTools = class _SterlingTools {
     for (const rel of _SterlingTools.baselineablePaths(record2)) {
       if (only && !only.has(rel))
         continue;
-      const shape = lstatSync6(join16(root, rel), { throwIfNoEntry: false });
+      const shape = lstatSync6(join17(root, rel), { throwIfNoEntry: false });
       if (!shape || !shape.isFile())
         continue;
       const hash = this.hashFile(rel, root);
@@ -34047,8 +34128,8 @@ var SterlingTools = class _SterlingTools {
   freshWorkingTrees() {
     if (!this.repoRoot)
       return this.config.working_trees;
-    const path = join16(this.repoRoot, ".sterling", "config.json");
-    return parseConfig(existsSync7(path) ? JSON.parse(readFileSync11(path, "utf8")) : {}).working_trees;
+    const path = join17(this.repoRoot, ".sterling", "config.json");
+    return parseConfig(existsSync8(path) ? JSON.parse(readFileSync13(path, "utf8")) : {}).working_trees;
   }
   treeRootFor(record2, workingTrees = this.config.working_trees) {
     const name = record2.working_tree;
@@ -34064,7 +34145,7 @@ var SterlingTools = class _SterlingTools {
       return { root: mapped, unresolved: false };
     if (!this.repoRoot)
       return { root: void 0, unresolved: true };
-    return { root: join16(this.repoRoot, mapped), unresolved: false };
+    return { root: join17(this.repoRoot, mapped), unresolved: false };
   }
   /**
    * Does a record's working_tree name a tree OTHER than this project? A
@@ -34081,7 +34162,7 @@ var SterlingTools = class _SterlingTools {
     const name = String(workingTree);
     const raw = workingTrees && Object.hasOwn(workingTrees, name) ? workingTrees[name] : void 0;
     const mapped = typeof raw === "string" && raw ? raw : void 0;
-    const location = mapped === void 0 ? name : isAbsolutePathAnyHost(mapped) ? mapped : this.repoRoot ? join16(this.repoRoot, mapped) : void 0;
+    const location = mapped === void 0 ? name : isAbsolutePathAnyHost(mapped) ? mapped : this.repoRoot ? join17(this.repoRoot, mapped) : void 0;
     if (location === void 0)
       return true;
     return !(this.repoRoot && sameLocationAnyHost(location, this.repoRoot) || this.checkoutRoot && sameLocationAnyHost(location, this.checkoutRoot));
@@ -34733,7 +34814,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash4("sha256").update(readFileSync11(join16(root, rel))).digest("hex");
+      return createHash4("sha256").update(readFileSync13(join17(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -34797,7 +34878,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync4(join16(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync4(join17(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -35485,7 +35566,7 @@ var SterlingTools = class _SterlingTools {
       fields = { ...fields, observations: opts.observations };
     const ts = this.now();
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
-    const operationId = randomUUID5();
+    const operationId = randomUUID6();
     const candidate = {
       id: this.newId(),
       type,
@@ -35758,7 +35839,7 @@ var SterlingTools = class _SterlingTools {
         if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
         if (rel && tree?.root) {
-          const stat = statSync4(join16(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync4(join17(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
@@ -38568,7 +38649,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         if (expectedVersion !== void 0 && previousVersion !== void 0 && expectedVersion !== previousVersion) {
           throw new Error(`${toolName}: stale expected_version \u2014 the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`);
         }
-        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID5() });
+        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID6() });
         for (const claim of claims) {
           const atRemoval = this.store.get(claim.id);
           this.store.remove(claim.id, ts);
@@ -39142,7 +39223,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: "informed_by", target_id: originalId }]
-      }, { operation_id: randomUUID5() });
+      }, { operation_id: randomUUID6() });
     } catch (err) {
       if (err instanceof ZodError2)
         throw this.renderValidationFailure(err, original.type, "knowledge_promote");
@@ -39360,10 +39441,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     try {
       if (!this.repoRoot)
         throw new Error("no project root is known to this server");
-      if (!existsSync7(join16(this.repoRoot, ".sterling")))
+      if (!existsSync8(join17(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      ledgerPath = join16(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
-      mkdirSync7(dirname8(ledgerPath), { recursive: true });
+      ledgerPath = join17(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
+      mkdirSync8(dirname9(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
 ${JSON.stringify(entry)}
@@ -39399,7 +39480,7 @@ ${JSON.stringify(entry)}
     const MIN_LINE_BYTES = 30;
     if (statSync4(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync11(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync13(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -39417,11 +39498,11 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join16(dirname8(ledgerPath), knowledgeWritesTempFile(basename4(ledgerPath), process.pid, randomUUID5()));
+    const tmp = join17(dirname9(ledgerPath), knowledgeWritesTempFile(basename4(ledgerPath), process.pid, randomUUID6()));
     try {
-      writeFileSync4(tmp, kept.map((e) => `${JSON.stringify(e)}
+      writeFileSync5(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
-      renameSync3(tmp, ledgerPath);
+      renameSync4(tmp, ledgerPath);
     } catch (err) {
       try {
         unlinkSync2(tmp);
@@ -39465,7 +39546,7 @@ ${JSON.stringify(entry)}
   removeExpiredDomainWriteLedgers() {
     if (!this.repoRoot)
       return void 0;
-    const dir = join16(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
+    const dir = join17(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
     const gone = (err) => err?.code === "ENOENT";
     const text = (err) => err instanceof Error ? err.message : String(err);
     let names;
@@ -39486,7 +39567,7 @@ ${JSON.stringify(entry)}
       const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name);
       if (name !== legacy && ownerPid === null)
         continue;
-      const path = join16(dir, name);
+      const path = join17(dir, name);
       let mtimeMs;
       try {
         mtimeMs = statSync4(path).mtimeMs;
@@ -39526,7 +39607,7 @@ ${JSON.stringify(entry)}
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join16(this.checkoutRoot ?? this.repoRoot, ".sterling", "transient", "session-events.json");
+    const eventsPath = join17(this.checkoutRoot ?? this.repoRoot, ".sterling", "transient", "session-events.json");
     const at = this.now();
     appendSessionEventsAt(eventsPath, entries.map((e) => ({ ...e, at })));
     return { at };
@@ -39593,6 +39674,27 @@ ${JSON.stringify(entry)}
     const detail = `${target.trim()} \u2014 ${reason.trim()}`;
     const { at } = this.appendSessionEvents([{ kind: "capture_pending", detail, target: target.trim() }]);
     return { pending: detail, at };
+  }
+  /**
+   * pending_answers_resolve: clears answered question forms (.sterling/transient/pending-answers.json,
+   * written by the hosts' question hooks) once the conductor has recorded the decision they settle
+   * or judged them not a decision. An unknown id refuses the whole call and removes nothing.
+   */
+  pendingAnswersResolve(args2) {
+    const root = this.checkoutRoot ?? this.repoRoot;
+    if (!root)
+      throw new Error("pending_answers_resolve: no project root is known to this server, so the pending answers file cannot be resolved");
+    const parsed = pendingAnswersResolveInputSchema.parse(args2);
+    let recordId;
+    if (parsed.outcome === "recorded") {
+      const record2 = this.resolveRecordId(parsed.record_id, "pending_answers_resolve");
+      if (record2.type !== "decision" || record2.status !== "active") {
+        throw new Error(`pending_answers_resolve: record_id '${parsed.record_id}' is ${record2.status} ${record2.type} ${record2.id}; outcome 'recorded' needs a live decision that holds the answer. Nothing was resolved.`);
+      }
+      recordId = record2.id;
+    }
+    const resolved = resolvePendingAnswers(root, parsed.ids);
+    return { resolved, outcome: parsed.outcome, ...recordId === void 0 ? {} : { record_id: recordId } };
   }
   // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
   configSet(args2) {
@@ -41150,20 +41252,20 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const holds = [];
     for (const item of linked)
       holds.push(...itemProvenance(item, root, head, { prefix }).holds.map((h) => ({ hold: h.hold, why: `item ${item.id}: ${h.why}` })));
-    for (const join22 of joins) {
-      const keys = (join22.file_keys ?? []).filter((k) => joinPaths.includes(k));
+    for (const join23 of joins) {
+      const keys = (join23.file_keys ?? []).filter((k) => joinPaths.includes(k));
       if (!keys.length)
         continue;
       try {
         const evidence = collectAttestationEvidence({ root, keys, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
         if (evidence.head_commit !== head)
-          holds.push({ hold: "integration", why: `item ${join22.id}: HEAD moved while it was checked` });
+          holds.push({ hold: "integration", why: `item ${join23.id}: HEAD moved while it was checked` });
         for (const [key, ev] of Object.entries(evidence.perPath)) {
           if (ev.kind !== "present")
-            holds.push({ hold: "integration", why: `item ${join22.id}: ${key} is not a committed file in ${head.slice(0, 8)} yet` });
+            holds.push({ hold: "integration", why: `item ${join23.id}: ${key} is not a committed file in ${head.slice(0, 8)} yet` });
         }
       } catch (err) {
-        holds.push({ hold: "integration", why: `item ${join22.id}: ${err instanceof Error ? err.message : String(err)}` });
+        holds.push({ hold: "integration", why: `item ${join23.id}: ${err instanceof Error ? err.message : String(err)}` });
       }
     }
     if (holds.length)
@@ -41623,7 +41725,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (!this.repoRoot) {
       throw new Error(`board_remove: '${itemId}' was handed over from another project, and this server has no project root to clear its evidence file in. Nothing was removed.`);
     }
-    const path = join16(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
+    const path = join17(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
     try {
       unlinkSync2(path);
     } catch (e) {
@@ -41644,17 +41746,17 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, and its evidence file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
     if (!this.repoRoot)
       throw fail("this server has no project root");
-    const dir = join16(this.repoRoot, HANDOFFS_DIR_REL);
-    const path = join16(dir, `${transferId}.evidence.json`);
+    const dir = join17(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join17(dir, `${transferId}.evidence.json`);
     const file = { transfer_id: transferId, item_id: itemId, ...evidence ? { evidence } : {}, ...outcome ? { outcome } : {} };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
-      mkdirSync7(dir, { recursive: true });
-      writeFileSync4(tmp, JSON.stringify(file, null, 2) + "\n");
-      renameSync3(tmp, path);
+      mkdirSync8(dir, { recursive: true });
+      writeFileSync5(tmp, JSON.stringify(file, null, 2) + "\n");
+      renameSync4(tmp, path);
     } catch (e) {
       try {
-        if (existsSync7(tmp))
+        if (existsSync8(tmp))
           unlinkSync2(tmp);
       } catch {
       }
@@ -41672,17 +41774,17 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
     if (!this.repoRoot)
       throw fail("this server has no project root");
-    const dir = join16(this.repoRoot, HANDOFFS_DIR_REL);
-    const path = join16(dir, `${transferId}.json`);
+    const dir = join17(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join17(dir, `${transferId}.json`);
     const closure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...note !== void 0 ? { note } : {} };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
-      mkdirSync7(dir, { recursive: true });
-      writeFileSync4(tmp, JSON.stringify(closure, null, 2) + "\n");
-      renameSync3(tmp, path);
+      mkdirSync8(dir, { recursive: true });
+      writeFileSync5(tmp, JSON.stringify(closure, null, 2) + "\n");
+      renameSync4(tmp, path);
     } catch (e) {
       try {
-        if (existsSync7(tmp))
+        if (existsSync8(tmp))
           unlinkSync2(tmp);
       } catch {
       }
@@ -41884,7 +41986,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       for (const rel of new Set(a.files.map((f) => f.path))) {
         let present;
         try {
-          present = lstatSync6(join16(tree.root, rel), { throwIfNoEntry: false }) !== void 0;
+          present = lstatSync6(join17(tree.root, rel), { throwIfNoEntry: false }) !== void 0;
         } catch (err) {
           failures.push(`'${rel}' could not be checked in ${tree.root} (${err.code ?? err.message})`);
           continue;
@@ -42162,7 +42264,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       }
     }
     const ts = this.now();
-    const operationId = randomUUID5();
+    const operationId = randomUUID6();
     const candidate = {
       id: this.newId(),
       type,
@@ -42595,7 +42697,7 @@ function readAllAt(fd) {
   }
 }
 function draftsRefusal(repoRoot, why) {
-  return new Error(`knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${join17(repoRoot, DRAFTS_DIR).replace(/\\/g, "/")}). Nothing was written.`);
+  return new Error(`knowledge_apply_drafts: ${why}. A drafts file must sit inside ${DRAFTS_DIR}/ of this project (${join18(repoRoot, DRAFTS_DIR).replace(/\\/g, "/")}). Nothing was written.`);
 }
 function closeDraft(d) {
   for (const fd of [d.leafFd, ...d.dirFds])
@@ -42605,15 +42707,15 @@ function openDraft(repoRoot, path) {
   if (process.platform !== "linux") {
     throw draftsRefusal(repoRoot, `this tool pins the drafts folder through /proc/self/fd, which exists only on Linux (run Sterling under WSL on Windows); platform '${process.platform}' is refused`);
   }
-  if (!existsSync8("/proc/self/fd")) {
+  if (!existsSync9("/proc/self/fd")) {
     throw draftsRefusal(repoRoot, "this tool pins the drafts folder through /proc/self/fd, and /proc/self/fd is not available in this process (is /proc mounted?)");
   }
-  const base2 = join17(repoRoot, DRAFTS_DIR);
+  const base2 = join18(repoRoot, DRAFTS_DIR);
   const inside = (b) => {
     const rel2 = relative2(b, isAbsolute2(path) ? path : resolve7(b, path));
     return rel2 === "" || rel2 === ".." || rel2.startsWith(".." + sep2) || isAbsolute2(rel2) ? void 0 : rel2;
   };
-  const rel = inside(base2) ?? (isAbsolute2(path) ? inside(join17(realpathSync7(repoRoot), DRAFTS_DIR)) : void 0);
+  const rel = inside(base2) ?? (isAbsolute2(path) ? inside(join18(realpathSync7(repoRoot), DRAFTS_DIR)) : void 0);
   if (rel === void 0)
     throw draftsRefusal(repoRoot, `'${path}' resolves outside the drafts folder`);
   const parts = [...DRAFTS_DIR.split("/"), ...rel.split(sep2)];
@@ -42701,13 +42803,13 @@ var StoreArgInPostgresStorageError = class extends Error {
   }
 };
 function openStoreArg(storePath2) {
-  const configPath = join17(dirname9(storePath2), "config.json");
-  const raw = existsSync8(configPath) ? JSON.parse(readFileSync12(configPath, "utf8")) : {};
+  const configPath = join18(dirname10(storePath2), "config.json");
+  const raw = existsSync9(configPath) ? JSON.parse(readFileSync14(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
-  return { store, config: config2, repoRoot: dirname9(dirname9(storePath2)) };
+  return { store, config: config2, repoRoot: dirname10(dirname10(storePath2)) };
 }
 function createSterlingServer(target, opts = {}) {
   if (opts.readOnly && opts.readOnly.writeTools.length === 0) {
@@ -43223,6 +43325,10 @@ function createSterlingServer(target, opts = {}) {
     description: "Declare that a capture exists and its write is in flight on a named target (a pending commit, a dispatched agent). H10 defers the capture duty: the declaration holds while any dispatched subagent is live, then gets one Stop of grace counted from the declaration (an earlier nag does not spend it); if still pending after that it becomes a capture_owed queue item citing this target, deduped per target. A real capture spends the declaration.",
     inputSchema: strict({ target: external_exports.string(), reason: external_exports.string() })
   }, ({ target: target2, reason }) => json(tools.capturePending(target2, reason)));
+  server.registerTool("pending_answers_resolve", {
+    description: "Conductor-only: clear answered question forms listed by the PENDING ANSWERS notice (.sterling/transient/pending-answers.json). `ids` are the full ids the notice prints. outcome 'recorded' needs `record_id`, a live decision (slug or id) that holds the answer, checked before anything is cleared; outcome 'not_a_decision' clears forms that settled nothing durable. An unknown id refuses the whole call and clears nothing.",
+    inputSchema: strict(pendingAnswersResolveShape)
+  }, ({ ids, outcome, record_id }) => json(tools.pendingAnswersResolve({ ids, outcome, record_id })));
   server.registerTool("config_set", {
     description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node \"<Sterling root>/bin/move-store.mjs\" --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
     inputSchema: strict({
@@ -43273,21 +43379,21 @@ function createSterlingServer(target, opts = {}) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync13, mkdirSync as mkdirSync8, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname10 } from "node:path";
+import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname11 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync13(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync15(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
     }
     const marker = runtimeMarkerSchema.parse({ build_id: buildId, pid: process.pid, booted_at: now() });
     const markerPath = runtimeMarkerPath(storePath2);
-    mkdirSync8(dirname10(markerPath), { recursive: true });
-    writeFileSync5(markerPath, JSON.stringify(marker));
+    mkdirSync9(dirname11(markerPath), { recursive: true });
+    writeFileSync6(markerPath, JSON.stringify(marker));
     return marker;
   } catch {
     return null;
@@ -43297,10 +43403,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync14, realpathSync as realpathSync8 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync16, realpathSync as realpathSync8 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync14(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync16(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -43459,21 +43565,21 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
 }
 
 // scripts/hooks/lib/hook-roots.mjs
-import { dirname as dirname12, isAbsolute as isAbsolute3, relative as relative3, resolve as resolve9 } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute3, relative as relative3, resolve as resolve9 } from "node:path";
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync9, readFileSync as readFileSync15 } from "node:fs";
-import { join as join18 } from "node:path";
-var CONFIG_REL2 = join18(".sterling", "config.json");
-var STORE_DB_REL = join18(".sterling", "sterling.db");
+import { existsSync as existsSync10, readFileSync as readFileSync17 } from "node:fs";
+import { join as join19 } from "node:path";
+var CONFIG_REL2 = join19(".sterling", "config.json");
+var STORE_DB_REL = join19(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync9(join18(dir, CONFIG_REL2)) || existsSync9(join18(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync10(join19(dir, CONFIG_REL2)) || existsSync10(join19(dir, STORE_DB_REL)));
 }
 
 // scripts/lib/worktree-root.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync10, realpathSync as realpathSync9, statSync as statSync5 } from "node:fs";
-import { basename as basename5, dirname as dirname11, join as join19, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync11, realpathSync as realpathSync9, statSync as statSync5 } from "node:fs";
+import { basename as basename5, dirname as dirname12, join as join20, resolve as resolve8 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
   const git3 = (args2, at) => spawnSync4("git", args2, { cwd: at, encoding: "utf8", timeout: 3e4 });
   const real = (p) => {
@@ -43502,14 +43608,14 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   if (settings.bare === "true") return null;
   let mainRoot = null;
   if (settings.worktree) mainRoot = real(resolve8(commonReal, settings.worktree));
-  else if (basename5(commonReal) === ".git") mainRoot = dirname11(commonReal);
+  else if (basename5(commonReal) === ".git") mainRoot = dirname12(commonReal);
   if (!mainRoot || mainRoot === worktree) return null;
   return { worktree, mainRoot };
 }
 function resolveStoreRoot(target, linkedWorktree = resolveLinkedWorktree(target)) {
   if (!linkedWorktree) return target;
-  const configRel = join19(".sterling", "config.json");
-  const worktreeOnlyConfig = !existsSync10(join19(linkedWorktree.mainRoot, configRel)) && existsSync10(join19(linkedWorktree.worktree, configRel));
+  const configRel = join20(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync11(join20(linkedWorktree.mainRoot, configRel)) && existsSync11(join20(linkedWorktree.worktree, configRel));
   return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
 }
 var linkedProbes = /* @__PURE__ */ new Map();
@@ -43519,7 +43625,7 @@ function linkedWorktreeOnce(dir) {
 }
 function gitFileAt(dir) {
   try {
-    return statSync5(join19(dir, ".git")).isFile();
+    return statSync5(join20(dir, ".git")).isFile();
   } catch {
     return false;
   }
@@ -43536,7 +43642,7 @@ function resolveProjectRoots(from, isRoot = isSterlingRoot) {
       }
     }
     if (isRoot(dir)) return { storeRoot: dir, checkoutRoot: dir };
-    const parent = dirname11(dir);
+    const parent = dirname12(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -43548,7 +43654,7 @@ function hookProjectRoot(from) {
   let dir = resolve9(String(from));
   for (; ; ) {
     if (isSterlingRoot(dir)) return dir;
-    const parent = dirname12(dir);
+    const parent = dirname13(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -43565,14 +43671,14 @@ function hookRoots(from) {
 }
 
 // scripts/hooks/lib/plugin-root-walk.mjs
-import { existsSync as existsSync11 } from "node:fs";
-import { dirname as dirname13, join as join20 } from "node:path";
+import { existsSync as existsSync12 } from "node:fs";
+import { dirname as dirname14, join as join21 } from "node:path";
 import { fileURLToPath } from "node:url";
 function walkUpPluginRoot(moduleUrl) {
-  let dir = dirname13(fileURLToPath(moduleUrl));
+  let dir = dirname14(fileURLToPath(moduleUrl));
   for (let i = 0; i < 4; i++) {
-    if (existsSync11(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname13(dir);
+    if (existsSync12(join21(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname14(dir);
   }
   return null;
 }
@@ -43630,7 +43736,7 @@ var claudeRoots = projectArg !== void 0 && checkoutArg === void 0 ? hookRoots(re
 var splitRoots = claudeRoots && claudeRoots.storeRoot !== claudeRoots.checkoutRoot ? claudeRoots : null;
 var projectRoot = projectArg !== void 0 ? splitRoots?.storeRoot ?? resolve10(projectArg) : void 0;
 var checkoutRoot = checkoutArg !== void 0 ? resolve10(checkoutArg) : splitRoots?.checkoutRoot ?? projectRoot;
-var storePath = projectRoot !== void 0 ? join21(projectRoot, ".sterling", "sterling.db") : resolve10(pathArg);
+var storePath = projectRoot !== void 0 ? join22(projectRoot, ".sterling", "sterling.db") : resolve10(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot, checkoutRoot } : storePath, { workerPolicy, readOnly });
@@ -43639,13 +43745,13 @@ try {
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
   process.exit(e instanceof ReadOnlyBootError ? 2 : 1);
 }
-recordRuntimeMarker(storePath, dirname14(fileURLToPath2(import.meta.url)));
+recordRuntimeMarker(storePath, dirname15(fileURLToPath2(import.meta.url)));
 await created.server.connect(new StdioServerTransport());
 if (projectRoot !== void 0) {
   const route = resolveStoreRoute(projectRoot);
   if (route?.storage === "postgres") {
     try {
-      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname14(fileURLToPath2(import.meta.url)) });
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname15(fileURLToPath2(import.meta.url)) });
       if (broker === null) {
         console.error("sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.");
       } else {
