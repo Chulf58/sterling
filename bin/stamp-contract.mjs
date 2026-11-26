@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync6, writeFileSync, existsSync as existsSync5, realpathSync as realpathSync5 } from "node:fs";
-import { join as join11, dirname as dirname3, resolve as resolve6 } from "node:path";
+import { realpathSync as realpathSync6 } from "node:fs";
+import { join as join12, dirname as dirname3, resolve as resolve6 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -3588,13 +3588,13 @@ var ZodEffects = class extends ZodType {
     };
     checkCtx.addIssue = checkCtx.addIssue.bind(checkCtx);
     if (effect.type === "preprocess") {
-      const processed2 = effect.transform(ctx.data, checkCtx);
+      const processed = effect.transform(ctx.data, checkCtx);
       if (ctx.common.async) {
-        return Promise.resolve(processed2).then(async (processed3) => {
+        return Promise.resolve(processed).then(async (processed2) => {
           if (status.value === "aborted")
             return INVALID;
           const result = await this._def.schema._parseAsync({
-            data: processed3,
+            data: processed2,
             path: ctx.path,
             parent: ctx
           });
@@ -3610,7 +3610,7 @@ var ZodEffects = class extends ZodType {
         if (status.value === "aborted")
           return INVALID;
         const result = this._def.schema._parseSync({
-          data: processed2,
+          data: processed,
           path: ctx.path,
           parent: ctx
         });
@@ -5965,12 +5965,12 @@ var ProjectRegistry = class {
   snapshot() {
     this.db.exec("BEGIN");
     try {
-      const rows = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
+      const rows2 = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
         repo_path: r.repo_path,
         name: r.name,
         project_key: r.project_key
       }));
-      const snap = { rows, occupancy: this.occupancy() };
+      const snap = { rows: rows2, occupancy: this.occupancy() };
       this.db.exec("COMMIT");
       return snap;
     } catch (e) {
@@ -6054,20 +6054,68 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
-// scripts/lib/contract-history.mjs
+// scripts/lib/worktree-root.mjs
 import { spawnSync } from "node:child_process";
+import { existsSync, realpathSync as realpathSync2, statSync } from "node:fs";
+import { basename, dirname as dirname2, join as join4, resolve as resolve2 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join3 } from "node:path";
+var CONFIG_REL = join3(".sterling", "config.json");
+var STORE_DB_REL = join3(".sterling", "sterling.db");
+
+// scripts/lib/worktree-root.mjs
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const git = (args, at) => spawnSync("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
+  const real = (p) => {
+    try {
+      return realpathSync2(p);
+    } catch {
+      return null;
+    }
+  };
+  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = real(resolve2(cwd, gitDir));
+  const commonReal = real(resolve2(cwd, commonDir));
+  const worktree = real(toplevel);
+  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
+  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
+  const settings = {};
+  if (!core.error && core.status === 0) {
+    for (const line of core.stdout.split("\n")) {
+      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
+      if (m) settings[m[1]] = m[2];
+    }
+  }
+  if (settings.bare === "true") return null;
+  let mainRoot = null;
+  if (settings.worktree) mainRoot = real(resolve2(commonReal, settings.worktree));
+  else if (basename(commonReal) === ".git") mainRoot = dirname2(commonReal);
+  if (!mainRoot || mainRoot === worktree) return null;
+  return { worktree, mainRoot };
+}
+
+// scripts/lib/stamp-projects.mjs
+import { writeFileSync, existsSync as existsSync5, realpathSync as realpathSync5 } from "node:fs";
+import { join as join11 } from "node:path";
+
+// scripts/lib/contract-history.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { readFileSync as readFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join7 } from "node:path";
 
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join6 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync, readFileSync, readdirSync, realpathSync as realpathSync2 } from "node:fs";
+import { existsSync as existsSync2, readFileSync, readdirSync, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join3, resolve as resolve2, sep } from "node:path";
+import { join as join5, resolve as resolve3, sep } from "node:path";
 import { createHash } from "node:crypto";
 
 // scripts/lib/jsonc.mjs
@@ -6258,7 +6306,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync, readFileSync, readdirSync, join3, homedir3);
+)(existsSync2, readFileSync, readdirSync, join5, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -6333,14 +6381,14 @@ var loaded = new Function(
   "homedir",
   `${RESOLVER_SOURCE}${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
 return { openCodeCacheKey, openCodeLoadedSterling };`
-)(createHash, existsSync, readFileSync, readdirSync, join3, homedir3);
+)(createHash, existsSync2, readFileSync, readdirSync, join5, homedir3);
 var openCodeCacheKey = loaded.openCodeCacheKey;
 var openCodeLoadedSterling = loaded.openCodeLoadedSterling;
 function canonical(p) {
   try {
-    return realpathSync2(p);
+    return realpathSync3(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve2(p);
+    if (err?.code === "ENOENT") return resolve3(p);
     throw err;
   }
 }
@@ -6357,7 +6405,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync2(join4(root, ".git"))) return true;
+  if (!existsSync3(join6(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
 
@@ -6365,7 +6413,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
 var CONTRACT_HISTORY_REL = "bin/contract-history.json";
 function gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git }) {
   if (isInstalledCopy(repoRoot2)) return null;
-  const variants2 = new Map(leads.map((l) => [l, /* @__PURE__ */ new Set()]));
+  const variants = new Map(leads.map((l) => [l, /* @__PURE__ */ new Set()]));
   for (const rel of templateRels) {
     const log = git(["log", "--format=%H", "--", rel]);
     if (log.status !== 0) {
@@ -6377,11 +6425,11 @@ function gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: e
       if (show.status !== 0) continue;
       for (const lead of leads) {
         const found = extractBlock2(show.stdout, lead);
-        if (found) variants2.get(lead).add(found.block);
+        if (found) variants.get(lead).add(found.block);
       }
     }
   }
-  return variants2;
+  return variants;
 }
 function loadSnapshot(path) {
   let raw;
@@ -6408,73 +6456,29 @@ function historicalVariants({
   extractBlock: extractBlock2,
   currentBlocks,
   warn = (line) => console.error(line),
-  git = (args) => spawnSync("git", args, { cwd: repoRoot2, encoding: "utf8" })
+  git = (args) => spawnSync2("git", args, { cwd: repoRoot2, encoding: "utf8" })
 }) {
   const fromGit = gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git });
   if (fromGit) {
-    const shipped = loadSnapshot(join5(repoRoot2, CONTRACT_HISTORY_REL));
+    const shipped = loadSnapshot(join7(repoRoot2, CONTRACT_HISTORY_REL));
     if (shipped.ok) {
       for (const lead of leads) for (const block of shipped.blocks[lead] ?? []) fromGit.get(lead).add(block);
     }
     return fromGit;
   }
   const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
-  const snapshot = loadSnapshot(join5(repoRoot2, CONTRACT_HISTORY_REL));
+  const snapshot = loadSnapshot(join7(repoRoot2, CONTRACT_HISTORY_REL));
   if (!snapshot.ok) {
     warn(`stamp-contract: DEGRADED \u2014 no git history at ${repoRoot2} (installed plugin copy) and ${snapshot.reason} \u2014 only the current template text counts as template-descended; older bullets read as drift`);
     return currentOnly();
   }
-  const variants2 = currentOnly();
+  const variants = currentOnly();
   const absent = leads.filter((l) => !Object.hasOwn(snapshot.blocks, l));
   if (absent.length) {
-    warn(`stamp-contract: DEGRADED \u2014 ${join5(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
+    warn(`stamp-contract: DEGRADED \u2014 ${join7(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
   }
-  for (const lead of leads) for (const block of snapshot.blocks[lead] ?? []) variants2.get(lead).add(block);
-  return variants2;
-}
-
-// scripts/lib/worktree-root.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync3, realpathSync as realpathSync3, statSync } from "node:fs";
-import { basename, dirname as dirname2, join as join7, resolve as resolve3 } from "node:path";
-
-// scripts/hooks/lib/store-backend.mjs
-import { join as join6 } from "node:path";
-var CONFIG_REL = join6(".sterling", "config.json");
-var STORE_DB_REL = join6(".sterling", "sterling.db");
-
-// scripts/lib/worktree-root.mjs
-function resolveLinkedWorktree(cwd = process.cwd()) {
-  const git = (args, at) => spawnSync2("git", args, { cwd: at, encoding: "utf8", timeout: 3e4 });
-  const real = (p) => {
-    try {
-      return realpathSync3(p);
-    } catch {
-      return null;
-    }
-  };
-  const r = git(["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], cwd);
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = real(resolve3(cwd, gitDir));
-  const commonReal = real(resolve3(cwd, commonDir));
-  const worktree = real(toplevel);
-  if (!gitDirReal || !commonReal || !worktree || gitDirReal === commonReal) return null;
-  const core = git(["--git-dir", commonReal, "config", "--get-regexp", "^core\\.(bare|worktree)$"], cwd);
-  const settings = {};
-  if (!core.error && core.status === 0) {
-    for (const line of core.stdout.split("\n")) {
-      const m = /^core\.(bare|worktree) (.*)$/.exec(line.trim());
-      if (m) settings[m[1]] = m[2];
-    }
-  }
-  if (settings.bare === "true") return null;
-  let mainRoot = null;
-  if (settings.worktree) mainRoot = real(resolve3(commonReal, settings.worktree));
-  else if (basename(commonReal) === ".git") mainRoot = dirname2(commonReal);
-  if (!mainRoot || mainRoot === worktree) return null;
-  return { worktree, mainRoot };
+  for (const lead of leads) for (const block of snapshot.blocks[lead] ?? []) variants.get(lead).add(block);
+  return variants;
 }
 
 // scripts/lib/contained-fs.mjs
@@ -7140,69 +7144,19 @@ function extractTemplateBlock(text, lead) {
   return extractBlock(renderClaudeText(text, "template"), lead);
 }
 function readTemplateBullets(repoRoot2) {
-  const templates2 = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync5(join10(repoRoot2, rel), "utf8")]));
-  const leadLayer2 = /* @__PURE__ */ new Map();
-  const current2 = /* @__PURE__ */ new Map();
+  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync5(join10(repoRoot2, rel), "utf8")]));
+  const leadLayer = /* @__PURE__ */ new Map();
+  const current = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
-    const home = TEMPLATE_RELS.find((rel) => extractTemplateBlock(templates2.get(rel), lead));
+    const home = TEMPLATE_RELS.find((rel) => extractTemplateBlock(templates.get(rel), lead));
     if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
-    leadLayer2.set(lead, home);
-    current2.set(lead, extractTemplateBlock(templates2.get(home), lead).block);
+    leadLayer.set(lead, home);
+    current.set(lead, extractTemplateBlock(templates.get(home), lead).block);
   }
-  return { templates: templates2, leadLayer: leadLayer2, current: current2 };
+  return { templates, leadLayer, current };
 }
 
-// scripts/stamp-contract.mjs
-var USAGE = "usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>... [--exact-projects]] [--help]";
-var KNOWN_FLAGS = /* @__PURE__ */ new Set(["--apply", "--apply-inserts", "--verbose", "--project", "--exact-projects"]);
-var argv = process.argv.slice(2);
-if (argv.includes("--help") || argv.includes("-h")) {
-  console.log(USAGE);
-  process.exit(0);
-}
-for (const a of argv) {
-  if (a.startsWith("-") && !KNOWN_FLAGS.has(a)) {
-    console.error(`stamp-contract: unknown option ${a}
-${USAGE}`);
-    process.exit(2);
-  }
-}
-var APPLY = process.argv.includes("--apply");
-var APPLY_INSERTS = !APPLY && process.argv.includes("--apply-inserts");
-var WRITE_INSERTS = APPLY || APPLY_INSERTS;
-var VERBOSE = process.argv.includes("--verbose");
-var EXACT_PROJECTS = process.argv.includes("--exact-projects");
-var onlyProjects = [];
-for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] !== "--project") continue;
-  const value = process.argv[i + 1];
-  if (value === void 0 || value.startsWith("-")) {
-    if (!EXACT_PROJECTS) continue;
-    console.error(`stamp-contract: --project needs a registered project path (got ${value === void 0 ? "nothing" : value}); --exact-projects stamps only the projects it names
-${USAGE}`);
-    process.exit(2);
-  }
-  onlyProjects.push(resolve6(process.argv[++i]));
-}
-if (EXACT_PROJECTS && !onlyProjects.length) {
-  console.error(`stamp-contract: --exact-projects needs at least one --project <registered path>; it never stamps the whole registry
-${USAGE}`);
-  process.exit(2);
-}
-var registryKey = (path) => resolve6(path).replace(/\\/g, "/");
-var realOrResolved = (path) => {
-  try {
-    return realpathSync5(path);
-  } catch {
-    return resolve6(path);
-  }
-};
-var projectTargets = onlyProjects.map((value) => {
-  if (EXACT_PROJECTS) return { value, key: registryKey(value), dir: value, worktree: false };
-  const linked = resolveLinkedWorktree(value);
-  return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
-});
-var repoRoot = join11(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+// scripts/lib/stamp-projects.mjs
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
 function withOriginalEols(raw, finalLf) {
   const pieces = raw.split("\n");
@@ -7264,234 +7218,200 @@ function unmask(text, layerLines) {
   lines.splice(at, 1, ...layerLines);
   return lines.join("\n");
 }
-var { templates, leadLayer, current } = readTemplateBullets(repoRoot);
-var variants = historicalVariants({
-  repoRoot,
-  templateRels: TEMPLATE_RELS,
-  leads: HISTORY_LEADS,
-  extractBlock: extractTemplateBlock,
-  currentBlocks: current
-});
-var registry = new ProjectRegistry(registryPath());
-var projects;
-try {
-  projects = registry.list();
-} finally {
-  registry.close();
-}
-var selfPath = realpathSync5(repoRoot);
-var results = [];
-var drift = 0;
-var matchedProjects = /* @__PURE__ */ new Set();
-var inSync = 0;
-function record(r) {
-  results.push(r);
-  if (r.status !== "processed") {
-    console.log(`\u2717 ${r.project} (${r.file}): ${r.status} (${r.detail})`);
-    return;
-  }
-  const notable = r.actions.filter((a) => a.action !== "matches");
-  if (!notable.length) {
-    inSync++;
-    if (!VERBOSE) return;
-  }
-  console.log(`${r.actions.some((a) => a.action.includes("REFUSED")) ? "\u2717" : "\u2022"} ${r.project} (${r.file})`);
-  for (const a of VERBOSE ? r.actions : notable) {
-    if (a.info) {
-      console.log(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026 \u2014 ${a.detail}`);
-      continue;
-    }
-    console.log(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026`);
-    if (a.detail) console.log(`      ${a.detail}`);
-    if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):
-      ${a.have.split("\n").join("\n      ")}`);
-  }
-}
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
-function stampDirs(p) {
-  if (!onlyProjects.length) return [p.repo_path];
-  const hits = EXACT_PROJECTS ? projectTargets.filter((t) => t.key === p.repo_path) : projectTargets.filter((t) => t.match === resolve6(p.repo_path) || t.match === realOrResolved(p.repo_path));
-  for (const t of hits) matchedProjects.add(t.value);
-  if (!hits.length) return null;
-  const worktrees = hits.filter((t) => t.worktree);
-  return worktrees.length ? worktrees.map((t) => t.dir) : [p.repo_path];
-}
-var work = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ p, dir })));
-for (const { p, dir: repo } of work) {
-  const projectLabel = repo === p.repo_path ? p.name : `${p.name} [worktree ${repo}; the main checkout is not touched]`;
-  if (!existsSync5(repo)) {
-    console.log(`\u2013 ${projectLabel} (${join11(repo, "AGENTS.md")}): skipped \u2014 the registered path does not exist (a stale registry entry); nothing stamped`);
-    continue;
-  }
-  if (realpathSync5(repo) === selfPath) continue;
-  if (looksLikeSterlingSourceTree(repo)) {
-    console.log(`\u2013 ${projectLabel} (${join11(repo, "AGENTS.md")}): skipped \u2014 a Sterling source tree, whose instruction files are hand-maintained; nothing stamped`);
-    continue;
-  }
-  const agentsMd = join11(repo, "AGENTS.md");
-  let agentsFile;
-  try {
-    agentsFile = readAgentsMd(repo);
-  } catch (err) {
-    if (!(err instanceof LayerMarkerError)) throw err;
-    record({ project: projectLabel, status: "processed", file: agentsMd, actions: [{ lead: "AGENTS.md", action: "AGENTS_MD_REFUSED", file: "AGENTS.md", detail: `${err.message}. Nothing was stamped.` }] });
-    drift++;
-    continue;
-  }
-  if (!agentsFile.exists) {
-    record({ project: projectLabel, status: "not_migrated", file: agentsMd, detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
-    drift++;
-    continue;
-  }
-  const raw = agentsFile.text;
-  const normalized = normalizeEol(raw);
-  let range;
-  try {
-    range = layerLineRange(normalized);
-  } catch (err) {
-    if (!(err instanceof LayerMarkerError)) throw err;
-    record({ project: projectLabel, status: "processed", file: agentsMd, actions: [{ lead: "Sterling layer section", action: "LAYER_MARKERS_REFUSED", file: "AGENTS.md", detail: `${err.message}; nothing in AGENTS.md was stamped. Fix the markers by hand, then rerun /sterling:update.` }] });
-    drift++;
-    continue;
-  }
-  const normalizedLines = normalized.split("\n");
-  const layerLines = range.begin === null ? [] : normalizedLines.slice(range.begin, range.end + 1);
-  const masked = range.begin === null ? normalized : [...normalizedLines.slice(0, range.begin), LAYER_MASK, ...normalizedLines.slice(range.end + 1)].join("\n");
-  const agents = { path: agentsMd, raw, original: masked, text: masked };
-  const noHostFile = { path: null, raw: "", original: "", text: "" };
-  const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, noHostFile]]);
-  const layerName = () => "AGENTS.md";
-  const actions = [];
-  const VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
-  const sectionRefused = /* @__PURE__ */ new Set();
-  for (const section of TARGET_SECTIONS) {
-    const home = leadLayer.get(section.leads[0]);
-    if (home === CLAUDE_TEMPLATE_REL) continue;
-    const target = siblingFiles.get(home);
-    if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
-    const label = `${section.heading} (section)`;
-    const own = headingIndex(target.text, section.heading, { loose: true });
-    if (own !== -1) {
-      actions.push({
-        lead: label,
-        action: "SECTION_HEADING_WITHOUT_BULLETS_REFUSED",
-        file: layerName(home),
-        detail: `${layerName(home)} already has a '${target.text.split("\n")[own].trim()}' heading and none of the '${section.heading}' bullets. To get Sterling's section, rename that heading and re-run; or copy the bullets from ${home} under it.`
-      });
-      drift++;
-      for (const lead of section.leads) sectionRefused.add(lead);
+var VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
+var isRefusal = (a) => a.action.includes("REFUSED");
+function stampProjects(rows2, { repoRoot: repoRoot2, apply = false, applyInserts = false, warn, onResult = () => {
+} }) {
+  if (!rows2.length) return [];
+  if (!repoRoot2) throw new Error("stampProjects: repoRoot is required");
+  const APPLY2 = apply;
+  const APPLY_INSERTS2 = !apply && applyInserts;
+  const WRITE_INSERTS = APPLY2 || APPLY_INSERTS2;
+  const { leadLayer, current } = readTemplateBullets(repoRoot2);
+  const variants = historicalVariants({
+    repoRoot: repoRoot2,
+    templateRels: TEMPLATE_RELS,
+    leads: HISTORY_LEADS,
+    extractBlock: extractTemplateBlock,
+    currentBlocks: current,
+    ...warn ? { warn } : {}
+  });
+  const selfPath = realpathSync5(repoRoot2);
+  const results2 = [];
+  const done = (r) => {
+    results2.push(r);
+    onResult(r);
+  };
+  for (const row of rows2) {
+    const repo = row.dir ?? row.repo_path;
+    const project = repo === row.repo_path ? row.name : `${row.name} [worktree ${repo}; the main checkout is not touched]`;
+    const agentsMd = join11(repo, "AGENTS.md");
+    const result = (status, actions2 = [], reason = null) => done({ row, project, path: agentsMd, status, actions: actions2, reason });
+    if (!existsSync5(repo)) {
+      result("skipped", [], "stale_path");
       continue;
     }
-    const at = headingIndex(target.text, section.before);
-    if (at === -1) {
-      actions.push({
-        lead: label,
-        action: "SECTION_ANCHOR_MISSING_REFUSED",
-        file: layerName(home),
-        detail: `${layerName(home)} has no '${section.before}' heading to put the section before. Copy the '${section.heading}' section from ${home} to where it belongs and re-run.`
-      });
-      drift++;
-      for (const lead of section.leads) sectionRefused.add(lead);
+    if (realpathSync5(repo) === selfPath) {
+      result("skipped", [], "running_clone");
       continue;
     }
-    const lines = target.text.split("\n");
-    const block = [section.heading, "", ...section.leads.flatMap((lead) => current.get(lead).split("\n")), ""];
-    if (at > 0 && lines[at - 1].trim() !== "") block.unshift("");
-    lines.splice(at, 0, ...block);
-    target.text = lines.join("\n");
-    actions.push({ lead: label, action: WRITE_INSERTS ? "section_inserted" : "would_insert_section", file: layerName(home) });
-  }
-  const stampLeads = ({ files, leads, wantOf, variantsOf, nameOf, pass }) => {
-    const outcome = (lead) => [...pass].reverse().find((a) => a.lead === lead)?.action;
-    for (const lead of leads) {
-      const home = leadLayer.get(lead);
-      const other = TEMPLATE_RELS.find((rel) => rel !== home);
-      const want = wantOf(lead);
-      const target = files.get(home);
-      const foundInOther = extractBlock(files.get(other).text, lead);
-      if (foundInOther) {
-        const foundHome = extractBlock(target.text, lead);
-        if (foundHome) {
-          pass.push({ lead, action: "DUPLICATE_REFUSED", file: nameOf(home), have: foundHome.block });
-        } else {
-          pass.push({ lead, action: "WRONG_LAYER_REFUSED", file: nameOf(other), have: foundInOther.block });
-        }
-        drift++;
+    if (looksLikeSterlingSourceTree(repo)) {
+      result("skipped", [], "sterling_source_tree");
+      continue;
+    }
+    let agentsFile;
+    try {
+      agentsFile = readAgentsMd(repo);
+    } catch (err) {
+      if (!(err instanceof LayerMarkerError)) throw err;
+      result("refused", [{ lead: "AGENTS.md", action: "AGENTS_MD_REFUSED", file: "AGENTS.md", detail: `${err.message}. Nothing was stamped.` }]);
+      continue;
+    }
+    if (!agentsFile.exists) {
+      result("not_migrated", [], `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}`);
+      continue;
+    }
+    const raw = agentsFile.text;
+    const normalized = normalizeEol(raw);
+    let range;
+    try {
+      range = layerLineRange(normalized);
+    } catch (err) {
+      if (!(err instanceof LayerMarkerError)) throw err;
+      result("refused", [{ lead: "Sterling layer section", action: "LAYER_MARKERS_REFUSED", file: "AGENTS.md", detail: `${err.message}; nothing in AGENTS.md was stamped. Fix the markers by hand, then rerun /sterling:update.` }]);
+      continue;
+    }
+    const normalizedLines = normalized.split("\n");
+    const layerLines = range.begin === null ? [] : normalizedLines.slice(range.begin, range.end + 1);
+    const masked = range.begin === null ? normalized : [...normalizedLines.slice(0, range.begin), LAYER_MASK, ...normalizedLines.slice(range.end + 1)].join("\n");
+    const agents = { path: agentsMd, raw, original: masked, text: masked };
+    const noHostFile = { path: null, raw: "", original: "", text: "" };
+    const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, agents], [CLAUDE_TEMPLATE_REL, noHostFile]]);
+    const layerName = () => "AGENTS.md";
+    const actions = [];
+    const sectionRefused = /* @__PURE__ */ new Set();
+    for (const section of TARGET_SECTIONS) {
+      const home = leadLayer.get(section.leads[0]);
+      if (home === CLAUDE_TEMPLATE_REL) continue;
+      const target = siblingFiles.get(home);
+      if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
+      const label = `${section.heading} (section)`;
+      const own = headingIndex(target.text, section.heading, { loose: true });
+      if (own !== -1) {
+        actions.push({
+          lead: label,
+          action: "SECTION_HEADING_WITHOUT_BULLETS_REFUSED",
+          file: layerName(home),
+          detail: `${layerName(home)} already has a '${target.text.split("\n")[own].trim()}' heading and none of the '${section.heading}' bullets. To get Sterling's section, rename that heading and re-run; or copy the bullets from ${home} under it.`
+        });
+        for (const lead of section.leads) sectionRefused.add(lead);
         continue;
       }
-      const found = extractBlock(target.text, lead);
-      if (found) {
-        if (found.block === want) {
-          pass.push({ lead, action: "matches", file: nameOf(home) });
+      const at = headingIndex(target.text, section.before);
+      if (at === -1) {
+        actions.push({
+          lead: label,
+          action: "SECTION_ANCHOR_MISSING_REFUSED",
+          file: layerName(home),
+          detail: `${layerName(home)} has no '${section.before}' heading to put the section before. Copy the '${section.heading}' section from ${home} to where it belongs and re-run.`
+        });
+        for (const lead of section.leads) sectionRefused.add(lead);
+        continue;
+      }
+      const lines = target.text.split("\n");
+      const block = [section.heading, "", ...section.leads.flatMap((lead) => current.get(lead).split("\n")), ""];
+      if (at > 0 && lines[at - 1].trim() !== "") block.unshift("");
+      lines.splice(at, 0, ...block);
+      target.text = lines.join("\n");
+      actions.push({ lead: label, action: WRITE_INSERTS ? "section_inserted" : "would_insert_section", file: layerName(home) });
+    }
+    const stampLeads = ({ files, leads, wantOf, variantsOf, nameOf, pass }) => {
+      const outcome = (lead) => [...pass].reverse().find((a) => a.lead === lead)?.action;
+      for (const lead of leads) {
+        const home = leadLayer.get(lead);
+        const other = TEMPLATE_RELS.find((rel) => rel !== home);
+        const want = wantOf(lead);
+        const target = files.get(home);
+        const foundInOther = extractBlock(files.get(other).text, lead);
+        if (foundInOther) {
+          const foundHome = extractBlock(target.text, lead);
+          if (foundHome) {
+            pass.push({ lead, action: "DUPLICATE_REFUSED", file: nameOf(home), have: foundHome.block });
+          } else {
+            pass.push({ lead, action: "WRONG_LAYER_REFUSED", file: nameOf(other), have: foundInOther.block });
+          }
           continue;
         }
-        if (variantsOf(lead).has(found.block)) {
-          if (!APPLY_INSERTS) {
-            const lines = target.text.split("\n");
-            lines.splice(found.start, found.end - found.start, ...want.split("\n"));
-            target.text = lines.join("\n");
+        const found = extractBlock(target.text, lead);
+        if (found) {
+          if (found.block === want) {
+            pass.push({ lead, action: "matches", file: nameOf(home) });
+            continue;
           }
-          pass.push({ lead, action: APPLY ? "updated" : "would_update", file: nameOf(home) });
-        } else {
-          pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: found.block });
-          drift++;
-        }
-        continue;
-      }
-      let renamed = false;
-      for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
-        const oldFound = extractBlock(target.text, oldLead);
-        if (!oldFound) continue;
-        renamed = true;
-        if (variantsOf(oldLead).has(oldFound.block)) {
-          if (!APPLY_INSERTS) {
-            const lines = target.text.split("\n");
-            lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
-            target.text = lines.join("\n");
+          if (variantsOf(lead).has(found.block)) {
+            if (!APPLY_INSERTS2) {
+              const lines = target.text.split("\n");
+              lines.splice(found.start, found.end - found.start, ...want.split("\n"));
+              target.text = lines.join("\n");
+            }
+            pass.push({ lead, action: APPLY2 ? "updated" : "would_update", file: nameOf(home) });
+          } else {
+            pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: found.block });
           }
-          pass.push({ lead, action: APPLY ? "renamed" : "would_rename", file: nameOf(home) });
-        } else {
-          pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: oldFound.block });
-          drift++;
+          continue;
         }
-        break;
+        let renamed = false;
+        for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
+          const oldFound = extractBlock(target.text, oldLead);
+          if (!oldFound) continue;
+          renamed = true;
+          if (variantsOf(oldLead).has(oldFound.block)) {
+            if (!APPLY_INSERTS2) {
+              const lines = target.text.split("\n");
+              lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
+              target.text = lines.join("\n");
+            }
+            pass.push({ lead, action: APPLY2 ? "renamed" : "would_rename", file: nameOf(home) });
+          } else {
+            pass.push({ lead, action: "HAND_TUNED_REFUSED", file: nameOf(home), have: oldFound.block });
+          }
+          break;
+        }
+        if (renamed) continue;
+        const covering = [...files.entries()].map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) })).find((c) => c.hit);
+        if (covering) {
+          pass.push({
+            lead,
+            action: "SIMILAR_BULLET_KEPT",
+            file: nameOf(home),
+            info: true,
+            detail: `kept the project's own bullet in ${nameOf(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`
+          });
+          continue;
+        }
+        const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean)).find(Boolean);
+        if (anchor) {
+          const lines = target.text.split("\n");
+          lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split("\n"));
+          target.text = lines.join("\n");
+          pass.push({ lead, action: WRITE_INSERTS ? "inserted" : "would_insert", file: nameOf(home) });
+          continue;
+        }
+        pass.push({ lead, action: "ANCHOR_MISSING_REFUSED", file: nameOf(home) });
       }
-      if (renamed) continue;
-      const covering = [...files.entries()].map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) })).find((c) => c.hit);
-      if (covering) {
-        pass.push({
-          lead,
-          action: "SIMILAR_BULLET_KEPT",
-          file: nameOf(home),
-          info: true,
-          detail: `kept the project's own bullet in ${nameOf(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`
-        });
-        continue;
-      }
-      const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean)).find(Boolean);
-      if (anchor) {
-        const lines = target.text.split("\n");
-        lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split("\n"));
-        target.text = lines.join("\n");
-        pass.push({ lead, action: WRITE_INSERTS ? "inserted" : "would_insert", file: nameOf(home) });
-        continue;
-      }
-      pass.push({ lead, action: "ANCHOR_MISSING_REFUSED", file: nameOf(home) });
-      drift++;
-    }
-  };
-  stampLeads({
-    files: siblingFiles,
-    leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead) && leadLayer.get(lead) === AGENTS_TEMPLATE_REL),
-    wantOf: (lead) => current.get(lead),
-    variantsOf: (lead) => variants.get(lead),
-    nameOf: layerName,
-    pass: actions
-  });
-  if (WRITE_INSERTS) {
-    for (const [file, f] of [["AGENTS.md", agents]]) {
-      if (f.text === f.original) continue;
-      const planned = withOriginalEols(f.raw, unmask(f.text, layerLines));
+    };
+    stampLeads({
+      files: siblingFiles,
+      leads: TARGET_LEADS.filter((lead) => !sectionRefused.has(lead) && leadLayer.get(lead) === AGENTS_TEMPLATE_REL),
+      wantOf: (lead) => current.get(lead),
+      variantsOf: (lead) => variants.get(lead),
+      nameOf: layerName,
+      pass: actions
+    });
+    if (WRITE_INSERTS && agents.text !== agents.original) {
+      const file = "AGENTS.md";
+      const planned = withOriginalEols(agents.raw, unmask(agents.text, layerLines));
       const refusal = plannedAgentsMdRefusal(planned) ?? (() => {
         try {
           readAgentsMd(repo);
@@ -7504,36 +7424,122 @@ for (const { p, dir: repo } of work) {
       if (refusal) {
         for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
         actions.push({ lead: `${file} (write)`, action: "PLANNED_AGENTS_MD_REFUSED", file, detail: `${refusal}. Nothing in AGENTS.md was changed.` });
-        drift++;
-        continue;
-      }
-      try {
-        writeFileSync(f.path, planned);
-      } catch (err) {
-        for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
-        actions.push({
-          lead: `${file} (write)`,
-          action: "WRITE_FAILED_REFUSED",
-          file,
-          detail: `${f.path} could not be written (${err?.code ?? "error"}: ${err?.message ?? err}). Nothing in it was changed; make the file writable and re-run.`
-        });
-        drift++;
+      } else {
+        try {
+          writeFileSync(agents.path, planned);
+        } catch (err) {
+          for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
+          actions.push({
+            lead: `${file} (write)`,
+            action: "WRITE_FAILED_REFUSED",
+            file,
+            detail: `${agents.path} could not be written (${err?.code ?? "error"}: ${err?.message ?? err}). Nothing in it was changed; make the file writable and re-run.`
+          });
+        }
       }
     }
+    result(actions.some(isRefusal) ? "refused" : actions.some((a) => a.action !== "matches") ? "stamped" : "in_sync", actions);
   }
-  record({ project: projectLabel, status: "processed", file: agentsMd, actions });
+  return results2;
 }
-var processed = results.filter((r) => r.status === "processed").length;
-console.log(
-  `
-${APPLY ? "APPLIED" : APPLY_INSERTS ? "INSERTS APPLIED (new text only; existing wording is never replaced without --apply)" : "DRY-RUN (no writes; pass --apply)"} \u2014 ${processed} project(s) processed, ${inSync} already in sync, ${drift} refusal(s).` + (!VERBOSE && inSync ? " Pass --verbose to list the in-sync bullets." : "")
-);
+var stampRefusalCount = (r) => r.status === "not_migrated" ? 1 : r.actions.filter(isRefusal).length;
+var SKIP_WHY = {
+  stale_path: "the registered path does not exist (a stale registry entry)",
+  sterling_source_tree: "a Sterling source tree, whose instruction files are hand-maintained"
+};
+function stampResultLines(r, { verbose = false } = {}) {
+  if (r.status === "skipped") return SKIP_WHY[r.reason] ? [`\u2013 ${r.project} (${r.path}): skipped \u2014 ${SKIP_WHY[r.reason]}; nothing stamped`] : [];
+  if (r.status === "not_migrated") return [`\u2717 ${r.project} (${r.path}): not_migrated (${r.reason})`];
+  const notable = r.actions.filter((a) => a.action !== "matches");
+  if (!notable.length && !verbose) return [];
+  const lines = [`${r.actions.some(isRefusal) ? "\u2717" : "\u2022"} ${r.project} (${r.path})`];
+  for (const a of verbose ? r.actions : notable) {
+    if (a.info) {
+      lines.push(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026 \u2014 ${a.detail}`);
+      continue;
+    }
+    lines.push(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026`);
+    if (a.detail) lines.push(`      ${a.detail}`);
+    if (a.have) lines.push(`      sibling text (hand-tuned, NOT touched):
+      ${a.have.split("\n").join("\n      ")}`);
+  }
+  return lines;
+}
+function stampSummaryLine(results2, { apply = false, applyInserts = false, verbose = false } = {}) {
+  const processed = results2.filter((r) => ["in_sync", "stamped", "refused"].includes(r.status)).length;
+  const inSync = results2.filter((r) => r.status === "in_sync").length;
+  const drift = results2.reduce((n, r) => n + stampRefusalCount(r), 0);
+  const mode = apply ? "APPLIED" : applyInserts ? "INSERTS APPLIED (new text only; existing wording is never replaced without --apply)" : "DRY-RUN (no writes; pass --apply)";
+  return `
+${mode} \u2014 ${processed} project(s) processed, ${inSync} already in sync, ${drift} refusal(s).` + (!verbose && inSync ? " Pass --verbose to list the in-sync bullets." : "");
+}
+
+// scripts/stamp-contract.mjs
+var USAGE = "usage: node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...] [--help]";
+var KNOWN_FLAGS = /* @__PURE__ */ new Set(["--apply", "--apply-inserts", "--verbose", "--project"]);
+var argv = process.argv.slice(2);
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(USAGE);
+  process.exit(0);
+}
+for (const a of argv) {
+  if (a.startsWith("-") && !KNOWN_FLAGS.has(a)) {
+    console.error(`stamp-contract: unknown option ${a}
+${USAGE}`);
+    process.exit(2);
+  }
+}
+var APPLY = process.argv.includes("--apply");
+var APPLY_INSERTS = !APPLY && process.argv.includes("--apply-inserts");
+var VERBOSE = process.argv.includes("--verbose");
+var onlyProjects = [];
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve6(process.argv[++i]));
+}
+var realOrResolved = (path) => {
+  try {
+    return realpathSync6(path);
+  } catch {
+    return resolve6(path);
+  }
+};
+var projectTargets = onlyProjects.map((value) => {
+  const linked = resolveLinkedWorktree(value);
+  return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
+});
+var repoRoot = join12(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var registry = new ProjectRegistry(registryPath());
+var projects;
+try {
+  projects = registry.list();
+} finally {
+  registry.close();
+}
+var matchedProjects = /* @__PURE__ */ new Set();
+function stampDirs(p) {
+  if (!onlyProjects.length) return [p.repo_path];
+  const hits = projectTargets.filter((t) => t.match === resolve6(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  for (const t of hits) matchedProjects.add(t.value);
+  if (!hits.length) return null;
+  const worktrees = hits.filter((t) => t.worktree);
+  return worktrees.length ? worktrees.map((t) => t.dir) : [p.repo_path];
+}
+var rows = projects.flatMap((p) => (stampDirs(p) ?? []).map((dir) => ({ name: p.name, repo_path: p.repo_path, dir })));
+var results = stampProjects(rows, {
+  repoRoot,
+  apply: APPLY,
+  applyInserts: APPLY_INSERTS,
+  onResult: (r) => {
+    for (const line of stampResultLines(r, { verbose: VERBOSE })) console.log(line);
+  }
+});
+console.log(stampSummaryLine(results, { apply: APPLY, applyInserts: APPLY_INSERTS, verbose: VERBOSE }));
 var unmatched = onlyProjects.filter((p) => !matchedProjects.has(p));
 if (unmatched.length) {
   console.error(`stamp-contract: --project matched no registered project: ${unmatched.join(", ")} (the value must equal a registered repo_path)`);
   process.exit(2);
 }
-if (drift) {
+if (results.some((r) => stampRefusalCount(r) > 0)) {
   console.error("stamp-contract: refused above \u2014 resolve each by hand (sibling text that differs from every template version, a missing anchor, or a file that could not be written) and re-run.");
   process.exit(2);
 }

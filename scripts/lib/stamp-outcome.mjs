@@ -1,10 +1,14 @@
-// stamp-contract's output, classified once for /sterling:update and the post-update sync (GitHub
-// #329). A write or safety refusal means AGENTS.md could not be updated: a failed instruction-file
-// update, never tolerated wording drift. A project stamp-contract could not check at all (no
-// AGENTS.md) fails the same way. A skipped project (a stale registry path, a Sterling source tree)
-// is printed as a `– ` line and is not a failure. Every other *_REFUSED action (hand-tuned text, a
-// missing anchor, a duplicate) is drift, which both callers tolerate. Builtins only (bundled into
-// hooks).
+// The contract stamp's verdict, classified once for /sterling:update and the post-update sync
+// (GitHub #329). A write or safety refusal means AGENTS.md could not be updated: a failed
+// instruction-file update, never tolerated wording drift. A project the stamper could not check at
+// all (no AGENTS.md) fails the same way. A skipped project (a stale registry path, a Sterling source
+// tree) is not a failure. Every other *_REFUSED action (hand-tuned text, a missing anchor, a
+// duplicate) is drift, which both callers tolerate. Builtins only (bundled into hooks).
+//
+// /sterling:update calls the stamper in-process and reads its structured results
+// (stampResultFailures). The post-update sync runs the INSTALLED copy's bin/stamp-contract.mjs
+// as a child against the session's checkout, which may be an unregistered linked worktree that
+// only the CLI's registry mapping reaches, so it reads the CLI's printed lines (stampFailures).
 
 export const STAMP_FAILURE_CODES = ['WRITE_FAILED_REFUSED', 'PLANNED_AGENTS_MD_REFUSED', 'AGENTS_MD_REFUSED', 'LAYER_MARKERS_REFUSED'];
 /** Project statuses stamp-contract prints as `✗ <project> (<AGENTS.md path>): <status> (<detail>)`: nothing in it was checked. */
@@ -12,6 +16,15 @@ export const STAMP_UNCHECKED_STATUSES = ['not_migrated'];
 const FAILURE_LINE = new RegExp(`^\\s+(${STAMP_FAILURE_CODES.join('|')})\\s`);
 const UNCHECKED_LINE = new RegExp(`^✗ .*\\): (${STAMP_UNCHECKED_STATUSES.join('|')}) \\((.*)\\)$`);
 const DETAIL_LINE = /^\s{6}\S/;
+
+/**
+ * The failures in one stampProjects result (scripts/lib/stamp-projects.mjs): each failure action
+ * as "CODE lead — detail", or the unchecked status as "status — reason".
+ */
+export function stampResultFailures(result) {
+  if (STAMP_UNCHECKED_STATUSES.includes(result.status)) return [`${result.status} — ${result.reason}`];
+  return result.actions.filter((a) => STAMP_FAILURE_CODES.includes(a.action)).map((a) => [`${a.action} ${a.lead}`, a.detail].filter(Boolean).join(' — '));
+}
 
 /**
  * The failure actions in stamp-contract output `out`, each as "CODE lead — detail", and each

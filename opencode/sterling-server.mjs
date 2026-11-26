@@ -24472,6 +24472,147 @@ function stampFailures(out, agentsMdPath = null) {
 }
 var stampProcessedNothing = (out) => /—\s*0 project\(s\) processed/.test(String(out ?? ""));
 
+// scripts/lib/contract-bullets.mjs
+init_agent_fences();
+var DOMAINS_LEADS = [
+  "- **A domain is a shared knowledge store for one subject.**",
+  "- **Mount every subject the project works with, its own subject included.**",
+  "- **What not to do:** a Salesforce project",
+  "- **A domain needs a description**",
+  "- **Run `/sterling:domains` to see and change mounts.**"
+];
+var TARGET_LEADS = [
+  "- **Reconcile _every affected_ article, not just the primary one**",
+  "- **Concept articles \u2014 capture design the moment it settles",
+  "- **Wired, not just asked:**",
+  // Added 2026-07-26 so the H19-delivery caveat reaches already-initialized
+  // siblings. It rides INSIDE this existing bullet rather than arriving as a new
+  // top-level one, so the REPLACE path carries it.
+  //
+  // CORRECTED 2026-07-26: an earlier version of this comment claimed a new bullet "would need an
+  // insert capability this script does not have". That was FALSE — the insert path
+  // exists at :127-137. What is true is narrower: that path is INDEX-PINNED, firing
+  // only for TARGET_LEADS[1] and anchoring on TARGET_LEADS[0]. A lead appended at
+  // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
+  // call for THIS bullet — but for that reason, not the one first written down.
+  // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
+  // INSERT_AFTER (below), the {lead, insertAfter} generalization this
+  // note once tracked.]
+  "- **Stage retrieval before acting**",
+  // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
+  // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
+  // siblings were running weaker conduct rules than the repo that ships them. Both
+  // bullets ALREADY EXIST in every sibling (they were generated from this template),
+  // so these ride the REPLACE path; neither depends on the index-pinned insert above.
+  // (The APPEND-ONLY constraint this note once stated died with the index pinning.)
+  "- **Anti-speculation:**",
+  "- **No false action claims:**",
+  // 2026-08-11: the note surface was retired (decision 'note-surface-retired')
+  // and the bullet's lead was renamed from "- **Notes are the user's surface.**"
+  // to the one below. A renamed lead matches nothing in an already-stamped
+  // sibling by itself, so RENAMED_LEADS below carries the old lead: a sibling
+  // block found under the OLD lead is replaced by the new bullet under the SAME
+  // template-descended guard as the normal replace path.
+  "- **Knowledge is born structured.**",
+  // 2026-09-26: the READY TO CLEAR bullet is NEW to older siblings, so it
+  // arrives through the insert path — see INSERT_AFTER below.
+  "- **Say `READY TO CLEAR` plainly when it is time.**",
+  // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
+  // and the new bullet replacing it reads right after "Ask, don't guess" in the template, so
+  // that bullet is tracked here too (it was not before) purely to serve as this insert's anchor —
+  // its own wording was already stable and unchanged, so tracking it adds no drift risk.
+  "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**",
+  "- **Instruction-file proposals replace memory.**",
+  // 2026-09-30: the plain-writing pair (decision write-plainly-everywhere-de-ai-pass-on-prose-deliverables).
+  // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
+  // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
+  //
+  // The AGENTS.md conduct bullets are listed in TEMPLATE ORDER (lint, plain-writing, background
+  // subagents), because leads are processed in this order and each anchors on the one before it
+  // (see INSERT_AFTER below): a sibling missing any combination of them
+  // gets them back in template order.
+  // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
+  // question form). NEW to every sibling, anchored on the two bullets above it in the template,
+  // which were already tracked.
+  "- **Lint and tests before done.**",
+  "- **Write plainly; no AI tells.**",
+  // 2026-10-24: text meant to be copied (decision copy-friendly-text-a-prompt-or-message-for-the-user-to-paste).
+  // NEW to every sibling, anchored on the plain-writing bullet it follows in the template; it sits
+  // before the background bullet there, so that bullet's anchors below name it first.
+  "- **Text meant to be copied goes between two horizontal rules.**",
+  // 2026-10-10: every subagent starts in the background (user-ruled 2026-10-09 and restated
+  // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
+  // plain-writing bullet it follows in the template.
+  "- **Start every subagent and every long shell command in the background.**",
+  // 2026-10-12: finish a started task before ending a turn (GitHub issue #79), and resolve a
+  // review thread once its finding is handled (GitHub issues #42 and #78; user-ruled through the
+  // question form, "AGENTS.md + conductor"). Both are NEW to every sibling, so they arrive through
+  // INSERT_AFTER, Finish anchored on the background bullet and Resolve on Finish; listed in
+  // template order so a sibling missing all three gets them back in that order.
+  "- **Finish what you start.**",
+  "- **Resolve a review thread once its finding is handled.**",
+  // 2026-11-25: code-comments rule (decision code-comments-conduct-rule-write-self-explanatory-code-defau,
+  // GitHub issue #327). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
+  // Resolve bullet (the nearest tracked lead; the template places it after Minimal change).
+  "- **Write self-explanatory code; comment only what the code can't say.**",
+  "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**",
+  // 2026-10-01: board every user ask at intake (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
+  // most siblings under these same leads, so the REPLACE path carries the new wording; a
+  // sibling that predates them gets them through INSERT_AFTER. Solve stays BEFORE Close-on-commit
+  // here because Close-on-commit anchors on it.
+  "- **Solve, don't board.**",
+  "- **Close-on-commit: a commit that fulfils a board item pays it**",
+  // 2026-10-02: Sterling defects are filed as scrubbed GitHub issues through report-issue.mjs
+  // (decision projects-file-sterling-issues-as-scrubbed-github-issues-automatically). The bullet
+  // already exists in every sibling under this lead, so the REPLACE path carries the new wording.
+  // 2026-10-10: renamed from "- **Stamp Sterling's version when reporting on Sterling.**" so the
+  // auto-report rule is findable by its lead; RENAMED_LEADS below carries the old lead.
+  "- **Report Sterling defects to its GitHub issues without asking.**",
+  // 2026-10-04: the Domains section of AGENTS.md (decision
+  // consumers-learn-domain-mounting-from-agents-md-and-a-domain-check-command). A project
+  // initialized before the section existed has none of these and no heading for them, so the
+  // whole section arrives through TARGET_SECTIONS below; from then on each bullet is an
+  // ordinary tracked lead (replace, hand-tuned refusal, re-insert after the bullet before it).
+  ...DOMAINS_LEADS
+];
+var TARGET_SECTIONS = [{ heading: "## Domains", before: "## Conventions", leads: DOMAINS_LEADS }];
+var INSERT_AFTER = /* @__PURE__ */ new Map([
+  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
+  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Knowledge is born structured.**"]],
+  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Write plainly; no AI tells.**", ["- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Text meant to be copied goes between two horizontal rules.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Start every subagent and every long shell command in the background.**", ["- **Text meant to be copied goes between two horizontal rules.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Finish what you start.**", ["- **Start every subagent and every long shell command in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Resolve a review thread once its finding is handled.**", ["- **Finish what you start.**", "- **Start every subagent and every long shell command in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Write self-explanatory code; comment only what the code can't say.**", ["- **Resolve a review thread once its finding is handled.**", "- **Finish what you start.**", "- **Start every subagent and every long shell command in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
+]);
+for (const section of TARGET_SECTIONS) {
+  section.leads.forEach((lead, i) => {
+    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
+  });
+}
+var RENAMED_LEADS = /* @__PURE__ */ new Map([
+  ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]],
+  // 2026-10-01: Sterling's own CLAUDE.md carried these two bullets under shorter leads
+  // that no template version ever used. Mapping them here means a sibling holding the
+  // old wording is refused (or replaced, if it ever matches a template variant) instead
+  // of getting a second copy through INSERT_AFTER.
+  ["- **Solve, don't board.**", ["- **Solve, don't board**"]],
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Close-on-commit:**"]],
+  // 2026-10-10: the auto-report bullet's lead said "stamp the version" while the rule is to file the issue.
+  ["- **Report Sterling defects to its GitHub issues without asking.**", ["- **Stamp Sterling's version when reporting on Sterling.**"]],
+  // 2026-10-25: the background bullet now covers long shell commands too (finding
+  // why-do-customer-hub-ch-conductors-sit-waiting-while-shells-r), so its lead gained the shells.
+  ["- **Start every subagent and every long shell command in the background.**", ["- **Start every subagent in the background.**"]]
+]);
+var HISTORY_LEADS = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
+
 // scripts/lib/update.mjs
 init_dist();
 

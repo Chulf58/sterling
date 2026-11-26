@@ -17,7 +17,8 @@ import { ProjectRegistry } from '@sterling/store';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
 import { AGENTS_TEMPLATE_REL, INSERT_AFTER, SUBJECT_MARKERS, TARGET_LEADS, TARGET_SECTIONS, findCoveringBullet, readTemplateBullets } from '../lib/contract-bullets.mjs';
 import { LAYER_END, readLayerSection, syncLayer } from '../lib/sterling-layer.mjs';
-import { stampFailures } from '../lib/stamp-outcome.mjs';
+import { stampFailures, stampResultFailures } from '../lib/stamp-outcome.mjs';
+import { stampProjects, stampRefusalCount, stampResultLines } from '../lib/stamp-projects.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { leadLayer } = readTemplateBullets(root);
@@ -1572,32 +1573,36 @@ test('--project <linked worktree> --apply edits the worktree copy and leaves the
   }
 });
 
-// Review loop 8 of #329: /sterling:update names registry rows exactly (--exact-projects). With a
-// registered main checkout AND its registered linked worktree, each is stamped in its own directory;
-// the interactive worktree mapping above (decision
-// stamp-contract-project-on-a-worktree-stamps-the-worktree-copy) is unchanged.
-test('--exact-projects: a registered main checkout and its registered linked worktree are both stamped; without the flag a worktree argument still maps to its main row', () => {
+// Since the #329 rebuild (decision 329-rebuild-how-sterling-update-stamps-sibling-projects-as-o)
+// /sterling:update hands the stamper its registry rows in-process (stampProjects in
+// scripts/lib/stamp-projects.mjs) instead of naming them as --project flags. A registered main
+// checkout and its registered linked worktree are two rows, each stamped in its own directory; the
+// interactive CLI keeps mapping a worktree argument to its main row (decision
+// stamp-contract-project-on-a-worktree-stamps-the-worktree-copy).
+test('stampProjects: a registered main checkout and its registered linked worktree, given as two rows, are each stamped; the CLI still maps a worktree argument to its main row', () => {
   const f = worktreeFixture({ registerWorktree: true });
   const wtAgents = join(f.wt, 'AGENTS.md');
   try {
     const interactive = runStampContract(f.regDb, ['--apply-inserts', '--project', f.wt]);
     assert.equal(interactive.status, 0, `${interactive.stdout}\n${interactive.stderr}`);
-    assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'a worktree argument without the flag stamps the worktree copy');
+    assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'a worktree argument stamps the worktree copy');
     assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted, 'and leaves the main checkout alone');
 
     writeFileSync(wtAgents, f.planted);
-    const exact = runStampContract(f.regDb, ['--apply-inserts', '--project', f.main, '--project', f.wt, '--exact-projects']);
-    assert.equal(exact.status, 0, `${exact.stdout}\n${exact.stderr}`);
-    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, `the main checkout row is stamped:\n${exact.stdout}`);
+    const results = stampProjects([{ name: 'wt', repo_path: f.main }, { name: 'wt-worktree', repo_path: f.wt }], { repoRoot: root, applyInserts: true });
+    assert.deepEqual(results.map((r) => [r.project, r.path, r.status]), [['wt', f.agentsPath, 'stamped'], ['wt-worktree', wtAgents, 'stamped']]);
+    assert.ok(results.every((r) => r.actions.some((a) => a.action === 'inserted')), 'each row has its insert');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the main checkout row is stamped');
     assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'the worktree row is stamped in its own directory');
+    assert.deepEqual(results.flatMap(stampResultFailures), []);
   } finally {
     f.cleanup();
   }
 });
 
-// Review loop 9 of #329: in --exact-projects mode a --project matches only the stored registry key,
-// never through realpath, so a real path and a symlink alias of it are two separate rows.
-test('--exact-projects: with a registered path and a registered symlink alias of it, each --project stamps only its own row', () => {
+// A row is stamped where it points; no realpath folds two rows into one. The interactive CLI keeps
+// its real-path fallback, so a real path reaches a registered symlink alias of it too.
+test('stampProjects: a path and a symlink alias of it, given as two rows, each get their own result', () => {
   const f = stampFixture('alias-real', (complete) => ({ planted: dropBlock(complete, INSERT_LEAD), expected: complete }));
   const real = dirname(f.agentsPath);
   const alias = `${real}-alias`;
@@ -1609,14 +1614,9 @@ test('--exact-projects: with a registered path and a registered symlink alias of
     } finally {
       registry.close();
     }
-    for (const [arg, own, other] of [[real, 'alias-real', 'alias-link'], [alias, 'alias-link', 'alias-real']]) {
-      const r = runStampContract(f.regDb, ['--project', arg, '--exact-projects']);
-      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-      assert.match(r.stdout, new RegExp(`^[•✗] ${own} \\(`, 'm'), `--project ${arg} stamps its own row:\n${r.stdout}`);
-      assert.doesNotMatch(r.stdout, new RegExp(`^[•✗] ${other} \\(`, 'm'), `and not the other row:\n${r.stdout}`);
-      assert.match(r.stdout, /— 1 project\(s\) processed/);
-    }
-    // The interactive mode keeps its real-path fallback: the real path reaches both rows.
+    const results = stampProjects([{ name: 'alias-real', repo_path: real }, { name: 'alias-link', repo_path: alias }], { repoRoot: root });
+    assert.deepEqual(results.map((r) => [r.project, r.path, r.status]), [['alias-real', f.agentsPath, 'stamped'], ['alias-link', join(alias, 'AGENTS.md'), 'stamped']]);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted, 'a dry run writes nothing');
     const interactive = runStampContract(f.regDb, ['--project', real]);
     assert.match(interactive.stdout, /— 2 project\(s\) processed/, interactive.stdout);
   } finally {
@@ -1625,22 +1625,83 @@ test('--exact-projects: with a registered path and a registered symlink alias of
   }
 });
 
-// Review loop 9 of #329: --exact-projects never stamps the whole registry. No --project, or a
-// --project whose value is missing, refuses with exit 2 before the registry is opened.
-test('--exact-projects with no --project or a --project missing its value refuses (exit 2) before opening the registry', () => {
+// One structured result per row, in row order, and the classifier /sterling:update applies to it
+// (scripts/lib/stamp-outcome.mjs): a stale path and a Sterling source tree are named skips, a project
+// with no AGENTS.md fails, hand-tuned text is tolerated drift, and an empty list reads nothing.
+test('stampProjects: stale path and source tree are skips, not_migrated fails, HAND_TUNED_REFUSED is tolerated drift, in-sync is quiet', () => {
+  const handTuned = sectionFixture('api-handtuned', (agents) => agents.replace(/- \*\*Anti-speculation:\*\*[^\n]*/, '- **Anti-speculation:** This project tunes the rule its own hand-edited way.'));
+  const inSync = sectionFixture('api-insync', (agents) => agents);
+  const checkout = sectionFixture('api-checkout', (agents) => agents.replace(DOMAINS_SECTION, ''));
+  const legacy = mkdtempSync(join(tmpdir(), 'sterling-stamp-api-legacy-'));
+  const gone = join(tmpdir(), `sterling-stamp-api-gone-${process.pid}-${Date.now()}`);
+  try {
+    mkdirSync(join(checkout.dir, '.claude-plugin'));
+    writeFileSync(join(checkout.dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(checkout.dir, 'scripts'));
+    writeFileSync(join(checkout.dir, 'scripts', 'architecture-projection.mjs'), '');
+    const before = [handTuned.read(), inSync.read(), checkout.read()];
+    const seen = [];
+    const rows = [
+      { name: 'stale', repo_path: gone },
+      { name: 'checkout', repo_path: checkout.dir },
+      { name: 'legacy', repo_path: legacy },
+      { name: 'handtuned', repo_path: handTuned.dir },
+      { name: 'insync', repo_path: inSync.dir },
+    ];
+    const results = stampProjects(rows, { repoRoot: root, applyInserts: true, onResult: (r) => seen.push(r.project) });
+    assert.deepEqual(seen, rows.map((r) => r.name), 'onResult runs per project, in row order');
+    assert.deepEqual(results.map((r) => [r.row, r.status, r.reason && r.reason.split(' ')[0]]), [
+      [rows[0], 'skipped', 'stale_path'],
+      [rows[1], 'skipped', 'sterling_source_tree'],
+      [rows[2], 'not_migrated', 'no'],
+      [rows[3], 'refused', null],
+      [rows[4], 'in_sync', null],
+    ]);
+    assert.deepEqual([handTuned.read(), inSync.read(), checkout.read()], before, 'nothing written');
+    assert.ok(results[3].actions.some((a) => a.action === 'HAND_TUNED_REFUSED'));
+    assert.deepEqual(results.map((r) => stampResultFailures(r).length), [0, 0, 1, 0, 0], 'only not_migrated fails');
+    assert.match(stampResultFailures(results[2])[0], new RegExp(`^not_migrated — no AGENTS\\.md — run: .*--target ${legacy}$`));
+    assert.deepEqual(results.map((r) => stampRefusalCount(r)), [0, 0, 1, 1, 0], 'drift counts not_migrated and every refusal');
+    assert.deepEqual(stampResultLines(results[0]), [`– stale (${join(gone, 'AGENTS.md')}): skipped — the registered path does not exist (a stale registry entry); nothing stamped`]);
+    assert.deepEqual(stampResultLines(results[1]), [`– checkout (${join(checkout.dir, 'AGENTS.md')}): skipped — a Sterling source tree, whose instruction files are hand-maintained; nothing stamped`]);
+    assert.deepEqual(stampResultLines(results[4]), [], 'quiet on clean');
+    assert.deepEqual(stampProjects([], { repoRoot: join(tmpdir(), 'no-such-sterling-root') }), [], 'an empty list reads nothing, not even the templates');
+  } finally {
+    for (const f of [handTuned, inSync, checkout]) f.cleanup();
+    rmSync(legacy, { recursive: true, force: true });
+  }
+});
+
+// The write and safety refusals are failures of that project, read from the structured actions.
+test('stampProjects: a write refusal (an over-cap plan) is a failure the classifier names; the file is untouched', () => {
+  const f = sectionFixture('api-cap', (agents) => {
+    const base = agents.replace(DOMAINS_SECTION, '');
+    return `${base}\n<!-- ${'x'.repeat(24_000 - Buffer.byteLength(base) - 20)} -->\n`;
+  });
+  try {
+    const before = f.read();
+    assert.ok(Buffer.byteLength(before.agents) <= 24_000, 'fixture: the file fits before the insert');
+    const [r] = stampProjects([{ name: 'api-cap', repo_path: f.dir }], { repoRoot: root, applyInserts: true });
+    assert.equal(r.status, 'refused');
+    assert.deepEqual(f.read(), before, 'nothing written');
+    const failures = stampResultFailures(r);
+    assert.equal(failures.length, 1, JSON.stringify(r.actions));
+    assert.match(failures[0], /^PLANNED_AGENTS_MD_REFUSED AGENTS\.md \(write\) — .*24,000-byte cap/);
+    assert.ok(r.actions.some((a) => a.action === 'would_insert_section'), 'the unwritten insert is reported as would_*');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// The rebuild removed --exact-projects: the interactive CLI is main's again, so the flag is unknown.
+test('--exact-projects is no longer an option: exit 2 naming it, before the registry is opened', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-exact-'));
   try {
     const regDb = join(scratch, 'registry.db');
-    for (const [args, why] of [
-      [['--apply-inserts', '--exact-projects'], /--exact-projects needs at least one --project/],
-      [['--apply-inserts', '--project', '--exact-projects'], /--project needs a registered project path \(got --exact-projects\)/],
-      [['--apply-inserts', '--exact-projects', '--project'], /--project needs a registered project path \(got nothing\)/],
-    ]) {
-      const r = runStampContract(regDb, args);
-      assert.equal(r.status, 2, `${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
-      assert.match(r.stderr, why, args.join(' '));
-      assert.equal(existsSync(regDb), false, `${args.join(' ')}: the registry was never opened`);
-    }
+    const r = runStampContract(regDb, ['--apply-inserts', '--project', scratch, '--exact-projects']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /unknown option --exact-projects/);
+    assert.equal(existsSync(regDb), false, 'the registry was never opened');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

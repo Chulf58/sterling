@@ -35,7 +35,8 @@ import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './con
 import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
 import { refreshAgentsMdKnowledge } from './agents-md-facts.mjs';
 import { LayerMarkerError, readAgentsMd, writeAgentsMdChecked } from './sterling-layer.mjs';
-import { stampFailures, stampProcessedNothing } from './stamp-outcome.mjs';
+import { stampResultFailures } from './stamp-outcome.mjs';
+import { stampProjects, stampRefusalCount, stampResultLines, stampSummaryLine } from './stamp-projects.mjs';
 import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
@@ -686,8 +687,11 @@ export function probeSchemaVersion(dbPath) {
  * until the workspace packages are BUILT, and building them is a step in here —
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
+ *
+ * `stamp` is the contract stamper (stampProjects in scripts/lib/stamp-projects.mjs), called
+ * in-process with the rows the refresh checked; a test passes its own.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot(), env = process.env, home = homedir() }) {
+export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot(), env = process.env, home = homedir() }) {
   // INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
   // design point D): an installed Sterling (Claude Code's /plugin or `opencode plugin add`) is
   // updated by its host — there is nothing here to fetch, build or fan out. Refused before anything
@@ -1053,20 +1057,42 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       }
     }
   };
-  // A stamp-contract run's verdict for the projects it touched (scripts/lib/stamp-outcome.mjs): a
-  // write or safety refusal, or a project it could not check (no AGENTS.md), fails that project
-  // (exit 2); a crash fails the update (exit 1). Returns the number of failed projects.
-  const judgeContract = (contract, projects) => {
-    const status = report.steps[report.steps.length - 1]?.status;
-    if (status !== 0 && status !== 2) {
-      log(`✗ stamp-contract crashed (exit ${status}) — instruction files were not checked; see its output above.`);
+  // THE CONTRACT STEP (decision 329-rebuild-how-sterling-update-stamps-sibling-projects-as-o): one
+  // in-process call to the stamper with `rows`, the registry rows this refresh checked minus the
+  // Sterling source trees, and one structured result per row. The same list is stamped and judged:
+  // a write or safety refusal, or a project it could not check (no AGENTS.md), fails that project
+  // (exit 2, scripts/lib/stamp-outcome.mjs); other refusals are tolerated drift; a skip (a stale
+  // path) is named and never a failure; a thrown error fails the update (exit 1), and the projects
+  // done before it are still judged. An empty list runs nothing. Returns the number of failed
+  // projects.
+  const stampAndJudge = (label, rows) => {
+    if (!rows.length || !existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
+    log(`\n▸ ${label}`);
+    const results = [];
+    let crashed = false;
+    try {
+      stamp(rows, {
+        repoRoot: cwd,
+        applyInserts: true,
+        warn: log,
+        onResult: (r) => {
+          results.push(r);
+          for (const line of stampResultLines(r)) log(line);
+        },
+      });
+      log(stampSummaryLine(results, { applyInserts: true }));
+    } catch (err) {
+      crashed = true;
+      log(`✗ stamp-contract crashed — instruction files were not checked${results.length ? ` past the ${results.length} project(s) above` : ''}: ${err?.stack ?? err}`);
       fail(1);
     }
+    report.contract_drift = results.some((r) => stampRefusalCount(r) > 0);
+    report.steps.push({ label, cmd: 'stampProjects (in-process)', status: crashed ? 1 : report.contract_drift ? 2 : 0 });
     let failed = 0;
-    for (const p of projects) {
-      const failures = stampFailures(contract.out, join(p.repo_path, 'AGENTS.md'));
+    for (const r of results) {
+      const failures = stampResultFailures(r);
       if (!failures.length) continue;
-      log(`✗ ${p.name}: stamp-contract could not update AGENTS.md (${failures.join('; ')})`);
+      log(`✗ ${r.row.name}: stamp-contract could not update AGENTS.md (${failures.join('; ')})`);
       fail(2);
       failed++;
     }
@@ -1081,26 +1107,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
   // but tolerated is not the same as unseen: the step's own block sits between
   // build/test/check output, so its verdict is repeated in the closing summary
-  // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
+  // where it cannot scroll past (P1/P5).
   // It runs on the already-current path too, so a project whose stamp failed after the completion
   // marker was written is stamped again on the next run (review loop 5 of #329).
-  // stamp-contract gets the targets as repeated --project flags and the verdict is read for exactly
-  // those (review loop 7 of #329): a project refused by the pre-write checks, the clone and any
-  // other Sterling source tree (hand-maintained instruction files) are never stamped, and with no
-  // target it does not run at all, since without --project it would stamp the whole registry.
-  // --exact-projects (review loop 8): each target is a registry row stamped in its own directory, so
-  // a registered linked worktree never takes the place of its registered main checkout.
-  // Returns the number of projects whose stamp failed.
-  const stampSiblings = () => {
-    const targets = stampTargets();
-    if (!targets.length || !existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
-    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', ...targets.flatMap((p) => ['--project', p.repo_path]), '--exact-projects'], {
-      show: true,
-      tolerate: true,
-    });
-    report.contract_drift = !contract.ok;
-    return judgeContract(contract, targets);
-  };
+  // A project refused by the pre-write checks, the clone and any other Sterling source tree
+  // (hand-maintained instruction files) are never stamped. Each row is stamped in its own
+  // directory, so a registered linked worktree never takes the place of its registered main
+  // checkout. Returns the number of projects whose stamp failed.
+  const stampSiblings = () => stampAndJudge('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', stampTargets());
   const isSourceTree = (p) => normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path);
   // Drains stampQueue: the queued projects the contract step may stamp, each source tree named once.
   const stampTargets = () => {
@@ -1194,21 +1208,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       log(`▸ ${normPath(project.repo_path) === normPath(cwd) ? "the clone's" : "this Sterling source tree's"} contract files are hand-maintained — not checked`);
     } else if (!stampable) {
       log('▸ contract text not stamped: the project was refused above, before any write');
-    } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-      // --apply-inserts: see the sibling-projects step below.
-      const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path, '--exact-projects'], {
-        show: true,
-        tolerate: true,
-      });
-      report.contract_drift = !contract.ok;
-      judgeContract(contract, [project]);
-      // stamp-contract skips an unregistered or missing path and exits 0 or 2 with "0 project(s)
-      // processed": a run that checked nothing is exactly what P5 forbids.
-      if (stampProcessedNothing(contract.out)) {
-        report.contract_unchecked = true;
-        log(`✗ stamp-contract checked NOTHING for ${project.repo_path} (0 project(s) processed) — the project is not reachable through the registry stamp-contract reads. Fix the registration and rerun.`);
-        fail(1);
-      }
+    } else {
+      // Inserts only: see the sibling-projects step below.
+      stampAndJudge('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', [project]);
       if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
     }
     retireAfterWriters();
