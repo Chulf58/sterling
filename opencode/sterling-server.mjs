@@ -23698,13 +23698,8 @@ function appendPendingAnswer(root, entry) {
   });
 }
 var clip2 = (s2) => s2.length > CLIP ? `${s2.slice(0, CLIP - 1)}\u2026` : s2;
-function pendingAnswersNotice(root) {
-  let entries;
-  try {
-    entries = readPendingAnswers(root);
-  } catch (e) {
-    return `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
-  }
+var unreadableNotice = (e) => `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+function noticeOf(entries) {
   if (!entries.length) return "";
   const listed = entries.slice(0, NOTICE_LISTED).map((e) => {
     const q = e.questions?.[0];
@@ -23716,10 +23711,15 @@ function pendingAnswersNotice(root) {
   return `PENDING ANSWERS: ${entries.length} answered question form${entries.length === 1 ? "" : "s"} not yet recorded. Each is a ruling or a confirmation; capture the decisions, then clear each with pending_answers_resolve({ids, outcome: "recorded", record_id}) or outcome "not_a_decision".
 ${listed.join("\n")}${more}`;
 }
-function pendingAnswersBlock(root) {
-  const text2 = pendingAnswersNotice(root);
-  if (!text2 || text2.startsWith("PENDING ANSWERS UNREADABLE")) return { text: text2, sig: text2 };
-  return { text: text2, sig: readPendingAnswers(root).map((e) => e.id).sort().join(",") };
+function pendingAnswersBlock(root, { read = readPendingAnswers } = {}) {
+  let entries;
+  try {
+    entries = read(root);
+  } catch (e) {
+    const text2 = unreadableNotice(e);
+    return { text: text2, sig: text2 };
+  }
+  return { text: noticeOf(entries), sig: entries.map((e) => e.id).sort().join(",") };
 }
 
 // scripts/hooks/lib/subject-fan.mjs

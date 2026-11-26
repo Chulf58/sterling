@@ -5,4 +5,4 @@ export function readPendingAnswers(root: string): any[];
 export function appendPendingAnswer(root: string, entry: object): boolean;
 export function resolvePendingAnswers(root: string, ids: string[]): string[];
 export function pendingAnswersNotice(root: string): string;
-export function pendingAnswersBlock(root: string): { text: string; sig: string };
+export function pendingAnswersBlock(root: string, options?: { read?: (root: string) => any[] }): { text: string; sig: string };

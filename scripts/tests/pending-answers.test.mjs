@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SterlingStore } from '../../packages/store/dist/index.js';
 import { SterlingTools } from '../../packages/mcp-server/dist/tools.js';
-import { appendPendingAnswer, entryFromClaude, entryFromOpenCode, pendingAnswersNotice, readPendingAnswers, resolvePendingAnswers, PENDING_ANSWERS_REL } from '../hooks/lib/pending-answers.mjs';
+import { appendPendingAnswer, pendingAnswersBlock, entryFromClaude, entryFromOpenCode, pendingAnswersNotice, readPendingAnswers, resolvePendingAnswers, PENDING_ANSWERS_REL } from '../hooks/lib/pending-answers.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -304,4 +304,33 @@ test('hooks.json registers H32 on PostToolUse for AskUserQuestion (a direct-invo
   assert.ok(entry, 'PostToolUse has an AskUserQuestion matcher');
   assert.ok(entry.hooks.some((h) => h.command.includes('h32-pending-answers.mjs')));
   assert.ok(existsSync(join(repo, 'hooks', 'h32-pending-answers.mjs')));
+});
+
+test('pendingAnswersBlock derives text and signature from one snapshot: a write landing mid-call cannot mark an old notice with the new set', () => {
+  const p = project();
+  try {
+    const base = entryFromClaude(claudeFixture(), NOW);
+    const entryN = (n) => ({ ...base, id: String(n).padStart(32, '0'), call_id: `c${n}` });
+    for (let n = 1; n <= 3; n++) appendPendingAnswer(p.dir, entryN(n));
+    let injected = false;
+    // The seam stands in for the old second read: the append lands right after the snapshot is taken.
+    const read = (root) => {
+      const snapshot = readPendingAnswers(root);
+      if (!injected) {
+        injected = true;
+        appendPendingAnswer(root, entryN(4));
+      }
+      return snapshot;
+    };
+    const during = pendingAnswersBlock(p.dir, { read });
+    assert.match(during.text, /^PENDING ANSWERS: 3 answered question forms/);
+    const after = pendingAnswersBlock(p.dir);
+    assert.match(after.text, /^PENDING ANSWERS: 4 answered question forms/);
+    assert.notEqual(during.sig, after.sig, 'the next prompt sees a different signature, so the 4-entry notice is delivered');
+    const unreadable = pendingAnswersBlock(p.dir, { read: () => { throw new Error('bad second snapshot'); } });
+    assert.match(unreadable.text, /^PENDING ANSWERS UNREADABLE \(bad second snapshot\)/);
+    assert.equal(unreadable.sig, unreadable.text);
+  } finally {
+    p.cleanup();
+  }
 });

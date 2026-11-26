@@ -141,12 +141,16 @@ const clip = (s) => (s.length > CLIP ? `${s.slice(0, CLIP - 1)}…` : s);
  * file says so, never reads as zero.
  */
 export function pendingAnswersNotice(root) {
-  let entries;
   try {
-    entries = readPendingAnswers(root);
+    return noticeOf(readPendingAnswers(root));
   } catch (e) {
-    return `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+    return unreadableNotice(e);
   }
+}
+
+const unreadableNotice = (e) => `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+
+function noticeOf(entries) {
   if (!entries.length) return '';
   const listed = entries.slice(0, NOTICE_LISTED).map((e) => {
     const q = e.questions?.[0];
@@ -162,8 +166,13 @@ export function pendingAnswersNotice(root) {
  * unresolved ids (the text lists only the first few entries, so it cannot tell a replaced
  * entry from an unchanged list). An unreadable file signs as its notice.
  */
-export function pendingAnswersBlock(root) {
-  const text = pendingAnswersNotice(root);
-  if (!text || text.startsWith('PENDING ANSWERS UNREADABLE')) return { text, sig: text };
-  return { text, sig: readPendingAnswers(root).map((e) => e.id).sort().join(',') };
+export function pendingAnswersBlock(root, { read = readPendingAnswers } = {}) {
+  let entries;
+  try {
+    entries = read(root);
+  } catch (e) {
+    const text = unreadableNotice(e);
+    return { text, sig: text };
+  }
+  return { text: noticeOf(entries), sig: entries.map((e) => e.id).sort().join(',') };
 }

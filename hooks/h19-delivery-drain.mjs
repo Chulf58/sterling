@@ -6517,12 +6517,14 @@ function readPendingAnswers(root) {
 }
 var clip = (s) => s.length > CLIP ? `${s.slice(0, CLIP - 1)}\u2026` : s;
 function pendingAnswersNotice(root) {
-  let entries;
   try {
-    entries = readPendingAnswers(root);
+    return noticeOf(readPendingAnswers(root));
   } catch (e) {
-    return `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+    return unreadableNotice(e);
   }
+}
+var unreadableNotice = (e) => `PENDING ANSWERS UNREADABLE (${e?.message ?? e}): answered question forms cannot be counted; fix or delete ${PENDING_ANSWERS_REL}.`;
+function noticeOf(entries) {
   if (!entries.length) return "";
   const listed = entries.slice(0, NOTICE_LISTED).map((e) => {
     const q = e.questions?.[0];
