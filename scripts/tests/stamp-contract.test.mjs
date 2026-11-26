@@ -2,18 +2,27 @@
 // the former ruling 'agents-md-is-the-instructions-file-claude-md-is-a-one-line-import' (not in the current store)): each TARGET_LEADS bullet propagates into whichever template CURRENTLY carries
 // it — AGENTS.md for a tool-agnostic lead, CLAUDE.md for a Sterling-bound one — and a sibling
 // lacking AGENTS.md entirely is reported not_migrated rather than partially patched.
+// Since GitHub #329 the Sterling layer is a generated section of AGENTS.md: stamp-contract never
+// reads or writes CLAUDE.md or GEMINI.md, does not stamp the target-claude-md.md leads anywhere,
+// and stamps only AGENTS.md text outside the generated section. Tests that pinned CLAUDE.md
+// stamping now pin that it stays byte-identical; the generic mechanics run on AGENTS.md leads.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, lstatSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
-import { INSERT_AFTER, SUBJECT_MARKERS, TARGET_LEADS, TARGET_SECTIONS, findCoveringBullet } from '../lib/contract-bullets.mjs';
+import { AGENTS_TEMPLATE_REL, INSERT_AFTER, SUBJECT_MARKERS, TARGET_LEADS, TARGET_SECTIONS, findCoveringBullet, readTemplateBullets } from '../lib/contract-bullets.mjs';
+import { LAYER_END, readLayerSection, syncLayer } from '../lib/sterling-layer.mjs';
+import { stampFailures, stampResultFailures } from '../lib/stamp-outcome.mjs';
+import { stampProjects, stampRefusalCount, stampResultLines } from '../lib/stamp-projects.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const { leadLayer } = readTemplateBullets(root);
+const AGENTS_HOMED = (lead) => leadLayer.get(lead) === AGENTS_TEMPLATE_REL;
 
 function runStampContract(regDb, args = ['--apply', '--verbose']) {
   return spawnSync(process.execPath, [join(root, 'scripts', 'stamp-contract.mjs'), ...args], {
@@ -43,7 +52,7 @@ function writeCompleteSibling(dir, projectName) {
   writeFileSync(join(dir, 'CLAUDE.md'), renderTemplate('templates/target-claude-md.md', projectName));
 }
 
-test('stamp-contract: an AGENTS.md-homed lead is updated in AGENTS.md (ancestry followed across the split from its pre-split home in target-claude-md.md), a CLAUDE.md-homed lead is updated in CLAUDE.md, and a sibling lacking AGENTS.md is not_migrated (nothing written for it)', () => {
+test('stamp-contract: an AGENTS.md-homed lead is updated in AGENTS.md (ancestry followed across the split from its pre-split home in target-claude-md.md), a stale CLAUDE.md-homed lead in CLAUDE.md is left byte-identical, and a sibling lacking AGENTS.md is not_migrated (nothing written for it)', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const migratedDir = mkdtempSync(join(tmpdir(), 'sterling-stamp-migrated-'));
@@ -78,11 +87,17 @@ test('stamp-contract: an AGENTS.md-homed lead is updated in AGENTS.md (ancestry 
     assert.ok(!agentsMdAfter.includes(staleAntiSpec), 'stale text replaced, not appended alongside');
 
     const claudeMdAfter = readFileSync(join(migratedDir, 'CLAUDE.md'), 'utf8');
-    assert.ok(!claudeMdAfter.includes(staleReconcile), 'the CLAUDE.md-homed lead was NOT left stale in CLAUDE.md');
-    assert.ok(!claudeMdAfter.includes('- **Anti-speculation:**'), 'the AGENTS.md-homed lead was not also duplicated into CLAUDE.md');
+    assert.equal(claudeMdAfter, `@AGENTS.md\n\n# CLAUDE.md\n\n## Reconcile-always\n\n${staleReconcile}\n`, 'CLAUDE.md is read-only to stamp-contract (#329): its stale CLAUDE.md-homed bullet stays as it was');
+    assert.ok(!/CLAUDE\.md/.test(r.stdout.split('\n').filter((l) => /^\s{4}\S/.test(l)).join('\n')), `no action names CLAUDE.md:\n${r.stdout}`);
 
     assert.equal(r.status, 2, 'a not_migrated sibling counts as a refusal — exit 2');
     assert.match(r.stdout, /not_migrated.*run: node "<Sterling root>\/bin\/init\.mjs" --target/,'the legacy sibling (no AGENTS.md) is reported not_migrated, naming the ensure command');
+    // Review loop 5 of #329: the one classifier /sterling:update and the post-update sync share
+    // reads the legacy sibling as a failed stamp, and only for that project.
+    const legacyFailures = stampFailures(r.stdout, join(legacyDir, 'AGENTS.md'));
+    assert.equal(legacyFailures.length, 1, r.stdout);
+    assert.match(legacyFailures[0], /^not_migrated — no AGENTS\.md — run: node /);
+    assert.deepEqual(stampFailures(r.stdout, join(migratedDir, 'AGENTS.md')), [], 'the migrated sibling is not failed by its neighbour');
     // legacy sibling untouched — no CLAUDE.md write, no AGENTS.md guessed into existence
     assert.equal(readFileSync(join(legacyDir, 'CLAUDE.md'), 'utf8'), '# CLAUDE.md\n\n(pre-split project, never migrated)\n', 'not_migrated sibling: nothing written');
   } finally {
@@ -115,7 +130,7 @@ test('stamp-contract: a COMPLETE, in-sync sibling (every TARGET_LEADS bullet, in
   }
 });
 
-test('stamp-contract: a bullet present in BOTH layer files (TRUE duplicate — home AND wrong layer) is exactly DUPLICATE_REFUSED before any write — exit 2, nothing written', () => {
+test('stamp-contract: a target-claude-md.md bullet present in both AGENTS.md project text and CLAUDE.md is neither refused nor touched (#329: those leads are not stamped) — exit 0, both files byte-identical', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-dup-'));
@@ -133,9 +148,8 @@ test('stamp-contract: a bullet present in BOTH layer files (TRUE duplicate — h
     registry.register({ repo_path: dir, name: 'dup-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
 
     const r = runStampContract(regDb);
-    assert.equal(r.status, 2, 'a duplicate bullet is a refusal — exit 2');
-    assert.match(r.stdout, /DUPLICATE_REFUSED/, 'named exactly DUPLICATE_REFUSED (present in BOTH files, home included)');
-    assert.ok(!/WRONG_LAYER_REFUSED/.test(r.stdout), 'not the wrong-layer-only action — the home copy is present too');
+    assert.equal(r.status, 0, `the layer leads are not stamped, so there is nothing to refuse:\n${r.stdout}`);
+    assert.ok(!/DUPLICATE_REFUSED|WRONG_LAYER_REFUSED/.test(r.stdout), `no layer refusal for a lead the layer section owns:\n${r.stdout}`);
     assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agentsPlanted, 'AGENTS.md untouched — no second copy written on top of the planted one');
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), claudeBefore, 'CLAUDE.md untouched — the home file never got an inserted/renamed copy either');
   } finally {
@@ -145,7 +159,7 @@ test('stamp-contract: a bullet present in BOTH layer files (TRUE duplicate — h
   }
 });
 
-test('stamp-contract: a bullet present ONLY in the wrong layer (home file has no copy at all) is exactly WRONG_LAYER_REFUSED before any write — exit 2, both files byte-identical', () => {
+test('stamp-contract: a target-claude-md.md bullet present only in AGENTS.md project text (none in CLAUDE.md) is neither refused nor moved (#329) — exit 0, both files byte-identical', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-wronglayer-'));
@@ -164,9 +178,8 @@ test('stamp-contract: a bullet present ONLY in the wrong layer (home file has no
     registry.register({ repo_path: dir, name: 'wronglayer-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
 
     const r = runStampContract(regDb);
-    assert.equal(r.status, 2, 'a wrong-layer-only bullet is a refusal — exit 2');
-    assert.match(r.stdout, /WRONG_LAYER_REFUSED/, 'named exactly WRONG_LAYER_REFUSED (absent from home, present only in the wrong file)');
-    assert.ok(!/DUPLICATE_REFUSED/.test(r.stdout), 'not the true-duplicate action — the home file has no copy at all');
+    assert.equal(r.status, 0, `the layer leads are not stamped, so there is nothing to refuse:\n${r.stdout}`);
+    assert.ok(!/DUPLICATE_REFUSED|WRONG_LAYER_REFUSED/.test(r.stdout), `no layer refusal for a lead the layer section owns:\n${r.stdout}`);
     assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agentsPlanted, 'AGENTS.md untouched — byte-identical');
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), claudeWithout, 'CLAUDE.md untouched — no insert/rename recreated it in the home file either — byte-identical');
   } finally {
@@ -183,19 +196,22 @@ test('stamp-contract: hand-tuned text (matches no template version, current or h
   const registry = new ProjectRegistry(regDb);
   try {
     writeCompleteSibling(dir, 'handtuned-sibling');
+    // An AGENTS.md-homed lead: stamp-contract stamps only AGENTS.md (#329).
     const claudeBefore = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
-    const handTuned = claudeBefore.replace(
-      /- \*\*Knowledge is born structured\.\*\*[^\n]*/,
-      '- **Knowledge is born structured.** This project tunes the rest of the rule its own hand-edited way, never matching any shipped wording.',
+    const agentsBefore = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    const handTuned = agentsBefore.replace(
+      /- \*\*Anti-speculation:\*\*[^\n]*/,
+      '- **Anti-speculation:** This project tunes the rest of the rule its own hand-edited way, never matching any shipped wording.',
     );
-    assert.notEqual(handTuned, claudeBefore, 'fixture sanity: the replace actually matched something');
-    writeFileSync(join(dir, 'CLAUDE.md'), handTuned);
+    assert.notEqual(handTuned, agentsBefore, 'fixture sanity: the replace actually matched something');
+    writeFileSync(join(dir, 'AGENTS.md'), handTuned);
     registry.register({ repo_path: dir, name: 'handtuned-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
 
     const r = runStampContract(regDb);
     assert.equal(r.status, 2, 'hand-tuned text is a refusal — exit 2');
     assert.match(r.stdout, /HAND_TUNED_REFUSED/);
-    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), handTuned, 'hand-tuned text left byte-for-byte untouched');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), handTuned, 'hand-tuned text left byte-for-byte untouched');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), claudeBefore, 'CLAUDE.md is never written');
   } finally {
     registry.close();
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -235,7 +251,10 @@ test('stamp-contract: a CRLF sibling gets a stale historical bullet updated, and
   }
 });
 
-test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own path, if registered, is skipped entirely and never read or written', () => {
+// Changed in the #329 fix round: the clone's skip is now one named line, not silence, because ruling
+// a-sterling-source-checkout-s-agents-md-is-hand-maintained-up requires a named skip for every
+// Sterling source tree, the running clone included. It is still never read or written.
+test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own path, if registered, is one named skip and never read or written', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const registry = new ProjectRegistry(regDb);
@@ -246,7 +265,8 @@ test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own pat
 
     const r = runStampContract(regDb);
     assert.equal(r.status, 0, 'the self-excluded clone contributes no drift');
-    assert.ok(!r.stdout.includes('self'), 'the self project never appears in the output at all — excluded before any read');
+    const selfLines = r.stdout.split('\n').filter((l) => l.includes('self'));
+    assert.deepEqual(selfLines, [`– self (${join(root, 'AGENTS.md')}): skipped — the Sterling clone running this stamp, whose instruction files are hand-maintained; nothing stamped`], 'the self project is one named skip line and nothing else');
     assert.equal(readFileSync(join(root, 'AGENTS.md'), 'utf8'), selfAgentsBefore, 'this clone\'s own AGENTS.md untouched');
     assert.equal(readFileSync(join(root, 'CLAUDE.md'), 'utf8'), selfClaudeBefore, 'this clone\'s own CLAUDE.md untouched');
   } finally {
@@ -269,7 +289,7 @@ function dropBlock(text, lead) {
   return lines.join('\n');
 }
 
-test('stamp-contract: a sibling CLAUDE.md lacking the READY TO CLEAR bullet gets it inserted after the Knowledge bullet — the result is byte-identical to the current template render, exit 0', () => {
+test('stamp-contract: a retained CLAUDE.md lacking the READY TO CLEAR bullet is left byte-identical and nothing is inserted (#329: host files are read-only), exit 0', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-'));
@@ -277,13 +297,16 @@ test('stamp-contract: a sibling CLAUDE.md lacking the READY TO CLEAR bullet gets
   try {
     writeCompleteSibling(dir, 'ready-sibling');
     const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
-    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(complete, READY_LEAD));
+    const planted = dropBlock(complete, READY_LEAD);
+    writeFileSync(join(dir, 'CLAUDE.md'), planted);
     registry.register({ repo_path: dir, name: 'ready-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
 
-    const r = runStampContract(regDb);
-    assert.equal(r.status, 0, `inserting a missing bullet is not a refusal: ${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /inserted {2}- \*\*Say `READY TO CLEAR`/);
-    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'bullet inserted in its template position, nothing else changed');
+    for (const mode of [['--apply-inserts'], ['--apply', '--verbose']]) {
+      const r = runStampContract(regDb, mode);
+      assert.equal(r.status, 0, `${mode}: ${r.stdout}\n${r.stderr}`);
+      assert.ok(!/READY TO CLEAR/.test(r.stdout), `${mode}: the layer bullet is not stamped:\n${r.stdout}`);
+      assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), planted, `${mode}: CLAUDE.md byte-identical`);
+    }
   } finally {
     registry.close();
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -295,58 +318,67 @@ test('stamp-contract: a sibling CLAUDE.md lacking the READY TO CLEAR bullet gets
 // a copy inside a fenced example), must itself have passed validation this run (never a refused,
 // hand-tuned block), and the insert must land after the anchor's COMPLETE list item.
 const KNOWLEDGE_LEAD = '- **Knowledge is born structured.**';
+// stampFixture mutates AGENTS.md (the only file stamp-contract writes since #329); the anchor and
+// insert mechanics run on the AGENTS.md pair "No false action claims" → "Lint and tests before done."
+const ANCHOR_LEAD = '- **No false action claims:**';
+const INSERT_LEAD = '- **Lint and tests before done.**';
+const ANTISPEC_LEAD = '- **Anti-speculation:**';
 function stampFixture(name, mutate) {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
   const registry = new ProjectRegistry(regDb);
   writeCompleteSibling(dir, name);
-  const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+  const complete = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
   const { planted, expected } = mutate(complete);
-  writeFileSync(join(dir, 'CLAUDE.md'), planted);
+  writeFileSync(join(dir, 'AGENTS.md'), planted);
   registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
   const cleanup = () => {
     registry.close();
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   };
-  return { regDb, claudePath: join(dir, 'CLAUDE.md'), planted, expected, cleanup };
+  return { regDb, agentsPath: join(dir, 'AGENTS.md'), claudePath: join(dir, 'CLAUDE.md'), claudeBefore: readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), planted, expected, cleanup };
 }
 
-test('stamp-contract: an exact Knowledge bullet inside a fenced ``` example BEFORE the conduct section is never an anchor — the missing bullets land after the REAL one, and a second run changes nothing (idempotent)', () => {
+test('stamp-contract: an exact No-false-action-claims bullet inside a fenced ``` example BEFORE the conduct section is never an anchor — the missing bullets land after the REAL one, and a second run changes nothing (idempotent)', () => {
   const f = stampFixture('fenced', (complete) => {
-    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const knowledge = complete.split('\n').find((l) => l.startsWith(ANCHOR_LEAD));
     const fence = `\n## Example\n\n\`\`\`md\n${knowledge}\n\`\`\`\n`;
     const [first, ...rest] = complete.split('\n');
     const withFence = [first, fence, ...rest].join('\n');
-    return { planted: dropBlock(withFence, READY_LEAD), expected: withFence };
+    return { planted: dropBlock(withFence, INSERT_LEAD), expected: withFence };
   });
   try {
     const r1 = runStampContract(f.regDb);
     assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'both bullets restored after the REAL Knowledge bullet; the fenced example is untouched');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'both bullets restored after the REAL Knowledge bullet; the fenced example is untouched');
     const r2 = runStampContract(f.regDb);
     assert.equal(r2.status, 0, `${r2.stdout}\n${r2.stderr}`);
     assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'second run leaves the file byte-identical');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'second run leaves the file byte-identical');
   } finally {
     f.cleanup();
   }
 });
 
-test('stamp-contract: a hand-tuned MULTI-PARAGRAPH Knowledge bullet is refused AND never used as an anchor — READY TO CLEAR is ANCHOR_MISSING_REFUSED, file byte-identical, exit 2', () => {
+test('stamp-contract: a hand-tuned MULTI-PARAGRAPH anchor bullet (with Anti-speculation, its fallback, also hand-tuned) is refused AND never used as an anchor — the lint bullet is ANCHOR_MISSING_REFUSED, file byte-identical, exit 2', () => {
   const f = stampFixture('handtuned-anchor', (complete) => {
-    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
-    const tuned = complete.replace(knowledge, `${KNOWLEDGE_LEAD} This project words it its own way.\n\n  A second paragraph of the same hand-tuned item.`);
-    const planted = dropBlock(tuned, READY_LEAD);
+    const knowledge = complete.split('\n').find((l) => l.startsWith(ANCHOR_LEAD));
+    const antiSpec = complete.split('\n').find((l) => l.startsWith(ANTISPEC_LEAD));
+    const tuned = complete
+      .replace(knowledge, `${ANCHOR_LEAD} This project words it its own way.\n\n  A second paragraph of the same hand-tuned item.`)
+      .replace(antiSpec, `${ANTISPEC_LEAD} This project's own wording of the fallback anchor.`);
+    const planted = dropBlock(tuned, INSERT_LEAD);
     return { planted, expected: planted };
   });
   try {
     const r = runStampContract(f.regDb);
     assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*Knowledge is born structured/);
-    assert.match(r.stdout, /ANCHOR_MISSING_REFUSED {2}- \*\*Say `READY TO CLEAR`/);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the refused bullet is not restructured and nothing is inserted');
+    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*No false action claims/);
+    assert.match(r.stdout, /ANCHOR_MISSING_REFUSED {2}- \*\*Lint and tests before done/);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the refused bullet is not restructured and nothing is inserted');
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.claudeBefore, 'CLAUDE.md is never written');
   } finally {
     f.cleanup();
   }
@@ -354,20 +386,20 @@ test('stamp-contract: a hand-tuned MULTI-PARAGRAPH Knowledge bullet is refused A
 
 test('stamp-contract: a valid anchor followed by a blank-separated indented continuation paragraph gets the insert after the WHOLE list item, and a second run changes nothing (idempotent)', () => {
   const f = stampFixture('continuation', (complete) => {
-    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
-    const extra = '\n  A project-added paragraph under the Knowledge item.';
-    // In the render the READY TO CLEAR line directly follows Knowledge, so here it follows the continuation.
+    const knowledge = complete.split('\n').find((l) => l.startsWith(ANCHOR_LEAD));
+    const extra = '\n  A project-added paragraph under the anchor item.';
+    // In the render the lint line directly follows the anchor, so here it follows the continuation.
     const withExtra = complete.replace(knowledge, `${knowledge}\n${extra}`);
-    return { planted: dropBlock(withExtra, READY_LEAD), expected: withExtra };
+    return { planted: dropBlock(withExtra, INSERT_LEAD), expected: withExtra };
   });
   try {
     const r1 = runStampContract(f.regDb);
     assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'READY TO CLEAR lands after the continuation paragraph, never between the item and its continuation');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the lint bullet lands after the continuation paragraph, never between the item and its continuation');
     const r2 = runStampContract(f.regDb);
     assert.equal(r2.status, 0, `${r2.stdout}\n${r2.stderr}`);
     assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected);
   } finally {
     f.cleanup();
   }
@@ -375,18 +407,18 @@ test('stamp-contract: a valid anchor followed by a blank-separated indented cont
 
 // Sol re-check of af99713: fences close only on the SAME character with a run at least as long
 // (CommonMark), and an indented fenced block is part of the list item it continues.
-test('stamp-contract: a ``` example containing a ~~~ line, then an exact Knowledge bullet STILL inside the fence, is never an anchor — the bullets land after the REAL one', () => {
+test('stamp-contract: a ``` example containing a ~~~ line, then an exact anchor bullet STILL inside the fence, is never an anchor — the bullets land after the REAL one', () => {
   const f = stampFixture('fence-mixed', (complete) => {
-    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const knowledge = complete.split('\n').find((l) => l.startsWith(ANCHOR_LEAD));
     const fence = `\n## Example\n\n\`\`\`md\n~~~\n${knowledge}\n\`\`\`\n`;
     const [first, ...rest] = complete.split('\n');
     const withFence = [first, fence, ...rest].join('\n');
-    return { planted: dropBlock(withFence, READY_LEAD), expected: withFence };
+    return { planted: dropBlock(withFence, INSERT_LEAD), expected: withFence };
   });
   try {
     const r = runStampContract(f.regDb);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'a ~~~ line does not close a ``` fence; the fenced copy stays untouched');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'a ~~~ line does not close a ``` fence; the fenced copy stays untouched');
   } finally {
     f.cleanup();
   }
@@ -394,18 +426,18 @@ test('stamp-contract: a ``` example containing a ~~~ line, then an exact Knowled
 
 test('stamp-contract: a valid anchor whose item continues with an INDENTED fenced code block gets the insert after that block, never re-parenting it under the new bullet', () => {
   const f = stampFixture('fence-continuation', (complete) => {
-    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
-    // In the render the READY TO CLEAR line directly follows Knowledge, so here it follows the fenced block.
+    const knowledge = complete.split('\n').find((l) => l.startsWith(ANCHOR_LEAD));
+    // In the render the lint line directly follows the anchor, so here it follows the fenced block.
     const withBlock = complete.replace(knowledge, `${knowledge}\n\n  \`\`\`sh\n  echo example\n\n  - not a bullet\n  \`\`\``);
-    return { planted: dropBlock(withBlock, READY_LEAD), expected: withBlock };
+    return { planted: dropBlock(withBlock, INSERT_LEAD), expected: withBlock };
   });
   try {
     const r1 = runStampContract(f.regDb);
     assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'READY TO CLEAR lands after the closing fence of the item\'s code block');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the lint bullet lands after the closing fence of the item\'s code block');
     const r2 = runStampContract(f.regDb);
     assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected);
   } finally {
     f.cleanup();
   }
@@ -413,24 +445,24 @@ test('stamp-contract: a valid anchor whose item continues with an INDENTED fence
 
 const SOLVE_LEAD = "- **Solve, don't board.**";
 const CLOSE_LEAD = '- **Close-on-commit: a commit that fulfils a board item pays it**';
-test('stamp-contract: Solve and Close-on-commit bullets under their OLD leads are recognised through RENAMED_LEADS — refused as hand-tuned, never given a duplicate under the new lead, file byte-identical, exit 2', () => {
-  const f = stampFixture('old-board-leads', (complete) => {
+// Solve and Close-on-commit are target-claude-md.md leads, no longer stamped (#329); the same
+// RENAMED_LEADS guard is pinned on the AGENTS.md background bullet's old lead.
+test('stamp-contract: a hand-tuned bullet under the background bullet\'s OLD lead is recognised through RENAMED_LEADS — refused as hand-tuned, never given a duplicate under the new lead, file byte-identical, exit 2', () => {
+  const f = stampFixture('old-background-lead', (complete) => {
     const lines = complete.split('\n');
-    const solve = lines.findIndex((l) => l.startsWith(SOLVE_LEAD));
-    const close = lines.findIndex((l) => l.startsWith(CLOSE_LEAD));
-    assert.ok(solve >= 0 && close >= 0, 'fixture sanity: the render carries both new leads');
-    lines[solve] = "- **Solve, don't board** inside the current task's scope: fix a finding in-session, board only what cannot be done now and say why.";
-    lines[close] = '- **Close-on-commit:** a commit that fulfils a board item pays it — `board_remove` in the same breath, citing the commit.';
+    const at = lines.findIndex((l) => l.startsWith('- **Start every subagent and every long shell command in the background.**'));
+    assert.ok(at >= 0, 'fixture sanity: the render carries the new lead');
+    lines[at] = '- **Start every subagent in the background.** Our own wording, which no template version ever used.';
     const planted = lines.join('\n');
     return { planted, expected: planted };
   });
   try {
     const r = runStampContract(f.regDb);
     assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Solve, don't board\./);
-    assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Close-on-commit: a commit/);
+    assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Start every subagent and every long shell command/);
     assert.ok(!/inserted|would_insert/.test(r.stdout), `no insert beside an old-lead bullet:\n${r.stdout}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the old-lead bullets are left byte-for-byte untouched');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the old-lead bullet is left byte-for-byte untouched');
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.claudeBefore, 'CLAUDE.md is never written');
   } finally {
     f.cleanup();
   }
@@ -439,34 +471,32 @@ test('stamp-contract: Solve and Close-on-commit bullets under their OLD leads ar
 const REPORT_LEAD = '- **Report Sterling defects to its GitHub issues without asking.**';
 const OLD_REPORT_LEAD = "- **Stamp Sterling's version when reporting on Sterling.**";
 
-test('stamp-contract: a CLAUDE.md with the report bullet under its OLD lead is reported would_rename by --apply-inserts (untouched, no duplicate), and --apply replaces it in place exactly once; a second --apply writes nothing', () => {
-  const f = stampFixture('old-report-lead', (complete) => {
-    const lines = complete.split('\n');
+test('stamp-contract: a retained CLAUDE.md with the report bullet under its OLD lead is neither reported nor touched by --apply-inserts or --apply (#329: host files are read-only)', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-old-report-lead-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'old-report-lead');
+    const lines = readFileSync(join(dir, 'CLAUDE.md'), 'utf8').split('\n');
     const at = lines.findIndex((l) => l.startsWith(REPORT_LEAD));
     assert.ok(at >= 0, 'fixture sanity: the render carries the new lead');
-    // The body is unchanged by the rename, so the old-lead variant is the same text under the old lead.
     lines[at] = lines[at].replace(REPORT_LEAD, OLD_REPORT_LEAD);
-    return { planted: lines.join('\n'), expected: complete };
-  });
-  try {
-    const inserts = runStampContract(f.regDb, ['--apply-inserts']);
-    assert.equal(inserts.status, 0, `${inserts.stdout}\n${inserts.stderr}`);
-    assert.match(inserts.stdout, /would_rename {2}- \*\*Report Sterling defects to its GitHub issues/);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.planted, '/sterling:update\'s mode reports the rename and does not touch the old bullet');
-
-    const r = runStampContract(f.regDb, ['--apply']);
-    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /renamed {2}- \*\*Report Sterling defects to its GitHub issues/);
-    const after = readFileSync(f.claudePath, 'utf8');
-    assert.equal(after, f.expected, 'the old-lead bullet became the current bullet, in place, and nothing else changed');
-    assert.equal(after.split('\n').filter((l) => l.startsWith(REPORT_LEAD)).length, 1, 'one bullet under the new lead');
-    assert.ok(!after.includes(OLD_REPORT_LEAD), 'no bullet under the old lead');
-
-    const again = runStampContract(f.regDb, ['--apply']);
-    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), after, 'a second run writes nothing');
+    const planted = lines.join('\n');
+    writeFileSync(join(dir, 'CLAUDE.md'), planted);
+    const agentsBefore = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    registry.register({ repo_path: dir, name: 'old-report-lead', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    for (const mode of [['--apply-inserts'], ['--apply']]) {
+      const r = runStampContract(regDb, mode);
+      assert.equal(r.status, 0, `${mode}: ${r.stdout}\n${r.stderr}`);
+      assert.ok(!/Report Sterling defects/.test(r.stdout), `${mode}: the layer bullet is not stamped:\n${r.stdout}`);
+      assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), planted, `${mode}: CLAUDE.md byte-identical`);
+      assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agentsBefore, `${mode}: AGENTS.md gains no copy of a layer bullet`);
+    }
   } finally {
-    f.cleanup();
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
@@ -497,7 +527,7 @@ function sectionFixture(name, mutateAgents, mutateClaude = (text) => text) {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   };
-  return { regDb, complete, read, cleanup };
+  return { regDb, dir, complete, read, cleanup };
 }
 
 test('stamp-contract: an AGENTS.md with no Domains section gains the whole section before Conventions; a dry run writes nothing and a second run changes nothing', () => {
@@ -520,6 +550,55 @@ test('stamp-contract: an AGENTS.md with no Domains section gains the whole secti
     assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
     assert.ok(!/inserted|updated|renamed/.test(again.stdout), `a second run has nothing to do:\n${again.stdout}`);
     assert.deepEqual(f.read(), f.complete, 'a second run changes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 7 of #329: a second registered Sterling checkout (not the one running stamp-contract)
+// has hand-maintained instruction files too, so it gets no automatic insert; it is named on one
+// skip line that is not a refusal and not a failure for the shared classifier.
+test('stamp-contract: a second registered Sterling source checkout gets no insert — AGENTS.md byte-identical, one skip line, exit 0', () => {
+  const f = sectionFixture('second-checkout', (agents) => agents.replace(DOMAINS_SECTION, ''));
+  try {
+    mkdirSync(join(f.dir, '.claude-plugin'));
+    writeFileSync(join(f.dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(f.dir, 'scripts'));
+    writeFileSync(join(f.dir, 'scripts', 'architecture-projection.mjs'), '');
+    const before = f.read();
+    assert.ok(!before.agents.includes('## Domains'), 'fixture sanity: an insert would be due in an ordinary project');
+    for (const args of [['--apply-inserts'], ['--apply-inserts', '--project', f.dir]]) {
+      const r = runStampContract(f.regDb, args);
+      assert.equal(r.status, 0, `${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /^– second-checkout \(.*AGENTS\.md\): skipped — a Sterling source tree, whose instruction files are hand-maintained; nothing stamped$/m);
+      assert.doesNotMatch(r.stdout, /section_inserted|^✗/m);
+      assert.deepEqual(stampFailures(r.stdout, join(f.dir, 'AGENTS.md')), []);
+      assert.deepEqual(f.read(), before, 'nothing written');
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 7 of #329: a registered path that no longer exists is a stale registry entry, not a
+// failure of the run: one explicit skip line, no ✗ refusal line, exit 0, nothing for the classifier.
+test('stamp-contract: a stale registry entry (path gone) beside a healthy project is one skip line, never a refusal', () => {
+  const f = sectionFixture('healthy', (agents) => agents);
+  const gone = join(tmpdir(), `sterling-stamp-gone-${process.pid}-${Date.now()}`);
+  try {
+    const registry = new ProjectRegistry(f.regDb);
+    try {
+      registry.register({ repo_path: gone, name: 'stale', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    } finally {
+      registry.close();
+    }
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /^– stale \(.*AGENTS\.md\): skipped — the registered path does not exist \(a stale registry entry\); nothing stamped$/m);
+    assert.doesNotMatch(r.stdout, /^✗/m, 'no refusal line');
+    assert.deepEqual(stampFailures(r.stdout, join(gone, 'AGENTS.md')), []);
+    assert.deepEqual(stampFailures(r.stdout), []);
+    assert.deepEqual(f.read(), f.complete, 'the healthy project is in sync and untouched');
   } finally {
     f.cleanup();
   }
@@ -976,6 +1055,12 @@ test('stamp-contract (#111): every SUBJECT_MARKERS lead is a tracked lead with a
       assert.ok(`${before.agents}\n${before.claude}`.includes(own), `fixture: ${own} placed`);
       const r = runStampContract(f.regDb, ['--apply-inserts']);
       assert.equal(r.status, 0, `${lead}: ${r.stdout}\n${r.stderr}`);
+      if (!AGENTS_HOMED(lead)) {
+        // A target-claude-md.md lead is not stamped (#329): nothing is said about it and nothing is written.
+        assert.ok(!r.stdout.includes(lead.slice(0, 60)), `${lead}: not stamped\n${r.stdout}`);
+        assert.deepEqual(f.read(), before, `${lead}: nothing written`);
+        continue;
+      }
       assert.match(r.stdout, /SIMILAR_BULLET_KEPT/, lead);
       assert.ok(!/(^|\s)inserted\s/.test(r.stdout), `${lead}: nothing inserted\n${r.stdout}`);
       assert.deepEqual(f.read(), before, `${lead}: nothing written`);
@@ -1022,6 +1107,12 @@ test('stamp-contract (#111): an unrelated bullet that shares a generic word with
         const r = runStampContract(f.regDb, ['--apply-inserts']);
         assert.equal(r.status, 0, `${own}: ${r.stdout}\n${r.stderr}`);
         assert.ok(!r.stdout.includes('SIMILAR_BULLET_KEPT'), `${own} must not count as covering ${lead}:\n${r.stdout}`);
+        if (!AGENTS_HOMED(lead)) {
+          // A target-claude-md.md lead is not stamped (#329): it is never inserted, and nothing is written.
+          assert.ok(!r.stdout.includes(lead.slice(0, 60)), `${lead}: not stamped\n${r.stdout}`);
+          assert.deepEqual(f.read(), before, `${own}: nothing written`);
+          continue;
+        }
         assert.ok(r.stdout.includes(`inserted  ${lead.slice(0, 60)}`), `${own}: the template bullet is inserted:\n${r.stdout}`);
         const after = f.read();
         assert.ok(`${after.agents}\n${after.claude}`.includes(own), `${own}: the project bullet is untouched`);
@@ -1237,26 +1328,168 @@ test('stamp-contract: in a file with mixed line endings the inserted lines take 
 });
 
 test('stamp-contract --apply-inserts: a bullet still under its old lead is kept and reported would_rename, and a new bullet anchored after it is inserted', () => {
-  const NOTES_LEAD = "- **Notes are the user's surface.**";
-  const oldBlock = JSON.parse(readFileSync(join(root, 'bin', 'contract-history.json'), 'utf8'))[NOTES_LEAD][0];
-  assert.ok(oldBlock?.startsWith(NOTES_LEAD), 'fixture sanity: a historical block under the old lead');
+  // Ported from the Knowledge/READY TO CLEAR pair (target-claude-md.md leads, not stamped since #329)
+  // to the AGENTS.md background bullet's old lead and the Finish bullet anchored after it.
+  const NEW_LEAD = '- **Start every subagent and every long shell command in the background.**';
+  const OLD_LEAD = '- **Start every subagent in the background.**';
+  const NEXT_LEAD = '- **Finish what you start.**';
+  const oldBlock = JSON.parse(readFileSync(join(root, 'bin', 'contract-history.json'), 'utf8'))[OLD_LEAD][0];
+  assert.ok(oldBlock?.startsWith(OLD_LEAD), 'fixture sanity: a historical block under the old lead');
   const f = stampFixture('rename-anchor', (complete) => {
-    const lines = dropBlock(complete, READY_LEAD).split('\n');
-    const i = lines.findIndex((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const lines = dropBlock(complete, NEXT_LEAD).split('\n');
+    const i = lines.findIndex((l) => l.startsWith(NEW_LEAD));
     assert.notEqual(i, -1);
     lines[i] = oldBlock;
     const planted = lines.join('\n');
-    const ready = complete.split('\n').find((l) => l.startsWith(READY_LEAD));
+    const next = complete.split('\n').find((l) => l.startsWith(NEXT_LEAD));
     const out = [...lines];
-    out.splice(i + 1, 0, ready);
+    out.splice(i + 1, 0, next);
     return { planted, expected: out.join('\n') };
   });
   try {
     const r = runStampContract(f.regDb, ['--apply-inserts']);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /would_rename {2}- \*\*Knowledge is born structured\./);
-    assert.match(r.stdout, /inserted {2}- \*\*Say `READY TO CLEAR`/);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the old block is byte-for-byte kept, with the new bullet after it');
+    assert.match(r.stdout, /would_rename {2}- \*\*Start every subagent and every long shell command/);
+    assert.match(r.stdout, /inserted {2}- \*\*Finish what you start/);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the old block is byte-for-byte kept, with the new bullet after it');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ---- the generated Sterling layer section (GitHub #329, review finding 4) ----
+// stamp-contract stamps only the project's own AGENTS.md text: the section between the
+// sterling:begin/end markers is never matched, refused, duplicated or rewritten, and host files
+// are never written, also on the combined update path (sync-agents' layer step, then --apply-inserts).
+
+const layerSlice = (text) => text.slice(text.indexOf('<!-- sterling:begin generated'), text.indexOf(LAYER_END) + LAYER_END.length);
+
+function layerFixture(name, { agents, claude, gemini }) {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
+  writeFileSync(join(dir, 'AGENTS.md'), agents);
+  if (claude !== undefined) writeFileSync(join(dir, 'CLAUDE.md'), claude);
+  if (gemini !== undefined) writeFileSync(join(dir, 'GEMINI.md'), gemini);
+  const registry = new ProjectRegistry(regDb);
+  try {
+    registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+  } finally {
+    registry.close();
+  }
+  const cleanup = () => {
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  };
+  return { dir, regDb, cleanup, read: (file) => readFileSync(join(dir, file), 'utf8') };
+}
+
+test('stamp-contract, combined update path: after the layer step, --apply-inserts leaves a retained CLAUDE.md and GEMINI.md and the generated section byte-identical, with no layer refusals, exit 0', () => {
+  const claude = `# Our CLAUDE.md\n\n${renderTemplate('templates/target-claude-md.md', 'combined').split('\n').filter((l) => l.startsWith('- **Reconcile') || l.startsWith('- **Knowledge is born')).join('\n')}\n- **Our rule.** Tabs, never spaces.\n`;
+  const gemini = '# Our GEMINI.md\n\n- **agy rule.** Our own.\n';
+  const f = layerFixture('combined', { agents: renderTemplate(AGENTS_TEMPLATE_REL, 'combined'), claude, gemini });
+  try {
+    const sync = syncLayer({ projectDir: f.dir, pluginRoot: root });
+    assert.equal(sync.refused, 0, sync.lines.join('\n'));
+    const afterSync = f.read('AGENTS.md');
+    assert.ok(afterSync.includes(LAYER_END), 'fixture sanity: the layer step wrote the section');
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(!/DUPLICATE_REFUSED|WRONG_LAYER_REFUSED|REFUSED/.test(r.stdout), `no refusal from the generated section:\n${r.stdout}`);
+    assert.equal(f.read('CLAUDE.md'), claude, 'retained CLAUDE.md byte-identical');
+    assert.equal(f.read('GEMINI.md'), gemini, 'retained GEMINI.md byte-identical');
+    assert.equal(f.read('AGENTS.md'), afterSync, 'AGENTS.md byte-identical: in sync outside the section, untouched inside');
+    assert.equal(layerSlice(f.read('AGENTS.md')), readLayerSection(root), 'the generated section is the shipped one');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: an AGENTS.md-homed bullet inside the generated section is not counted — a missing copy is inserted OUTSIDE the markers, and the section is byte-identical', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'masked');
+  const lint = complete.split('\n').find((l) => l.startsWith(INSERT_LEAD));
+  const section = readLayerSection(root).replace(LAYER_END, `${lint}\n${LAYER_END}`);
+  const planted = `${dropBlock(complete, INSERT_LEAD)}\n${section}\n`;
+  const f = layerFixture('masked', { agents: planted });
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(!/DUPLICATE_REFUSED|WRONG_LAYER_REFUSED/.test(r.stdout), r.stdout);
+    assert.match(r.stdout, /inserted {2}- \*\*Lint and tests before done/);
+    const after = f.read('AGENTS.md');
+    assert.equal(after, `${complete}\n${section}\n`, 'the bullet lands in its template position outside the section; the section is untouched');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: malformed layer markers (a begin line missing -->) are LAYER_MARKERS_REFUSED — exit 2, AGENTS.md byte-identical', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'malformed');
+  const broken = readLayerSection(root).replace(/ -->\n/, '\n');
+  const planted = `${dropBlock(complete, INSERT_LEAD)}\n${broken}\n`;
+  const f = layerFixture('malformed', { agents: planted });
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /LAYER_MARKERS_REFUSED/);
+    assert.equal(f.read('AGENTS.md'), planted);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a CRLF AGENTS.md with the generated section gets only the insert; every other byte, the section included, is kept', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'crlf-layer');
+  const section = readLayerSection(root);
+  const toCrlf = (t) => t.replace(/\n/g, '\r\n');
+  const planted = toCrlf(`${dropBlock(complete, INSERT_LEAD)}\n${section}\n`);
+  const f = layerFixture('crlf-layer', { agents: planted });
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(f.read('AGENTS.md'), toCrlf(`${complete}\n${section}\n`));
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 2 of #329: stamp-contract never follows an aliased AGENTS.md, and never writes a
+// planned AGENTS.md that would not fit agy's cap once the Sterling layer is in.
+test('stamp-contract: a symlinked AGENTS.md (here pointing at CLAUDE.md) is AGENTS_MD_REFUSED — link and target byte-identical, exit 2', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'linked');
+  const f = layerFixture('linked', { agents: '' });
+  try {
+    rmSync(join(f.dir, 'AGENTS.md'));
+    const claude = `${dropBlock(complete, INSERT_LEAD)}\n`;
+    writeFileSync(join(f.dir, 'CLAUDE.md'), claude);
+    symlinkSync('CLAUDE.md', join(f.dir, 'AGENTS.md'));
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /AGENTS_MD_REFUSED/);
+    assert.equal(f.read('CLAUDE.md'), claude, 'the link target is not stamped');
+    assert.ok(lstatSync(join(f.dir, 'AGENTS.md')).isSymbolicLink(), 'the link is left in place');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: an insert that would take AGENTS.md (with the layer) past agy\'s 24,000-byte cap is PLANNED_AGENTS_MD_REFUSED — nothing written, exit 2', () => {
+  const complete = renderTemplate(AGENTS_TEMPLATE_REL, 'near-cap');
+  const section = readLayerSection(root);
+  const base = `${dropBlock(complete, INSERT_LEAD)}\n`;
+  const room = 24_000 - Buffer.byteLength(`${base}\n${section}\n`);
+  assert.ok(room > 200, 'fixture: the stock text fits with the layer');
+  const lint = complete.split('\n').find((l) => l.startsWith(INSERT_LEAD));
+  const pad = `\n## Our notes\n\n${'x'.repeat(room - Buffer.byteLength(lint) + 10 - 16)}\n`;
+  const planted = `${base}${pad}\n${section}\n`;
+  assert.ok(Buffer.byteLength(planted) <= 24_000, 'fixture: the file fits before the insert');
+  const f = layerFixture('near-cap', { agents: planted });
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /PLANNED_AGENTS_MD_REFUSED/);
+    assert.match(r.stdout, /over agy's 24,000-byte cap/);
+    assert.equal(f.read('AGENTS.md'), planted);
   } finally {
     f.cleanup();
   }
@@ -1303,9 +1536,10 @@ test('a --project that matches no registered project exits 2 naming the value', 
 
 // --project naming a linked git worktree (issue #210, user-ruled 2026-10-27 "The worktree's
 // copy"): the registry match goes through the main project, the files are the worktree's own.
-function worktreeFixture() {
-  const f = stampFixture('wt', (complete) => ({ planted: dropBlock(complete, READY_LEAD), expected: complete }));
-  const main = dirname(f.claudePath);
+// `registerWorktree`: the worktree is also a registry row of its own (review loop 8 of #329).
+function worktreeFixture({ registerWorktree = false } = {}) {
+  const f = stampFixture('wt', (complete) => ({ planted: dropBlock(complete, INSERT_LEAD), expected: complete }));
+  const main = dirname(f.agentsPath);
   const git = (...args) => {
     const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: main, encoding: 'utf8' });
     assert.equal(r.status, 0, 'git setup step failed');
@@ -1315,6 +1549,14 @@ function worktreeFixture() {
   git('commit', '-q', '-m', 'seed');
   const wt = `${main}-wt`;
   git('worktree', 'add', '-q', wt, '-b', 'wt-branch');
+  if (registerWorktree) {
+    const registry = new ProjectRegistry(f.regDb);
+    try {
+      registry.register({ repo_path: wt, name: 'wt-worktree', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    } finally {
+      registry.close();
+    }
+  }
   const cleanup = () => {
     f.cleanup();
     rmSync(wt, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -1327,11 +1569,145 @@ test('--project <linked worktree> --apply edits the worktree copy and leaves the
   try {
     const r = runStampContract(f.regDb, ['--apply', '--project', f.wt]);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.expected, 'the worktree copy is stamped');
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.planted, 'the main checkout is byte-identical');
+    assert.equal(readFileSync(join(f.wt, 'AGENTS.md'), 'utf8'), f.expected, 'the worktree copy is stamped');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted, 'the main checkout is byte-identical');
     assert.match(r.stdout, /worktree .*-wt; the main checkout is not touched/);
   } finally {
     f.cleanup();
+  }
+});
+
+// Since the #329 rebuild (decision 329-rebuild-how-sterling-update-stamps-sibling-projects-as-o)
+// /sterling:update hands the stamper its registry rows in-process (stampProjects in
+// scripts/lib/stamp-projects.mjs) instead of naming them as --project flags. A registered main
+// checkout and its registered linked worktree are two rows, each stamped in its own directory; the
+// interactive CLI keeps mapping a worktree argument to its main row (decision
+// stamp-contract-project-on-a-worktree-stamps-the-worktree-copy).
+test('stampProjects: a registered main checkout and its registered linked worktree, given as two rows, are each stamped; the CLI still maps a worktree argument to its main row', () => {
+  const f = worktreeFixture({ registerWorktree: true });
+  const wtAgents = join(f.wt, 'AGENTS.md');
+  try {
+    const interactive = runStampContract(f.regDb, ['--apply-inserts', '--project', f.wt]);
+    assert.equal(interactive.status, 0, `${interactive.stdout}\n${interactive.stderr}`);
+    assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'a worktree argument stamps the worktree copy');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted, 'and leaves the main checkout alone');
+
+    writeFileSync(wtAgents, f.planted);
+    const results = stampProjects([{ name: 'wt', repo_path: f.main }, { name: 'wt-worktree', repo_path: f.wt }], { repoRoot: root, applyInserts: true });
+    assert.deepEqual(results.map((r) => [r.project, r.path, r.status]), [['wt', f.agentsPath, 'stamped'], ['wt-worktree', wtAgents, 'stamped']]);
+    assert.ok(results.every((r) => r.actions.some((a) => a.action === 'inserted')), 'each row has its insert');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, 'the main checkout row is stamped');
+    assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'the worktree row is stamped in its own directory');
+    assert.deepEqual(results.flatMap(stampResultFailures), []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// A row is stamped where it points; no realpath folds two rows into one. The interactive CLI keeps
+// its real-path fallback, so a real path reaches a registered symlink alias of it too.
+test('stampProjects: a path and a symlink alias of it, given as two rows, each get their own result', () => {
+  const f = stampFixture('alias-real', (complete) => ({ planted: dropBlock(complete, INSERT_LEAD), expected: complete }));
+  const real = dirname(f.agentsPath);
+  const alias = `${real}-alias`;
+  try {
+    symlinkSync(real, alias);
+    const registry = new ProjectRegistry(f.regDb);
+    try {
+      registry.register({ repo_path: alias, name: 'alias-link', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    } finally {
+      registry.close();
+    }
+    const results = stampProjects([{ name: 'alias-real', repo_path: real }, { name: 'alias-link', repo_path: alias }], { repoRoot: root });
+    assert.deepEqual(results.map((r) => [r.project, r.path, r.status]), [['alias-real', f.agentsPath, 'stamped'], ['alias-link', join(alias, 'AGENTS.md'), 'stamped']]);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted, 'a dry run writes nothing');
+    const interactive = runStampContract(f.regDb, ['--project', real]);
+    assert.match(interactive.stdout, /— 2 project\(s\) processed/, interactive.stdout);
+  } finally {
+    rmSync(alias, { force: true });
+    f.cleanup();
+  }
+});
+
+// One structured result per row, in row order, and the classifier /sterling:update applies to it
+// (scripts/lib/stamp-outcome.mjs): a stale path and a Sterling source tree are named skips, a project
+// with no AGENTS.md fails, hand-tuned text is tolerated drift, and an empty list reads nothing.
+test('stampProjects: stale path and source tree are skips, not_migrated fails, HAND_TUNED_REFUSED is tolerated drift, in-sync is quiet', () => {
+  const handTuned = sectionFixture('api-handtuned', (agents) => agents.replace(/- \*\*Anti-speculation:\*\*[^\n]*/, '- **Anti-speculation:** This project tunes the rule its own hand-edited way.'));
+  const inSync = sectionFixture('api-insync', (agents) => agents);
+  const checkout = sectionFixture('api-checkout', (agents) => agents.replace(DOMAINS_SECTION, ''));
+  const legacy = mkdtempSync(join(tmpdir(), 'sterling-stamp-api-legacy-'));
+  const gone = join(tmpdir(), `sterling-stamp-api-gone-${process.pid}-${Date.now()}`);
+  try {
+    mkdirSync(join(checkout.dir, '.claude-plugin'));
+    writeFileSync(join(checkout.dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(checkout.dir, 'scripts'));
+    writeFileSync(join(checkout.dir, 'scripts', 'architecture-projection.mjs'), '');
+    const before = [handTuned.read(), inSync.read(), checkout.read()];
+    const seen = [];
+    const rows = [
+      { name: 'stale', repo_path: gone },
+      { name: 'checkout', repo_path: checkout.dir },
+      { name: 'legacy', repo_path: legacy },
+      { name: 'handtuned', repo_path: handTuned.dir },
+      { name: 'insync', repo_path: inSync.dir },
+    ];
+    const results = stampProjects(rows, { repoRoot: root, applyInserts: true, onResult: (r) => seen.push(r.project) });
+    assert.deepEqual(seen, rows.map((r) => r.name), 'onResult runs per project, in row order');
+    assert.deepEqual(results.map((r) => [r.row, r.status, r.reason && r.reason.split(' ')[0]]), [
+      [rows[0], 'skipped', 'stale_path'],
+      [rows[1], 'skipped', 'sterling_source_tree'],
+      [rows[2], 'not_migrated', 'no'],
+      [rows[3], 'refused', null],
+      [rows[4], 'in_sync', null],
+    ]);
+    assert.deepEqual([handTuned.read(), inSync.read(), checkout.read()], before, 'nothing written');
+    assert.ok(results[3].actions.some((a) => a.action === 'HAND_TUNED_REFUSED'));
+    assert.deepEqual(results.map((r) => stampResultFailures(r).length), [0, 0, 1, 0, 0], 'only not_migrated fails');
+    assert.match(stampResultFailures(results[2])[0], new RegExp(`^not_migrated — no AGENTS\\.md — run: .*--target ${legacy}$`));
+    assert.deepEqual(results.map((r) => stampRefusalCount(r)), [0, 0, 1, 1, 0], 'drift counts not_migrated and every refusal');
+    assert.deepEqual(stampResultLines(results[0]), [`– stale (${join(gone, 'AGENTS.md')}): skipped — the registered path does not exist (a stale registry entry); nothing stamped`]);
+    assert.deepEqual(stampResultLines(results[1]), [`– checkout (${join(checkout.dir, 'AGENTS.md')}): skipped — a Sterling source tree, whose instruction files are hand-maintained; nothing stamped`]);
+    assert.deepEqual(stampResultLines(results[4]), [], 'quiet on clean');
+    assert.deepEqual(stampProjects([], { repoRoot: join(tmpdir(), 'no-such-sterling-root') }), [], 'an empty list reads nothing, not even the templates');
+  } finally {
+    for (const f of [handTuned, inSync, checkout]) f.cleanup();
+    rmSync(legacy, { recursive: true, force: true });
+  }
+});
+
+// The write and safety refusals are failures of that project, read from the structured actions.
+test('stampProjects: a write refusal (an over-cap plan) is a failure the classifier names; the file is untouched', () => {
+  const f = sectionFixture('api-cap', (agents) => {
+    const base = agents.replace(DOMAINS_SECTION, '');
+    return `${base}\n<!-- ${'x'.repeat(24_000 - Buffer.byteLength(base) - 20)} -->\n`;
+  });
+  try {
+    const before = f.read();
+    assert.ok(Buffer.byteLength(before.agents) <= 24_000, 'fixture: the file fits before the insert');
+    const [r] = stampProjects([{ name: 'api-cap', repo_path: f.dir }], { repoRoot: root, applyInserts: true });
+    assert.equal(r.status, 'refused');
+    assert.deepEqual(f.read(), before, 'nothing written');
+    const failures = stampResultFailures(r);
+    assert.equal(failures.length, 1, JSON.stringify(r.actions));
+    assert.match(failures[0], /^PLANNED_AGENTS_MD_REFUSED AGENTS\.md \(write\) — .*24,000-byte cap/);
+    assert.ok(r.actions.some((a) => a.action === 'would_insert_section'), 'the unwritten insert is reported as would_*');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// The rebuild removed --exact-projects: the interactive CLI is main's again, so the flag is unknown.
+test('--exact-projects is no longer an option: exit 2 naming it, before the registry is opened', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-exact-'));
+  try {
+    const regDb = join(scratch, 'registry.db');
+    const r = runStampContract(regDb, ['--apply-inserts', '--project', scratch, '--exact-projects']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /unknown option --exact-projects/);
+    assert.equal(existsSync(regDb), false, 'the registry was never opened');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 
@@ -1340,10 +1716,10 @@ test('--project <linked worktree> dry run reports the worktree path and writes n
   try {
     const r = runStampContract(f.regDb, ['--project', f.wt]);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.ok(r.stdout.includes(join(f.wt, 'CLAUDE.md')), 'the output names the worktree file');
-    assert.ok(!r.stdout.includes(`${f.main}/CLAUDE.md`), 'the main checkout file is not named');
+    assert.ok(r.stdout.includes(join(f.wt, 'AGENTS.md')), 'the output names the worktree file');
+    assert.ok(!r.stdout.includes(`${f.main}/AGENTS.md`), 'the main checkout file is not named');
     assert.match(r.stdout, /would_insert/);
-    assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.planted);
+    assert.equal(readFileSync(join(f.wt, 'AGENTS.md'), 'utf8'), f.planted);
   } finally {
     f.cleanup();
   }
@@ -1354,8 +1730,8 @@ test('naming both the registered project and its worktree stamps only the worktr
   try {
     const r = runStampContract(f.regDb, ['--apply', '--project', f.main, '--project', f.wt]);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.expected);
-    assert.equal(readFileSync(f.claudePath, 'utf8'), f.planted);
+    assert.equal(readFileSync(join(f.wt, 'AGENTS.md'), 'utf8'), f.expected);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted);
   } finally {
     f.cleanup();
   }
@@ -1369,7 +1745,7 @@ test('a worktree whose main project is not registered exits 2 as unmatched', () 
       const r = runStampContract(join(other, 'registry.db'), ['--apply', '--project', f.wt]);
       assert.equal(r.status, 2);
       assert.ok(r.stderr.includes(`--project matched no registered project: ${f.wt}`));
-      assert.equal(readFileSync(join(f.wt, 'CLAUDE.md'), 'utf8'), f.planted);
+      assert.equal(readFileSync(join(f.wt, 'AGENTS.md'), 'utf8'), f.planted);
     } finally {
       rmSync(other, { recursive: true, force: true });
     }

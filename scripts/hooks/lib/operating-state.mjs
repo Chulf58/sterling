@@ -69,9 +69,9 @@ export function sterlingRootLine(root) {
  * never sees the line; it exists because the committed CLAUDE.md's "this machine
  * authors" prose travels with every clone and misleads a session opened inside one.
  */
-// Where the Sterling layer lives, per host: CLAUDE.md on Claude Code, the
+// Where the Sterling layer lives, per host: AGENTS.md on Claude Code, the
 // injected layer on OpenCode (as axis-compose's HOST_TEXT varies its wording).
-const MACHINE_ROLE_LAYER = { claude: "Sterling layer in CLAUDE.md's", opencode: "Sterling layer's" };
+const MACHINE_ROLE_LAYER = { claude: "Sterling layer in AGENTS.md's", opencode: "Sterling layer's" };
 
 export function machineRoleLine({ atClone, installedCopy, config, host = 'claude' }) {
   if (!Object.hasOwn(MACHINE_ROLE_LAYER, host)) throw new Error(`machineRoleLine: unknown host '${host}'`);

@@ -39,6 +39,8 @@ function installGeneration(home, gen, version, { syncDelayMs = 0 } = {}) {
   writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version }));
   writeFileSync(join(root, 'scripts', 'sync-agents.mjs'), `setTimeout(() => process.stdout.write("refreshed: implementor\\n\\nRESTART REQUIRED — project subagents load at session start.\\n"), ${syncDelayMs});\n`);
   writeFileSync(join(root, 'scripts', 'stamp-contract.mjs'), 'process.stdout.write("stamp-contract: 1 already in sync — 1 project(s) processed\\n");\n');
+  // The sync's last step (GitHub #329); this one removes nothing.
+  writeFileSync(join(root, 'scripts', 'retire-host-files.mjs'), 'process.exit(0);\n');
   writeFileSync(join(root, 'scripts', 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
   return root;
 }

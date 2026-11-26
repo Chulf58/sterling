@@ -33,7 +33,11 @@ import { fileURLToPath } from 'node:url';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 import { readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL, isSterlingClone } from './handoff-projection.mjs';
-import { refreshAgentsMdKnowledgeFile } from './agents-md-facts.mjs';
+import { refreshAgentsMdKnowledge } from './agents-md-facts.mjs';
+import { LayerMarkerError, readAgentsMd, writeAgentsMdChecked } from './sterling-layer.mjs';
+import { stampResultFailures } from './stamp-outcome.mjs';
+import { stampProjects, stampRefusalCount, stampResultLines, stampSummaryLine } from './stamp-projects.mjs';
+import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { ProjectWorkflowError, readProjectWorkflow } from '@sterling/schemas';
 import { identityRefusal as projectIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
@@ -236,6 +240,7 @@ const GENERATED_TRACKED = [
   /^bin\/[^/]+\.mjs$/,
   /^bin\/contract-history\.json$/,
   /^bin\/launcher-history\.json$/,
+  /^bin\/host-file-history\.json$/,
   /^mcp\/sterling-mcp\.mjs$/,
   /^mcp\/\.build-id$/,
   /^tui\/sterling-tui\.mjs$/,
@@ -682,8 +687,11 @@ export function probeSchemaVersion(dbPath) {
  * until the workspace packages are BUILT, and building them is a step in here —
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
+ *
+ * `stamp` is the contract stamper (stampProjects in scripts/lib/stamp-projects.mjs), called
+ * in-process with the rows the refresh checked; a test passes its own.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot(), env = process.env, home = homedir() }) {
+export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot(), env = process.env, home = homedir() }) {
   // INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
   // design point D): an installed Sterling (Claude Code's /plugin or `opencode plugin add`) is
   // updated by its host — there is nothing here to fetch, build or fan out. Refused before anything
@@ -797,11 +805,24 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // any persisted schedule. One target's failure never stops another's refresh.
   // This guarantees convergence when refresh runs, not freshness between runs.
   // Returns the number of targets whose refresh failed or was refused.
+  // Every refreshed project: its CLAUDE.md / GEMINI.md are checked for removal after the contract
+  // step, the last AGENTS.md writer, whatever the writers' outcome (review loop 4 of #329). The
+  // check itself is on disk: only Sterling's current render or the stub, with the layer verified
+  // in AGENTS.md, is removed, so a writer failure cannot make it lose project text.
+  const retireQueue = [];
+  // The projects the contract step stamps and judges: one explicit set, those of this refresh that
+  // passed the pre-write checks (workflow, identity, handoff setting). See stampTargets.
+  const stampQueue = [];
+  // Queued projects whose AGENTS.md another writer refused (the layer, or the Knowledge section):
+  // the contract step still checks and judges them, as a dry run, and writes nothing to them.
+  const agentsMdWriteRefused = new Set();
+  const stampRow = (p) => (agentsMdWriteRefused.has(p) ? { ...p, readOnly: true } : p);
   const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report.projects.push(entry);
+      retireQueue.push(p);
       // The workflow settings (config.workflow, or a legacy config.mode through the one
       // transform) are read so an invalid value is refused here, before anything is synced.
       try {
@@ -857,6 +878,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         failures++;
         continue;
       }
+      // Past the pre-write checks: the contract step may stamp this project (stampTargets below).
+      stampQueue.push(p);
       let failed = false;
       const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
@@ -872,6 +895,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // value). The prefix has a space, so the status filter above never counts them as agent changes;
       // relayed on success here and verbatim in the failure output below.
       const configMigrationLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('config migration: '));
+      // The Sterling layer in AGENTS.md (scripts/lib/sterling-layer.mjs syncLayer): a removed host
+      // file, a kept one that hides AGENTS.md, and a refusal are each relayed; "up to date" and
+      // "regenerated" are not. A refusal also exits 2, which the branch below reports.
+      const layerLines = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|✗ Sterling layer REFUSED:|Sterling layer: \S+ removed\b)/.test(l));
       // `unsupported:` is a role whose model Claude Code cannot run and that has no copy: nothing changed.
       const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: ') && !l.startsWith('unsupported: '));
       const modelConflictLine = r.stdout.split('\n').map((l) => l.trim()).find((l) => l.startsWith('refused_model_conflicts: '));
@@ -884,7 +911,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         fail(2);
         failed = true;
       } else if (r.status === 2) {
-        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
+        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, a .claude/settings.json that is not valid JSON or not a JSON object, or a Sterling layer refusal in AGENTS.md). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         fail(2);
         failed = true;
       } else if (r.status !== 0) {
@@ -896,6 +923,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
         for (const line of autoMemoryNotices) log(`      ⚠ ${line}`);
         for (const line of configMigrationLines) log(`      ⚠ ${line}`);
+        for (const line of layerLines) log(`      ${line}`);
       }
       // An absent handoff key with handoff files on disk that git does not track:
       // they stopped being maintained, so the run names them (sync-agents prints
@@ -904,13 +932,52 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // The AGENTS.md Knowledge section names architecture.md/rulings.md only while handoff is on
       // (GitHub #218); a shipped-wording section is flipped to match, a hand-edited one is left
       // and named. A Sterling clone has its own projections and keeps the projection wording.
-      try {
-        const knowledge = refreshAgentsMdKnowledgeFile(join(p.repo_path, 'AGENTS.md'), isSterlingClone(p.repo_path, cwd) || handoffEnabled);
-        if (knowledge?.refreshed) log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+      // After a layer refusal nothing else writes AGENTS.md; otherwise the rewrite goes through the
+      // same checks as the layer (a plain file, and the whole planned file under agy's cap).
+      // A sync-agents run that did not succeed (an I/O error writing the layer exits 1 with no
+      // refusal line) also leaves the layer unconfirmed: the contract step only checks this row.
+      // The Knowledge pass skips its write on the same guard; the project is already failed above.
+      if (r.status !== 0) agentsMdWriteRefused.add(p);
+      if (layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) {
+        log('      ⚠ AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed');
+        agentsMdWriteRefused.add(p);
+      } else if (r.status !== 0) {
+        log(`      ⚠ AGENTS.md Knowledge section not updated: sync-agents did not succeed above (exit ${r.status}), so the Sterling layer in AGENTS.md is not confirmed and nothing else writes the file until a rerun succeeds`);
+        entry.knowledge = 'not_updated';
+      } else try {
+        const agents = readAgentsMd(p.repo_path);
+        const knowledge = agents.exists ? refreshAgentsMdKnowledge(agents.text, isSterlingClone(p.repo_path, cwd) || handoffEnabled) : null;
+        if (knowledge?.refreshed) {
+          const refusal = writeAgentsMdChecked(p.repo_path, knowledge.text);
+          if (refusal) {
+            // A writer refusal is a failed project refresh (exit 2), with its reason.
+            log(`      ✗ AGENTS.md Knowledge section REFUSED: ${refusal}`);
+            entry.knowledge = 'refused';
+            agentsMdWriteRefused.add(p);
+            fail(2);
+            failed = true;
+          } else {
+            log(`      AGENTS.md: rewrote the Knowledge section to match the handoff setting (${handoffEnabled ? 'on' : 'off'})`);
+          }
+        }
         if (knowledge?.kept) log(`      ⚠ AGENTS.md: left the Knowledge section alone (${knowledge.kept}); with handoff files on it should point at architecture.md and rulings.md, with them off at the Sterling store (knowledge_query, knowledge_get). Update it by hand.`);
       } catch (err) {
-        if (!isProjectReadRefusal(err)) throw err;
-        log(`      ⚠ AGENTS.md Knowledge section not checked: ${err.message}`);
+        if (err instanceof LayerMarkerError) {
+          log(`      ✗ AGENTS.md Knowledge section REFUSED: ${err.message}`);
+          entry.knowledge = 'refused';
+          agentsMdWriteRefused.add(p);
+          fail(2);
+          failed = true;
+        } else {
+          // A file system error reading or writing AGENTS.md (EROFS, EACCES) leaves the section
+          // unrefreshed: a failed project refresh like a writer refusal (review loop 5 of #329).
+          if (!isProjectReadRefusal(err)) throw err;
+          log(`      ✗ AGENTS.md Knowledge section NOT updated: ${err.message}`);
+          entry.knowledge = 'failed';
+          agentsMdWriteRefused.add(p);
+          fail(2);
+          failed = true;
+        }
       }
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):
@@ -990,6 +1057,89 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
+  // The last step of a refresh: retire-host-files for every queued project (the clone itself and
+  // any other Sterling source tree excepted: sync-agents writes no layer there). Its receipts are relayed whatever its exit code, so a file removed before a later
+  // unlink failed is still named.
+  const retireAfterWriters = () => {
+    for (const p of retireQueue.splice(0)) {
+      if (isSourceTree(p)) continue;
+      const r = exec(nodeBin, [join(cwd, 'scripts', 'retire-host-files.mjs'), '--target', p.repo_path], { cwd });
+      const lines = `${r.stdout ?? ''}`.split('\n').map((l) => l.trim()).filter((l) => /^(⚠ Sterling layer:|Sterling layer: \S+ removed\b)/.test(l));
+      if (lines.length) log(`  • ${p.name}:\n${lines.map((l) => `      ${l}`).join('\n')}`);
+      if (r.status !== 0) {
+        log(`  ✗ ${p.name}: retire-host-files failed (exit ${r.status}): ${`${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split('\n').slice(-3).join(' | ')}`);
+        fail(r.status === 2 ? 2 : 1);
+      }
+    }
+  };
+  // THE CONTRACT STEP (decision 329-rebuild-how-sterling-update-stamps-sibling-projects-as-o): one
+  // in-process call to the stamper with `rows`, the registry rows this refresh checked minus the
+  // Sterling source trees, and one structured result per row. The same list is stamped and judged:
+  // a write or safety refusal, or a project it could not check (no AGENTS.md), fails that project
+  // (exit 2, scripts/lib/stamp-outcome.mjs); other refusals are tolerated drift; a skip (a stale
+  // path) is named and never a failure; a thrown error fails the update (exit 1), and the projects
+  // done before it are still judged. An empty list runs nothing. Returns the number of failed
+  // projects.
+  const stampAndJudge = (label, rows) => {
+    if (!rows.length || !existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) return 0;
+    log(`\n▸ ${label}`);
+    const results = [];
+    let crashed = false;
+    try {
+      stamp(rows, {
+        repoRoot: cwd,
+        applyInserts: true,
+        warn: log,
+        onResult: (r) => {
+          results.push(r);
+          for (const line of stampResultLines(r)) log(line);
+        },
+      });
+      log(stampSummaryLine(results, { applyInserts: true }));
+    } catch (err) {
+      crashed = true;
+      log(`✗ stamp-contract crashed — instruction files were not checked${results.length ? ` past the ${results.length} project(s) above` : ''}: ${err?.stack ?? err}`);
+      fail(1);
+    }
+    report.contract_drift = results.some((r) => stampRefusalCount(r) > 0);
+    report.steps.push({ label, cmd: 'stampProjects (in-process)', status: crashed ? 1 : report.contract_drift ? 2 : 0 });
+    let failed = 0;
+    for (const r of results) {
+      const failures = stampResultFailures(r);
+      if (!failures.length) continue;
+      log(`✗ ${r.row.name}: stamp-contract could not update AGENTS.md (${failures.join('; ')})`);
+      fail(2);
+      failed++;
+    }
+    return failed;
+  };
+  // INSERTS ONLY (user-ruled 2026-10-04 through the question form, "Auto-insert, new text
+  // only"): --apply-inserts writes a tracked section or bullet that is entirely absent from
+  // a sibling's AGENTS.md/CLAUDE.md and lists what it inserted; without that, text a newer
+  // template added never reaches a project initialized before it. Existing wording is
+  // reported and never replaced here: the full --apply stays a deliberate act (it rewrites
+  // seven repos), and hand-tuned text is still refused.
+  // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
+  // but tolerated is not the same as unseen: the step's own block sits between
+  // build/test/check output, so its verdict is repeated in the closing summary
+  // where it cannot scroll past (P1/P5).
+  // It runs on the already-current path too, so a project whose stamp failed after the completion
+  // marker was written is stamped again on the next run (review loop 5 of #329).
+  // A project refused by the pre-write checks, the clone and any other Sterling source tree
+  // (hand-maintained instruction files) are never stamped. Each row is stamped in its own
+  // directory, so a registered linked worktree never takes the place of its registered main
+  // checkout. Returns the number of projects whose stamp failed.
+  const stampSiblings = () => stampAndJudge('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', stampTargets());
+  const isSourceTree = (p) => normPath(p.repo_path) === normPath(cwd) || looksLikeSterlingSourceTree(p.repo_path);
+  // Drains stampQueue: the queued projects the contract step may stamp, each source tree named once.
+  const stampTargets = () => {
+    const targets = [];
+    for (const p of stampQueue.splice(0)) {
+      if (!isSourceTree(p)) targets.push(stampRow(p));
+      else log(`  • ${p.name}: a Sterling source tree — its contract files are hand-maintained, not stamped`);
+    }
+    return targets;
+  };
   const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`\n▸ ${label}`);
     const r = exec(cmd, args, { cwd: stepCwd, timeout });
@@ -1066,24 +1216,19 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       for (const line of lines) log(`      ${line}`);
     }
     warnIfLauncherNamesOldBundle(project.repo_path, log);
-    if (normPath(project.repo_path) === normPath(cwd)) {
-      log("▸ the clone's contract files are hand-maintained — not checked");
-    } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-      // --apply-inserts: see the sibling-projects step below.
-      const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path], {
-        show: true,
-        tolerate: true,
-      });
-      report.contract_drift = !contract.ok;
-      // stamp-contract skips an unregistered or missing path and exits 0 with "0 project(s)
-      // processed": a green that checked nothing is exactly what P5 forbids.
-      if (contract.ok && /—\s*0 project\(s\) processed/.test(contract.out)) {
-        report.contract_unchecked = true;
-        log(`✗ stamp-contract checked NOTHING for ${project.repo_path} (0 project(s) processed) — the project is not reachable through the registry stamp-contract reads. Fix the registration and rerun.`);
-        fail(1);
-      }
+    // The same target set as stampSiblings: a project refused before any write, the clone and any
+    // other Sterling source tree get no stamp.
+    const stampable = stampQueue.splice(0).includes(project);
+    if (isSourceTree(project)) {
+      log(`▸ ${normPath(project.repo_path) === normPath(cwd) ? "the clone's" : "this Sterling source tree's"} contract files are hand-maintained — not checked`);
+    } else if (!stampable) {
+      log('▸ contract text not stamped: the project was refused above, before any write');
+    } else {
+      // Inserts only: see the sibling-projects step below.
+      stampAndJudge('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', [stampRow(project)]);
       if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
     }
+    retireAfterWriters();
     log('RESTART THE SESSION if agents changed — subagents load at CLI start.');
     return report;
   }
@@ -1279,6 +1424,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       } else if (list.length) {
         log(`\n▸ already current at ${before.head_short}; refreshing ${list.length} registered project(s) — each once, by its current mode (unchanged files stay byte-identical)`);
         failures = refreshProjects(list, { launchers: false });
+        failures += stampSiblings();
+        retireAfterWriters();
+        if (report.contract_drift) log('CONTRACT DRIFT in a sibling project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.');
       }
       if (report.exit === 0) {
         log(`\nAlready current — nothing to do for the core update at ${before.head_short}${list.length ? `; ${list.length} registered project(s) refreshed` : ''}. (Rerun with --force to rebuild and re-sync anyway.)`);
@@ -1540,23 +1688,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
 
-  // INSERTS ONLY (user-ruled 2026-10-04 through the question form, "Auto-insert, new text
-  // only"): --apply-inserts writes a tracked section or bullet that is entirely absent from
-  // a sibling's AGENTS.md/CLAUDE.md and lists what it inserted; without that, text a newer
-  // template added never reaches a project initialized before it. Existing wording is
-  // reported and never replaced here: the full --apply stays a deliberate act (it rewrites
-  // seven repos), and hand-tuned text is still refused.
-  // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
-  // but tolerated is not the same as unseen: the step's own block sits between
-  // build/test/check output, so its verdict is repeated in the closing summary
-  // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
-  if (opts.projects !== false && existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts'], {
-      show: true,
-      tolerate: true,
-    });
-    report.contract_drift = !contract.ok;
-  }
+  // The contract step (stampSiblings above), then host-file retirement after every writer.
+  refreshFailures += stampSiblings();
+  retireAfterWriters();
 
   log(
     `\n${'─'.repeat(60)}\n` +

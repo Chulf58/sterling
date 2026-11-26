@@ -64,6 +64,8 @@ function makePluginRoot({ clone = false, bin = false } = {}) {
   // Every Sterling copy ships domains.mjs, and H1 runs it before a due sync
   // (scripts/hooks/lib/domain-notice.mjs). This one reports no proposal and logs nothing.
   writeFileSync(join(scriptDir, 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
+  // The sync's last step (GitHub #329); this one removes nothing and logs nothing.
+  writeFileSync(join(scriptDir, 'retire-host-files.mjs'), 'process.exit(0);\n');
   return dir;
 }
 

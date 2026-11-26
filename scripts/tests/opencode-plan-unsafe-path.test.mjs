@@ -168,7 +168,7 @@ function syncAgents(dir, home, binDir) {
     encoding: 'utf8',
     cwd: dir,
     timeout: 180_000,
-    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, STERLING_CLAUDE_PROBE: 'absent', STERLING_OPENCODE_SETUP_DISABLE: '' },
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_STATE_HOME: join(home, '.local', 'state'), XDG_DATA_HOME: join(home, '.local', 'share'), PATH: `${binDir}${delimiter}${process.env.PATH}`, STERLING_CLAUDE_PROBE: 'absent', STERLING_OPENCODE_SETUP_DISABLE: '' },
   });
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }

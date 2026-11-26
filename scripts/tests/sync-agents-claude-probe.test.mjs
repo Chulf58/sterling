@@ -69,3 +69,21 @@ test('an unrecognized STERLING_CLAUDE_PROBE value fails sync-agents loud before 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Review loop 4 of #329 (R5): sync-agents removes no host file; run on its own, it names a
+// retained CLAUDE.md once with the step that removes it, and leaves the file as it was.
+test('standalone sync-agents names a retained CLAUDE.md once, with the retire-host-files follow-up, and leaves it in place', () => {
+  const dir = project();
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '# P\n');
+    writeFileSync(join(dir, 'CLAUDE.md'), '@AGENTS.md\n');
+    const r = sync(dir, 'absent');
+    assert.equal(r.code, 0, r.out);
+    const named = r.out.split('\n').filter((l) => l.startsWith('⚠ host files retained:'));
+    assert.equal(named.length, 1, r.out);
+    assert.match(named[0], /^⚠ host files retained: CLAUDE\.md — sync-agents removes none\. .*bin\/retire-host-files\.mjs" --target ".*" or \/sterling:update\.$/);
+    assert.ok(existsSync(join(dir, 'CLAUDE.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

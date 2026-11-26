@@ -1,7 +1,7 @@
 // Sterling on Antigravity CLI (agy) project setup (scripts/lib/agy-setup.mjs; decision
 // antigravity-cli-agy-sterling-mcp-server-is-declared-per-agen): the generated
-// .agents/agents/<name>/agent.md roster, GEMINI.md, the exclude block, the agy install root
-// in sterling-roots, the three-host post-update sync, stamp-contract's GEMINI.md pass, and
+// .agents/agents/<name>/agent.md roster, the exclude block, the agy install root
+// in sterling-roots, the three-host post-update sync, and
 // init/sync-agents with agy absent.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,26 +18,20 @@ import {
   AGY_READ_ONLY_ROLES,
   AGY_ROSTER,
   AGY_TOOLS,
-  GEMINI_MD_MAX_BYTES,
   agyMcpRoot,
   agyModelsOf,
   readAgyModels,
   ensureAgyExcluded,
-  ensureGeminiMd,
-  geminiRootAlias,
-  geminiRootFor,
   formatAgyRows,
   probeMcpServer,
   probeAgy,
   renderAgyAgent,
-  renderGeminiMd,
   setupAgy,
   trackedFiles,
 } from '../lib/agy-setup.mjs';
 import { ROSTER } from '../lib/opencode-install.mjs';
 import { installHostOf, newestInstalledSterling, scanInstalledSterling, sterlingInstallRemedy, sterlingUpdateRemedy } from '../lib/sterling-roots.mjs';
 import { postUpdateSync, runPostUpdateSteps, runStepSync } from '../lib/post-update-sync.mjs';
-import { extractBlock } from '../lib/contract-bullets.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NODE = '/opt/node/bin/node';
@@ -127,79 +121,35 @@ test('agent.md ownership: a re-run matches, an edited, a foreign or a tracked fi
   assert.equal(readFileSync(foreign, 'utf8'), '---\nname: reviewer\n---\nmine\n');
 });
 
-test('GEMINI.md: the agy render under 24,000 bytes, no @AGENTS.md import, written only when absent', () => {
-  // The FILLED render: {{STERLING_ROOT}} is replaced by an absolute path several times, so
-  // the size depends on the root. This checkout's real path must fit.
-  const text = renderGeminiMd({ pluginRoot: repo, root: repo, projectName: 'demo' });
-  assert.ok(Buffer.byteLength(text) <= GEMINI_MD_MAX_BYTES, `${Buffer.byteLength(text)} bytes with the root ${repo}`);
-  assert.ok(text.includes(`node "${repo}/bin/rotation-note.mjs"`), 'the real root is filled in');
-  // A root of about 200 characters does not fit (measured 2026-11-18: 24,121 bytes), so the render refuses with the byte count.
-  const longRoot = `/home/${'u'.repeat(194)}`;
-  assert.equal(longRoot.length, 200);
-  assert.throws(() => renderGeminiMd({ pluginRoot: repo, root: longRoot, projectName: 'demo' }), /is \d+ bytes, over agy's 24000-byte cap/);
-  assert.doesNotMatch(text, /^@AGENTS\.md/m);
-  assert.doesNotMatch(text, /\{\{[A-Z_]+\}\}/);
-  assert.match(text, /# CLAUDE\.md — demo \(Sterling layer\)/);
+test('setupAgy writes no GEMINI.md: a missing one stays missing and one the project has is left byte for byte (GitHub #329)', () => {
   const dir = gitProject();
   mkdirSync(join(dir, '.sterling'));
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'demo' }));
-  const rowOf = (r) => r.rows.find((x) => x.item === 'GEMINI.md');
-  assert.equal(rowOf(setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false })).status, 'created');
-  assert.match(readFileSync(join(dir, 'GEMINI.md'), 'utf8'), /— demo \(Sterling layer\)/);
-  assert.equal(rowOf(setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false })).status, 'matches');
+  const result = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false });
+  assert.equal(result.rows.some((x) => x.item === 'GEMINI.md'), false);
+  assert.equal(existsSync(join(dir, 'GEMINI.md')), false);
   writeFileSync(join(dir, 'GEMINI.md'), 'my own\n');
-  assert.equal(rowOf(setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false })).status, 'differs');
+  setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false });
   assert.equal(readFileSync(join(dir, 'GEMINI.md'), 'utf8'), 'my own\n');
 });
 
-test('GEMINI.md: a Sterling root over 180 characters goes through a short per-user link, and a blocked link refuses loudly', () => {
-  const home = tmp('sterling-agy-home-');
-  const longRoot = join(tmp('sterling-agy-long-'), 'a'.repeat(100), 'b'.repeat(100));
-  copyAt(longRoot, '1.0.0');
-  const dir = gitProject();
-  const run = () => ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: longRoot, home });
-  assert.ok(longRoot.length > 200);
-  const alias = geminiRootAlias(home);
-  assert.equal(run().status, 'created');
-  const text = readFileSync(join(dir, 'GEMINI.md'), 'utf8');
-  assert.ok(Buffer.byteLength(text) <= GEMINI_MD_MAX_BYTES);
-  assert.ok(text.includes(`node "${alias}/bin/rotation-note.mjs"`), 'the short link stands in for the root');
-  assert.ok(!text.includes(longRoot));
-  assert.equal(readFileSync(join(alias, 'mcp', 'sterling-mcp.mjs'), 'utf8'), '', 'the link reaches the real root');
-  assert.equal(run().status, 'matches');
-  const moved = join(tmp('sterling-agy-long2-'), 'c'.repeat(200));
-  copyAt(moved, '2.0.0');
-  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: moved, home }).status, 'matches');
-  assert.ok(existsSync(join(alias, '.claude-plugin', 'plugin.json')) && JSON.parse(readFileSync(join(alias, 'package.json'), 'utf8')).version === '2.0.0', 'the link follows the new root');
-  const blocked = tmp('sterling-agy-blocked-');
-  mkdirSync(join(blocked, '.gemini', 'sterling-root'), { recursive: true });
-  const row = ensureGeminiMd({ projectDir: gitProject(), pluginRoot: repo, root: longRoot, home: blocked });
-  assert.equal(row.status, 'refused');
-  assert.match(row.detail, /is not a link Sterling made/);
-});
-
-test('exclude block: every agy agent dir plus GEMINI.md; a Sterling GEMINI.md that later differs stays listed; a tracked one never is', () => {
+test('exclude block: every agy agent dir and nothing else; a rerun matches; an older block that listed GEMINI.md is rewritten without it', () => {
   const dir = gitProject();
   setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false });
-  const block = () => readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8').match(/# >>> sterling agy[^\n]*\n([\s\S]*?)# <<< sterling agy/)[1].trim().split('\n');
-  assert.deepEqual(block(), [...AGY_ROSTER.map((n) => `/.agents/agents/${n}/`), '/GEMINI.md']);
+  const excludePath = join(dir, '.git', 'info', 'exclude');
+  const block = () => readFileSync(excludePath, 'utf8').match(/# >>> sterling agy[^\n]*\n([\s\S]*?)# <<< sterling agy/)[1].trim().split('\n');
+  assert.deepEqual(block(), AGY_ROSTER.map((n) => `/.agents/agents/${n}/`));
   assert.equal(git(dir, 'status', '--porcelain', '--untracked-files=all').stdout, '', 'nothing Sterling wrote shows in git status');
-  writeFileSync(join(dir, 'GEMINI.md'), 'changed\n');
-  setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false });
-  assert.ok(block().includes('/GEMINI.md'), 'kept: listed before');
-  git(dir, 'add', '-f', 'GEMINI.md');
-  setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, installed: false });
-  assert.ok(!block().includes('/GEMINI.md'), 'a tracked GEMINI.md is the project\'s');
-  const plain = gitProject();
-  writeFileSync(join(plain, 'GEMINI.md'), 'a user file\n');
-  assert.equal(ensureAgyExcluded({ projectDir: plain, gemini: 'keep' }).status, 'created');
-  assert.ok(!readFileSync(join(plain, '.git', 'info', 'exclude'), 'utf8').includes('/GEMINI.md'), 'a GEMINI.md Sterling never listed is not hidden');
+  assert.equal(ensureAgyExcluded({ projectDir: dir }).status, 'matches');
+  writeFileSync(excludePath, readFileSync(excludePath, 'utf8').replace('# <<< sterling agy', '/GEMINI.md\n# <<< sterling agy'));
+  assert.equal(ensureAgyExcluded({ projectDir: dir }).status, 'refreshed');
+  assert.ok(!block().includes('/GEMINI.md'));
 });
 
 test('agy absent: one loud skip line and nothing written; the disable seam and a bad probe value are loud too', () => {
   const dir = gitProject();
   const r = setupAgy({ projectDir: dir, pluginRoot: repo, env: { STERLING_AGY_PROBE: 'absent' } });
-  assert.deepEqual(formatAgyRows(r), ['Antigravity CLI (agy): agy not installed (STERLING_AGY_PROBE=absent) — Sterling on Antigravity CLI SKIPPED: no .agents/agents/, GEMINI.md or exclude block written; install agy, then run /sterling:update']);
+  assert.deepEqual(formatAgyRows(r), ['Antigravity CLI (agy): agy not installed (STERLING_AGY_PROBE=absent) — Sterling on Antigravity CLI SKIPPED: no .agents/agents/ or exclude block written; install agy, then run /sterling:update']);
   assert.equal(existsSync(join(dir, '.agents')), false);
   assert.equal(existsSync(join(dir, 'GEMINI.md')), false);
   assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /sterling agy/);
@@ -291,43 +241,7 @@ test('agy host: a skipped agy setup in sync-agents is a failed step, and written
   assert.equal(written.restart, true);
 });
 
-// ---------- stamp-contract keeps AGENTS.md, CLAUDE.md and GEMINI.md in step ----------
-
-test('stamp-contract --apply-inserts: a CLAUDE.md bullet missing from GEMINI.md is inserted there in its agy wording; CLAUDE.md is untouched', () => {
-  const scratchDir = tmp('sterling-agy-stamp-');
-  const proj = tmp('sterling-agy-stamp-proj-');
-  const regDb = join(scratchDir, 'registry.db');
-  const fill = (s) => s.replaceAll('{{PROJECT_NAME}}', 'p').replaceAll('{{STACK_TAGS}}', 'node').replaceAll('{{TOOLCHAINS}}', 'node').replaceAll('{{LINT_COMMAND}}', 'x').replaceAll('{{DOMAINS}}', 'x').replaceAll('{{BACKUP_PATH}}', 'x').replaceAll('{{CONVENTIONS_SECTION}}', 'x');
-  return import('../lib/agent-fences.mjs').then(({ renderClaudeText }) => {
-    const claude = fill(renderClaudeText(readFileSync(join(repo, 'templates/target-claude-md.md'), 'utf8'), 'c'));
-    writeFileSync(join(proj, 'AGENTS.md'), fill(renderClaudeText(readFileSync(join(repo, 'templates/target-agents-md.md'), 'utf8'), 'a')));
-    writeFileSync(join(proj, 'CLAUDE.md'), claude);
-    const gemini = renderGeminiMd({ pluginRoot: repo, root: repo, projectName: 'p' });
-    const lead = '- **Concept articles — capture design the moment it settles';
-    const b = extractBlock(gemini, lead);
-    assert.ok(b && /agy has no Stop block/.test(b.block), 'the agy wording of the bullet differs from the Claude one');
-    const lines = gemini.split('\n');
-    lines.splice(b.start, b.end - b.start);
-    writeFileSync(join(proj, 'GEMINI.md'), lines.join('\n'));
-    const registry = new ProjectRegistry(regDb);
-    registry.register({ repo_path: proj, name: 'agy-stamp', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
-    registry.close();
-    const r = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, STERLING_REGISTRY_DB: regDb } });
-    const out = `${r.stdout}${r.stderr}`;
-    assert.equal(r.status, 0, out);
-    assert.match(out, /inserted {2}\[GEMINI\.md\] - \*\*Concept articles/);
-    const after = readFileSync(join(proj, 'GEMINI.md'), 'utf8');
-    assert.equal(extractBlock(after, lead)?.block, b.block, 'GEMINI.md regains the exact agy bullet, with the Sterling root filled in');
-    assert.equal(after.split(lead).length, 2, 'one copy');
-    assert.equal(after.length, gemini.length, 'nothing else changed');
-    assert.equal(readFileSync(join(proj, 'CLAUDE.md'), 'utf8'), claude, 'CLAUDE.md untouched');
-    assert.match(out, /AGENTS\.md \+ .*CLAUDE\.md \+ .*GEMINI\.md/);
-    // In step: a second run has nothing to do.
-    const again = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, STERLING_REGISTRY_DB: regDb } });
-    assert.equal(again.status, 0, again.stdout);
-    assert.match(again.stdout, /1 already in sync/);
-  });
-});
+// ---------- the generated AGENTS.md section on agy ----------
 
 // ---------- init and sync-agents ----------
 
@@ -337,7 +251,7 @@ function spawnEnv(extra) {
   return env;
 }
 
-test('sync-agents: agy absent prints one skip line and writes nothing for agy; agy present writes the roster and GEMINI.md', () => {
+test('sync-agents: agy absent prints one skip line and writes nothing for agy; agy present writes the roster and no GEMINI.md', () => {
   const dir = gitProject();
   mkdirSync(join(dir, '.sterling'));
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
@@ -351,11 +265,11 @@ test('sync-agents: agy absent prints one skip line and writes nothing for agy; a
   const present = sync('ok');
   assert.equal(present.status, 0, present.stdout + present.stderr);
   assert.match(present.stdout, /^Antigravity CLI \(agy\) created: \.agents\/agents\/conductor\/agent\.md$/m);
-  assert.ok(existsSync(join(dir, 'GEMINI.md')));
+  assert.equal(existsSync(join(dir, 'GEMINI.md')), false);
   assert.doesNotMatch(present.stdout, /^[a-z_]+: .*agy/m, 'no line /sterling:update would count as an agent change');
 });
 
-test('init: agy absent leaves the project as before (no .agents/, no GEMINI.md, one skipped row); agy present adds them', () => {
+test('init: agy absent leaves the project as before (no .agents/, no GEMINI.md, one skipped row); agy present adds the agents but no GEMINI.md', () => {
   const run = (probe) => {
     const dir = gitProject();
     const r = spawnSync(process.execPath, [join(repo, 'scripts', 'init.mjs'), '--target', dir, '--project-name', 'agyinit', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'], { // --mode is retired (settings redesign item C)
@@ -374,7 +288,8 @@ test('init: agy absent leaves the project as before (no .agents/, no GEMINI.md, 
   const present = run('ok');
   assert.equal(present.code, 0, present.out);
   assert.ok(existsSync(join(present.dir, '.agents', 'agents', 'conductor', 'agent.md')), present.out);
-  assert.match(readFileSync(join(present.dir, 'GEMINI.md'), 'utf8'), /— agyinit \(Sterling layer\)/);
+  assert.equal(existsSync(join(present.dir, 'GEMINI.md')), false);
+  assert.match(readFileSync(join(present.dir, 'AGENTS.md'), 'utf8'), /sterling:begin generated[\s\S]*## On Antigravity CLI \(agy\) only[\s\S]*sterling:end generated/);
 });
 
 // ---------- a failing git inventory (review fix round) ----------
@@ -412,42 +327,25 @@ test('a failing git ls-files inside a checkout refuses every agy write and names
 function agyOnlyProject() {
   const proj = tmp('sterling-agy-only-');
   git(proj, 'init', '-q');
-  const fill = (t) => t.replaceAll('{{PROJECT_NAME}}', 'p').replaceAll('{{STACK_TAGS}}', 'node').replaceAll('{{TOOLCHAINS}}', 'node').replaceAll('{{LINT_COMMAND}}', 'x').replaceAll('{{DOMAINS}}', 'x').replaceAll('{{BACKUP_PATH}}', 'x').replaceAll('{{CONVENTIONS_SECTION}}', 'x');
-  return import('../lib/agent-fences.mjs').then(({ renderClaudeText }) => {
-    writeFileSync(join(proj, 'AGENTS.md'), fill(renderClaudeText(readFileSync(join(repo, 'templates/target-agents-md.md'), 'utf8'), 'a')));
-    const gemini = renderGeminiMd({ pluginRoot: repo, root: repo, projectName: 'p' });
-    const lead = '- **Concept articles — capture design the moment it settles';
-    const b = extractBlock(gemini, lead);
-    const lines = gemini.split('\n');
-    lines.splice(b.start, b.end - b.start);
-    writeFileSync(join(proj, 'GEMINI.md'), lines.join('\n'));
-    const regDb = join(tmp('sterling-agy-only-reg-'), 'registry.db');
-    const registry = new ProjectRegistry(regDb);
-    registry.register({ repo_path: proj, name: 'agy-only', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
-    registry.close();
-    return { proj, regDb, lead, block: b.block };
-  });
+  // A complete AGENTS.md as init renders it (every tracked AGENTS.md bullet in today's wording), so
+  // stamp-contract has nothing to refuse and a drift result would be a real defect.
+  writeFileSync(join(proj, 'AGENTS.md'), readFileSync(join(repo, 'templates', 'target-agents-md.md'), 'utf8')
+    .replaceAll('{{PROJECT_NAME}}', 'agy-only')
+    .replaceAll('{{STACK_TAGS}}', 'node')
+    .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+    .replaceAll('{{LINT_COMMAND}}', 'not recorded yet; add it here')
+    .replaceAll('{{DOMAINS}}', '~/.sterling/domains/node/ — created lazily on first need (§2.3)')
+    .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
+    .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)'));
+  const regDb = join(tmp('sterling-agy-only-reg-'), 'registry.db');
+  const registry = new ProjectRegistry(regDb);
+  registry.register({ repo_path: proj, name: 'agy-only', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+  registry.close();
+  return { proj, regDb };
 }
 
-test('stamp-contract: a project with AGENTS.md and GEMINI.md but no CLAUDE.md is processed, and GEMINI.md gains the missing bullet', async () => {
-  const { proj, regDb, lead, block } = await agyOnlyProject();
-  const r = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, STERLING_REGISTRY_DB: regDb } });
-  const out = `${r.stdout}${r.stderr}`;
-  assert.equal(r.status, 0, out);
-  assert.match(out, /— 1 project\(s\) processed/);
-  assert.doesNotMatch(out, /no_claude_md/);
-  assert.match(out, /inserted {2}\[GEMINI\.md\] - \*\*Concept articles/);
-  assert.equal(extractBlock(readFileSync(join(proj, 'GEMINI.md'), 'utf8'), lead)?.block, block);
-  assert.equal(existsSync(join(proj, 'CLAUDE.md')), false, 'no CLAUDE.md is created');
-  // Neither host layer: still refused, as before agy.
-  rmSync(join(proj, 'GEMINI.md'));
-  const none = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, STERLING_REGISTRY_DB: regDb } });
-  assert.equal(none.status, 2);
-  assert.match(none.stdout, /✗ agy-only: no_claude_md/);
-});
-
 test('post-update sync on agy: an agy-only project runs sync-agents and stamp-contract through to a synced result', async () => {
-  const { proj, regDb } = await agyOnlyProject();
+  const { proj, regDb } = agyOnlyProject();
   mkdirSync(join(proj, '.sterling'));
   writeFileSync(join(proj, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
   const keys = ['STERLING_REGISTRY_DB', 'STERLING_CLAUDE_PROBE', 'STERLING_AGY_PROBE', 'STERLING_AGY_SETUP_DISABLE', 'STERLING_OPENCODE_SETUP_DISABLE'];
@@ -455,10 +353,18 @@ test('post-update sync on agy: an agy-only project runs sync-agents and stamp-co
   Object.assign(process.env, { STERLING_REGISTRY_DB: regDb, STERLING_CLAUDE_PROBE: 'absent', STERLING_AGY_PROBE: 'ok', STERLING_OPENCODE_SETUP_DISABLE: '1' });
   delete process.env.STERLING_AGY_SETUP_DISABLE;
   try {
+    const before = readFileSync(join(proj, 'AGENTS.md'), 'utf8');
     const result = await runPostUpdateSteps(repo, proj, runStepSync, 'agy');
     assert.equal(result.ok, true, result.detail);
+    assert.equal(result.drift, false, `stamp-contract found no drift in a complete AGENTS.md:\n${result.driftOut}`);
+    assert.deepEqual(result.inserted, [], 'nothing to insert');
+    assert.deepEqual(result.layer, [], 'no layer warning or refusal');
     assert.equal(result.restart, true, 'sync-agents wrote the agy agents');
-    assert.ok(result.inserted.some((i) => /\[GEMINI\.md\] - \*\*Concept articles/.test(i)), JSON.stringify(result));
+    const after = readFileSync(join(proj, 'AGENTS.md'), 'utf8');
+    assert.ok(after.startsWith(before), 'the project text is kept byte for byte');
+    assert.match(after.slice(before.length), /^\n<!-- sterling:begin generated[\s\S]*<!-- sterling:end generated -->\n$/, 'the layer section is appended after it');
+    assert.equal(existsSync(join(proj, 'GEMINI.md')), false, 'no GEMINI.md is written');
+    assert.equal(existsSync(join(proj, 'CLAUDE.md')), false, 'no CLAUDE.md is written');
     assert.ok(existsSync(join(proj, '.agents', 'agents', 'conductor', 'agent.md')));
   } finally {
     for (const k of keys) if (saved[k] === undefined) delete process.env[k];
@@ -486,7 +392,7 @@ test('mixed versions: agy\'s older installed copy cannot enforce --read-only, so
   assert.match(refused.detail, /cannot enforce --read-only .*exited 2, so that server predates read-only mode/);
   assert.match(refused.instruction, new RegExp(`agy plugin install ${repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.equal(existsSync(join(dir, '.agents')), false, 'no agent file, so no sterling-ro entry points at a server that ignores --read-only');
-  assert.equal(old.rows.find((r) => r.item === 'GEMINI.md')?.status, 'created', 'GEMINI.md does not depend on the server');
+  assert.equal(old.rows.find((r) => r.item === '.git/info/exclude (agy)')?.status, 'created', 'the exclude block does not depend on the server');
 
   writeFileSync(join(copy, 'mcp', 'sterling-mcp.mjs'), NEW_SERVER);
   const current = setupAgy({ projectDir: dir, pluginRoot: repo, env: ON, home, installed: true, nodePath: NODE });
@@ -506,59 +412,6 @@ test('probeMcpServer: this checkout\'s server reports read-only mode; an old, a 
   assert.match(probeMcpServer({ root }).reason, /does not report read_only/);
   rmSync(server);
   assert.equal(probeMcpServer({ root }).readOnly, false);
-});
-
-test('stamp-contract: a fresh GEMINI.md written through the short root link is in sync, not HAND_TUNED', async () => {
-  const { proj, regDb } = await agyOnlyProject();
-  const home = tmp('sterling-agy-stamp-home-');
-  const alias = geminiRootAlias(home);
-  writeFileSync(join(proj, 'GEMINI.md'), renderGeminiMd({ pluginRoot: repo, root: alias, projectName: 'p' }));
-  assert.equal(geminiRootFor(readFileSync(join(proj, 'GEMINI.md'), 'utf8'), { root: repo, home }), alias);
-  const r = spawnSync(process.execPath, [join(repo, 'scripts', 'stamp-contract.mjs'), '--project', proj], { cwd: repo, encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home, STERLING_REGISTRY_DB: regDb } });
-  const out = `${r.stdout}${r.stderr}`;
-  assert.equal(r.status, 0, out);
-  assert.doesNotMatch(out, /HAND_TUNED/);
-  assert.match(out, /1 already in sync/);
-});
-
-test('GEMINI.md root link upkeep: an edited doc, a changed template and a long-to-short root move all repoint the link; the doc is never rewritten; a non-link is refused', () => {
-  const home = tmp('sterling-agy-upkeep-');
-  const alias = geminiRootAlias(home);
-  const longRoot = copyAt(join(tmp('sterling-agy-up-long-'), 'a'.repeat(100), 'b'.repeat(100)), '1.0.0');
-  const versionAtLink = () => JSON.parse(readFileSync(join(alias, 'package.json'), 'utf8')).version;
-  const dir = gitProject();
-  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: longRoot, home }).status, 'created');
-  const path = join(dir, 'GEMINI.md');
-  const edited = `${readFileSync(path, 'utf8')}\nmy own line\n`;
-  writeFileSync(path, edited);
-
-  const moved = copyAt(join(tmp('sterling-agy-up-moved-'), 'c'.repeat(200)), '2.0.0');
-  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: moved, home }).status, 'differs');
-  assert.equal(versionAtLink(), '2.0.0', 'an edited doc still gets its link repointed');
-
-  const templateRoot = tmp('sterling-agy-up-tpl-');
-  mkdirSync(join(templateRoot, 'templates'));
-  writeFileSync(join(templateRoot, 'templates', 'target-claude-md.md'), `${readFileSync(join(repo, 'templates', 'target-claude-md.md'), 'utf8')}\nA new template line.\n`);
-  const third = copyAt(join(tmp('sterling-agy-up-third-'), 'd'.repeat(200)), '3.0.0');
-  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: templateRoot, root: third, home }).status, 'differs');
-  assert.equal(versionAtLink(), '3.0.0', 'a changed template still repoints the link');
-
-  const short = copyAt(tmp('sterling-agy-up-s-'), '4.0.0');
-  assert.equal(ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: short, home }).status, 'differs');
-  assert.equal(versionAtLink(), '4.0.0', 'a move to a short root keeps the link the doc names');
-  assert.equal(readFileSync(path, 'utf8'), edited, 'GEMINI.md is never rewritten');
-
-  // An untouched aliased doc stays 'matches' after a long-to-short move: setup compares it in the link form.
-  const fresh = gitProject();
-  assert.equal(ensureGeminiMd({ projectDir: fresh, pluginRoot: repo, root: longRoot, home }).status, 'created');
-  assert.equal(ensureGeminiMd({ projectDir: fresh, pluginRoot: repo, root: short, home }).status, 'matches');
-
-  rmSync(alias);
-  mkdirSync(alias);
-  const row = ensureGeminiMd({ projectDir: dir, pluginRoot: repo, root: short, home });
-  assert.equal(row.status, 'refused');
-  assert.match(row.detail, /is not a link Sterling made/);
-  assert.equal(readFileSync(path, 'utf8'), edited);
 });
 
 test('probeMcpServer: a server that ignores SIGTERM and never answers is killed at the timeout and reported as not read-only', () => {

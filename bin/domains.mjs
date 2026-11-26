@@ -7,9 +7,9 @@ var __export = (target, all) => {
 };
 
 // scripts/domains.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync5 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync7, readdirSync as readdirSync2, writeFileSync as writeFileSync2, renameSync as renameSync2, realpathSync as realpathSync5 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename3, dirname as dirname6, join as join11, resolve as resolve6 } from "node:path";
+import { basename as basename3, dirname as dirname6, join as join12, resolve as resolve7 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -11404,6 +11404,175 @@ function describeAgentsMdRefresh({ refreshed, kept }, { stackTags, domainPaths =
   return parts.join("; ");
 }
 
+// scripts/lib/sterling-layer.mjs
+import { existsSync as existsSync5, lstatSync as lstatSync5, readFileSync as readFileSync6, unlinkSync as unlinkSync2 } from "node:fs";
+
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS = {
+  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+  "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" },
+  "agy-only": { open: "<!-- agy-only -->", close: "<!-- /agy-only -->" }
+};
+var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
+
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync4, readFileSync as readFileSync4, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID3()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync2(tmp, { force: true });
+    throw err;
+  }
+}
+
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync4, readFileSync as readFileSync5, readdirSync, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
+import { join as join11, resolve as resolve6 } from "node:path";
+var ContainmentError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ContainmentError";
+  }
+};
+var lstatOrNull = (p) => {
+  try {
+    return lstatSync4(p);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+};
+function containedPath(root, rel, leaf) {
+  const segments = rel.split("/").filter(Boolean);
+  if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
+  let cursor = resolve6(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join11(cursor, part);
+    const st = lstatOrNull(cursor);
+    if (!st) break;
+    const isLeaf = index === segments.length - 1;
+    const wantDir = !isLeaf || leaf === "dir";
+    if (st.isSymbolicLink()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} is a symlink \u2014 refusing to follow it out of the project`);
+    if (wantDir && !st.isDirectory()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} exists but is not a directory`);
+    if (!wantDir && !st.isFile()) throw new ContainmentError(`${rel} exists but is not a regular file`);
+  }
+  try {
+    return resolveStoreWritePath(root, ...segments);
+  } catch (e) {
+    if (e instanceof StorePathContainmentError) throw new ContainmentError(`${rel}: ${e.message.replace(/^resolveStoreWritePath: /, "")}`);
+    throw e;
+  }
+}
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/sterling-layer.mjs
+var LAYER_END = "<!-- sterling:end generated -->";
+var LAYER_BEGIN = /^<!-- sterling:begin generated(?: \([^()]*\))? -->$/;
+var AGENTS_MD_AGY_CAP_BYTES = 24e3;
+var AGENTS_MD_MAX_BYTES = AGENTS_MD_AGY_CAP_BYTES - 3e3;
+function decodeExact(buf) {
+  const text = buf.toString("utf8");
+  return Buffer.from(text, "utf8").equals(buf) ? text : null;
+}
+var bytes = (s2) => Buffer.byteLength(s2, "utf8");
+var LayerMarkerError = class extends Error {
+};
+function scanLines(raw) {
+  const out = [];
+  let start = 0;
+  while (start < raw.length) {
+    const nl = raw.indexOf("\n", start);
+    const end = nl === -1 ? raw.length : nl + 1;
+    let contentEnd = nl === -1 ? raw.length : nl;
+    if (nl !== -1 && contentEnd > start && raw[contentEnd - 1] === "\r") contentEnd--;
+    out.push({ start, contentEnd, end, content: raw.slice(start, contentEnd) });
+    start = end;
+  }
+  return out;
+}
+var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+var MARKER_WORD = /sterling:(?:begin|end)/;
+function findMarkers(lines) {
+  const begins = [];
+  const ends = [];
+  const other = [];
+  let fence = null;
+  lines.forEach(({ content }, i) => {
+    if (fence) {
+      if (MARKER_WORD.test(content)) other.push(i);
+      const close = FENCE_CLOSE.exec(content);
+      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      return;
+    }
+    const open = FENCE_OPEN.exec(content);
+    if (open && !(open[1][0] === "`" && open[2].includes("`"))) {
+      fence = { ch: open[1][0], len: open[1].length, line: i };
+      if (MARKER_WORD.test(content)) other.push(i);
+      return;
+    }
+    if (LAYER_BEGIN.test(content)) begins.push(i);
+    else if (content === LAYER_END) ends.push(i);
+    else if (MARKER_WORD.test(content)) other.push(i);
+  });
+  if (fence) return { error: `AGENTS.md has a code fence opened at line ${fence.line + 1} that is never closed, so its marker lines cannot be told from code` };
+  if (other.length) return { error: `AGENTS.md line ${other.map((i) => i + 1).join(", ")} names a sterling marker but is not one exact marker line outside code` };
+  if (!begins.length && !ends.length) return { begin: null, end: null };
+  if (begins.length === 1 && ends.length === 1 && begins[0] < ends[0]) return { begin: begins[0], end: ends[0] };
+  return { error: `AGENTS.md has ${begins.length} sterling:begin and ${ends.length} sterling:end marker lines outside code (one of each, begin first, is required)` };
+}
+function readAgentsMd(projectDir2, { readFile = readFileSync6 } = {}) {
+  let path;
+  try {
+    path = containedPath(projectDir2, "AGENTS.md", "file");
+  } catch (err) {
+    if (err instanceof ContainmentError) throw new LayerMarkerError(`AGENTS.md is not a plain file in the project (${err.message}), so Sterling neither reads nor writes it`);
+    throw err;
+  }
+  let st;
+  try {
+    st = lstatSync5(path);
+  } catch (err) {
+    if (err?.code === "ENOENT") return { exists: false, path, text: null };
+    throw err;
+  }
+  if (st.nlink > 1) throw new LayerMarkerError(`AGENTS.md has ${st.nlink} hard links, so writing it could change another file; Sterling neither reads nor writes it`);
+  const text = decodeExact(readFile(path));
+  if (text === null) throw new LayerMarkerError("AGENTS.md is not valid UTF-8 text, so rewriting it would change bytes Sterling cannot read; Sterling leaves it alone");
+  return { exists: true, path, text };
+}
+function plannedAgentsMdRefusal(text) {
+  const found = findMarkers(scanLines(text));
+  if (found.error) return found.error;
+  return capRefusal(text);
+}
+function capRefusal(text) {
+  const n = bytes(text);
+  if (n <= AGENTS_MD_AGY_CAP_BYTES) return null;
+  return `AGENTS.md would be ${n.toLocaleString("en-US")} bytes with the Sterling layer, over agy's ${AGENTS_MD_AGY_CAP_BYTES.toLocaleString("en-US")}-byte cap, so nothing was written and no CLAUDE.md or GEMINI.md was removed. Shorten the project's own text in AGENTS.md by at least ${(n - AGENTS_MD_AGY_CAP_BYTES).toLocaleString("en-US")} bytes (move detail into a linked doc), then rerun`;
+}
+function writeAgentsMdChecked(projectDir2, text) {
+  let agents;
+  try {
+    agents = readAgentsMd(projectDir2);
+  } catch (err) {
+    if (err instanceof LayerMarkerError) return err.message;
+    throw err;
+  }
+  const why = plannedAgentsMdRefusal(text);
+  if (why) return why;
+  writeFileAtomic(agents.path, text);
+  return null;
+}
+
 // scripts/domains.mjs
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var USAGE = "usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]";
@@ -11440,15 +11609,15 @@ if (opts.descriptions.size && !opts.apply) refuse("--description is used only to
 if (opts.apply && !opts.add.length) refuse("--apply needs at least one --add <domain>");
 if (opts.apply && opts.json) refuse("--json prints the map; it cannot be combined with --apply");
 var projectRootOf = (dir) => resolveLinkedWorktree(dir)?.mainRoot ?? dir;
-var projectDir = projectRootOf(resolve6(opts.target ?? process.cwd()));
-var hasConfig = (dir) => existsSync4(join11(dir, ".sterling", "config.json"));
+var projectDir = projectRootOf(resolve7(opts.target ?? process.cwd()));
+var hasConfig = (dir) => existsSync6(join12(dir, ".sterling", "config.json"));
 function enclosingProject(dir) {
   for (let d = dir; ; d = dirname6(d)) {
     if (hasConfig(d)) return d;
     if (dirname6(d) === d) return null;
   }
 }
-var real = (p) => existsSync4(p) ? realpathSync5(p) : p;
+var real = (p) => existsSync6(p) ? realpathSync5(p) : p;
 if (opts.apply && opts.target !== void 0) {
   const here = enclosingProject(projectRootOf(process.cwd()));
   if (!here || !sameLocationAnyHost(real(here), real(projectDir))) {
@@ -11457,8 +11626,8 @@ if (opts.apply && opts.target !== void 0) {
 }
 function readProject(dir) {
   const configPath = resolveStoreWritePath(dir, ".sterling", "config.json");
-  if (!existsSync4(configPath)) return null;
-  const text = readFileSync4(configPath, "utf8");
+  if (!existsSync6(configPath)) return null;
+  const text = readFileSync7(configPath, "utf8");
   const raw = JSON.parse(text);
   return { dir, configPath, text, raw, config: parseConfig(raw) };
 }
@@ -11477,7 +11646,7 @@ if (project) {
   }
 }
 var onPostgres = route?.storage === "postgres";
-var domainsRoot = join11(homedir5(), ".sterling", "domains");
+var domainsRoot = join12(homedir5(), ".sterling", "domains");
 function inspectStore(name, dbPath) {
   const entry = { name, path: fwd2(dbPath), description: null, format: "current", unreadable: null, renamed_to: null };
   let db;
@@ -11538,14 +11707,14 @@ function listPostgresStores() {
 function listStores() {
   if (onPostgres) return listPostgresStores();
   const found = /* @__PURE__ */ new Map();
-  if (existsSync4(domainsRoot)) {
-    for (const d of readdirSync(domainsRoot, { withFileTypes: true })) {
-      const dbPath = join11(domainsRoot, d.name, "sterling.db");
-      if (d.isDirectory() && existsSync4(dbPath)) found.set(d.name, dbPath);
+  if (existsSync6(domainsRoot)) {
+    for (const d of readdirSync2(domainsRoot, { withFileTypes: true })) {
+      const dbPath = join12(domainsRoot, d.name, "sterling.db");
+      if (d.isDirectory() && existsSync6(dbPath)) found.set(d.name, dbPath);
     }
   }
   for (const [name, dbPath] of Object.entries(project?.config.domain_paths ?? {})) {
-    if (existsSync4(dbPath)) found.set(name, dbPath);
+    if (existsSync6(dbPath)) found.set(name, dbPath);
     else found.delete(name);
   }
   return [...found].map(([name, dbPath]) => inspectStore(name, dbPath));
@@ -11560,8 +11729,8 @@ if (!project) {
 }
 var rows = [];
 var registeredByThisRun = false;
-var hasStore = project ? onPostgres || existsSync4(join11(projectDir, ".sterling", "sterling.db")) : false;
-if (existsSync4(registryPath()) || hasStore) {
+var hasStore = project ? onPostgres || existsSync6(join12(projectDir, ".sterling", "sterling.db")) : false;
+if (existsSync6(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
   try {
     rows = registry.list();
@@ -11589,7 +11758,7 @@ if (existsSync4(registryPath()) || hasStore) {
 var projects = rows.map((p) => {
   if (isCurrent(p)) return { name: p.name, path: currentPath, stack_tags: project.config.stack_tags, exists: true };
   const path = fwd2(p.repo_path);
-  const exists = existsSync4(path);
+  const exists = existsSync6(path);
   let stack_tags = p.stack_tags;
   if (exists) {
     try {
@@ -11667,7 +11836,7 @@ if (onPostgres) {
     );
   }
 } else {
-  planned = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({ ...m, exists: existsSync4(m.dbPath) }));
+  planned = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({ ...m, exists: existsSync6(m.dbPath) }));
 }
 var plan = planned.map((m) => ({
   ...m,
@@ -11708,8 +11877,8 @@ if (toAdd.length) {
   project.config = parseConfig(nextRaw);
   try {
     const tmpPath = resolveStoreWritePath(project.dir, ".sterling", `config.json.tmp-${process.pid}`);
-    writeFileSync(tmpPath, JSON.stringify(nextRaw, null, 2) + (project.text.endsWith("\n") ? "\n" : ""));
-    renameSync(tmpPath, project.configPath);
+    writeFileSync2(tmpPath, JSON.stringify(nextRaw, null, 2) + (project.text.endsWith("\n") ? "\n" : ""));
+    renameSync2(tmpPath, project.configPath);
   } catch (e) {
     refuse(`.sterling/config.json could not be written (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
   }
@@ -11724,14 +11893,29 @@ if (toAdd.length) {
     }
     done.push("updated this project's tags in the project registry");
   } else done.push("this project has no registry row, so the registry was not changed (run /sterling:init to register it)");
-  const agentsMdPath = join11(project.dir, "AGENTS.md");
-  if (existsSync4(agentsMdPath)) {
+  const agentsMdNotUpdated = (why, lines = "Stack tags and Domain stores lines") => refuse(`AGENTS.md was not updated (${why}). Already applied in this run: ${done.join("; ")}. Fix AGENTS.md, then update its ${lines} by hand.`);
+  const fsReason = (e) => {
+    if (e instanceof LayerMarkerError) return e.message;
+    if (typeof e?.code === "string") return `${e.code}: ${e.message}`;
+    throw e;
+  };
+  let agentsFile;
+  try {
+    agentsFile = readAgentsMd(project.dir);
+  } catch (e) {
+    agentsMdNotUpdated(fsReason(e));
+  }
+  if (agentsFile.exists) {
     const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
-    const refresh = refreshAgentsMdFacts(readFileSync4(agentsMdPath, "utf8"), facts);
+    const refresh = refreshAgentsMdFacts(agentsFile.text, facts);
     if (refresh.refreshed.length) {
-      const tmpPath = `${agentsMdPath}.tmp-${process.pid}`;
-      writeFileSync(tmpPath, refresh.text);
-      renameSync(tmpPath, agentsMdPath);
+      let why;
+      try {
+        why = writeAgentsMdChecked(project.dir, refresh.text);
+      } catch (e) {
+        why = fsReason(e);
+      }
+      if (why) agentsMdNotUpdated(why, `${refresh.refreshed.join(" and ")} line${refresh.refreshed.length > 1 ? "s" : ""}`);
     }
     if (refresh.refreshed.length || refresh.kept.length) done.push(`AGENTS.md: ${describeAgentsMdRefresh(refresh, facts)}`);
     for (const k of refresh.kept) notes.push(`AGENTS.md's ${k.name} line was not rewritten (${k.reason}); update it by hand.`);

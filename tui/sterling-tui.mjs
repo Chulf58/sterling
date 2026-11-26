@@ -8013,7 +8013,7 @@ var require_xterm2 = __commonJS({
       }
     };
     var handler = {};
-    handler.mouseX11Protocol = function(basename7, buffer) {
+    handler.mouseX11Protocol = function(basename6, buffer) {
       var code = buffer[0];
       var result = {
         data: {
@@ -8024,25 +8024,25 @@ var require_xterm2 = __commonJS({
       };
       if (code & 32) {
         if (code & 64) {
-          result.name = basename7 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+          result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
         } else {
           switch (code & 3) {
             case 0:
-              result.name = basename7 + "_LEFT_BUTTON_PRESSED";
+              result.name = basename6 + "_LEFT_BUTTON_PRESSED";
               break;
             case 1:
-              result.name = basename7 + "_MIDDLE_BUTTON_PRESSED";
+              result.name = basename6 + "_MIDDLE_BUTTON_PRESSED";
               break;
             case 2:
-              result.name = basename7 + "_RIGHT_BUTTON_PRESSED";
+              result.name = basename6 + "_RIGHT_BUTTON_PRESSED";
               break;
             case 3:
-              result.name = basename7 + "_BUTTON_RELEASED";
+              result.name = basename6 + "_BUTTON_RELEASED";
               break;
           }
         }
       } else if (code & 64) {
-        result.name = basename7 + "_MOTION";
+        result.name = basename6 + "_MOTION";
       }
       result.eaten = 3;
       result.data.code = code;
@@ -8050,7 +8050,7 @@ var require_xterm2 = __commonJS({
       result.data.y = buffer[2] - 32;
       return result;
     };
-    handler.mouseSGRProtocol = function(basename7, buffer) {
+    handler.mouseSGRProtocol = function(basename6, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^(-?[0-9]*);?([0-9]*);?([0-9]*)(M|m)/);
       if (!matches || matches[3].length === 0) {
@@ -8076,7 +8076,7 @@ var require_xterm2 = __commonJS({
       if (code & 32) {
         switch (code & 3) {
           case 0:
-            result.name = basename7 + "_DRAG";
+            result.name = basename6 + "_DRAG";
             result.data.left = true;
             result.data.right = false;
             result.data.xFrom = this.state.button.left.x;
@@ -8085,7 +8085,7 @@ var require_xterm2 = __commonJS({
           // Doesn't seem to exist, middle drag does not discriminate from motion
           //case 1 :
           case 2:
-            result.name = basename7 + "_DRAG";
+            result.name = basename6 + "_DRAG";
             result.data.left = false;
             result.data.right = true;
             result.data.xFrom = this.state.button.right.x;
@@ -8093,27 +8093,27 @@ var require_xterm2 = __commonJS({
             break;
           case 3:
           default:
-            result.name = basename7 + "_MOTION";
+            result.name = basename6 + "_MOTION";
             break;
         }
       } else if (code & 64) {
-        result.name = basename7 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename7 + "_LEFT_BUTTON";
+            result.name = basename6 + "_LEFT_BUTTON";
             this.state.button.left = pressed ? result.data : null;
             break;
           case 1:
-            result.name = basename7 + "_MIDDLE_BUTTON";
+            result.name = basename6 + "_MIDDLE_BUTTON";
             this.state.button.middle = pressed ? result.data : null;
             break;
           case 2:
-            result.name = basename7 + "_RIGHT_BUTTON";
+            result.name = basename6 + "_RIGHT_BUTTON";
             this.state.button.right = pressed ? result.data : null;
             break;
           case 3:
-            result.name = basename7 + "_OTHER_BUTTON";
+            result.name = basename6 + "_OTHER_BUTTON";
             this.state.button.other = pressed ? result.data : null;
             break;
         }
@@ -8122,7 +8122,7 @@ var require_xterm2 = __commonJS({
       result.data.code = code;
       return result;
     };
-    handler.cursorLocation = function(basename7, paramString) {
+    handler.cursorLocation = function(basename6, paramString) {
       var params = paramString.split(";");
       return {
         name: "CURSOR_LOCATION",
@@ -8132,7 +8132,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.colorRegister = function(basename7, paramString) {
+    handler.colorRegister = function(basename6, paramString) {
       var matches = paramString.match(/^([0-9]*);rgb:([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8147,7 +8147,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.screenSize = function(basename7, paramString) {
+    handler.screenSize = function(basename6, paramString) {
       var params = paramString.split(";"), width = parseInt(params[1], 10), height = parseInt(params[0], 10), resized = this.root.width !== width || this.root.height !== height;
       this.root.width = width;
       this.root.height = height;
@@ -8160,7 +8160,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.clipboard = function(basename7, paramString) {
+    handler.clipboard = function(basename6, paramString) {
       var matches = paramString.match(/^([cps][0-7]*);(.*)/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8173,14 +8173,14 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.xtgettcap = function(basename7, paramString) {
-      console.log("handler.xtgettcap: ", basename7, paramString);
+    handler.xtgettcap = function(basename6, paramString) {
+      console.log("handler.xtgettcap: ", basename6, paramString);
       var matches = paramString.match(/^([0-9a-fA-F]*)=([0-9a-fA-F]*)/);
       if (!matches) {
         return {
           name: "TERMINFO",
           data: {
-            valid: basename7 !== "XTGETTCAP_INVALID",
+            valid: basename6 !== "XTGETTCAP_INVALID",
             key: Buffer.from(paramString, "hex").toString(),
             error: "Not found"
           }
@@ -8189,14 +8189,14 @@ var require_xterm2 = __commonJS({
       return {
         name: "TERMINFO",
         data: {
-          valid: basename7 !== "XTGETTCAP_INVALID",
+          valid: basename6 !== "XTGETTCAP_INVALID",
           key: Buffer.from(matches[1], "hex").toString(),
           value: Buffer.from(matches[2], "hex").toString()
         }
       };
     };
-    handler.terminalUnitId = function(basename7, paramString) {
-      console.log("handler.terminalUnitId: ", basename7, paramString);
+    handler.terminalUnitId = function(basename6, paramString) {
+      console.log("handler.terminalUnitId: ", basename6, paramString);
       return {
         name: "TERMINAL_UNIT_ID",
         data: {
@@ -8868,7 +8868,7 @@ var require_konsole2 = __commonJS({
     });
     var keymap = Object.create(xterm.keymap);
     var handler = Object.create(xterm.handler);
-    handler.mouseSGRProtocol = function mouseSGRProtocol(basename7, buffer) {
+    handler.mouseSGRProtocol = function mouseSGRProtocol(basename6, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^([0-9]*);([0-9]*);([0-9]*)(.)/);
       code = parseInt(matches[1], 10);
@@ -8884,34 +8884,34 @@ var require_konsole2 = __commonJS({
       result.data.y = parseInt(matches[3], 10);
       result.eaten = matches[0].length;
       if (code & 32) {
-        result.name = basename7 + "_MOTION";
+        result.name = basename6 + "_MOTION";
       } else if (code & 64) {
-        result.name = basename7 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename6 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename7 + "_LEFT_BUTTON";
+            result.name = basename6 + "_LEFT_BUTTON";
             if (this.state.button.left === pressed) {
               result.disable = true;
             }
             this.state.button.left = pressed;
             break;
           case 1:
-            result.name = basename7 + "_MIDDLE_BUTTON";
+            result.name = basename6 + "_MIDDLE_BUTTON";
             if (this.state.button.middle === pressed) {
               result.disable = true;
             }
             this.state.button.middle = pressed;
             break;
           case 2:
-            result.name = basename7 + "_RIGHT_BUTTON";
+            result.name = basename6 + "_RIGHT_BUTTON";
             if (this.state.button.right === pressed) {
               result.disable = true;
             }
             this.state.button.right = pressed;
             break;
           case 3:
-            result.name = basename7 + "_OTHER_BUTTON";
+            result.name = basename6 + "_OTHER_BUTTON";
             if (this.state.button.other === pressed) {
               result.disable = true;
             }
@@ -39073,7 +39073,7 @@ import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync20, writeFileSync as writeFileSync8, existsSync as existsSync18, rmSync as rmSync8, mkdirSync as mkdirSync11 } from "node:fs";
-import { basename as basename6, dirname as dirname12, join as join27 } from "node:path";
+import { basename as basename5, dirname as dirname12, join as join27 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { homedir as homedir10 } from "node:os";
 
@@ -58655,13 +58655,11 @@ import { join as join22 } from "node:path";
 // scripts/lib/agy-setup.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync14, readdirSync as readdirSync5, readlinkSync, rmdirSync, statSync as statSync7, symlinkSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync8, readFileSync as readFileSync14, readdirSync as readdirSync5, rmdirSync, statSync as statSync7, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { basename as basename5, dirname as dirname9, isAbsolute as isAbsolute2, join as join21, resolve as resolve10 } from "node:path";
+import { dirname as dirname9, isAbsolute as isAbsolute2, join as join21, resolve as resolve10 } from "node:path";
 var AGY_AGENTS_DIR = ".agents/agents";
-var GEMINI_MD = "GEMINI.md";
 var AGY_CONDUCTOR = "conductor";
-var GEMINI_MD_MAX_BYTES = 24e3;
 var AGY_MCP_SERVER_NAME = "sterling";
 var AGY_MCP_READ_ONLY_SERVER_NAME = "sterling-ro";
 var AGY_READ_ONLY_ROLES = /* @__PURE__ */ new Set(["reviewer", "researcher", "scout", "sparring", "preflight"]);
@@ -58891,87 +58889,7 @@ function readAgyModels(projectDir) {
   }
   return { pins, ignored };
 }
-function projectNameOf(projectDir) {
-  const configPath2 = join21(storeRootFor(projectDir), ".sterling", "config.json");
-  if (!existsSync13(configPath2)) return basename5(projectDir);
-  const name = JSON.parse(readFileSync14(configPath2, "utf8")).project_name;
-  return typeof name === "string" && name ? name : basename5(projectDir);
-}
-function renderGeminiMd({ pluginRoot, root, projectName }) {
-  const rel = "templates/target-claude-md.md";
-  const text = renderAgyText(readFileSync14(join21(pluginRoot, rel), "utf8"), rel).replaceAll("{{PROJECT_NAME}}", () => projectName).replaceAll("{{STERLING_ROOT}}", () => fwd3(root));
-  if (/^@AGENTS\.md\s*$/m.test(text)) throw new Error(`${GEMINI_MD}: the agy render of ${rel} imports @AGENTS.md; agy loads AGENTS.md itself (P5)`);
-  const leftover = text.match(/\{\{[A-Z_]+\}\}/);
-  if (leftover) throw new Error(`${GEMINI_MD}: the agy render of ${rel} keeps the token ${leftover[0]} (P5)`);
-  const dead = findDeadTerms(text);
-  if (dead.length) throw new Error(`${GEMINI_MD}: dead term(s) in the agy render of ${rel}: ${dead.map((h) => h.match).join(", ")} (P5)`);
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > GEMINI_MD_MAX_BYTES) throw Object.assign(new Error(`${GEMINI_MD}: the agy render of ${rel} is ${bytes} bytes, over agy's ${GEMINI_MD_MAX_BYTES}-byte cap, so agy would cut it (P5)`), { overCap: true });
-  return text;
-}
-function geminiRootAlias(home) {
-  return join21(home, ".gemini", "sterling-root");
-}
-function ensureRootAlias(alias, root) {
-  let st = null;
-  try {
-    st = lstatSync7(alias);
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-  }
-  if (st) {
-    if (!st.isSymbolicLink()) throw new Error(`${fwd3(alias)} exists and is not a link Sterling made; move it, then rerun /sterling:update`);
-    if (resolve10(dirname9(alias), readlinkSync(alias)) === resolve10(root)) return;
-    unlinkSync4(alias);
-  }
-  mkdirSync8(dirname9(alias), { recursive: true });
-  symlinkSync(root, alias, "junction");
-}
-function geminiUsesRootAlias(text, home = homedir8()) {
-  return String(text).includes(`${fwd3(geminiRootAlias(home))}/`);
-}
-function ensureGeminiMd({ projectDir, pluginRoot, root, home = homedir8() }) {
-  const path = join21(projectDir, GEMINI_MD);
-  const alias = geminiRootAlias(home);
-  const existing = existsSync13(path) ? normalize4(readFileSync14(path, "utf8")) : null;
-  const keepAlias = () => {
-    try {
-      ensureRootAlias(alias, root);
-      return null;
-    } catch (err) {
-      return refusal2(GEMINI_MD, `${GEMINI_MD} names the Sterling root through the short link ${fwd3(alias)}, which could not be pointed at ${fwd3(root)}: ${err.message}`, "fix the cause named, then rerun /sterling:update");
-    }
-  };
-  if (existing !== null && geminiUsesRootAlias(existing, home)) {
-    const refused = keepAlias();
-    if (refused) return refused;
-  }
-  const projectName = projectNameOf(projectDir);
-  let want;
-  let aliased = existing !== null && geminiUsesRootAlias(existing, home);
-  try {
-    try {
-      want = renderGeminiMd({ pluginRoot, root: aliased ? alias : root, projectName });
-    } catch (err) {
-      if (!err.overCap || aliased) throw err;
-      want = renderGeminiMd({ pluginRoot, root: alias, projectName });
-      aliased = true;
-    }
-  } catch (err) {
-    return refusal2(GEMINI_MD, `${GEMINI_MD} could not be rendered: ${err.message}`, "fix the cause named, then rerun /sterling:update");
-  }
-  if (existing === null) {
-    if (aliased) {
-      const refused = keepAlias();
-      if (refused) return refused;
-    }
-    writeFileAtomic(path, want);
-    return { item: GEMINI_MD, status: "created", detail: "from templates/target-claude-md.md (agy render)" };
-  }
-  if (existing === want) return { item: GEMINI_MD, status: "matches", detail: "generated content, unmodified" };
-  return { item: GEMINI_MD, status: "differs", detail: "left untouched \u2014 merge the Sterling layer by hand (template: templates/target-claude-md.md, agy render)" };
-}
-function ensureAgyExcluded({ projectDir, gemini }) {
+function ensureAgyExcluded({ projectDir }) {
   const label = ".git/info/exclude (agy)";
   const gp = git2(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
@@ -58979,9 +58897,7 @@ function ensureAgyExcluded({ projectDir, gemini }) {
   const current = existsSync13(excludePath) ? normalize4(readFileSync14(excludePath, "utf8")) : "";
   const begin = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END);
-  const listed = begin !== -1 && end > begin && current.slice(begin, end).split("\n").includes(`/${GEMINI_MD}`);
-  const excludeGemini = gemini === "exclude" || gemini === "keep" && listed;
-  const lines = [...AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`), ...excludeGemini ? [`/${GEMINI_MD}`] : []];
+  const lines = AGY_ROSTER.map((n) => `/${AGY_AGENTS_DIR}/${n}/`);
   const want = [EXCLUDE_BEGIN, ...lines, EXCLUDE_END].join("\n");
   if (begin !== -1 && end > begin) {
     if (current.slice(begin, end + EXCLUDE_END.length) === want) return { item: label, status: "matches", detail: lines.join(" ") };
@@ -58998,12 +58914,12 @@ function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir8()
   if (!isAbsolute2(projectDir)) throw new TypeError(`setupAgy: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_AGY_SETUP_DISABLE === "1") return { skipped: "Sterling on Antigravity CLI SKIPPED (STERLING_AGY_SETUP_DISABLE=1)" };
   const found = probe({ env, home });
-  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/, ${GEMINI_MD} or exclude block written; install agy, then run /sterling:update` };
+  if (!found.installed) return { skipped: `agy not installed (${found.reason}) \u2014 Sterling on Antigravity CLI SKIPPED: no ${AGY_AGENTS_DIR}/ or exclude block written; install agy, then run /sterling:update` };
   const { root, why } = agyMcpRoot({ pluginRoot, env, home, installed });
   const rows = [{ item: "Sterling MCP server", status: "matches", detail: `${fwd3(join21(root, "mcp", "sterling-mcp.mjs"))} (${why})` }];
-  const inventory = trackedFiles(projectDir, [AGY_AGENTS_DIR, GEMINI_MD], runGit);
+  const inventory = trackedFiles(projectDir, [AGY_AGENTS_DIR], runGit);
   if (inventory.failed) {
-    rows.push(refusal2(`${AGY_AGENTS_DIR}/, ${GEMINI_MD}, .git/info/exclude (agy)`, `git ls-files failed in ${fwd3(projectDir)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
+    rows.push(refusal2(`${AGY_AGENTS_DIR}/, .git/info/exclude (agy)`, `git ls-files failed in ${fwd3(projectDir)}, so which agy files git tracks is unknown (${inventory.failed})`, "fix the repository (git status shows the same error), then rerun /sterling:update"));
     return { root, rows };
   }
   const { tracked } = inventory;
@@ -59019,10 +58935,7 @@ function setupAgy({ projectDir, pluginRoot, env = process.env, home = homedir8()
     const remedy = resolve10(root) !== resolve10(pluginRoot) ? `install this Sterling into agy (agy plugin install ${fwd3(resolve10(pluginRoot))}), then rerun /sterling:update` : `rebuild or reinstall the Sterling at ${fwd3(root)} so its mcp/sterling-mcp.mjs is current, then rerun /sterling:update`;
     rows.push(refusal2(`${AGY_AGENTS_DIR}/`, `the Sterling MCP server the agy agents would start cannot enforce --read-only for the read-only roles: ${server.reason}`, remedy));
   }
-  const gemini = tracked.includes(GEMINI_MD) ? { item: GEMINI_MD, status: "matches", detail: "tracked by git \u2014 the project keeps its own; left untouched" } : ensureGeminiMd({ projectDir, pluginRoot, root, home });
-  rows.push(gemini);
-  const geminiRule = tracked.includes(GEMINI_MD) ? "no" : ["created", "matches"].includes(gemini.status) ? "exclude" : "keep";
-  rows.push(ensureAgyExcluded({ projectDir, gemini: geminiRule }));
+  rows.push(ensureAgyExcluded({ projectDir }));
   return { root, rows };
 }
 
@@ -59176,12 +59089,12 @@ function discoverCustomAgents(projectRoot) {
 
 // scripts/lib/agent-adoption.mjs
 import { createHash as createHash6 } from "node:crypto";
-import { existsSync as existsSync17, lstatSync as lstatSync9, readFileSync as readFileSync18, readdirSync as readdirSync8, rmSync as rmSync6, rmdirSync as rmdirSync3 } from "node:fs";
+import { existsSync as existsSync17, lstatSync as lstatSync8, readFileSync as readFileSync18, readdirSync as readdirSync8, rmSync as rmSync6, rmdirSync as rmdirSync3 } from "node:fs";
 import { dirname as dirname11, isAbsolute as isAbsolute3, join as join25 } from "node:path";
 
 // scripts/lib/custom-agent-render.mjs
 import { createHash as createHash5 } from "node:crypto";
-import { existsSync as existsSync16, lstatSync as lstatSync8, mkdirSync as mkdirSync9, readFileSync as readFileSync17, readdirSync as readdirSync7, rmSync as rmSync5, rmdirSync as rmdirSync2 } from "node:fs";
+import { existsSync as existsSync16, lstatSync as lstatSync7, mkdirSync as mkdirSync9, readFileSync as readFileSync17, readdirSync as readdirSync7, rmSync as rmSync5, rmdirSync as rmdirSync2 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname10, join as join24 } from "node:path";
 var CUSTOM_RENDERER = "custom-agent/1";
@@ -59497,7 +59410,7 @@ function symlinkIn(root, rel) {
     p = join24(p, part);
     let st;
     try {
-      st = lstatSync8(p);
+      st = lstatSync7(p);
     } catch (err) {
       if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
       throw err;
@@ -59512,7 +59425,7 @@ function inspectTarget(root, rel, host2, key, sourcePath, vacated = []) {
   if (link) return { state: "refused", reason: `${rel} is reached through the symlink ${link}; Sterling does not write through links` };
   const path = join24(root, rel);
   if (!existsSync16(path)) return { state: "absent" };
-  if (!lstatSync8(path).isFile()) return { state: "refused", reason: `${rel} exists and is not a file` };
+  if (!lstatSync7(path).isFile()) return { state: "refused", reason: `${rel} exists and is not a file` };
   const disk = normalize5(readFileSync17(path, "utf8"));
   const h = disk.match(STAMP_RE);
   if (!h) return { state: "refused", reason: `${rel} carries no Sterling stamp (a file Sterling did not write); the agent's source is ${sourcePath ?? AGENT_SOURCE_DIR}. Move it aside or delete it, then sync again` };
@@ -59525,11 +59438,11 @@ function stampedOutputs(root) {
   const out = [];
   const scan = (host2, rel) => {
     const dir = join24(root, rel);
-    if (!existsSync16(dir) || symlinkIn(root, rel) || !lstatSync8(dir).isDirectory()) return;
+    if (!existsSync16(dir) || symlinkIn(root, rel) || !lstatSync7(dir).isDirectory()) return;
     for (const e of readdirSync7(dir, { withFileTypes: true })) {
       if (host2 === "agy" ? !e.isDirectory() : !(e.isFile() && e.name.endsWith(".md"))) continue;
       const fileRel = host2 === "agy" ? `${rel}/${e.name}/agent.md` : `${rel}/${e.name}`;
-      if (!existsSync16(join24(root, fileRel)) || !lstatSync8(join24(root, fileRel)).isFile()) continue;
+      if (!existsSync16(join24(root, fileRel)) || !lstatSync7(join24(root, fileRel)).isFile()) continue;
       const m = normalize5(readFileSync17(join24(root, fileRel), "utf8")).match(STAMP_RE);
       if (m && m[2] === host2) out.push({ host: host2, key: m[3], rel: fileRel });
     }
@@ -59812,7 +59725,7 @@ function adopt(projectRoot, plan) {
   unlinkContained(projectRoot, plan.move.from);
   if (plan.move.from.startsWith(HOST_DIRS.agy)) {
     const folder = containedPath(projectRoot, dirname11(plan.move.from), "dir");
-    if (lstatSync9(folder).isDirectory() && readdirSync8(folder).length === 0) rmdirSync3(folder);
+    if (lstatSync8(folder).isDirectory() && readdirSync8(folder).length === 0) rmdirSync3(folder);
   }
   return { from: plan.move.from, to: plan.move.to, key: plan.key };
 }
@@ -59876,7 +59789,7 @@ function openDashboard(storePath2, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename6(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename5(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -61110,7 +61023,7 @@ import { homedir as homedir11 } from "node:os";
 import { join as join30 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync13, readFileSync as readFileSync22, writeFileSync as writeFileSync10, rmSync as rmSync9, rmdirSync as rmdirSync4, renameSync as renameSync6, existsSync as existsSync20, lstatSync as lstatSync10, readdirSync as readdirSync10, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
+import { mkdirSync as mkdirSync13, readFileSync as readFileSync22, writeFileSync as writeFileSync10, rmSync as rmSync9, rmdirSync as rmdirSync4, renameSync as renameSync6, existsSync as existsSync20, lstatSync as lstatSync9, readdirSync as readdirSync10, realpathSync as realpathSync7, chmodSync as chmodSync2 } from "node:fs";
 import { join as join29, resolve as resolve11, dirname as dirname14, isAbsolute as isAbsolute4 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash7 } from "node:crypto";

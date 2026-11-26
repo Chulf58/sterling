@@ -69,6 +69,14 @@ test('LRI-4: STERLING_REGISTRY_DB is relocated under the per-run temp root, neve
   }
 });
 
+test('LRI-5: the XDG config, cache, state and data homes are relocated under the per-run temp root, never the real OpenCode dirs', () => {
+  const root = process.env[MARKER];
+  assert.ok(root, `${MARKER} is set — the suite must run with --import ./scripts/tests/lib/lock-root-isolation.mjs (npm test)`);
+  for (const [key, sub] of [['XDG_CONFIG_HOME', 'xdg-config'], ['XDG_CACHE_HOME', 'xdg-cache'], ['XDG_STATE_HOME', 'xdg-state'], ['XDG_DATA_HOME', 'xdg-data']]) {
+    assert.equal(process.env[key], join(root, sub), `${key} points under the per-run root`);
+  }
+});
+
 test('LRI-3: a fresh run creates its own temp root and removes it — lock dbs included — when the run exits', () => {
   const dir = project();
   try {

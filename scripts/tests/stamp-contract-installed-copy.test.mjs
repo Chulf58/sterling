@@ -25,6 +25,12 @@ const STALE_RECONCILE = '- **Reconcile _every affected_ article, not just the pr
 const realTemplate = (rel) => readFileSync(join(root, rel), 'utf8');
 const currentReconcile = () => realTemplate(CLAUDE_REL).split('\n').find((l) => l.startsWith(RECONCILE_LEAD));
 const withStaleReconcile = (text) => text.replace(currentReconcile(), STALE_RECONCILE);
+// stamp-contract stamps only AGENTS.md (GitHub #329: CLAUDE.md is read-only to it), so the replace
+// cases run on an AGENTS.md-homed lead. A genuine older wording of Anti-speculation, from before the split.
+const ANTISPEC_LEAD = '- **Anti-speculation:**';
+const STALE_ANTISPEC = '- **Anti-speculation:** never invent an API, field, flag, or behavior. Verify in docs or code first. If you cannot verify, say so and ask.';
+const currentAntiSpec = () => realTemplate(AGENTS_REL).split('\n').find((l) => l.startsWith(ANTISPEC_LEAD));
+const withStaleAntiSpec = (text) => text.replace(currentAntiSpec(), STALE_ANTISPEC);
 
 // The node_modules the real tree resolves @sterling/store from (a worktree has none of
 // its own; resolution walks up to the main tree's).
@@ -57,13 +63,14 @@ function makePluginRoot() {
   git(dir, ['config', 'user.email', 'test@example.com']);
   git(dir, ['config', 'user.name', 'test']);
   git(dir, ['config', 'core.autocrlf', 'false']);
-  writeFileSync(join(dir, AGENTS_REL), realTemplate(AGENTS_REL));
+  writeFileSync(join(dir, AGENTS_REL), withStaleAntiSpec(realTemplate(AGENTS_REL)));
   writeFileSync(join(dir, CLAUDE_REL), withStaleReconcile(realTemplate(CLAUDE_REL)));
   git(dir, ['add', 'templates']);
   git(dir, ['commit', '-q', '-m', 'older Reconcile wording']);
   return dir;
 }
 function commitCurrentTemplates(dir) {
+  writeFileSync(join(dir, AGENTS_REL), realTemplate(AGENTS_REL));
   writeFileSync(join(dir, CLAUDE_REL), realTemplate(CLAUDE_REL));
   git(dir, ['add', 'templates']);
   git(dir, ['commit', '-q', '-m', 'current templates']);
@@ -87,7 +94,8 @@ function withSibling(fn) {
   const regDb = join(scratch, 'registry.db');
   const registry = new ProjectRegistry(regDb);
   try {
-    writeFileSync(join(sibling, 'AGENTS.md'), renderTemplate(AGENTS_REL));
+    writeFileSync(join(sibling, 'AGENTS.md'), withStaleAntiSpec(renderTemplate(AGENTS_REL)));
+    // A retained CLAUDE.md with an older bullet: never stamped, so it must stay byte-identical.
     writeFileSync(join(sibling, 'CLAUDE.md'), withStaleReconcile(renderTemplate(CLAUDE_REL)));
     registry.register({ repo_path: sibling, name: 'installed-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
     fn({ sibling, regDb });
@@ -114,10 +122,11 @@ test('installed copy (no .git) with bin/contract-history.json: an older template
     withSibling(({ sibling, regDb }) => {
       const r = runStamp(dir, regDb);
       assert.equal(r.status, 0, `clean replace expected:\n${r.stdout}\n${r.stderr}`);
-      assert.match(r.stdout, /updated\s+- \*\*Reconcile/);
+      assert.match(r.stdout, /updated\s+- \*\*Anti-speculation/);
       assert.ok(!/REFUSED/.test(r.stdout), r.stdout);
       assert.ok(!/only the current template text counts/.test(r.stderr), `no degraded warning when the snapshot loads:\n${r.stderr}`);
-      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), renderTemplate(CLAUDE_REL), 'the old bullet became the current one');
+      assert.equal(readFileSync(join(sibling, 'AGENTS.md'), 'utf8'), renderTemplate(AGENTS_REL), 'the old bullet became the current one');
+      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), withStaleReconcile(renderTemplate(CLAUDE_REL)), 'the retained CLAUDE.md is never stamped');
     });
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -147,9 +156,10 @@ test('installed copy nested inside an unrelated git repo: git log there is empty
     withSibling(({ sibling, regDb }) => {
       const r = runStamp(nested, regDb, env);
       assert.equal(r.status, 0, `clean replace expected:\n${r.stdout}\n${r.stderr}`);
-      assert.match(r.stdout, /updated\s+- \*\*Reconcile/);
+      assert.match(r.stdout, /updated\s+- \*\*Anti-speculation/);
       assert.ok(!/REFUSED/.test(r.stdout), r.stdout);
-      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), renderTemplate(CLAUDE_REL), 'the old bullet became the current one');
+      assert.equal(readFileSync(join(sibling, 'AGENTS.md'), 'utf8'), renderTemplate(AGENTS_REL), 'the old bullet became the current one');
+      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), withStaleReconcile(renderTemplate(CLAUDE_REL)), 'the retained CLAUDE.md is never stamped');
     });
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -163,14 +173,16 @@ test('installed copy (no .git) WITHOUT bin/contract-history.json: degraded and a
     commitCurrentTemplates(dir);
     rmSync(join(dir, '.git'), { recursive: true, force: true });
     withSibling(({ sibling, regDb }) => {
-      const before = readFileSync(join(sibling, 'CLAUDE.md'), 'utf8');
+      const before = readFileSync(join(sibling, 'AGENTS.md'), 'utf8');
+      const claudeBefore = readFileSync(join(sibling, 'CLAUDE.md'), 'utf8');
       const r = runStamp(dir, regDb);
       assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
-      assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Reconcile/);
+      assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Anti-speculation/);
       assert.match(r.stderr, /DEGRADED/);
       assert.ok(r.stderr.includes(`${join(dir, 'bin', 'contract-history.json')} is missing`), r.stderr);
       assert.match(r.stderr, /only the current template text counts as template-descended/);
-      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), before);
+      assert.equal(readFileSync(join(sibling, 'AGENTS.md'), 'utf8'), before);
+      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), claudeBefore, 'the retained CLAUDE.md is never stamped');
     });
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

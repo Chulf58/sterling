@@ -135,7 +135,7 @@ const files = tracked.stdout
 
 const violations = [];
 // Currency (board 9d0fb893): WARN-only, scoped to pointer surfaces (AGENTS.md, CLAUDE.md,
-// templates/target-agents-md.md, templates/target-claude-md.md, skills/**, commands/**) —
+// templates/target-agents-md.md, templates/target-claude-md.md, templates/sterling-layer-agents.md, templates/claude-session-block.md, skills/**, commands/**) —
 // see lib/checks.mjs for the full rationale. Never affects the exit code below.
 const currencyWarnings = [];
 let citations = 0;

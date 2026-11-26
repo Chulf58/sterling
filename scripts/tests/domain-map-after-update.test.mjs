@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SterlingStore, ProjectRegistry, createDomain } from '@sterling/store';
+import { stampProjects } from '../lib/stamp-projects.mjs';
 import { runUpdate, UPDATE_MARKER_RELATIVE_PATH, DOMAIN_MAP_PENDING_REL } from '../lib/update.mjs';
 import { buildSeamHook } from './lib/seam-hook.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
@@ -83,7 +84,7 @@ function machine() {
     if (authoringFrom) {
       writeFileSync(join(cwd, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
       mkdirSync(join(cwd, 'scripts'), { recursive: true });
-      writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture: the exec below runs the real one\n');
+      writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture: the stamp below runs the real stamper\n');
     }
     const calls = [];
     const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -109,9 +110,16 @@ function machine() {
       }
       return ok('');
     };
+    // The contract step runs in-process (decision 329-rebuild-how-sterling-update-stamps-sibling-projects-as-o):
+    // the real stamper, with this repository's templates, since the fixture clone has none.
+    const stamps = [];
+    const stamp = (rows, o) => {
+      stamps.push({ rows: rows.map((r) => r.repo_path), applyInserts: o.applyInserts, apply: o.apply });
+      return stampProjects(rows, { ...o, repoRoot: root });
+    };
     const lines = [];
-    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: projects.map((dir) => ({ name: configOf(dir).project_name, repo_path: fwd(dir) })), opts: {}, pluginRoot: null, projectDir: authoringFrom });
-    return { report, calls, out: lines.join('\n') };
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: projects.map((dir) => ({ name: configOf(dir).project_name, repo_path: fwd(dir) })), opts: {}, pluginRoot: null, projectDir: authoringFrom, stamp });
+    return { report, calls, stamps, out: lines.join('\n') };
   };
 
   const sessionStart = (dir, { hook = sourceH1, extraEnv = {} } = {}) => {
@@ -294,9 +302,9 @@ test('/sterling:update writes the Domains section into an existing project with 
 
   const u = await m.update([dir], { authoringFrom: dir });
   assert.equal(u.report.exit, 0, u.out);
-  const contractCalls = u.calls.filter((c) => c.includes('stamp-contract.mjs'));
-  assert.equal(contractCalls.length, 1);
-  assert.ok(contractCalls[0].includes('--apply-inserts') && !/--apply( |$)/.test(contractCalls[0]), contractCalls[0]);
+  assert.equal(u.stamps.length, 1, JSON.stringify(u.stamps));
+  assert.deepEqual(u.stamps[0].rows, [fwd(dir)]);
+  assert.ok(u.stamps[0].applyInserts === true && !u.stamps[0].apply, JSON.stringify(u.stamps[0]));
   assert.match(u.out, /section_inserted {2}## Domains/, 'the update prints what it inserted');
   const after = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
   assert.match(after, /## Domains\n\n- \*\*A domain is a shared knowledge store for one subject\.\*\*/);
@@ -336,6 +344,8 @@ function installedPluginRoot() {
   mkdirSync(join(dir, 'bin'), { recursive: true });
   writeFileSync(join(dir, 'bin', 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', 'up_to_date: implementor\n', 'FIXTURE_SYNC_EXIT'));
   writeFileSync(join(dir, 'bin', 'stamp-contract.mjs'), LOGGING_SCRIPT('stamp-contract', 'stamp-contract: 1 already in sync — 1 project(s) processed\n', 'FIXTURE_CONTRACT_EXIT'));
+  // The sync's last step (GitHub #329); this one removes nothing and logs nothing.
+  writeFileSync(join(dir, 'bin', 'retire-host-files.mjs'), 'process.exit(0);\n');
   writeFileSync(
     join(dir, 'bin', 'domains.mjs'),
     `import { appendFileSync } from 'node:fs';\n` +

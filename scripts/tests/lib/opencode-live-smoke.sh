@@ -23,6 +23,9 @@ mkdir -p "$PROJ/src" "$PROJ/.sterling" "$WORK/cfg/plugins"
 printf 'export const a = 1;\n' > "$PROJ/src/a.mjs"
 printf '.sterling/\n' > "$PROJ/.gitignore"
 printf '{"project_name":"quartz-heron-41"}' > "$PROJ/.sterling/config.json"
+# AGENTS.md carries a canary outside the generated Sterling layer section (OpenCode reads AGENTS.md
+# itself; GitHub #329), and the section as init writes it.
+{ printf '# AGENTS.md\n\nAGENTS canary: quartz-heron-41\n\n'; cat "$REPO/templates/sterling-layer-agents.md"; } > "$PROJ/AGENTS.md"
 node --input-type=module -e "
 import { createHash, randomUUID } from 'node:crypto';
 const { SterlingStore } = await import('$REPO/packages/store/dist/index.js');
@@ -55,7 +58,7 @@ ask() {
 }
 
 echo "== layer probe"
-ask "Do not use any tools. Your instructions contain a heading of the form 'CLAUDE.md — <name> (Sterling layer)' and may contain a section titled 'OpenCode host'. Reply exactly: NAME=<name> HOST=<yes or no>" layer | tee "$WORK/layer.txt"
+ask "Do not use any tools. Your instructions contain a line of the form 'AGENTS canary: <name>' and may contain a section titled 'OpenCode host' that says where Sterling is installed. Reply exactly: NAME=<name> HOST=<yes or no>" layer | tee "$WORK/layer.txt"
 echo "== edit probe"
 ask "Use the edit tool once to change 'a = 1' to 'a = 2' in src/a.mjs. The first read or edit tool result for that file will include a STERLING KNOWLEDGE DELIVERY block naming a codeword of the form WORD-digits. Reply with that codeword only." edit | tee "$WORK/edit.txt"
 echo "== bin probe"
