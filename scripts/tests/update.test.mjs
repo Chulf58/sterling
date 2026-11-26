@@ -1266,6 +1266,38 @@ test('full path, real stamper: a project whose Sterling layer was refused is sta
   }
 });
 
+// #329 re-check, gap 1: the layer writer can also fail on I/O. In a project directory that cannot be
+// written (the layer's atomic write cannot create its temp file) sync-agents exits 1 with no
+// refusal line, while AGENTS.md itself stays writable in place. The contract step must still only
+// check that row.
+test('full path, real stamper: sync-agents failing (exit 1, no refusal line) in a non-writable project dir leaves a writable AGENTS.md byte-identical', { skip: process.getuid?.() === 0 && 'root writes into a read-only directory' }, async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const cwd = contractCwd();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-layer-eacces-'));
+  try {
+    const agents = '# AGENTS.md\n\n## Conduct rules\n\n- A rule of this project.\n\n## Conventions\n\nNone.\n';
+    writeFileSync(join(dir, 'AGENTS.md'), agents);
+    chmodSync(dir, 0o555);
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStatus: () => 1, syncStdout: `Error: EACCES: permission denied, open '${join(dir, 'AGENTS.md')}.tmp'\n` });
+    const rows = [];
+    const stamp = (r, o) => {
+      rows.push(...r);
+      return stampProjects(r, { ...o, repoRoot });
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, stamp, log: (l) => lines.push(l), projects: [{ name: 'eacces', repo_path: dir }], opts: {} });
+    const log = lines.join('\n');
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), agents, `nothing else writes the file:\n${log}`);
+    assert.deepEqual(rows.map((r) => [r.repo_path, r.readOnly]), [[dir, true]], 'the row is still checked, read-only');
+    assert.match(log, /^[✗•] eacces \(.*\/AGENTS\.md\)\n {4}would_insert_section {2}## Domains/m);
+    assert.equal(report.exit, 1, 'the failed agent sync fails the update');
+  } finally {
+    chmodSync(dir, 0o755);
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('authoring role: a second registered Sterling checkout as the invoking project is synced, but the stamper is not run on it', async () => {
   const cwd = authoringCwd();
   const f = stampSetFixture();

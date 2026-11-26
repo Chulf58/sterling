@@ -1610,7 +1610,11 @@ test('postUpdateSync: the retire step\'s receipts are relayed even when it exits
   assert.equal(markerOf(project), '0.0.1\n');
 });
 
-test('runPostUpdateSteps: a Sterling source tree runs no retire step and names a retained CLAUDE.md with the follow-up command', async () => {
+// Changed in the #329 re-check: the line used to name retire-host-files and /sterling:update as the
+// follow-up. Ruling a-sterling-source-checkout-s-agents-md-is-hand-maintained-up exempts source trees
+// from retirement, so both are no-ops there and the advice was wrong; the line now says the files
+// are maintained by hand and names no removal command.
+test('runPostUpdateSteps: a Sterling source tree runs no retire step and names a retained CLAUDE.md as maintained by hand, with no removal command', async () => {
   const plugin = makePluginRoot({ clone: true });
   writeFileSync(join(plugin, 'CLAUDE.md'), '# Sterling\n');
   const { calls, runStep } = stepsWith({});
@@ -1618,7 +1622,8 @@ test('runPostUpdateSteps: a Sterling source tree runs no retire step and names a
   assert.equal(r.ok, true);
   assert.deepEqual(calls, ['sync-agents.mjs']);
   assert.equal(r.layer.length, 1);
-  assert.match(r.layer[0], /^⚠ Sterling layer: CLAUDE\.md kept — this project is a Sterling source tree, so the post-update sync removes no host file\..*bin\/retire-host-files\.mjs" --target ".*" or \/sterling:update\.$/);
+  assert.equal(r.layer[0], '⚠ Sterling layer: CLAUDE.md kept — this project is a Sterling source tree, whose instruction files are maintained by hand, so Sterling removes no host file here.');
+  assert.doesNotMatch(r.layer[0], /retire-host-files|sterling:update/, 'no removal command is offered');
 });
 
 // #329 fix round, finding 2: during an OpenCode auto-update the runtime already loaded (from
@@ -1669,3 +1674,34 @@ for (const [label, sync] of [
     assert.ok(!calls.includes('retire-host-files.mjs'), calls.join(', '));
   });
 }
+
+// #329 re-check, gap 3: the marker advanced but the layer receipt could not be written. The sync is
+// failed, the banner and the context OpenCode relays both name the exact file, and the next start
+// runs the steps again while a host file is left; the marker keeps newest-copy-wins.
+test('postUpdateSync: a layer receipt that cannot be written fails the sync, naming the receipt file in banner and context', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const receipt = join(project, '.sterling', 'synced-layer-version');
+  mkdirSync(receipt);
+  const { runStep } = stepsWith({});
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.ok(r.warning.includes(`${receipt} could not be written (EISDIR)`), r.warning);
+  assert.ok(!r.warning.includes(`${join(project, '.sterling', 'synced-version')} could not be written`), 'the marker is not blamed');
+  assert.ok(r.context.startsWith('\n\nPOST-UPDATE SYNC FAILED (OpenCode plugin): '), r.context);
+  assert.ok(r.context.includes(`${receipt} could not be written (EISDIR)`), r.context);
+  assert.match(r.context, /retries the next time OpenCode starts while a CLAUDE\.md or GEMINI\.md is left/);
+  assert.equal(markerOf(project), `${VERSION}\n`, 'the version marker advanced');
+});
+
+// #329 re-check, gap 4: a dangling CLAUDE.md symlink is a directory entry retirement sees, so an
+// equal marker without a layer receipt still runs the steps.
+test('postUpdateSync: an equal marker without a layer receipt and a dangling CLAUDE.md symlink runs the steps', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: VERSION, store: false });
+  symlinkSync(join(project, 'no-such-file'), join(project, 'CLAUDE.md'));
+  const { calls, runStep } = stepsWith({});
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r?.outcome, 'synced', JSON.stringify(r));
+  assert.ok(calls.includes('retire-host-files.mjs'), calls.join(', '));
+});

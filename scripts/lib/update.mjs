@@ -934,6 +934,9 @@ export async function runUpdate({ cwd, exec = defaultExec, stamp = stampProjects
       // and named. A Sterling clone has its own projections and keeps the projection wording.
       // After a layer refusal nothing else writes AGENTS.md; otherwise the rewrite goes through the
       // same checks as the layer (a plain file, and the whole planned file under agy's cap).
+      // A sync-agents run that did not succeed (an I/O error writing the layer exits 1 with no
+      // refusal line) also leaves the layer unconfirmed: the contract step only checks this row.
+      if (r.status !== 0) agentsMdWriteRefused.add(p);
       if (layerLines.some((l) => l.startsWith('✗ Sterling layer REFUSED:'))) {
         log('      ⚠ AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed');
         agentsMdWriteRefused.add(p);

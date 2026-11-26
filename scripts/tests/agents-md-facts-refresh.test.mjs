@@ -4,7 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -199,4 +199,26 @@ test("domains.mjs --apply refuses (exit 2) an AGENTS.md refresh that would pass 
   assert.match(r.out, /domains REFUSED: AGENTS\.md was not updated \(AGENTS\.md would be [\d,]+ bytes .*over agy's 24,000-byte cap/);
   assert.match(r.out, /Already applied in this run: .*stack_tags in \.sterling\/config\.json/);
   assert.equal(readFileSync(agentsPath, 'utf8'), padded, 'nothing written');
+});
+
+// #329 re-check, gap 2: a file system error writing AGENTS.md (here the project directory cannot
+// take the atomic write's temp file) comes after the mount and the registry tags were changed. It is
+// the same loud partial-apply refusal (exit 2) as a validation refusal, never a stack trace.
+test('domains.mjs --apply: an AGENTS.md that cannot be written is a partial-apply refusal (exit 2); the new mount stays and AGENTS.md is byte-identical', { skip: process.getuid?.() === 0 && 'root writes into a read-only directory' }, () => {
+  const { dir, home } = initedProject();
+  const agentsPath = join(dir, 'AGENTS.md');
+  const before = readFileSync(agentsPath, 'utf8');
+  chmodSync(dir, 0o555);
+  let r;
+  try {
+    r = run('domains.mjs', dir, home, ['--apply', '--add', 'python']);
+  } finally {
+    chmodSync(dir, 0o755);
+  }
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /domains REFUSED: AGENTS\.md was not updated \(EACCES: /);
+  assert.match(r.out, /Already applied in this run: .*stack_tags in \.sterling\/config\.json: node, python, sterling/);
+  assert.doesNotMatch(r.out, /^\s+at /m, 'no stack trace');
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).stack_tags, ['node', 'python', 'sterling'], 'the new mount is present');
+  assert.equal(readFileSync(agentsPath, 'utf8'), before, 'AGENTS.md is byte-identical');
 });

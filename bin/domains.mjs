@@ -11893,13 +11893,29 @@ if (toAdd.length) {
     }
     done.push("updated this project's tags in the project registry");
   } else done.push("this project has no registry row, so the registry was not changed (run /sterling:init to register it)");
-  const agentsMdPath = join12(project.dir, "AGENTS.md");
-  if (existsSync6(agentsMdPath)) {
+  const agentsMdNotUpdated = (why, lines = "Stack tags and Domain stores lines") => refuse(`AGENTS.md was not updated (${why}). Already applied in this run: ${done.join("; ")}. Fix AGENTS.md, then update its ${lines} by hand.`);
+  const fsReason = (e) => {
+    if (e instanceof LayerMarkerError) return e.message;
+    if (typeof e?.code === "string") return `${e.code}: ${e.message}`;
+    throw e;
+  };
+  let agentsFile;
+  try {
+    agentsFile = readAgentsMd(project.dir);
+  } catch (e) {
+    agentsMdNotUpdated(fsReason(e));
+  }
+  if (agentsFile.exists) {
     const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
-    const refresh = refreshAgentsMdFacts(readFileSync7(agentsMdPath, "utf8"), facts);
+    const refresh = refreshAgentsMdFacts(agentsFile.text, facts);
     if (refresh.refreshed.length) {
-      const why = writeAgentsMdChecked(project.dir, refresh.text);
-      if (why) refuse(`AGENTS.md was not updated (${why}). Already applied in this run: ${done.join("; ")}. Shorten or fix AGENTS.md, then update its ${refresh.refreshed.join(" and ")} line by hand.`);
+      let why;
+      try {
+        why = writeAgentsMdChecked(project.dir, refresh.text);
+      } catch (e) {
+        why = fsReason(e);
+      }
+      if (why) agentsMdNotUpdated(why, `${refresh.refreshed.join(" and ")} line${refresh.refreshed.length > 1 ? "s" : ""}`);
     }
     if (refresh.refreshed.length || refresh.kept.length) done.push(`AGENTS.md: ${describeAgentsMdRefresh(refresh, facts)}`);
     for (const k of refresh.kept) notes.push(`AGENTS.md's ${k.name} line was not rewritten (${k.reason}); update it by hand.`);

@@ -22,7 +22,7 @@
 //
 // Builtins only: hooks and the OpenCode server bundle vendor this module.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -41,6 +41,15 @@ export const SYNC_MARKER_REL = join('.sterling', 'synced-version');
 // marker by the post-update sync and by init; a runtime from before #329 never writes it.
 export const SYNC_LAYER_RECEIPT_REL = join('.sterling', 'synced-layer-version');
 const HOST_FILES = ['CLAUDE.md', 'GEMINI.md'];
+// A directory entry by that name, as retirement sees it: a dangling symlink counts.
+const hasEntry = (path) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** True when the project's layer receipt is `current` or newer. */
 export function layerReceiptCurrent(project, current) {
@@ -275,7 +284,7 @@ async function writerSteps({ root, project, runStep, host, sync, migrated, layer
   // so the user is told agents changed even though the step as a whole failed.
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) {
     const retained = ['CLAUDE.md', 'GEMINI.md'].filter((f) => existsSync(join(project, f)));
-    if (retained.length) layer.push(`⚠ Sterling layer: ${retained.join(' and ')} kept — this project is a Sterling source tree, so the post-update sync removes no host file. If ${retained.length > 1 ? 'one holds' : 'it holds'} only Sterling's generated text, run node "${root}/bin/retire-host-files.mjs" --target "${project}" or /sterling:update.`);
+    if (retained.length) layer.push(`⚠ Sterling layer: ${retained.join(' and ')} kept — this project is a Sterling source tree, whose instruction files are maintained by hand, so Sterling removes no host file here.`);
     return { result: { ok: true, restart, drift: false, driftOut: '', inserted: [], migrated, layer }, retire: false };
   }
   const contract = await runStep(root, 'stamp-contract.mjs', ['--apply-inserts', '--project', project]);
@@ -360,7 +369,7 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   // ran too. A runtime from before #329 (OpenCode's loaded plugin during an auto-update) runs the
   // new scripts but writes the version marker without retiring CLAUDE.md / GEMINI.md, so with a
   // host file left the steps run again. With none left there is nothing to retire.
-  if (order === 0 && (layerReceiptCurrent(project, current) || !HOST_FILES.some((f) => existsSync(join(project, f))))) return null;
+  if (order === 0 && (layerReceiptCurrent(project, current) || !HOST_FILES.some((f) => hasEntry(join(project, f))))) return null;
   if (order < 0) {
     const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]](env, home, root);
     return {
@@ -386,13 +395,26 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
     };
   }
   let warning = '';
+  // The layer receipt is written only after the marker. When it alone fails, the marker has
+  // advanced, so the sync is reported failed: with no receipt the steps run again at the next start
+  // while a CLAUDE.md or GEMINI.md is left.
+  let receiptFailure = null;
   try {
     writeFileSync(markerPath, `${current}\n`);
-    writeFileSync(join(project, SYNC_LAYER_RECEIPT_REL), `${current}\n`);
   } catch (err) {
     warning = `✗ ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) — the sync ${t.rerun} until it can. `;
   }
+  if (!warning) {
+    const receiptPath = join(project, SYNC_LAYER_RECEIPT_REL);
+    try {
+      writeFileSync(receiptPath, `${current}\n`);
+    } catch (err) {
+      receiptFailure = `${receiptPath} could not be written (${err?.code ?? err?.message ?? err}), so the post-update steps, retirement included, run again: it ${t.retry} while a CLAUDE.md or GEMINI.md is left in the project`;
+      warning = `✗ ${hop}: post-update sync FAILED — the steps ran, but ${receiptFailure}. `;
+    }
+  }
   const restartLine = result.restart ? t.restartShort : 'agents synced, none changed';
+  if (receiptFailure) warning += `${restartLine}. `;
   warning ||= `⚠ ${hop}: ${restartLine}. `;
   const inserted = result.inserted ?? [];
   if (inserted.length) warning += `AGENTS.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? '' : 's'}). `;
@@ -400,10 +422,10 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   warning += migratedWarning(migrated);
   warning += layerWarning(result.layer);
   return {
-    outcome: 'synced',
+    outcome: receiptFailure ? 'failed' : 'synced',
     warning,
     context:
-      `\n\nPOST-UPDATE SYNC (${t.label}): ${hop} — ${restartLine}.` +
+      (receiptFailure ? `\n\nPOST-UPDATE SYNC FAILED (${t.label}): ${hop} — ${receiptFailure}; tell the user and fix the cause. ${restartLine}.` : `\n\nPOST-UPDATE SYNC (${t.label}): ${hop} — ${restartLine}.`) +
       (result.restart ? ` ${t.restartLong}` : '') +
       layerContext(result.layer) +
       (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md (text that was entirely absent; no existing wording was replaced): ${inserted.join('; ')}.` : '') +

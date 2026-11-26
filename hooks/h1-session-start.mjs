@@ -17689,7 +17689,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir7() } = {}) {
 
 // scripts/lib/post-update-sync.mjs
 import { spawn, spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync18, readFileSync as readFileSync18, realpathSync as realpathSync9, statSync as statSync8, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync18, lstatSync as lstatSync9, readFileSync as readFileSync18, realpathSync as realpathSync9, statSync as statSync8, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
 import { join as join29, resolve as resolve13 } from "node:path";
 
@@ -17729,6 +17729,14 @@ var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
 var SYNC_MARKER_REL = join29(".sterling", "synced-version");
 var SYNC_LAYER_RECEIPT_REL = join29(".sterling", "synced-layer-version");
 var HOST_FILES = ["CLAUDE.md", "GEMINI.md"];
+var hasEntry = (path) => {
+  try {
+    lstatSync9(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 function layerReceiptCurrent(project, current) {
   let receipt;
   try {
@@ -17847,7 +17855,7 @@ async function writerSteps({ root, project, runStep, host, sync, migrated, layer
   if (agySkip) return done({ ok: false, restart, migrated, layer, detail: `sync-agents did not refresh the agy agents (${agySkip[0]})` });
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) {
     const retained = ["CLAUDE.md", "GEMINI.md"].filter((f) => existsSync18(join29(project, f)));
-    if (retained.length) layer.push(`\u26A0 Sterling layer: ${retained.join(" and ")} kept \u2014 this project is a Sterling source tree, so the post-update sync removes no host file. If ${retained.length > 1 ? "one holds" : "it holds"} only Sterling's generated text, run node "${root}/bin/retire-host-files.mjs" --target "${project}" or /sterling:update.`);
+    if (retained.length) layer.push(`\u26A0 Sterling layer: ${retained.join(" and ")} kept \u2014 this project is a Sterling source tree, whose instruction files are maintained by hand, so Sterling removes no host file here.`);
     return { result: { ok: true, restart, drift: false, driftOut: "", inserted: [], migrated, layer }, retire: false };
   }
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
@@ -17897,7 +17905,7 @@ POST-UPDATE SYNC (${t.label}): SKIPPED \u2014 ${manifest} carries version '${cur
     };
   }
   const order = previous === null ? 1 : compareVersions(current, previous) ?? 1;
-  if (order === 0 && (layerReceiptCurrent(project, current) || !HOST_FILES.some((f) => existsSync18(join29(project, f))))) return null;
+  if (order === 0 && (layerReceiptCurrent(project, current) || !HOST_FILES.some((f) => hasEntry(join29(project, f))))) return null;
   if (order < 0) {
     const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]](env, home, root);
     return {
@@ -17921,15 +17929,25 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
     };
   }
   let warning = "";
+  let receiptFailure = null;
   try {
     writeFileSync9(markerPath, `${current}
-`);
-    writeFileSync9(join29(project, SYNC_LAYER_RECEIPT_REL), `${current}
 `);
   } catch (err) {
     warning = `\u2717 ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) \u2014 the sync ${t.rerun} until it can. `;
   }
+  if (!warning) {
+    const receiptPath = join29(project, SYNC_LAYER_RECEIPT_REL);
+    try {
+      writeFileSync9(receiptPath, `${current}
+`);
+    } catch (err) {
+      receiptFailure = `${receiptPath} could not be written (${err?.code ?? err?.message ?? err}), so the post-update steps, retirement included, run again: it ${t.retry} while a CLAUDE.md or GEMINI.md is left in the project`;
+      warning = `\u2717 ${hop}: post-update sync FAILED \u2014 the steps ran, but ${receiptFailure}. `;
+    }
+  }
   const restartLine = result.restart ? t.restartShort : "agents synced, none changed";
+  if (receiptFailure) warning += `${restartLine}. `;
   warning ||= `\u26A0 ${hop}: ${restartLine}. `;
   const inserted = result.inserted ?? [];
   if (inserted.length) warning += `AGENTS.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). `;
@@ -17937,11 +17955,13 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   warning += migratedWarning(migrated);
   warning += layerWarning(result.layer);
   return {
-    outcome: "synced",
+    outcome: receiptFailure ? "failed" : "synced",
     warning,
-    context: `
+    context: (receiptFailure ? `
 
-POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + layerContext(result.layer) + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
+POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${receiptFailure}; tell the user and fix the cause. ${restartLine}.` : `
+
+POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.`) + (result.restart ? ` ${t.restartLong}` : "") + layerContext(result.layer) + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + migratedContext(migrated) + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
 }
 function layerWarning(layer = []) {

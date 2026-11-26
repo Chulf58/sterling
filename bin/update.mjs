@@ -18971,6 +18971,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         for (const line of layerLines) log(`      ${line}`);
       }
       if (handoffUnmaintained.length) log(`      \u26A0 ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
+      if (r.status !== 0) agentsMdWriteRefused.add(p);
       if (layerLines.some((l) => l.startsWith("\u2717 Sterling layer REFUSED:"))) {
         log("      \u26A0 AGENTS.md Knowledge section not checked: the Sterling layer in AGENTS.md was refused above, so nothing else writes the file until that is fixed");
         agentsMdWriteRefused.add(p);
