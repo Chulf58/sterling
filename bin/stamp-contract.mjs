@@ -7171,10 +7171,25 @@ var APPLY = process.argv.includes("--apply");
 var APPLY_INSERTS = !APPLY && process.argv.includes("--apply-inserts");
 var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
+var EXACT_PROJECTS = process.argv.includes("--exact-projects");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve6(process.argv[++i]));
+  if (process.argv[i] !== "--project") continue;
+  const value = process.argv[i + 1];
+  if (value === void 0 || value.startsWith("-")) {
+    if (!EXACT_PROJECTS) continue;
+    console.error(`stamp-contract: --project needs a registered project path (got ${value === void 0 ? "nothing" : value}); --exact-projects stamps only the projects it names
+${USAGE}`);
+    process.exit(2);
+  }
+  onlyProjects.push(resolve6(process.argv[++i]));
 }
+if (EXACT_PROJECTS && !onlyProjects.length) {
+  console.error(`stamp-contract: --exact-projects needs at least one --project <registered path>; it never stamps the whole registry
+${USAGE}`);
+  process.exit(2);
+}
+var registryKey = (path) => resolve6(path).replace(/\\/g, "/");
 var realOrResolved = (path) => {
   try {
     return realpathSync5(path);
@@ -7182,9 +7197,9 @@ var realOrResolved = (path) => {
     return resolve6(path);
   }
 };
-var EXACT_PROJECTS = process.argv.includes("--exact-projects");
 var projectTargets = onlyProjects.map((value) => {
-  const linked = EXACT_PROJECTS ? null : resolveLinkedWorktree(value);
+  if (EXACT_PROJECTS) return { value, key: registryKey(value), dir: value, worktree: false };
+  const linked = resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
 var repoRoot = join11(dirname3(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
@@ -7295,7 +7310,7 @@ function record(r) {
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 function stampDirs(p) {
   if (!onlyProjects.length) return [p.repo_path];
-  const hits = projectTargets.filter((t) => t.match === resolve6(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  const hits = EXACT_PROJECTS ? projectTargets.filter((t) => t.key === p.repo_path) : projectTargets.filter((t) => t.match === resolve6(p.repo_path) || t.match === realOrResolved(p.repo_path));
   for (const t of hits) matchedProjects.add(t.value);
   if (!hits.length) return null;
   const worktrees = hits.filter((t) => t.worktree);

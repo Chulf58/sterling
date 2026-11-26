@@ -941,11 +941,15 @@ const HAND_TUNED_OUT = (dir) =>
   '\nINSERTS APPLIED (new text only; existing wording is never replaced without --apply) — 1 project(s) processed, 0 already in sync, 1 refusal(s).\n';
 const IN_SYNC_OUT = '\nINSERTS APPLIED (new text only; existing wording is never replaced without --apply) — 1 project(s) processed, 1 already in sync, 0 refusal(s). Pass --verbose to list the in-sync bullets.\n';
 test('sibling contract drift is tolerated but repeated in the closing summary, never only in the scrolled-past block', async () => {
-  for (const [contractStatus, expectDrift, contractStdout] of [
-    [2, true, HAND_TUNED_OUT('/tmp/p')],
-    [0, false, IN_SYNC_OUT],
+  for (const [contractStatus, expectDrift, contractOut] of [
+    [2, true, HAND_TUNED_OUT],
+    [0, false, () => IN_SYNC_OUT],
   ]) {
     const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-contract-'));
+    // A disposable project dir (review loop 9 of #329): the registry row, the captured-format output
+    // and the command assertion all name it.
+    const project = mkdtempSync(join(tmpdir(), 'sterling-update-drift-project-'));
+    const contractStdout = contractOut(project);
     try {
       mkdirSync(join(cwd, 'scripts'), { recursive: true });
       writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
@@ -953,11 +957,11 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
       const lines = [];
       // Review loop 7 of #329: stamp-contract runs only with an explicit target set (one --project
       // per refreshed project), so the fixture registers one project.
-      const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+      const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [{ name: 'p', repo_path: project }], opts: {} });
       const out = lines.join('\n');
 
       assert.ok(calls.some((c) => c.includes('stamp-contract.mjs')), 'the dry run runs either way');
-      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts --project \/tmp\/p --exact-projects$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
+      assert.ok(calls.some((c) => c.endsWith(`stamp-contract.mjs --apply-inserts --project ${project} --exact-projects`)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
       assert.equal(report.contract_drift, expectDrift, 'the report carries the verdict for callers');
       assert.equal(report.exit, 0, "a sibling's CLAUDE.md never blocks this clone's update");
       assert.doesNotMatch(out, /✗ p: stamp-contract could not update AGENTS\.md/, 'hand-tuned text is drift, never a failed stamp');
@@ -966,6 +970,7 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
       assert.match(out, /RESTART THE SESSION/, 'the restart instruction survives either way');
     } finally {
       rmSync(cwd, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
     }
   }
 });

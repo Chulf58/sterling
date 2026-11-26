@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, lstatSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, lstatSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -572,53 +572,6 @@ test('stamp-contract: a second registered Sterling source checkout gets no inser
     }
   } finally {
     f.cleanup();
-  }
-});
-
-// Review loop 8 of #329: /sterling:update names registry rows exactly (--exact-projects). With a
-// registered main checkout AND its registered linked worktree, each is stamped in its own directory;
-// the interactive worktree mapping (a worktree argument stamps the worktree's copy through its main
-// row, decision stamp-contract-project-on-a-worktree-stamps-the-worktree-copy) is unchanged.
-test('stamp-contract --exact-projects: a registered main checkout and its registered linked worktree are both stamped; without the flag a worktree argument still maps to its main row', () => {
-  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
-  const regDb = join(scratch, 'registry.db');
-  const main = join(scratch, 'main');
-  const wt = join(scratch, 'wt');
-  const git = (cwd, args) => {
-    const r = spawnSync('git', ['-c', 'user.email=t@sterling.test', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' });
-    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
-  };
-  try {
-    mkdirSync(main);
-    writeCompleteSibling(main, 'wt-fixture');
-    const complete = readFileSync(join(main, 'AGENTS.md'), 'utf8');
-    writeFileSync(join(main, 'AGENTS.md'), complete.replace(DOMAINS_SECTION, ''));
-    git(main, ['init', '-q']);
-    git(main, ['add', '-A']);
-    git(main, ['commit', '-q', '-m', 'fixture']);
-    git(main, ['worktree', 'add', '-q', '-b', 'wt-branch', wt]);
-    const stamped = () => [main, wt].map((d) => readFileSync(join(d, 'AGENTS.md'), 'utf8').includes('## Domains'));
-    assert.deepEqual(stamped(), [false, false], 'fixture sanity: both copies lack the Domains section');
-    const registry = new ProjectRegistry(regDb);
-    try {
-      const at = new Date().toISOString();
-      registry.register({ repo_path: main, name: 'wt-main', stack_tags: [], toolchains: [], sterling_version: null, at });
-      registry.register({ repo_path: wt, name: 'wt-worktree', stack_tags: [], toolchains: [], sterling_version: null, at });
-    } finally {
-      registry.close();
-    }
-
-    const interactive = runStampContract(regDb, ['--apply-inserts', '--project', wt]);
-    assert.equal(interactive.status, 0, `${interactive.stdout}\n${interactive.stderr}`);
-    assert.deepEqual(stamped(), [false, true], 'a worktree argument without the flag stamps the worktree copy only');
-
-    git(wt, ['checkout', '--', 'AGENTS.md']);
-    const exact = runStampContract(regDb, ['--apply-inserts', '--project', main, '--project', wt, '--exact-projects']);
-    assert.equal(exact.status, 0, `${exact.stdout}\n${exact.stderr}`);
-    assert.deepEqual(stamped(), [true, true], `both registry rows are stamped in their own directory:\n${exact.stdout}`);
-    assert.equal(readFileSync(join(main, 'AGENTS.md'), 'utf8'), complete, 'the main checkout gets exactly the current render');
-  } finally {
-    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
@@ -1578,7 +1531,8 @@ test('a --project that matches no registered project exits 2 naming the value', 
 
 // --project naming a linked git worktree (issue #210, user-ruled 2026-10-27 "The worktree's
 // copy"): the registry match goes through the main project, the files are the worktree's own.
-function worktreeFixture() {
+// `registerWorktree`: the worktree is also a registry row of its own (review loop 8 of #329).
+function worktreeFixture({ registerWorktree = false } = {}) {
   const f = stampFixture('wt', (complete) => ({ planted: dropBlock(complete, INSERT_LEAD), expected: complete }));
   const main = dirname(f.agentsPath);
   const git = (...args) => {
@@ -1590,6 +1544,14 @@ function worktreeFixture() {
   git('commit', '-q', '-m', 'seed');
   const wt = `${main}-wt`;
   git('worktree', 'add', '-q', wt, '-b', 'wt-branch');
+  if (registerWorktree) {
+    const registry = new ProjectRegistry(f.regDb);
+    try {
+      registry.register({ repo_path: wt, name: 'wt-worktree', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    } finally {
+      registry.close();
+    }
+  }
   const cleanup = () => {
     f.cleanup();
     rmSync(wt, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -1607,6 +1569,80 @@ test('--project <linked worktree> --apply edits the worktree copy and leaves the
     assert.match(r.stdout, /worktree .*-wt; the main checkout is not touched/);
   } finally {
     f.cleanup();
+  }
+});
+
+// Review loop 8 of #329: /sterling:update names registry rows exactly (--exact-projects). With a
+// registered main checkout AND its registered linked worktree, each is stamped in its own directory;
+// the interactive worktree mapping above (decision
+// stamp-contract-project-on-a-worktree-stamps-the-worktree-copy) is unchanged.
+test('--exact-projects: a registered main checkout and its registered linked worktree are both stamped; without the flag a worktree argument still maps to its main row', () => {
+  const f = worktreeFixture({ registerWorktree: true });
+  const wtAgents = join(f.wt, 'AGENTS.md');
+  try {
+    const interactive = runStampContract(f.regDb, ['--apply-inserts', '--project', f.wt]);
+    assert.equal(interactive.status, 0, `${interactive.stdout}\n${interactive.stderr}`);
+    assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'a worktree argument without the flag stamps the worktree copy');
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.planted, 'and leaves the main checkout alone');
+
+    writeFileSync(wtAgents, f.planted);
+    const exact = runStampContract(f.regDb, ['--apply-inserts', '--project', f.main, '--project', f.wt, '--exact-projects']);
+    assert.equal(exact.status, 0, `${exact.stdout}\n${exact.stderr}`);
+    assert.equal(readFileSync(f.agentsPath, 'utf8'), f.expected, `the main checkout row is stamped:\n${exact.stdout}`);
+    assert.equal(readFileSync(wtAgents, 'utf8'), f.expected, 'the worktree row is stamped in its own directory');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Review loop 9 of #329: in --exact-projects mode a --project matches only the stored registry key,
+// never through realpath, so a real path and a symlink alias of it are two separate rows.
+test('--exact-projects: with a registered path and a registered symlink alias of it, each --project stamps only its own row', () => {
+  const f = stampFixture('alias-real', (complete) => ({ planted: dropBlock(complete, INSERT_LEAD), expected: complete }));
+  const real = dirname(f.agentsPath);
+  const alias = `${real}-alias`;
+  try {
+    symlinkSync(real, alias);
+    const registry = new ProjectRegistry(f.regDb);
+    try {
+      registry.register({ repo_path: alias, name: 'alias-link', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+    } finally {
+      registry.close();
+    }
+    for (const [arg, own, other] of [[real, 'alias-real', 'alias-link'], [alias, 'alias-link', 'alias-real']]) {
+      const r = runStampContract(f.regDb, ['--project', arg, '--exact-projects']);
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, new RegExp(`^[•✗] ${own} \\(`, 'm'), `--project ${arg} stamps its own row:\n${r.stdout}`);
+      assert.doesNotMatch(r.stdout, new RegExp(`^[•✗] ${other} \\(`, 'm'), `and not the other row:\n${r.stdout}`);
+      assert.match(r.stdout, /— 1 project\(s\) processed/);
+    }
+    // The interactive mode keeps its real-path fallback: the real path reaches both rows.
+    const interactive = runStampContract(f.regDb, ['--project', real]);
+    assert.match(interactive.stdout, /— 2 project\(s\) processed/, interactive.stdout);
+  } finally {
+    rmSync(alias, { force: true });
+    f.cleanup();
+  }
+});
+
+// Review loop 9 of #329: --exact-projects never stamps the whole registry. No --project, or a
+// --project whose value is missing, refuses with exit 2 before the registry is opened.
+test('--exact-projects with no --project or a --project missing its value refuses (exit 2) before opening the registry', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-exact-'));
+  try {
+    const regDb = join(scratch, 'registry.db');
+    for (const [args, why] of [
+      [['--apply-inserts', '--exact-projects'], /--exact-projects needs at least one --project/],
+      [['--apply-inserts', '--project', '--exact-projects'], /--project needs a registered project path \(got --exact-projects\)/],
+      [['--apply-inserts', '--exact-projects', '--project'], /--project needs a registered project path \(got nothing\)/],
+    ]) {
+      const r = runStampContract(regDb, args);
+      assert.equal(r.status, 2, `${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
+      assert.match(r.stderr, why, args.join(' '));
+      assert.equal(existsSync(regDb), false, `${args.join(' ')}: the registry was never opened`);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

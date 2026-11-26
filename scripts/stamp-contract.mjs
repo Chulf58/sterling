@@ -77,10 +77,29 @@ const APPLY = process.argv.includes('--apply');
 const APPLY_INSERTS = !APPLY && process.argv.includes('--apply-inserts');
 const WRITE_INSERTS = APPLY || APPLY_INSERTS;
 const VERBOSE = process.argv.includes('--verbose');
+// --exact-projects (review loops 8 and 9 of #329): /sterling:update is the one caller. Each
+// --project names a registry row by its stored key, the path as init registers it (resolved, with
+// forward slashes, never through realpath): no worktree mapping and no symlink resolution, so a
+// registered main checkout and its registered linked worktree, or a path and a symlink alias of it,
+// are each stamped as their own row. The post-update sync keeps the interactive mapping below,
+// because its project can be a linked worktree whose main checkout is the registered row.
+const EXACT_PROJECTS = process.argv.includes('--exact-projects');
 const onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === '--project' && process.argv[i + 1]) onlyProjects.push(resolve(process.argv[++i]));
+  if (process.argv[i] !== '--project') continue;
+  const value = process.argv[i + 1];
+  if (value === undefined || value.startsWith('-')) {
+    if (!EXACT_PROJECTS) continue;
+    console.error(`stamp-contract: --project needs a registered project path (got ${value === undefined ? 'nothing' : value}); --exact-projects stamps only the projects it names\n${USAGE}`);
+    process.exit(2);
+  }
+  onlyProjects.push(resolve(process.argv[++i]));
 }
+if (EXACT_PROJECTS && !onlyProjects.length) {
+  console.error(`stamp-contract: --exact-projects needs at least one --project <registered path>; it never stamps the whole registry\n${USAGE}`);
+  process.exit(2);
+}
+const registryKey = (path) => resolve(path).replace(/\\/g, '/');
 // A --project value that is a linked git worktree matches its registered MAIN project, but the
 // contract files read and written are the worktree's own, so the stamp lands on that branch
 // (user-ruled 2026-10-27, "The worktree's copy"). value: what was typed; match: the path the
@@ -92,12 +111,9 @@ const realOrResolved = (path) => {
     return resolve(path);
   }
 };
-// --exact-projects (the automatic callers: /sterling:update and the post-update sync, review loop 8
-// of #329): each --project names a registry row exactly, with no worktree mapping, so a registered
-// main checkout and its registered linked worktree are each stamped in their own directory.
-const EXACT_PROJECTS = process.argv.includes('--exact-projects');
 const projectTargets = onlyProjects.map((value) => {
-  const linked = EXACT_PROJECTS ? null : resolveLinkedWorktree(value);
+  if (EXACT_PROJECTS) return { value, key: registryKey(value), dir: value, worktree: false };
+  const linked = resolveLinkedWorktree(value);
   return linked ? { value, match: linked.mainRoot, dir: linked.worktree, worktree: true } : { value, match: value, dir: value, worktree: false };
 });
 
@@ -253,7 +269,9 @@ const UNWRITTEN = { updated: 'would_update', inserted: 'would_insert', renamed: 
 // more of its linked worktrees, only those worktree copies (null: --project excludes it).
 function stampDirs(p) {
   if (!onlyProjects.length) return [p.repo_path];
-  const hits = projectTargets.filter((t) => t.match === resolve(p.repo_path) || t.match === realOrResolved(p.repo_path));
+  const hits = EXACT_PROJECTS
+    ? projectTargets.filter((t) => t.key === p.repo_path)
+    : projectTargets.filter((t) => t.match === resolve(p.repo_path) || t.match === realOrResolved(p.repo_path));
   for (const t of hits) matchedProjects.add(t.value);
   if (!hits.length) return null;
   const worktrees = hits.filter((t) => t.worktree);
